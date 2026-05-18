@@ -37,22 +37,30 @@ export const PLUGIN_CATEGORIES: PluginCategory[] = [
 ];
 
 /**
- * A reasonable default plugin ref per category so a freshly dropped node
- * validates against the bundled plugin registry. Versions match the
- * examples/pipelines corpus.
+ * The default plugin ref per category so a freshly dropped node validates
+ * against the bundled plugin registry and renders a schema-driven form (not a
+ * raw-JSON fallback). Every category maps to a plugin id that is really
+ * registered by the plugin-loader (builtin-rag + sample-text), at v1.0.0.
  */
-const DEFAULT_PLUGIN: Partial<Record<PluginCategory, PluginRef>> = {
-  datasource: { category: "datasource", id: "filesystem_datasource", version: "1.0.0" },
-  loader: { category: "loader", id: "file_document_loader", version: "1.0.0" },
+const DEFAULT_PLUGIN: Record<PluginCategory, PluginRef> = {
+  datasource: { category: "datasource", id: "manual_text_input", version: "1.0.0" },
+  loader: { category: "loader", id: "text_document_loader", version: "1.0.0" },
   parser: { category: "parser", id: "text_parser", version: "1.0.0" },
-  chunker: { category: "chunker", id: "recursive_chunker", version: "1.0.0" },
-  embedder: { category: "embedder", id: "provider_embedder", version: "1.0.0" },
+  chunker: { category: "chunker", id: "basic_text_chunker", version: "1.0.0" },
+  embedder: { category: "embedder", id: "provider_embeddings", version: "1.0.0" },
   vector_store: { category: "vector_store", id: "qdrant_vector_store", version: "1.0.0" },
   retriever: { category: "retriever", id: "qdrant_retriever", version: "1.0.0" },
   reranker: { category: "reranker", id: "score_reranker", version: "1.0.0" },
   llm: { category: "llm", id: "provider_chat", version: "1.0.0" },
   prompt_template: { category: "prompt_template", id: "basic_rag_prompt", version: "1.0.0" },
-  output_parser: { category: "output_parser", id: "json_output_parser", version: "1.0.0" }
+  tool: { category: "tool", id: "static_value_tool", version: "1.0.0" },
+  guardrail: { category: "guardrail", id: "simple_keyword_guardrail", version: "1.0.0" },
+  evaluator: { category: "evaluator", id: "simple_evaluator_stub", version: "1.0.0" },
+  output_parser: { category: "output_parser", id: "json_output_parser", version: "1.0.0" },
+  transformer: { category: "transformer", id: "sample_uppercase_transformer", version: "1.0.0" },
+  router: { category: "router", id: "field_router", version: "1.0.0" },
+  memory: { category: "memory", id: "buffer_memory", version: "1.0.0" },
+  sink: { category: "sink", id: "vector_upsert", version: "1.0.0" }
 };
 
 export function defaultPluginRef(category: PluginCategory): PluginRef {

@@ -121,15 +121,26 @@ is picked up automatically with no loader edits. Plugins are keyed by
 `plugins/builtin-rag` ships an end-to-end RAG toolkit:
 
 - `manual_text_input` (datasource)
+- `text_document_loader` (loader)
+- `text_parser` (parser)
 - `basic_text_chunker` (chunker)
 - `provider_embeddings` (embedder)
+- `qdrant_vector_store` (vector_store)
 - `vector_upsert` (sink)
 - `qdrant_retriever` (retriever)
+- `score_reranker` (reranker)
 - `basic_rag_prompt` (prompt_template)
 - `provider_chat` (llm)
+- `static_value_tool` (tool)
+- `field_router` (router)
+- `buffer_memory` (memory)
 - `json_output_parser` (output_parser)
 - `simple_keyword_guardrail` (guardrail)
 - `simple_evaluator_stub` (evaluator)
+
+Together with the `sample_uppercase_transformer` (transformer) plugin from
+`plugins/sample-text`, every palette category has at least one built-in,
+schema-bearing plugin so the visual builder always renders a real form.
 
 `vector_upsert` and `qdrant_retriever` use the shared `VectorStore` (in-memory
 singleton offline, Qdrant when configured), so an upsert followed by a retrieve
