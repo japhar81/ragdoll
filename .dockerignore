@@ -4,3 +4,12 @@ node_modules
 .github
 **/dist
 **/*.log
+# Python plugin service: keep its slow build context lean. The root is the
+# build context for services/python-plugins/Dockerfile too, so trim venv /
+# bytecode / test caches here (does not affect the JS api/worker images).
+**/.venv
+**/__pycache__
+**/*.pyc
+**/.pytest_cache
+**/.mypy_cache
+**/.ruff_cache

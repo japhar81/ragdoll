@@ -1,0 +1,45 @@
+{{- if .Values.pythonPlugins.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-python-plugins
+spec:
+  replicas: {{ .Values.pythonPlugins.replicas }}
+  selector:
+    matchLabels:
+      app: {{ .Release.Name }}-python-plugins
+  template:
+    metadata:
+      labels:
+        app: {{ .Release.Name }}-python-plugins
+    spec:
+      containers:
+        - name: python-plugins
+          image: "{{ .Values.pythonPlugins.image.repository }}:{{ .Values.pythonPlugins.image.tag }}"
+          imagePullPolicy: {{ .Values.pythonPlugins.image.pullPolicy }}
+          ports:
+            - containerPort: {{ .Values.pythonPlugins.port }}
+          env:
+            - name: PORT
+              value: "{{ .Values.pythonPlugins.port }}"
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: {{ .Values.pythonPlugins.port }}
+            # Chromium-bearing image is slow to come up.
+            initialDelaySeconds: 20
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: {{ .Values.pythonPlugins.port }}
+            initialDelaySeconds: 30
+            periodSeconds: 15
+          resources:
+            requests:
+              cpu: {{ .Values.pythonPlugins.resources.requests.cpu }}
+              memory: {{ .Values.pythonPlugins.resources.requests.memory }}
+            limits:
+              cpu: {{ .Values.pythonPlugins.resources.limits.cpu | quote }}
+              memory: {{ .Values.pythonPlugins.resources.limits.memory }}
+{{- end }}

@@ -1,0 +1,13 @@
+{{- if .Values.pythonPlugins.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-python-plugins
+spec:
+  selector:
+    app: {{ .Release.Name }}-python-plugins
+  ports:
+    - name: http
+      port: {{ .Values.pythonPlugins.port }}
+      targetPort: {{ .Values.pythonPlugins.port }}
+{{- end }}

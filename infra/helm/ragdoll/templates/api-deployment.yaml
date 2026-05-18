@@ -22,6 +22,16 @@ spec:
           envFrom:
             - secretRef:
                 name: {{ .Values.secrets.existingSecret }}
+          {{- if .Values.pythonPlugins.enabled }}
+          # api only lists/validates the external crawler plugins for the
+          # builder palette, but still needs PYTHON_PLUGIN_URL set so the
+          # plugin-loader registers them.
+          env:
+            - name: PYTHON_PLUGIN_URL
+              value: "http://{{ .Release.Name }}-python-plugins:{{ .Values.pythonPlugins.port }}"
+            - name: PYTHON_PLUGIN_TIMEOUT_MS
+              value: "{{ .Values.pythonPlugins.timeoutMs }}"
+          {{- end }}
           readinessProbe:
             httpGet:
               path: /readyz

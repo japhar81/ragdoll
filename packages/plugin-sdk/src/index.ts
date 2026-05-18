@@ -168,12 +168,186 @@ export function pluginKey(ref: Pick<PluginRef, "category" | "id" | "version">): 
   return `${ref.category}:${ref.id}:${ref.version}`;
 }
 
+/** Default execute/health timeout. Crawls are slow, so this is generous. */
+const DEFAULT_EXTERNAL_TIMEOUT_MS = 300000;
+
+function joinUrl(baseUrl: string, path: string): string {
+  const base = baseUrl.endsWith("/") ? baseUrl.slice(0, -1) : baseUrl;
+  const suffix = path.startsWith("/") ? path : `/${path}`;
+  return `${base}${suffix}`;
+}
+
+/**
+ * Reduces a {@link RuntimeContext} to a JSON-safe wire object for an external
+ * plugin. Strips the AbortSignal and any functions, turns the `deadline` Date
+ * into an ISO string (or `null`), and collapses the resolved config down to
+ * `{ values: { key: { value } } }` so secret/sensitivity metadata never leaves
+ * the control plane.
+ */
+function toWireContext(context: PluginExecutionInput["context"]): Record<string, unknown> {
+  const values: Record<string, { value: unknown }> = {};
+  const resolved = context.resolvedConfig?.values ?? {};
+  for (const [key, entry] of Object.entries(resolved)) {
+    values[key] = { value: entry?.value };
+  }
+  let deadline: string | null = null;
+  if (context.deadline instanceof Date && !Number.isNaN(context.deadline.getTime())) {
+    deadline = context.deadline.toISOString();
+  }
+  return {
+    requestId: context.requestId,
+    executionId: context.executionId,
+    tenantId: context.tenantId,
+    pipelineId: context.pipelineId,
+    pipelineVersionId: context.pipelineVersionId,
+    environment: context.environment,
+    deadline,
+    resolvedConfig: { values }
+  };
+}
+
+/**
+ * Builds the exact JSON-safe request body for the external plugin HTTP
+ * contract v1. Kept as a standalone function so tests can assert the wire
+ * shape and the Python server can be validated against the same structure.
+ */
+export function buildExternalRequestBody(
+  plugin: RegisteredPlugin,
+  input: PluginExecutionInput
+): Record<string, unknown> {
+  return {
+    plugin: {
+      category: plugin.manifest.category,
+      id: plugin.manifest.id,
+      version: plugin.manifest.version
+    },
+    node: {
+      id: input.node.id,
+      config: input.node.config ?? {},
+      secrets: input.node.secrets ?? {}
+    },
+    inputs: input.inputs,
+    config: input.config,
+    secrets: input.secrets,
+    context: toWireContext(input.context)
+  };
+}
+
+/**
+ * Calls the external plugin health endpoint
+ * (`GET {baseUrl}{healthPath ?? "/healthz"}`). Resolves (never rejects) so
+ * callers can probe liveness without try/catch; on any transport/parse error
+ * it returns `{ ok: false, message }`.
+ */
+export async function externalPluginHealth(
+  endpoint: ExternalPluginEndpoint
+): Promise<{ ok: boolean; plugins?: string[]; message?: string }> {
+  if (endpoint.mode === "grpc") {
+    return { ok: false, message: "grpc external transport not implemented" };
+  }
+  const url = joinUrl(endpoint.baseUrl, endpoint.healthPath ?? "/healthz");
+  const timeoutMs = endpoint.timeoutMs ?? DEFAULT_EXTERNAL_TIMEOUT_MS;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(url, { method: "GET", signal: controller.signal });
+    if (!response.ok) {
+      return { ok: false, message: `health check failed with HTTP ${response.status}` };
+    }
+    const body = (await response.json()) as { ok?: unknown; plugins?: unknown };
+    const plugins = Array.isArray(body.plugins)
+      ? body.plugins.filter((entry): entry is string => typeof entry === "string")
+      : undefined;
+    return { ok: body.ok === true, plugins };
+  } catch (error) {
+    return { ok: false, message: error instanceof Error ? error.message : String(error) };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function executeExternalHttp(
+  plugin: RegisteredPlugin,
+  endpoint: ExternalPluginEndpoint,
+  input: PluginExecutionInput
+): Promise<PluginExecutionOutput> {
+  const url = joinUrl(endpoint.baseUrl, endpoint.executePath ?? "/execute");
+  const timeoutMs = endpoint.timeoutMs ?? DEFAULT_EXTERNAL_TIMEOUT_MS;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(buildExternalRequestBody(plugin, input)),
+      signal: controller.signal
+    });
+  } catch (error) {
+    if (controller.signal.aborted) {
+      throw new Error(`External plugin request timed out after ${timeoutMs}ms`);
+    }
+    throw new Error(
+      `External plugin request failed: ${error instanceof Error ? error.message : String(error)}`
+    );
+  } finally {
+    clearTimeout(timer);
+  }
+
+  let parsed: unknown;
+  let rawText = "";
+  try {
+    rawText = await response.text();
+    parsed = rawText.length > 0 ? JSON.parse(rawText) : undefined;
+  } catch {
+    parsed = undefined;
+  }
+  const body = (parsed ?? {}) as {
+    error?: unknown;
+    outputs?: unknown;
+    metadata?: unknown;
+    usage?: unknown;
+    artifacts?: unknown;
+  };
+
+  if (typeof body.error === "string") {
+    throw new Error(body.error);
+  }
+  if (!response.ok) {
+    const detail = rawText.trim().length > 0 ? `: ${rawText.trim()}` : "";
+    throw new Error(`External plugin returned HTTP ${response.status}${detail}`);
+  }
+
+  const result: PluginExecutionOutput = {
+    outputs:
+      body.outputs && typeof body.outputs === "object"
+        ? (body.outputs as Record<string, unknown>)
+        : {}
+  };
+  if (body.metadata && typeof body.metadata === "object") {
+    result.metadata = body.metadata as Record<string, unknown>;
+  }
+  if (body.usage && typeof body.usage === "object") {
+    result.usage = body.usage as PluginExecutionOutput["usage"];
+  }
+  if (Array.isArray(body.artifacts)) {
+    result.artifacts = body.artifacts as PluginExecutionOutput["artifacts"];
+  }
+  return result;
+}
+
 export async function executeRegisteredPlugin(
   plugin: RegisteredPlugin,
   input: PluginExecutionInput
 ): Promise<PluginExecutionOutput> {
   if (plugin.mode === "in_process" && plugin.implementation) {
     return plugin.implementation.execute(input);
+  }
+  if (plugin.mode === "external" && plugin.external) {
+    if (plugin.external.mode === "grpc") {
+      throw new Error("grpc external transport not implemented");
+    }
+    return executeExternalHttp(plugin, plugin.external, input);
   }
   throw new Error("External plugin execution is scaffolded; deploy plugin gateway before enabling external plugins");
 }

@@ -1,0 +1,15 @@
+# Keep the build context small and deterministic. The Dockerfile installs
+# deps from pyproject.toml/poetry.lock and copies only app/, so dev/test
+# cruft must never invalidate cache layers or leak into the image.
+.venv
+__pycache__
+*.pyc
+*.pyo
+.pytest_cache
+.mypy_cache
+.ruff_cache
+tests
+.git
+.gitignore
+README.md
+Makefile

@@ -1,4 +1,4 @@
-.PHONY: up down refresh smoke test
+.PHONY: up down refresh smoke test crawl-up
 
 # Bring up the full local stack (build + start everything). First run pulls
 # CPU Ollama models and builds images.
@@ -21,3 +21,9 @@ smoke:
 # All offline test suites (unit + functional + e2e).
 test:
 	npm test && npm run test:functional && npm run test:e2e
+
+# Build + start only the Python crawler plugin service. Kept separate from
+# `refresh` because the image bundles a headless Chromium and is slow to
+# build — rebuild it explicitly, not on every code-refresh.
+crawl-up:
+	docker compose -f infra/docker/docker-compose.yml up -d --build python-plugins
