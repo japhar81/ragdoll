@@ -5,4 +5,5 @@ RUN npm install && npm --workspace @ragdoll/web run build
 
 FROM nginx:1.27-alpine
 COPY --from=build /app/apps/web/dist /usr/share/nginx/html
+COPY infra/docker/nginx.conf /etc/nginx/conf.d/default.conf
 EXPOSE 80

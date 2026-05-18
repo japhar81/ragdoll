@@ -47,22 +47,11 @@ async function buildDeps(): Promise<WorkerDeps> {
     apiKey: process.env.QDRANT_API_KEY
   });
 
-  const repositories: WorkerRepositories = {
-    pipelineVersions: new InMemoryPipelineVersionRepository(),
-    configDefinitions: new InMemoryConfigDefinitionRepository(),
-    configValues: new InMemoryConfigValueRepository(),
-    providers: new InMemoryProviderRepository(),
-    providerModels: new InMemoryProviderModelRepository(),
-    vectorCollections: new InMemoryVectorCollectionRepository(),
-    datasourceConnections: new InMemoryDatasourceConnectionRepository(),
-    usageRecords: new InMemoryUsageRecordRepository()
-  };
-
-  const secretProvider: SecretProvider = new DatabaseEncryptedSecretProvider(
-    new InMemorySecretRepository(),
-    new StaticKeyProvider(process.env.SECRET_ENCRYPTION_KEY ?? "dev-secret")
-  );
-
+  // Control-plane repositories: Postgres-backed when DATABASE_URL is set so the
+  // worker reads the SAME seeded pipelines / config / providers the API serves;
+  // otherwise fully in-memory (single-process embedding / tests).
+  let repositories: WorkerRepositories;
+  let secretProvider: SecretProvider;
   let store: ExecutionStore;
   // Mirror runtime usage into the control-plane UsageRecordRepository ONLY in
   // the in-memory wiring. PostgresExecutionStore.recordUsage already writes
@@ -71,18 +60,49 @@ async function buildDeps(): Promise<WorkerDeps> {
   // exactly one usage write per (executionId, provider, model).
   let mirrorUsageToRepository = false;
   if (process.env.DATABASE_URL) {
-    // Postgres-backed execution store; migrations are owned by the migrate
-    // tool / API. We only wire the runtime store + usage here.
-    const { createPool, PostgresExecutionStore } = await import(
-      "../../../packages/db/src/index.ts"
+    // Postgres-backed execution store + control-plane repositories so the
+    // worker resolves the SAME seeded pipeline versions / config / providers
+    // the API serves. Migrations are owned by db-init / the API.
+    const db = await import("../../../packages/db/src/index.ts");
+    const pool = await db.createPool({
+      connectionString: process.env.DATABASE_URL
+    });
+    store = new db.PostgresExecutionStore(pool);
+    repositories = {
+      pipelineVersions: new db.PostgresPipelineVersionRepository(pool),
+      configDefinitions: new db.PostgresConfigDefinitionRepository(pool),
+      configValues: new db.PostgresConfigValueRepository(pool),
+      providers: new db.PostgresProviderRepository(pool),
+      providerModels: new db.PostgresProviderModelRepository(pool),
+      vectorCollections: new db.PostgresVectorCollectionRepository(pool),
+      datasourceConnections: new db.PostgresDatasourceConnectionRepository(
+        pool
+      ),
+      usageRecords: new db.PostgresUsageRecordRepository(pool)
+    };
+    secretProvider = new DatabaseEncryptedSecretProvider(
+      new db.PostgresSecretRepository(pool),
+      new StaticKeyProvider(process.env.SECRET_ENCRYPTION_KEY ?? "dev-secret")
     );
-    const pool = await createPool({ connectionString: process.env.DATABASE_URL });
-    store = new PostgresExecutionStore(pool);
-    logger.info("worker using Postgres execution store");
+    logger.info("worker using Postgres execution store + repositories");
   } else {
     store = new InMemoryExecutionStore();
+    repositories = {
+      pipelineVersions: new InMemoryPipelineVersionRepository(),
+      configDefinitions: new InMemoryConfigDefinitionRepository(),
+      configValues: new InMemoryConfigValueRepository(),
+      providers: new InMemoryProviderRepository(),
+      providerModels: new InMemoryProviderModelRepository(),
+      vectorCollections: new InMemoryVectorCollectionRepository(),
+      datasourceConnections: new InMemoryDatasourceConnectionRepository(),
+      usageRecords: new InMemoryUsageRecordRepository()
+    };
+    secretProvider = new DatabaseEncryptedSecretProvider(
+      new InMemorySecretRepository(),
+      new StaticKeyProvider(process.env.SECRET_ENCRYPTION_KEY ?? "dev-secret")
+    );
     mirrorUsageToRepository = true;
-    logger.info("worker using in-memory execution store");
+    logger.info("worker using in-memory execution store + repositories");
   }
 
   return {

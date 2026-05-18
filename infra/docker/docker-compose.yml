@@ -1,3 +1,14 @@
+# One-command local RAGdoll stack:
+#
+#   docker compose -f infra/docker/docker-compose.yml up --build
+#
+# Brings up Postgres, Redis, Qdrant, Ollama (CPU), the OTEL collector, runs
+# migrations + seeds once (db-init), pulls the CPU models once (ollama-pull),
+# then starts the API, worker, and nginx-served web UI.
+#
+# NOTE: the first `up` downloads the qwen2.5:0.5b + nomic-embed-text models
+# and CPU inference is slow — the first /run can take tens of seconds.
+
 services:
   postgres:
     image: postgres:16
@@ -9,29 +20,54 @@ services:
       - "5432:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
-      - ../../packages/db/migrations:/docker-entrypoint-initdb.d/migrations:ro
-      - ../../packages/db/seeds:/docker-entrypoint-initdb.d/seeds:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ragdoll"]
       interval: 5s
       timeout: 3s
       retries: 20
+
   redis:
     image: redis:7
     ports:
       - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
   qdrant:
     image: qdrant/qdrant:v1.13.4
     ports:
       - "6333:6333"
     volumes:
       - qdrant-data:/qdrant/storage
+
   ollama:
     image: ollama/ollama:latest
     ports:
       - "11434:11434"
     volumes:
       - ollama-data:/root/.ollama
+
+  # One-shot: wait for Ollama, then pull the CPU models the demo needs.
+  ollama-pull:
+    image: ollama/ollama:latest
+    depends_on:
+      ollama:
+        condition: service_started
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >
+        echo "waiting for ollama..." &&
+        until ollama list >/dev/null 2>&1; do sleep 2; done &&
+        ollama pull qwen2.5:0.5b &&
+        ollama pull nomic-embed-text &&
+        echo "models pulled"
+    restart: "no"
+
   otel-collector:
     image: otel/opentelemetry-collector-contrib:0.119.0
     command: ["--config=/etc/otelcol/config.yaml"]
@@ -40,10 +76,25 @@ services:
     ports:
       - "4317:4317"
       - "4318:4318"
+
+  # One-shot: run migrations + seeds, then exit. Reuses the api image.
+  db-init:
+    build:
+      context: ../..
+      dockerfile: infra/docker/api.Dockerfile
+    command:
+      ["node", "--experimental-strip-types", "scripts/db-init.ts"]
+    environment:
+      DATABASE_URL: postgres://ragdoll:ragdoll@postgres:5432/ragdoll
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
   api:
-    image: node:22-alpine
-    working_dir: /workspace
-    command: ["node", "--experimental-strip-types", "apps/api/src/server.ts"]
+    build:
+      context: ../..
+      dockerfile: infra/docker/api.Dockerfile
     environment:
       PORT: "3001"
       RAGDOLL_ENV: development
@@ -51,29 +102,52 @@ services:
       REDIS_URL: redis://redis:6379
       SECRET_ENCRYPTION_KEY: local-dev-only-change-me-32-bytes-min
       SESSION_SECRET: local-dev-only-change-me-session-hmac
-    volumes:
-      - ../..:/workspace
+      QDRANT_URL: http://qdrant:6333
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
     ports:
       - "3001:3001"
     depends_on:
       postgres:
         condition: service_healthy
-      redis:
-        condition: service_started
+      db-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        ["CMD-SHELL", "wget -qO- http://localhost:3001/healthz || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
   worker:
-    image: node:22-alpine
-    working_dir: /workspace
-    command: ["node", "--experimental-strip-types", "apps/worker/src/index.ts"]
+    build:
+      context: ../..
+      dockerfile: infra/docker/worker.Dockerfile
     environment:
       DATABASE_URL: postgres://ragdoll:ragdoll@postgres:5432/ragdoll
       REDIS_URL: redis://redis:6379
       SECRET_ENCRYPTION_KEY: local-dev-only-change-me-32-bytes-min
-      SESSION_SECRET: local-dev-only-change-me-session-hmac
       QDRANT_URL: http://qdrant:6333
-    volumes:
-      - ../..:/workspace
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
     depends_on:
-      - api
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      db-init:
+        condition: service_completed_successfully
+      api:
+        condition: service_started
+
+  web:
+    build:
+      context: ../..
+      dockerfile: infra/docker/web.Dockerfile
+    ports:
+      - "8080:80"
+    depends_on:
+      api:
+        condition: service_started
+
 volumes:
   postgres-data:
   qdrant-data:
