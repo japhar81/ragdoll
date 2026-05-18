@@ -67,8 +67,35 @@ Effective config is merged as `node.config` < `context.resolvedConfig.values`
 | `timeoutMs`           | `60000`      |
 | `allowPrivateNetworks`| `false`      |
 
+**Breadth-first crawl.** The plugin does *not* fetch only the seed(s). It
+runs a BFS:
+
+1. The frontier is a FIFO queue of `(url, depth)` seeded from `url` / `urls`
+   at depth `0`. A `visited` set of *normalized* URLs (fragment stripped, a
+   single trailing `/` dropped) guarantees each page is fetched **once** —
+   `a`, `a/` and `a#x` collapse to one fetch.
+2. URLs are popped FIFO (seed first, then its links, breadth-first) until
+   `maxPages` documents are collected, the frontier drains, or the
+   wall-clock exceeds `timeoutMs`.
+3. **Every** popped URL is re-checked by the SSRF guard *before* it is
+   fetched (scheme, `allowedDomains`, `sameDomainOnly` vs. its seed host,
+   private-network deny, `allowPrivateNetworks` override). A blocked or
+   duplicate link is **skipped** — it never fails the whole run. A page
+   whose fetch raises is likewise skipped. `metadata.skipped` counts these.
+4. If the page's depth `< maxDepth`, its anchors (crawl4ai's `links`,
+   resolved relative→absolute against the page URL, filtered to http/https)
+   are enqueued at `depth+1` if not already visited.
+5. If **no** seed URL survives the SSRF guard the run is fatal and returns
+   `{"error": ...}` per the contract; otherwise a fully-failed *followed*
+   page is just skipped.
+
+So with the shipped `web-crawl-demo.yaml` (`maxDepth:1`, `maxPages:5`,
+`sameDomainOnly:true`): the seed is fetched, then up to 4 same-domain links
+from it, for `pageCount == 5` (not `1`). `maxDepth:0` fetches only the
+seed(s).
+
 Output:
-`{"outputs":{"documents":[{"url","title","markdown"|"text","metadata"}],"pageCount":N},"usage":{},"metadata":{"crawler":"crawl4ai"}}`
+`{"outputs":{"documents":[{"url","title","markdown"|"text","metadata"}],"pageCount":N},"usage":{},"metadata":{"crawler":"crawl4ai","pagesRequested":maxPages,"pagesFetched":N,"skipped":S}}`
 
 **`scrapy_spider`**
 
@@ -84,8 +111,10 @@ Output: same `documents` shape with `"metadata":{"crawler":"scrapy"}`.
 
 ## SSRF guard (`app/safety.py`)
 
-This is a multi-tenant crawler, so the default posture is **deny**. For every
-target URL:
+This is a multi-tenant crawler, so the default posture is **deny**. The guard
+runs on **every** URL the BFS is about to fetch — seeds *and* links discovered
+on crawled pages — so a hostile page cannot pivot the crawler onto a private
+address or off-domain target. For every such URL:
 
 - Scheme must be `http` or `https` (no `file:`, `ftp:`, `gopher:`, `data:`…).
 - Host must be present.
