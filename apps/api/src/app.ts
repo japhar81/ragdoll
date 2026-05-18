@@ -12,6 +12,7 @@ import {
   type ConfigDefinition,
   type ConfigValue,
   type PipelineSpec,
+  type PluginRef,
   type SecretRef
 } from "../../../packages/core/src/index.ts";
 import {
@@ -67,7 +68,10 @@ import type {
 } from "../../../packages/runtime/src/index.ts";
 import type { SecretProvider } from "../../../packages/secrets/src/index.ts";
 import { SecretNotFoundError, SecretAccessDeniedError } from "../../../packages/secrets/src/index.ts";
-import type { PluginRegistry } from "../../../packages/plugin-sdk/src/index.ts";
+import type {
+  PluginRegistry,
+  RegisteredPlugin
+} from "../../../packages/plugin-sdk/src/index.ts";
 import type { ProviderRegistry } from "../../../packages/providers/src/index.ts";
 import type { StructuredLogger } from "../../../packages/observability/src/index.ts";
 import type { QueuePort, QueueJob } from "../../../apps/worker/src/index.ts";
@@ -926,16 +930,19 @@ export function createApp(deps: AppDeps): App {
   // ---- plugins ------------------------------------------------------------
   route("GET", "/api/plugins", async (ctx) => {
     enforce(ctx.principal, "execution:view_logs");
-    const plugins = deps.pluginRegistry.list().map((plugin) => ({
-      id: plugin.manifest.id,
-      name: plugin.manifest.name,
-      version: plugin.manifest.version,
-      category: plugin.manifest.category,
-      description: plugin.manifest.description,
-      mode: plugin.mode,
-      capabilities: plugin.manifest.capabilities ?? []
-    }));
+    const plugins = deps.pluginRegistry.list().map(projectPlugin);
     return ok({ plugins });
+  });
+
+  route("GET", "/api/plugins/:category/:id/:version", async (ctx) => {
+    enforce(ctx.principal, "execution:view_logs");
+    const found = deps.pluginRegistry.get({
+      category: ctx.params.category as PluginRef["category"],
+      id: ctx.params.id,
+      version: ctx.params.version
+    });
+    if (!found) return error(404, "not_found");
+    return ok({ plugin: projectPlugin(found) });
   });
 
   // ---- providers ----------------------------------------------------------
@@ -1232,6 +1239,54 @@ export function createApp(deps: AppDeps): App {
 // ---------------------------------------------------------------------------
 // Module-level helpers (no closure over deps)
 // ---------------------------------------------------------------------------
+
+/**
+ * Projects a registered plugin's manifest onto the public shape consumed by
+ * the web UI to render schema-driven config/secret forms. This is the single
+ * source of truth shared by `GET /api/plugins` and the per-plugin route, so
+ * both responses always match the documented contract.
+ */
+function projectPlugin(plugin: RegisteredPlugin): {
+  id: string;
+  name: string;
+  version: string;
+  category: string;
+  description: string;
+  mode: string;
+  capabilities: string[];
+  configSchema?: unknown;
+  secretsSchema?: unknown;
+  ui?: {
+    icon?: string;
+    color?: string;
+    formHints?: Record<string, unknown>;
+    paletteGroup?: string;
+    module?: string;
+  };
+} {
+  const m = plugin.manifest;
+  const ui = m.ui
+    ? {
+        ...(m.ui.icon !== undefined ? { icon: m.ui.icon } : {}),
+        ...(m.ui.color !== undefined ? { color: m.ui.color } : {}),
+        ...(m.ui.formHints !== undefined ? { formHints: m.ui.formHints } : {}),
+        ...(m.ui.paletteGroup !== undefined ? { paletteGroup: m.ui.paletteGroup } : {}),
+        ...(m.ui.module !== undefined ? { module: m.ui.module } : {})
+      }
+    : undefined;
+  return {
+    id: m.id,
+    name: m.name,
+    version: m.version,
+    category: m.category,
+    description: m.description,
+    mode: plugin.mode,
+    capabilities: m.capabilities ?? [],
+    ...(m.configSchema !== undefined ? { configSchema: m.configSchema } : {}),
+    ...(m.secretsSchema !== undefined ? { secretsSchema: m.secretsSchema } : {}),
+    ...(ui !== undefined ? { ui } : {})
+  };
+}
 
 function parseSpec(input: unknown): PipelineSpec | undefined {
   if (typeof input === "string") {

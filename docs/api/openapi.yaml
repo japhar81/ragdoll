@@ -58,6 +58,53 @@ components:
                 type: string
                 enum: [conflict, immutable_version, no_active_deployment]
               message: { type: string }
+  schemas:
+    JsonSchemaLike:
+      description: >-
+        Dependency-free JSON-Schema subset describing a plugin's config or
+        secrets shape so the UI can render a real form.
+      type: object
+      properties:
+        type: { type: string }
+        properties:
+          type: object
+          additionalProperties: { $ref: "#/components/schemas/JsonSchemaLike" }
+        required: { type: array, items: { type: string } }
+        items: { $ref: "#/components/schemas/JsonSchemaLike" }
+        additionalProperties: { type: boolean }
+        description: { type: string }
+        enum: { type: array, items: {} }
+        default: {}
+        format:
+          type: string
+          description: >-
+            Semantic hint. "secret-ref" marks a managed-secret reference; the
+            UI renders a secret picker and the value never leaves the server.
+    Plugin:
+      type: object
+      required: [id, name, version, category, description, mode, capabilities]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        version: { type: string }
+        category: { type: string }
+        description: { type: string }
+        mode: { type: string }
+        capabilities: { type: array, items: { type: string } }
+        configSchema: { $ref: "#/components/schemas/JsonSchemaLike" }
+        secretsSchema: { $ref: "#/components/schemas/JsonSchemaLike" }
+        ui:
+          type: object
+          properties:
+            icon: { type: string }
+            color: { type: string }
+            formHints: { type: object, additionalProperties: true }
+            paletteGroup: { type: string }
+            module:
+              type: string
+              description: >-
+                Optional ESM module URL exporting a custom ConfigEditor React
+                component (see ADR 0008). Type/contract seam only.
   securitySchemes:
     bearerAuth:
       type: http
@@ -459,8 +506,46 @@ paths:
   /api/plugins:
     get:
       summary: List plugins from the loaded plugin registry
+      description: >-
+        Returns each plugin's manifest projection, including configSchema,
+        secretsSchema, and ui metadata so the UI can render schema-driven forms.
       responses:
-        "200": { description: Plugin list }
+        "200":
+          description: Plugin list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  plugins:
+                    type: array
+                    items: { $ref: "#/components/schemas/Plugin" }
+  /api/plugins/{category}/{id}/{version}:
+    get:
+      summary: Get a single plugin's manifest projection
+      parameters:
+        - name: category
+          in: path
+          required: true
+          schema: { type: string }
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+        - name: version
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Plugin manifest projection
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  plugin: { $ref: "#/components/schemas/Plugin" }
+        "404": { $ref: "#/components/responses/NotFound" }
   /api/providers:
     get:
       summary: List providers from the loaded provider registry

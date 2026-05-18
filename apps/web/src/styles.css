@@ -348,3 +348,152 @@ table.grid th {
   font-size: 12px;
   margin-top: 4px;
 }
+
+/* ---- Schema-driven config / secrets editors ---- */
+.config-form,
+.secrets-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.field-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.field-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.field-label .req {
+  color: #b91c1c;
+}
+
+.field-tools {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.bound-tag {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  background: #ede9fe;
+  color: #6d28d9;
+}
+
+.field-help {
+  margin: 2px 0 0;
+}
+
+.link-btn {
+  border: none;
+  background: none;
+  color: #2563eb;
+  cursor: pointer;
+  font-size: 12px;
+  padding: 0;
+}
+
+.link-btn:hover {
+  text-decoration: underline;
+}
+
+.config-form input[type="text"],
+.config-form input[type="password"],
+.config-form input[type="number"],
+.config-form select,
+.secrets-editor input,
+.secrets-editor select {
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  padding: 6px 8px;
+  font-size: 13px;
+}
+
+.config-form textarea.field-json {
+  min-height: 80px;
+}
+
+.range-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.range-row input[type="range"] {
+  flex: 1;
+}
+
+.range-val {
+  min-width: 40px;
+  font-size: 12px;
+  color: #475569;
+}
+
+.bound-input {
+  border: 1px dashed #a78bfa;
+  border-radius: 6px;
+  padding: 6px 8px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+}
+
+.secret-slot {
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  background: #f8fafc;
+}
+
+.secret-slot-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.secret-slot-head .link-btn {
+  margin-left: auto;
+}
+
+.add-secret {
+  display: flex;
+  gap: 8px;
+}
+
+.add-secret input {
+  flex: 1;
+}
+
+.create-secret {
+  margin-top: 6px;
+  margin-bottom: 0;
+}
+
+.config-form button,
+.secrets-editor button:not(.link-btn) {
+  border: 1px solid #cbd5e1;
+  background: #fff;
+  border-radius: 6px;
+  padding: 6px 10px;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.inspector h3 {
+  margin: 16px 0 6px;
+  font-size: 14px;
+}

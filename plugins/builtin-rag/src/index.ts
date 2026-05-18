@@ -49,9 +49,16 @@ export const manualTextInputPlugin: InProcessPlugin = {
     version: "1.0.0",
     category: "datasource",
     description: "Passes runtime text input into the pipeline.",
+    configSchema: {
+      type: "object",
+      description: "Manual input has no configuration; text is supplied at runtime.",
+      properties: {},
+      additionalProperties: false
+    },
     inputSchema: { type: "object" },
     outputSchema: { type: "object" },
-    capabilities: ["query", "ingestion"]
+    capabilities: ["query", "ingestion"],
+    ui: { icon: "keyboard", paletteGroup: "Sources" }
   },
   async execute({ inputs }) {
     return { outputs: inputs };
@@ -65,8 +72,31 @@ export const basicTextChunkerPlugin: InProcessPlugin = {
     version: "1.0.0",
     category: "chunker",
     description: "Splits text into overlapping character chunks.",
-    configSchema: { type: "object" },
-    capabilities: ["ingestion"]
+    configSchema: {
+      type: "object",
+      properties: {
+        chunkSize: {
+          type: "integer",
+          default: 1000,
+          description: "Maximum characters per chunk."
+        },
+        overlap: {
+          type: "integer",
+          default: 100,
+          description: "Characters of overlap shared between adjacent chunks."
+        }
+      },
+      additionalProperties: false
+    },
+    capabilities: ["ingestion"],
+    ui: {
+      icon: "scissors",
+      paletteGroup: "Ingestion",
+      formHints: {
+        chunkSize: { widget: "number", min: 1, step: 50 },
+        overlap: { widget: "number", min: 0, step: 10 }
+      }
+    }
   },
   async execute({ inputs, config }) {
     const text = String(inputs.text ?? inputs.input ?? "");
@@ -87,7 +117,24 @@ export const basicPromptTemplatePlugin: InProcessPlugin = {
     version: "1.0.0",
     category: "prompt_template",
     description: "Builds a compact RAG prompt from question and context.",
-    capabilities: ["query"]
+    configSchema: {
+      type: "object",
+      properties: {
+        template: {
+          type: "string",
+          default: "Answer using only the context.\n\nContext:\n{{context}}\n\nQuestion: {{question}}",
+          description:
+            "Prompt template. {{context}} and {{question}} are substituted before sending to the model."
+        }
+      },
+      additionalProperties: false
+    },
+    capabilities: ["query"],
+    ui: {
+      icon: "file-text",
+      paletteGroup: "Prompting",
+      formHints: { template: { widget: "textarea", rows: 6 } }
+    }
   },
   async execute({ inputs, config }) {
     const question = String((inputs.input as any)?.question ?? inputs.question ?? "");
@@ -111,7 +158,61 @@ export const providerChatPlugin: InProcessPlugin = {
     version: "1.0.0",
     category: "llm",
     description: "Calls OpenAI, Anthropic, or Ollama-compatible chat provider.",
-    capabilities: ["query", "streaming"]
+    configSchema: {
+      type: "object",
+      properties: {
+        provider: {
+          type: "string",
+          enum: ["openai", "anthropic", "ollama"],
+          default: "ollama",
+          description: "Chat provider adapter to call."
+        },
+        model: {
+          type: "string",
+          default: "llama3.1",
+          description: "Model id passed to the provider."
+        },
+        temperature: {
+          type: "number",
+          default: 0.2,
+          description: "Sampling temperature."
+        },
+        maxTokens: {
+          type: "integer",
+          default: 1024,
+          description: "Maximum tokens to generate."
+        },
+        baseUrl: {
+          type: "string",
+          description: "Override the provider base URL (e.g. self-hosted Ollama)."
+        }
+      },
+      additionalProperties: false
+    },
+    secretsSchema: {
+      type: "object",
+      properties: {
+        apiKey: {
+          type: "string",
+          format: "secret-ref",
+          description:
+            "Reference to the provider API key secret. Required for hosted providers (OpenAI/Anthropic)."
+        }
+      },
+      additionalProperties: false
+    },
+    capabilities: ["query", "streaming"],
+    ui: {
+      icon: "message-square",
+      color: "#7c3aed",
+      paletteGroup: "Models",
+      formHints: {
+        provider: { widget: "select" },
+        temperature: { widget: "range", min: 0, max: 2, step: 0.1 },
+        maxTokens: { widget: "number", min: 1, step: 64 },
+        apiKey: { widget: "secret" }
+      }
+    }
   },
   async execute({ inputs, config, secrets, context }) {
     const providers = new ProviderRegistry();
@@ -143,7 +244,14 @@ export const jsonOutputParserPlugin: InProcessPlugin = {
     version: "1.0.0",
     category: "output_parser",
     description: "Attempts to parse model text as JSON.",
-    capabilities: ["query"]
+    configSchema: {
+      type: "object",
+      description: "No configuration; parses upstream model text as JSON.",
+      properties: {},
+      additionalProperties: false
+    },
+    capabilities: ["query"],
+    ui: { icon: "braces", paletteGroup: "Parsing" }
   },
   async execute({ inputs }) {
     const text = String((inputs.llm as any)?.text ?? inputs.text ?? "");
@@ -162,7 +270,24 @@ export const keywordGuardrailPlugin: InProcessPlugin = {
     version: "1.0.0",
     category: "guardrail",
     description: "Blocks configured keywords.",
-    capabilities: ["query"]
+    configSchema: {
+      type: "object",
+      properties: {
+        blockedKeywords: {
+          type: "array",
+          items: { type: "string" },
+          default: [],
+          description: "Case-insensitive keywords that cause the request to be blocked."
+        }
+      },
+      additionalProperties: false
+    },
+    capabilities: ["query"],
+    ui: {
+      icon: "shield",
+      paletteGroup: "Guardrails",
+      formHints: { blockedKeywords: { widget: "tags" } }
+    }
   },
   async execute({ inputs, config }) {
     const text = JSON.stringify(inputs);
@@ -179,7 +304,14 @@ export const evaluatorStubPlugin: InProcessPlugin = {
     version: "1.0.0",
     category: "evaluator",
     description: "Returns a placeholder evaluation score.",
-    capabilities: ["evaluation"]
+    configSchema: {
+      type: "object",
+      description: "Stub evaluator; no configuration.",
+      properties: {},
+      additionalProperties: false
+    },
+    capabilities: ["evaluation"],
+    ui: { icon: "check-circle", paletteGroup: "Evaluation" }
   },
   async execute() {
     return { outputs: { score: 1, passed: true, notes: "stub evaluator" } };
@@ -193,7 +325,49 @@ export const providerEmbeddingsPlugin: InProcessPlugin = {
     version: "1.0.0",
     category: "embedder",
     description: "Embeds input texts using OpenAI or Ollama-compatible embedding provider.",
-    capabilities: ["ingestion", "query"]
+    configSchema: {
+      type: "object",
+      properties: {
+        provider: {
+          type: "string",
+          enum: ["openai", "anthropic", "ollama"],
+          default: "ollama",
+          description: "Embedding provider adapter to call."
+        },
+        model: {
+          type: "string",
+          default: "nomic-embed-text",
+          description: "Embedding model id passed to the provider."
+        },
+        baseUrl: {
+          type: "string",
+          description: "Override the provider base URL (e.g. self-hosted Ollama)."
+        }
+      },
+      additionalProperties: false
+    },
+    secretsSchema: {
+      type: "object",
+      properties: {
+        apiKey: {
+          type: "string",
+          format: "secret-ref",
+          description:
+            "Reference to the provider API key secret. Required for hosted providers."
+        }
+      },
+      additionalProperties: false
+    },
+    capabilities: ["ingestion", "query"],
+    ui: {
+      icon: "vector",
+      color: "#0ea5e9",
+      paletteGroup: "Embeddings",
+      formHints: {
+        provider: { widget: "select" },
+        apiKey: { widget: "secret" }
+      }
+    }
   },
   async execute({ inputs, config, secrets, context }) {
     const rawTexts =
@@ -225,7 +399,68 @@ export const qdrantRetrieverPlugin: InProcessPlugin = {
     version: "1.0.0",
     category: "retriever",
     description: "Queries a vector store (Qdrant or in-memory) for the top-K most similar documents.",
-    capabilities: ["query"]
+    configSchema: {
+      type: "object",
+      properties: {
+        url: {
+          type: "string",
+          description: "Qdrant URL. Falls back to the in-memory store when unset."
+        },
+        apiKey: {
+          type: "string",
+          description: "Qdrant API key (passed to the vector store client)."
+        },
+        collection: {
+          type: "string",
+          default: "default",
+          description: "Collection to query."
+        },
+        topK: {
+          type: "integer",
+          default: 5,
+          description: "Number of nearest documents to return."
+        },
+        filter: {
+          type: "object",
+          additionalProperties: true,
+          description: "Optional payload filter applied to the query."
+        },
+        provider: {
+          type: "string",
+          enum: ["openai", "anthropic", "ollama"],
+          default: "ollama",
+          description: "Embedding provider used to embed the query when no queryVector is supplied."
+        },
+        model: {
+          type: "string",
+          default: "nomic-embed-text",
+          description: "Embedding model used to embed the query."
+        }
+      },
+      additionalProperties: false
+    },
+    secretsSchema: {
+      type: "object",
+      properties: {
+        apiKey: {
+          type: "string",
+          format: "secret-ref",
+          description: "Reference to the embedding provider API key secret (used for query embedding)."
+        }
+      },
+      additionalProperties: false
+    },
+    capabilities: ["query"],
+    ui: {
+      icon: "search",
+      color: "#16a34a",
+      paletteGroup: "Retrieval",
+      formHints: {
+        provider: { widget: "select" },
+        topK: { widget: "number", min: 1, step: 1 },
+        filter: { widget: "json" }
+      }
+    }
   },
   async execute({ inputs, config, secrets, context }) {
     const store = createVectorStore({
@@ -274,7 +509,49 @@ export const vectorUpsertPlugin: InProcessPlugin = {
     version: "1.0.0",
     category: "sink",
     description: "Ensures a collection exists and upserts embedded chunks into the vector store.",
-    capabilities: ["ingestion"]
+    configSchema: {
+      type: "object",
+      properties: {
+        url: {
+          type: "string",
+          description: "Qdrant URL. Falls back to the in-memory store when unset."
+        },
+        apiKey: {
+          type: "string",
+          description: "Qdrant API key (passed to the vector store client)."
+        },
+        collection: {
+          type: "string",
+          default: "default",
+          description: "Target collection name."
+        },
+        distance: {
+          type: "string",
+          enum: ["cosine", "dot", "euclidean"],
+          default: "cosine",
+          description: "Distance metric used when the collection is created."
+        },
+        dimensions: {
+          type: "integer",
+          description: "Vector dimensionality. Inferred from the first vector when unset."
+        },
+        idPrefix: {
+          type: "string",
+          description: "Prefix for generated point ids. Defaults to the execution id."
+        }
+      },
+      additionalProperties: false
+    },
+    capabilities: ["ingestion"],
+    ui: {
+      icon: "database",
+      color: "#16a34a",
+      paletteGroup: "Storage",
+      formHints: {
+        distance: { widget: "select" },
+        dimensions: { widget: "number", min: 1, step: 1 }
+      }
+    }
   },
   async execute({ inputs, config, context }) {
     const store = createVectorStore({

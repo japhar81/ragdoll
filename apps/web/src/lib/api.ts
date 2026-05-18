@@ -13,6 +13,9 @@ import type {
   PipelineSpec,
   PipelineValidationResult
 } from "./types.ts";
+import type { JsonSchemaLike } from "./schemaForm.ts";
+
+export type { JsonSchemaLike } from "./schemaForm.ts";
 
 export interface ApiAuth {
   token?: string;
@@ -191,7 +194,40 @@ export const api = {
       "GET",
       `/api/usage${qs(params)}`
     ),
-  listPlugins: () => request<{ plugins: PluginInfo[] }>("GET", "/api/plugins")
+  listPlugins: () => request<{ plugins: PluginInfo[] }>("GET", "/api/plugins"),
+
+  /**
+   * Fetch a single plugin's full metadata (incl. config/secrets schema + ui).
+   * Hits the per-plugin route; if that route 404s (older API that only knows
+   * GET /api/plugins) we fall back to scanning the list. Returns `undefined`
+   * when the plugin truly is not registered.
+   */
+  async getPlugin(
+    category: string,
+    id: string,
+    version: string
+  ): Promise<PluginInfo | undefined> {
+    try {
+      const res = await request<{ plugin: PluginInfo }>(
+        "GET",
+        `/api/plugins/${encodeURIComponent(category)}/${encodeURIComponent(
+          id
+        )}/${encodeURIComponent(version)}`
+      );
+      return res.plugin;
+    } catch (e) {
+      if (!(e instanceof ApiError) || e.status !== 404) throw e;
+      // 404 may mean "no such plugin" OR "older API without the per-plugin
+      // route" — disambiguate by scanning the list endpoint.
+      const { plugins } = await request<{ plugins: PluginInfo[] }>(
+        "GET",
+        "/api/plugins"
+      );
+      return plugins.find(
+        (p) => p.category === category && p.id === id && p.version === version
+      );
+    }
+  }
 };
 
 // ---- response row shapes (loosely typed; only fields the UI reads) -------
@@ -308,10 +344,29 @@ export interface UsageRow {
   estimatedCostUsd: number;
 }
 
+/** Plugin-published UI hints (all optional; tolerate any missing field). */
+export interface PluginUi {
+  icon?: string;
+  color?: string;
+  formHints?: Record<string, unknown>;
+  paletteGroup?: string;
+  /**
+   * Optional URL of an ES module exporting a custom config editor. UNTRUSTED
+   * third-party code — only admin-registered plugins ship one, and none do
+   * yet. PluginEditorSlot lazy-imports it behind an error boundary.
+   */
+  module?: string;
+}
+
 export interface PluginInfo {
   id: string;
   name: string;
   version: string;
   category: string;
   description?: string;
+  mode?: string;
+  capabilities?: string[];
+  configSchema?: JsonSchemaLike;
+  secretsSchema?: JsonSchemaLike;
+  ui?: PluginUi;
 }
