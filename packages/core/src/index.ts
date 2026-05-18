@@ -227,7 +227,50 @@ export function isSensitiveKey(key: string): boolean {
 }
 
 export function looksSensitive(value: string): boolean {
-  return /^(sk-|xox[baprs]-|eyJ|Bearer\s+|gh[pousr]_)/.test(value) || value.length > 48 && /[A-Za-z0-9+/=_-]{32,}/.test(value);
+  // 1) Known secret prefixes / formats. These are unambiguous credential
+  //    shapes regardless of length, so match them up front.
+  //    - sk-...            (OpenAI / Anthropic style API keys)
+  //    - xoxb-/xoxp-/...   (Slack tokens)
+  //    - ghp_/gho_/...     (GitHub tokens)
+  //    - Bearer <token>    (Authorization header values)
+  if (/^(sk-|xox[baprs]-|gh[pousr]_)/.test(value)) return true;
+  if (/^Bearer\s+\S+/.test(value)) return true;
+
+  // 2) JWT: three base64url segments separated by dots, starting with the
+  //    canonical `eyJ` header. Allow surrounding whitespace only at the edges
+  //    (e.g. trailing newline) but not inside the token itself.
+  const trimmed = value.trim();
+  if (/^eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(trimmed)) {
+    return true;
+  }
+
+  // 3) Connection-string-looking values: `scheme://user:pass@host[/db]`.
+  //    A `://...:...@` shape embeds credentials and must stay redacted even
+  //    though it contains punctuation. It still must not contain whitespace
+  //    inside the URL (real prose with a URL in a sentence has spaces around
+  //    the credential portion, and we only match a contiguous URL token).
+  if (/^[A-Za-z][A-Za-z0-9+.-]*:\/\/[^\s/@]+:[^\s/@]+@\S+$/.test(trimmed)) {
+    return true;
+  }
+
+  // 4) High-entropy opaque token. Only treat a string as a secret token when
+  //    the WHOLE value is a single contiguous run of token-ish characters
+  //    with NO whitespace at all. Natural language, markdown and JSON prose
+  //    always contain spaces/newlines, so they fall through here and are NOT
+  //    redacted even if they contain a long alphanumeric substring.
+  if (/\s/.test(value)) return false;
+  if (!/^[A-Za-z0-9+/=_.-]{40,}$/.test(value)) return false;
+
+  // Reject contiguous strings that are clearly not opaque secrets: a single
+  // long natural word (all letters, single case) or a dotted/underscored
+  // identifier path with no digits and no entropy markers. Genuine opaque
+  // tokens mix character classes (digits + letters, or include +/=_- noise).
+  const hasDigit = /[0-9]/.test(value);
+  const hasUpper = /[A-Z]/.test(value);
+  const hasLower = /[a-z]/.test(value);
+  const hasTokenNoise = /[+/=_-]/.test(value);
+  const classes = (hasDigit ? 1 : 0) + (hasUpper ? 1 : 0) + (hasLower ? 1 : 0);
+  return hasDigit || hasTokenNoise || classes >= 2;
 }
 
 export interface EmbeddingProfile {

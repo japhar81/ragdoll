@@ -36,17 +36,16 @@ def test_healthz(client):
 def test_execute_crawl4ai_happy_path(client, monkeypatch):
     captured = {}
 
-    async def fake_run(urls, cfg):
-        captured["urls"] = urls
+    async def fake_run(url, cfg):
+        captured["url"] = url
         captured["cfg"] = cfg
-        return [
-            {
-                "url": "https://example.com/",
-                "title": "Example",
-                "markdown": "# Example\nhello",
-                "metadata": {"title": "Example"},
-            }
-        ]
+        return {
+            "url": "https://example.com/",
+            "title": "Example",
+            "markdown": "# Example\nhello",
+            "metadata": {"title": "Example"},
+            "links": [],
+        }
 
     monkeypatch.setattr(c4a, "run_crawl4ai", fake_run)
     monkeypatch.setattr(safety, "system_resolver", _fake_resolver)
@@ -58,9 +57,13 @@ def test_execute_crawl4ai_happy_path(client, monkeypatch):
     assert r.status_code == 200
     data = r.json()
 
-    # Envelope shape exactly per contract.
+    # Envelope shape exactly per contract (metadata now also carries the
+    # BFS counters; ``crawler`` stays stable for the TS side).
     assert set(data.keys()) == {"outputs", "metadata", "usage"}
-    assert data["metadata"] == {"crawler": "crawl4ai"}
+    assert data["metadata"]["crawler"] == "crawl4ai"
+    assert data["metadata"]["pagesRequested"] == 10
+    assert data["metadata"]["pagesFetched"] == 1
+    assert data["metadata"]["skipped"] == 0
     assert data["usage"] == {}
     assert data["outputs"]["pageCount"] == 1
     doc = data["outputs"]["documents"][0]
@@ -78,15 +81,14 @@ def test_execute_crawl4ai_happy_path(client, monkeypatch):
 
 
 def test_execute_crawl4ai_text_extract(client, monkeypatch):
-    async def fake_run(urls, cfg):
-        return [
-            {
-                "url": "https://example.com/",
-                "title": "T",
-                "text": "plain text body",
-                "metadata": {},
-            }
-        ]
+    async def fake_run(url, cfg):
+        return {
+            "url": "https://example.com/",
+            "title": "T",
+            "text": "plain text body",
+            "metadata": {},
+            "links": [],
+        }
 
     monkeypatch.setattr(c4a, "run_crawl4ai", fake_run)
     monkeypatch.setattr(safety, "system_resolver", _fake_resolver)
@@ -124,8 +126,14 @@ def test_execute_crawl4ai_ssrf_blocked(client, monkeypatch):
 
 
 def test_execute_crawl4ai_ssrf_bypass(client, monkeypatch):
-    async def fake_run(urls, cfg):
-        return [{"url": urls[0], "title": "", "markdown": "ok", "metadata": {}}]
+    async def fake_run(url, cfg):
+        return {
+            "url": url,
+            "title": "",
+            "markdown": "ok",
+            "metadata": {},
+            "links": [],
+        }
 
     def private_resolver(host):
         return ["10.0.0.9"]
@@ -225,9 +233,15 @@ def test_resolved_config_merge(client, monkeypatch):
     """context.resolvedConfig.values feed effective_config; top-level wins."""
     captured = {}
 
-    async def fake_run(urls, cfg):
+    async def fake_run(url, cfg):
         captured["cfg"] = cfg
-        return [{"url": urls[0], "title": "", "markdown": "x", "metadata": {}}]
+        return {
+            "url": url,
+            "title": "",
+            "markdown": "x",
+            "metadata": {},
+            "links": [],
+        }
 
     monkeypatch.setattr(c4a, "run_crawl4ai", fake_run)
     monkeypatch.setattr(safety, "system_resolver", _fake_resolver)
