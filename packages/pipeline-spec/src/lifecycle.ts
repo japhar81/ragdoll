@@ -92,6 +92,10 @@ export interface PipelineVersionRecord {
   checksum: string;
   createdAt: string;
   publishedAt?: string;
+  /** Optional id of this record (used for pointer/parent linkage). */
+  id?: string;
+  /** Optional id of the version this one was saved on top of. */
+  parentVersionId?: string | null;
 }
 
 export class ImmutableVersionError extends Error {
@@ -99,6 +103,83 @@ export class ImmutableVersionError extends Error {
     super(`Published version ${version} is immutable and cannot be changed`);
     this.name = "ImmutableVersionError";
   }
+}
+
+export class VersionNotFoundError extends Error {
+  constructor(versionId: string) {
+    super(`Pipeline version ${versionId} was not found`);
+    this.name = "VersionNotFoundError";
+  }
+}
+
+export class ActivationResolutionError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ActivationResolutionError";
+  }
+}
+
+/* ---------------------------- semver helpers ------------------------------ */
+
+export interface Semver {
+  major: number;
+  minor: number;
+  patch: number;
+}
+
+/**
+ * Parses a strict `major.minor.patch` semver (no pre-release / build
+ * metadata). Returns `null` for anything that does not match.
+ */
+export function parseSemver(v: string): Semver | null {
+  const match = /^(\d+)\.(\d+)\.(\d+)$/.exec(typeof v === "string" ? v.trim() : "");
+  if (!match) return null;
+  const major = Number(match[1]);
+  const minor = Number(match[2]);
+  const patch = Number(match[3]);
+  if (!Number.isSafeInteger(major) || !Number.isSafeInteger(minor) || !Number.isSafeInteger(patch)) {
+    return null;
+  }
+  return { major, minor, patch };
+}
+
+/**
+ * Orders two version strings. Unparseable versions sort below any valid
+ * semver (and equal to each other). Returns <0, 0, or >0.
+ */
+export function compareSemver(a: string, b: string): number {
+  const pa = parseSemver(a);
+  const pb = parseSemver(b);
+  if (!pa && !pb) return 0;
+  if (!pa) return -1;
+  if (!pb) return 1;
+  if (pa.major !== pb.major) return pa.major - pb.major;
+  if (pa.minor !== pb.minor) return pa.minor - pb.minor;
+  return pa.patch - pb.patch;
+}
+
+/**
+ * Returns the greatest parseable semver in `versions`, or `"0.0.0"` when the
+ * list is empty / contains no parseable versions.
+ */
+export function maxSemver(versions: string[]): string {
+  let best: string | null = null;
+  for (const candidate of versions) {
+    if (parseSemver(candidate) === null) continue;
+    if (best === null || compareSemver(candidate, best) > 0) best = candidate;
+  }
+  return best ?? "0.0.0";
+}
+
+/**
+ * Increments `base` by one level. `minor` resets patch to 0; `major` resets
+ * both minor and patch to 0. An unparseable `base` is treated as `0.0.0`.
+ */
+export function semverBump(base: string, level: "patch" | "minor" | "major"): string {
+  const parsed = parseSemver(base) ?? { major: 0, minor: 0, patch: 0 };
+  if (level === "major") return `${parsed.major + 1}.0.0`;
+  if (level === "minor") return `${parsed.major}.${parsed.minor + 1}.0`;
+  return `${parsed.major}.${parsed.minor}.${parsed.patch + 1}`;
 }
 
 export interface PublishOptions {
@@ -153,6 +234,135 @@ export function publishVersion(
 export function archiveVersion(record: PipelineVersionRecord): PipelineVersionRecord {
   if (record.status === "archived") return record;
   return { ...record, status: "archived" };
+}
+
+/* -------------------------- save / rollback ------------------------------- */
+
+export interface NextVersionOnSaveArgs {
+  /** All known version records for the pipeline (any status). */
+  existingVersions: PipelineVersionRecord[];
+  /** The record the pipeline's "latest" pointer currently references. */
+  latest?: PipelineVersionRecord;
+  spec: PipelineSpec;
+  level?: "patch" | "minor" | "major";
+  pipelineId?: string;
+  now?: () => string;
+}
+
+export type NextVersionOnSaveResult =
+  | { kind: "idempotent"; version: PipelineVersionRecord }
+  | { kind: "new"; record: PipelineVersionRecord };
+
+/**
+ * Computes the outcome of a "save" against the current latest pointer.
+ *
+ * - If `latest` exists and its checksum equals the new spec's checksum the
+ *   save is idempotent and returns the existing `latest` record unchanged.
+ * - Otherwise a new published record is produced. Its version is the GLOBAL
+ *   max version across `existingVersions` bumped by `level` (default
+ *   `"patch"`). Bumping from the global max — not from `latest` — keeps
+ *   version numbers unique and monotonic even when the latest pointer was
+ *   rolled back to an older version. `parentVersionId` links to `latest`.
+ *
+ * Pure: never mutates inputs.
+ */
+export function nextVersionOnSave(args: NextVersionOnSaveArgs): NextVersionOnSaveResult {
+  const now = args.now ?? (() => new Date().toISOString());
+  const pipelineId = args.pipelineId ?? args.latest?.pipelineId ?? args.spec.metadata.name;
+  const checksum = specChecksum(args.spec);
+
+  if (args.latest && args.latest.checksum === checksum) {
+    return { kind: "idempotent", version: args.latest };
+  }
+
+  const version = semverBump(
+    maxSemver(args.existingVersions.map((record) => record.version)),
+    args.level ?? "patch"
+  );
+
+  const record: PipelineVersionRecord = {
+    pipelineId,
+    version,
+    status: "published",
+    spec: args.spec,
+    checksum,
+    createdAt: now(),
+    parentVersionId: args.latest?.id ?? null
+  };
+  return { kind: "new", record };
+}
+
+/**
+ * Validates that `versionId` exists among `versions` and returns it as the
+ * new "latest" pointer value. Throws `VersionNotFoundError` otherwise. This
+ * is a pointer move only — it creates NO new version record.
+ */
+export function rollbackPointer(versions: PipelineVersionRecord[], versionId: string): string {
+  const found = versions.some((record) => record.id === versionId);
+  if (!found) throw new VersionNotFoundError(versionId);
+  return versionId;
+}
+
+/* ------------------------------ activations ------------------------------- */
+
+/**
+ * Resolves which activation a request targets.
+ *
+ * Precedence:
+ *  1. An explicit `label` — it must exist and be enabled.
+ *  2. The activation labelled `"default"`, if enabled.
+ *  3. Exactly one enabled activation.
+ *  4. Otherwise throw `ActivationResolutionError`.
+ */
+export function resolveActivation<T extends { label: string; enabled: boolean }>(
+  activations: T[],
+  label?: string
+): T {
+  if (label !== undefined) {
+    const match = activations.find((activation) => activation.label === label);
+    if (!match) {
+      throw new ActivationResolutionError(`No activation labelled "${label}"`);
+    }
+    if (!match.enabled) {
+      throw new ActivationResolutionError(`Activation "${label}" is disabled`);
+    }
+    return match;
+  }
+
+  const enabled = activations.filter((activation) => activation.enabled);
+
+  const byDefault = enabled.find((activation) => activation.label === "default");
+  if (byDefault) return byDefault;
+
+  if (enabled.length === 1) return enabled[0];
+
+  if (enabled.length === 0) {
+    throw new ActivationResolutionError("No enabled activation to resolve");
+  }
+  throw new ActivationResolutionError(
+    "Ambiguous activation: multiple enabled activations and no explicit or default label"
+  );
+}
+
+/**
+ * Resolves the concrete pipeline version id an activation points at.
+ * `trackLatest` activations follow the pipeline's latest pointer; pinned
+ * activations use their own `pipelineVersionId`. Throws
+ * `ActivationResolutionError` if the resolved id is missing.
+ */
+export function effectiveVersionId(
+  activation: { trackLatest: boolean; pipelineVersionId?: string | null },
+  pipelineLatestVersionId?: string | null
+): string {
+  const resolved = activation.trackLatest ? pipelineLatestVersionId : activation.pipelineVersionId;
+  if (resolved === null || resolved === undefined) {
+    throw new ActivationResolutionError(
+      activation.trackLatest
+        ? "Activation tracks latest but pipeline has no latest version"
+        : "Pinned activation has no pipelineVersionId"
+    );
+  }
+  return resolved;
 }
 
 /* ----------------------------- deployments -------------------------------- */

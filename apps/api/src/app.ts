@@ -35,17 +35,32 @@ import {
   publishVersion,
   archiveVersion,
   selectDeployedVersion,
+  nextVersionOnSave,
+  rollbackPointer,
+  resolveActivation,
+  effectiveVersionId,
   ImmutableVersionError,
+  VersionNotFoundError,
+  ActivationResolutionError,
   type PipelineVersionRecord,
   type PipelineDeployment
 } from "../../../packages/pipeline-spec/src/index.ts";
+import { parseCron, nextAfter, CronParseError } from "../../../packages/cron/src/index.ts";
 import {
   NotFoundError,
   ConflictError,
+  InMemoryPipelineFolderRepository,
+  InMemoryPipelineActivationRepository,
+  InMemoryScheduleRepository,
+  InMemoryTenantPipelineRepository,
   type TenantRepository,
   type PipelineRepository,
   type PipelineVersionRepository,
   type PipelineDeploymentRepository,
+  type PipelineFolderRepository,
+  type PipelineActivationRepository,
+  type ScheduleRepository,
+  type TenantPipelineRepository,
   type ConfigDefinitionRepository,
   type ConfigValueRepository,
   type AuditLogRepository,
@@ -58,6 +73,10 @@ import {
   type PipelineRow,
   type PipelineVersionRow,
   type PipelineDeploymentRow,
+  type PipelineFolderRow,
+  type PipelineActivationRow,
+  type ScheduleRow,
+  type TenantPipelineRow,
   type ConfigDefinitionRow,
   type ConfigValueRow
 } from "../../../packages/db/src/index.ts";
@@ -128,6 +147,16 @@ export interface AppDeps {
   pipelines: PipelineRepository;
   pipelineVersions: PipelineVersionRepository;
   deployments: PipelineDeploymentRepository;
+  /**
+   * Org/versioning/scheduler repositories. Optional so older harnesses that
+   * predate Wave B (e.g. the cross-component e2e harness) still construct a
+   * valid `AppDeps`; when omitted `createApp` falls back to fresh InMemory
+   * instances so the new routes remain fully functional.
+   */
+  pipelineFolders?: PipelineFolderRepository;
+  pipelineActivations?: PipelineActivationRepository;
+  schedules?: ScheduleRepository;
+  tenantPipelines?: TenantPipelineRepository;
   configDefinitions: ConfigDefinitionRepository;
   configValues: ConfigValueRepository;
   auditLogs: AuditLogRepository;
@@ -180,6 +209,33 @@ function isObject(value: unknown): value is Record<string, unknown> {
 
 function nowIso(): string {
   return new Date().toISOString();
+}
+
+/**
+ * A canonical UUID. Path params that don't match this are treated as a
+ * pipeline slug/name (the web builder POSTs `/api/pipelines/<slug>/run`), so
+ * they are NEVER passed into a Postgres `uuid` column query.
+ */
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function isUuid(value: string): boolean {
+  return UUID_RE.test(value);
+}
+
+/**
+ * True when a thrown error is a Postgres invalid-text-representation, i.e. a
+ * value (often a slug) being cast to a typed column such as `uuid`. PG raises
+ * SQLSTATE 22P02 with a message like
+ * `invalid input syntax for type uuid: "support-rag"`. We surface these as a
+ * clear 400 instead of a 500.
+ */
+function isInvalidTextRepresentation(e: unknown): boolean {
+  const code = (e as { code?: unknown } | null | undefined)?.code;
+  if (code === "22P02") return true;
+  const msg =
+    e instanceof Error ? e.message : typeof e === "string" ? e : "";
+  return /invalid input syntax for type uuid/i.test(msg);
 }
 
 // ---------------------------------------------------------------------------
@@ -235,6 +291,18 @@ export function createApp(deps: AppDeps): App {
     routes.push({ method, segments: compile(pattern), handler });
   };
 
+  // Resolve optional Wave-B repositories to concrete instances once. Harnesses
+  // that omit them get fresh InMemory stores so folder/activation/schedule
+  // routes work without the caller having to wire anything new.
+  const pipelineFolders: PipelineFolderRepository =
+    deps.pipelineFolders ?? new InMemoryPipelineFolderRepository();
+  const pipelineActivations: PipelineActivationRepository =
+    deps.pipelineActivations ?? new InMemoryPipelineActivationRepository();
+  const schedules: ScheduleRepository =
+    deps.schedules ?? new InMemoryScheduleRepository();
+  const tenantPipelines: TenantPipelineRepository =
+    deps.tenantPipelines ?? new InMemoryTenantPipelineRepository();
+
   // ---- audit helper -------------------------------------------------------
   async function audit(
     ctx: RouteContext,
@@ -263,6 +331,59 @@ export function createApp(deps: AppDeps): App {
   /** Tenant scope from explicit header, falling back to the principal. */
   function tenantScope(ctx: RouteContext): string | undefined {
     return headerValue(ctx.request.headers, "x-tenant-id") ?? ctx.principal.tenantId;
+  }
+
+  /**
+   * Record which folder a pipeline lives in so a non-empty folder delete
+   * raises 409. The InMemory folder repo exposes a `trackPipelineFolder`
+   * hook; a Postgres-backed repo derives emptiness from the pipelines table
+   * via its own FK so the call is a no-op there.
+   */
+  function trackFolder(pipelineId: string, folderId: string | null): void {
+    const repo = pipelineFolders as unknown as {
+      trackPipelineFolder?: (p: string, f: string | null) => void;
+    };
+    repo.trackPipelineFolder?.(pipelineId, folderId);
+  }
+
+  /**
+   * Resolve a pipeline `:id` path param that may be EITHER a UUID or a
+   * slug/name. The web builder POSTs `/api/pipelines/<slug>/run`, so a route
+   * that blindly fed `:id` into a Postgres `uuid` query would throw
+   * `invalid input syntax for type uuid` and surface as a 500.
+   *
+   * Strategy: if the param looks like a UUID, try `pipelines.get` first; if
+   * that misses (or the param is not a UUID) fall back to
+   * `pipelines.findBySlug`. A non-UUID is never passed to `.get` (which would
+   * hit a uuid column). Returns the resolved row, or an `error(404,
+   * "pipeline_not_found")` response the caller should return as-is. Callers
+   * MUST use the returned `pipeline.id` (the real UUID) for every downstream
+   * lookup (versions/deployments/activations).
+   */
+  async function resolvePipelineRef(
+    ref: string
+  ): Promise<PipelineRow | AppResponse> {
+    let pipeline: PipelineRow | undefined;
+    if (isUuid(ref)) {
+      pipeline = await deps.pipelines.get(ref);
+    }
+    if (!pipeline) {
+      pipeline = await deps.pipelines.findBySlug(ref);
+    }
+    if (!pipeline) {
+      return error(404, "pipeline_not_found", {
+        message: `no pipeline with id or slug '${ref}'`
+      });
+    }
+    return pipeline;
+  }
+
+  /** Narrow the union returned by `resolvePipelineRef`. */
+  function isAppResponse(v: PipelineRow | AppResponse): v is AppResponse {
+    return (
+      typeof (v as AppResponse).status === "number" &&
+      "headers" in (v as AppResponse)
+    );
   }
 
   // ---- health -------------------------------------------------------------
@@ -348,9 +469,9 @@ export function createApp(deps: AppDeps): App {
 
   route("GET", "/api/pipelines/:id", async (ctx) => {
     enforce(ctx.principal, "execution:view_logs");
-    const pipeline = await deps.pipelines.get(ctx.params.id);
-    if (!pipeline) return error(404, "not_found");
-    return ok({ pipeline });
+    const resolved = await resolvePipelineRef(ctx.params.id);
+    if (isAppResponse(resolved)) return resolved;
+    return ok({ pipeline: resolved });
   });
 
   route("POST", "/api/pipelines", async (ctx) => {
@@ -363,43 +484,140 @@ export function createApp(deps: AppDeps): App {
     }
     const existing = await deps.pipelines.findBySlug(body.slug);
     if (existing) return error(409, "conflict", { message: "slug already exists" });
+    const folderId =
+      typeof body.folderId === "string" ? body.folderId : null;
+    if (folderId !== null && !(await pipelineFolders.get(folderId))) {
+      return error(404, "not_found", { message: "folder not found" });
+    }
     const row: PipelineRow = {
       id: typeof body.id === "string" ? body.id : randomUUID(),
       slug: body.slug,
       name: body.name,
       description: typeof body.description === "string" ? body.description : null,
       labels: isObject(body.labels) ? (body.labels as Record<string, string>) : {},
+      folderId,
+      latestVersionId: null,
       createdBy: ctx.principal.id,
       createdAt: nowIso(),
       updatedAt: nowIso()
     };
     const created = await deps.pipelines.create(row);
+    if (folderId !== null) trackFolder(created.id, folderId);
     await audit(ctx, "pipeline.create", "pipeline", created.id, undefined, created);
     return ok({ pipeline: created }, 201);
   });
 
   route("PUT", "/api/pipelines/:id", async (ctx) => {
     enforce(ctx.principal, "pipeline:update");
-    const before = await deps.pipelines.get(ctx.params.id);
-    if (!before) return error(404, "not_found");
+    const before = await resolvePipelineRef(ctx.params.id);
+    if (isAppResponse(before)) return before;
     const body = ctx.request.body;
     if (!isObject(body)) return error(422, "validation_failed", { issues: [] });
     const patch: Partial<PipelineRow> = { updatedAt: nowIso() };
     if (typeof body.name === "string") patch.name = body.name;
     if (typeof body.description === "string") patch.description = body.description;
     if (isObject(body.labels)) patch.labels = body.labels as Record<string, string>;
-    const updated = await deps.pipelines.update(ctx.params.id, patch);
+    const updated = await deps.pipelines.update(before.id, patch);
     await audit(ctx, "pipeline.update", "pipeline", updated.id, before, updated);
     return ok({ pipeline: updated });
   });
 
   route("DELETE", "/api/pipelines/:id", async (ctx) => {
     enforce(ctx.principal, "pipeline:delete");
-    const before = await deps.pipelines.get(ctx.params.id);
-    if (!before) return error(404, "not_found");
-    await deps.pipelines.delete(ctx.params.id);
-    await audit(ctx, "pipeline.delete", "pipeline", ctx.params.id, before, undefined);
+    const before = await resolvePipelineRef(ctx.params.id);
+    if (isAppResponse(before)) return before;
+    await deps.pipelines.delete(before.id);
+    await audit(ctx, "pipeline.delete", "pipeline", before.id, before, undefined);
     return { status: 204, body: undefined, headers: {} };
+  });
+
+  // ---- pipeline folders ---------------------------------------------------
+  route("GET", "/api/folders", async (ctx) => {
+    enforce(ctx.principal, "execution:view_logs");
+    return ok({ folders: await pipelineFolders.tree() });
+  });
+
+  route("POST", "/api/folders", async (ctx) => {
+    enforce(ctx.principal, "pipeline:create");
+    const body = ctx.request.body;
+    if (!isObject(body) || typeof body.name !== "string" || body.name.length === 0) {
+      return error(422, "validation_failed", {
+        issues: [{ path: "name", message: "name is required" }]
+      });
+    }
+    const parentId = typeof body.parentId === "string" ? body.parentId : null;
+    if (parentId !== null && !(await pipelineFolders.get(parentId))) {
+      return error(404, "not_found", { message: "parent folder not found" });
+    }
+    const row: PipelineFolderRow = {
+      id: typeof body.id === "string" ? body.id : randomUUID(),
+      parentId,
+      name: body.name,
+      createdAt: nowIso()
+    };
+    const created = await pipelineFolders.create(row);
+    await audit(ctx, "pipeline_folder.create", "pipeline_folder", created.id, undefined, created);
+    return ok({ folder: created }, 201);
+  });
+
+  route("PUT", "/api/folders/:id", async (ctx) => {
+    enforce(ctx.principal, "pipeline:update");
+    const before = await pipelineFolders.get(ctx.params.id);
+    if (!before) return error(404, "not_found");
+    const body = ctx.request.body;
+    if (!isObject(body)) return error(422, "validation_failed", { issues: [] });
+    let updated = before;
+    if (typeof body.name === "string" && body.name.length > 0) {
+      updated = await pipelineFolders.rename(ctx.params.id, body.name);
+    }
+    if ("parentId" in body) {
+      const parentId =
+        typeof body.parentId === "string" ? body.parentId : null;
+      if (parentId === ctx.params.id) {
+        return error(422, "validation_failed", {
+          issues: [{ path: "parentId", message: "folder cannot be its own parent" }]
+        });
+      }
+      if (parentId !== null && !(await pipelineFolders.get(parentId))) {
+        return error(404, "not_found", { message: "parent folder not found" });
+      }
+      updated = await pipelineFolders.update(ctx.params.id, {
+        parentId
+      } as Partial<PipelineFolderRow>);
+    }
+    await audit(ctx, "pipeline_folder.update", "pipeline_folder", updated.id, before, updated);
+    return ok({ folder: updated });
+  });
+
+  route("DELETE", "/api/folders/:id", async (ctx) => {
+    enforce(ctx.principal, "pipeline:delete");
+    const before = await pipelineFolders.get(ctx.params.id);
+    if (!before) return error(404, "not_found");
+    // Repo throws ConflictError when the folder still has children/pipelines;
+    // the global handler maps that to 409 conflict.
+    await pipelineFolders.delete(ctx.params.id);
+    await audit(ctx, "pipeline_folder.delete", "pipeline_folder", ctx.params.id, before, undefined);
+    return { status: 204, body: undefined, headers: {} };
+  });
+
+  route("PUT", "/api/pipelines/:id/folder", async (ctx) => {
+    enforce(ctx.principal, "pipeline:update");
+    const pipeline = await resolvePipelineRef(ctx.params.id);
+    if (isAppResponse(pipeline)) return pipeline;
+    const body = ctx.request.body;
+    if (!isObject(body) || !("folderId" in body)) {
+      return error(422, "validation_failed", {
+        issues: [{ path: "folderId", message: "folderId is required (string or null)" }]
+      });
+    }
+    const folderId = typeof body.folderId === "string" ? body.folderId : null;
+    if (folderId !== null && !(await pipelineFolders.get(folderId))) {
+      return error(404, "not_found", { message: "folder not found" });
+    }
+    const updated = await deps.pipelines.setFolder(pipeline.id, folderId);
+    trackFolder(pipeline.id, folderId);
+    await audit(ctx, "pipeline.set_folder", "pipeline", updated.id, pipeline, updated);
+    return ok({ pipeline: updated });
   });
 
   // ---- pipeline spec validation ------------------------------------------
@@ -413,16 +631,23 @@ export function createApp(deps: AppDeps): App {
   // ---- pipeline versions --------------------------------------------------
   route("GET", "/api/pipelines/:id/versions", async (ctx) => {
     enforce(ctx.principal, "execution:view_logs");
-    const pipeline = await deps.pipelines.get(ctx.params.id);
-    if (!pipeline) return error(404, "not_found");
-    const versions = await deps.pipelineVersions.listByPipeline(ctx.params.id);
-    return ok({ versions });
+    const pipeline = await resolvePipelineRef(ctx.params.id);
+    if (isAppResponse(pipeline)) return pipeline;
+    const rows = await deps.pipelineVersions.listByPipeline(pipeline.id);
+    const latestId = pipeline.latestVersionId ?? null;
+    const versions = rows.map((row) => ({
+      ...row,
+      parentVersionId: row.parentVersionId ?? null,
+      isLatest: row.id === latestId
+    }));
+    return ok({ versions, latestVersionId: latestId });
   });
 
   route("POST", "/api/pipelines/:id/versions", async (ctx) => {
     enforce(ctx.principal, "pipeline:update");
-    const pipeline = await deps.pipelines.get(ctx.params.id);
-    if (!pipeline) return error(404, "not_found");
+    const pipeline = await resolvePipelineRef(ctx.params.id);
+    if (isAppResponse(pipeline)) return pipeline;
+    const pipelineId = pipeline.id;
     const body = ctx.request.body;
     if (!isObject(body) || typeof body.version !== "string") {
       return error(422, "validation_failed", {
@@ -441,7 +666,7 @@ export function createApp(deps: AppDeps): App {
     }
 
     const publish = body.publish === true;
-    const existingRows = await deps.pipelineVersions.listByPipeline(ctx.params.id);
+    const existingRows = await deps.pipelineVersions.listByPipeline(pipelineId);
     const existingRecords: PipelineVersionRecord[] = existingRows.map((row) => ({
       pipelineId: row.pipelineId,
       version: row.version,
@@ -456,7 +681,7 @@ export function createApp(deps: AppDeps): App {
       let record: PipelineVersionRecord;
       try {
         record = publishVersion(existingRecords, spec, body.version, {
-          pipelineId: ctx.params.id
+          pipelineId
         });
       } catch (e) {
         if (e instanceof ImmutableVersionError) {
@@ -473,7 +698,7 @@ export function createApp(deps: AppDeps): App {
       }
       const versionRow: PipelineVersionRow = {
         id: randomUUID(),
-        pipelineId: ctx.params.id,
+        pipelineId,
         version: record.version,
         status: "published",
         spec: record.spec,
@@ -514,7 +739,7 @@ export function createApp(deps: AppDeps): App {
     }
     const draftRow: PipelineVersionRow = {
       id: randomUUID(),
-      pipelineId: ctx.params.id,
+      pipelineId,
       version: body.version,
       status: "draft",
       spec,
@@ -530,9 +755,132 @@ export function createApp(deps: AppDeps): App {
     return ok({ version: created }, 201);
   });
 
+  // ---- save (auto-version) + rollback ------------------------------------
+  route("POST", "/api/pipelines/:id/save", async (ctx) => {
+    enforce(ctx.principal, "pipeline:update");
+    const pipeline = await resolvePipelineRef(ctx.params.id);
+    if (isAppResponse(pipeline)) return pipeline;
+    const pipelineId = pipeline.id;
+    const body = ctx.request.body;
+    if (!isObject(body)) {
+      return error(422, "validation_failed", { issues: [{ message: "body required" }] });
+    }
+    const spec = parseSpec(body.spec);
+    if (!spec) {
+      return error(422, "validation_failed", {
+        issues: [{ path: "spec", message: "spec is missing or invalid" }]
+      });
+    }
+    const validation = validatePipelineSpec(spec, deps.pluginRegistry);
+    if (!validation.valid) {
+      return error(422, "validation_failed", { issues: validation.errors });
+    }
+    const level =
+      body.level === "minor" || body.level === "major" || body.level === "patch"
+        ? (body.level as "patch" | "minor" | "major")
+        : "patch";
+
+    const rows = await deps.pipelineVersions.listByPipeline(pipelineId);
+    const toRecord = (row: PipelineVersionRow): PipelineVersionRecord => ({
+      id: row.id,
+      pipelineId: row.pipelineId,
+      version: row.version,
+      status: row.status,
+      spec: row.spec as PipelineSpec,
+      checksum: row.checksum,
+      parentVersionId: row.parentVersionId ?? null,
+      createdAt: row.createdAt,
+      publishedAt: row.publishedAt ?? undefined
+    });
+    const existingVersions = rows.map(toRecord);
+    const latestRow = pipeline.latestVersionId
+      ? rows.find((row) => row.id === pipeline.latestVersionId)
+      : undefined;
+
+    const result = nextVersionOnSave({
+      existingVersions,
+      latest: latestRow ? toRecord(latestRow) : undefined,
+      spec,
+      level,
+      pipelineId
+    });
+
+    if (result.kind === "idempotent") {
+      // Identical spec as the current latest: no new row, pointer unchanged.
+      const unchanged = rows.find((row) => row.id === result.version.id);
+      return ok({ version: unchanged, created: false });
+    }
+
+    const versionRow: PipelineVersionRow = {
+      id: randomUUID(),
+      pipelineId,
+      version: result.record.version,
+      status: "published",
+      spec: result.record.spec,
+      checksum: result.record.checksum,
+      parentVersionId: result.record.parentVersionId ?? null,
+      createdBy: ctx.principal.id,
+      createdAt: result.record.createdAt,
+      publishedAt: result.record.publishedAt ?? nowIso()
+    };
+    const created = await deps.pipelineVersions.create(versionRow);
+    const updatedPipeline = await deps.pipelines.setLatestVersion(
+      pipelineId,
+      created.id
+    );
+    await audit(ctx, "pipeline_version.save", "pipeline_version", created.id, undefined, {
+      version: created.version,
+      checksum: created.checksum,
+      parentVersionId: created.parentVersionId,
+      latestVersionId: updatedPipeline.latestVersionId
+    });
+    return ok({ version: created, created: true }, 201);
+  });
+
+  route("POST", "/api/pipelines/:id/rollback", async (ctx) => {
+    enforce(ctx.principal, "pipeline:update");
+    const pipeline = await resolvePipelineRef(ctx.params.id);
+    if (isAppResponse(pipeline)) return pipeline;
+    const pipelineId = pipeline.id;
+    const body = ctx.request.body;
+    if (!isObject(body) || typeof body.versionId !== "string") {
+      return error(422, "validation_failed", {
+        issues: [{ path: "versionId", message: "versionId is required" }]
+      });
+    }
+    const rows = await deps.pipelineVersions.listByPipeline(pipelineId);
+    let targetId: string;
+    try {
+      targetId = rollbackPointer(
+        rows.map((row) => ({
+          id: row.id,
+          pipelineId: row.pipelineId,
+          version: row.version,
+          status: row.status,
+          spec: row.spec as PipelineSpec,
+          checksum: row.checksum,
+          createdAt: row.createdAt
+        })),
+        body.versionId
+      );
+    } catch (e) {
+      if (e instanceof VersionNotFoundError) {
+        return error(404, "not_found", { message: e.message });
+      }
+      throw e;
+    }
+    const updated = await deps.pipelines.setLatestVersion(pipelineId, targetId);
+    await audit(ctx, "pipeline_version.rollback", "pipeline", pipelineId, pipeline, {
+      latestVersionId: updated.latestVersionId
+    });
+    return ok({ pipeline: updated, latestVersionId: updated.latestVersionId });
+  });
+
   route("POST", "/api/pipelines/:id/versions/:version/archive", async (ctx) => {
     enforce(ctx.principal, "pipeline:update");
-    const found = await deps.pipelineVersions.findByVersion(ctx.params.id, ctx.params.version);
+    const pipeline = await resolvePipelineRef(ctx.params.id);
+    if (isAppResponse(pipeline)) return pipeline;
+    const found = await deps.pipelineVersions.findByVersion(pipeline.id, ctx.params.version);
     if (!found) return error(404, "not_found");
     const archived = archiveVersion({
       pipelineId: found.pipelineId,
@@ -550,7 +898,9 @@ export function createApp(deps: AppDeps): App {
 
   route("GET", "/api/pipelines/:id/versions/:version/export", async (ctx) => {
     enforce(ctx.principal, "execution:view_logs");
-    const found = await deps.pipelineVersions.findByVersion(ctx.params.id, ctx.params.version);
+    const pipeline = await resolvePipelineRef(ctx.params.id);
+    if (isAppResponse(pipeline)) return pipeline;
+    const found = await deps.pipelineVersions.findByVersion(pipeline.id, ctx.params.version);
     if (!found) return error(404, "not_found");
     const format = ctx.request.query.format === "yaml" ? "yaml" : "json";
     const text = exportSpec(found.spec as PipelineSpec, format);
@@ -564,15 +914,16 @@ export function createApp(deps: AppDeps): App {
   // ---- deployments --------------------------------------------------------
   route("GET", "/api/pipelines/:id/deployments", async (ctx) => {
     enforce(ctx.principal, "execution:view_logs");
-    const pipeline = await deps.pipelines.get(ctx.params.id);
-    if (!pipeline) return error(404, "not_found");
-    return ok({ deployments: await deps.deployments.listByPipeline(ctx.params.id) });
+    const pipeline = await resolvePipelineRef(ctx.params.id);
+    if (isAppResponse(pipeline)) return pipeline;
+    return ok({ deployments: await deps.deployments.listByPipeline(pipeline.id) });
   });
 
   route("POST", "/api/pipelines/:id/deployments", async (ctx) => {
     enforce(ctx.principal, "pipeline:deploy");
-    const pipeline = await deps.pipelines.get(ctx.params.id);
-    if (!pipeline) return error(404, "not_found");
+    const pipeline = await resolvePipelineRef(ctx.params.id);
+    if (isAppResponse(pipeline)) return pipeline;
+    const pipelineId = pipeline.id;
     const body = ctx.request.body;
     if (
       !isObject(body) ||
@@ -583,7 +934,7 @@ export function createApp(deps: AppDeps): App {
         issues: [{ message: "version and environment are required" }]
       });
     }
-    const version = await deps.pipelineVersions.findByVersion(ctx.params.id, body.version);
+    const version = await deps.pipelineVersions.findByVersion(pipelineId, body.version);
     if (!version) return error(404, "not_found", { message: "pipeline version not found" });
     if (version.status !== "published") {
       return error(422, "validation_failed", {
@@ -592,7 +943,7 @@ export function createApp(deps: AppDeps): App {
     }
     const deploymentRow: PipelineDeploymentRow = {
       id: randomUUID(),
-      pipelineId: ctx.params.id,
+      pipelineId,
       pipelineVersionId: version.id,
       environment: body.environment,
       tenantId: typeof body.tenantId === "string" ? body.tenantId : null,
@@ -603,6 +954,382 @@ export function createApp(deps: AppDeps): App {
     const created = await deps.deployments.create(deploymentRow);
     await audit(ctx, "pipeline.deploy", "pipeline_deployment", created.id, undefined, created);
     return ok({ deployment: created }, 201);
+  });
+
+  // ---- tenant <-> pipeline associations + activations ---------------------
+  function activationEnv(ctx: RouteContext, body: unknown): string {
+    if (isObject(body) && typeof body.environment === "string" && body.environment) {
+      return body.environment;
+    }
+    return ctx.request.query.environment ?? "dev";
+  }
+
+  function projectActivation(
+    row: PipelineActivationRow,
+    pipelineLatestVersionId: string | null
+  ): Record<string, unknown> {
+    let effective: string | null = null;
+    try {
+      effective = effectiveVersionId(
+        { trackLatest: row.trackLatest, pipelineVersionId: row.pipelineVersionId ?? null },
+        pipelineLatestVersionId
+      );
+    } catch {
+      effective = null;
+    }
+    return {
+      id: row.id,
+      label: row.label,
+      environment: row.environment,
+      pipelineVersionId: row.pipelineVersionId ?? null,
+      trackLatest: row.trackLatest,
+      enabled: row.enabled,
+      effectiveVersionId: effective
+    };
+  }
+
+  route("GET", "/api/tenants/:id/pipelines", async (ctx) => {
+    enforce(ctx.principal, "execution:view_logs", { tenantId: ctx.params.id });
+    if (
+      !ctx.principal.roles.includes("platform_admin") &&
+      ctx.principal.tenantId &&
+      ctx.principal.tenantId !== ctx.params.id
+    ) {
+      return error(403, "forbidden");
+    }
+    const associations = await tenantPipelines.listByTenant(ctx.params.id);
+    const activations = await pipelineActivations.listByTenant(ctx.params.id);
+    const byPipeline = new Map<string, PipelineActivationRow[]>();
+    for (const act of activations) {
+      const bucket = byPipeline.get(act.pipelineId) ?? [];
+      bucket.push(act);
+      byPipeline.set(act.pipelineId, bucket);
+    }
+    const pipelineIds = new Set<string>([
+      ...associations.map((a) => a.pipelineId),
+      ...activations.map((a) => a.pipelineId)
+    ]);
+    const out: Array<Record<string, unknown>> = [];
+    for (const pipelineId of pipelineIds) {
+      const pipeline = await deps.pipelines.get(pipelineId);
+      const assoc = associations.find((a) => a.pipelineId === pipelineId);
+      out.push({
+        pipelineId,
+        enabled: assoc ? assoc.enabled : false,
+        activations: (byPipeline.get(pipelineId) ?? []).map((row) =>
+          projectActivation(row, pipeline?.latestVersionId ?? null)
+        )
+      });
+    }
+    return ok({ pipelines: out });
+  });
+
+  route("POST", "/api/tenants/:id/pipelines", async (ctx) => {
+    enforce(ctx.principal, "config:edit_tenant", { tenantId: ctx.params.id });
+    const body = ctx.request.body;
+    if (!isObject(body) || typeof body.pipelineId !== "string") {
+      return error(422, "validation_failed", {
+        issues: [{ path: "pipelineId", message: "pipelineId is required" }]
+      });
+    }
+    const pipeline = await deps.pipelines.get(body.pipelineId);
+    if (!pipeline) return error(404, "not_found", { message: "pipeline not found" });
+    const environment =
+      typeof body.environment === "string" && body.environment
+        ? body.environment
+        : "dev";
+    const row: TenantPipelineRow = {
+      tenantId: ctx.params.id,
+      pipelineId: body.pipelineId,
+      environment,
+      enabled: true,
+      vectorIsolation: isObject(body.vectorIsolation) ? body.vectorIsolation : {},
+      providerPolicy: isObject(body.providerPolicy) ? body.providerPolicy : {},
+      rateLimitPolicy: isObject(body.rateLimitPolicy) ? body.rateLimitPolicy : {},
+      createdAt: nowIso(),
+      updatedAt: nowIso()
+    };
+    const saved = await tenantPipelines.upsert(row);
+    await audit(ctx, "tenant_pipeline.associate", "tenant_pipeline", `${ctx.params.id}:${body.pipelineId}`, undefined, saved);
+    return ok({ association: saved }, 201);
+  });
+
+  route("PATCH", "/api/tenants/:id/pipelines/:pid", async (ctx) => {
+    enforce(ctx.principal, "config:edit_tenant", { tenantId: ctx.params.id });
+    const body = ctx.request.body;
+    if (!isObject(body) || typeof body.enabled !== "boolean") {
+      return error(422, "validation_failed", {
+        issues: [{ path: "enabled", message: "enabled (boolean) is required" }]
+      });
+    }
+    const environment =
+      typeof body.environment === "string" && body.environment
+        ? body.environment
+        : "dev";
+    const existing = await tenantPipelines.get({
+      tenantId: ctx.params.id,
+      pipelineId: ctx.params.pid,
+      environment
+    });
+    if (!existing) return error(404, "not_found", { message: "association not found" });
+    const saved = await tenantPipelines.upsert({
+      ...existing,
+      enabled: body.enabled,
+      updatedAt: nowIso()
+    });
+    await audit(ctx, "tenant_pipeline.update", "tenant_pipeline", `${ctx.params.id}:${ctx.params.pid}`, existing, saved);
+    return ok({ association: saved });
+  });
+
+  route("GET", "/api/tenants/:id/pipelines/:pid/activations", async (ctx) => {
+    enforce(ctx.principal, "execution:view_logs", { tenantId: ctx.params.id });
+    if (
+      !ctx.principal.roles.includes("platform_admin") &&
+      ctx.principal.tenantId &&
+      ctx.principal.tenantId !== ctx.params.id
+    ) {
+      return error(403, "forbidden");
+    }
+    const pipeline = await resolvePipelineRef(ctx.params.pid);
+    if (isAppResponse(pipeline)) return pipeline;
+    const rows = (
+      await pipelineActivations.listByTenant(ctx.params.id)
+    ).filter((row) => row.pipelineId === pipeline.id);
+    return ok({
+      activations: rows.map((row) =>
+        projectActivation(row, pipeline.latestVersionId ?? null)
+      )
+    });
+  });
+
+  route("POST", "/api/tenants/:id/pipelines/:pid/activations", async (ctx) => {
+    enforce(ctx.principal, "config:edit_tenant", { tenantId: ctx.params.id });
+    const pipeline = await resolvePipelineRef(ctx.params.pid);
+    if (isAppResponse(pipeline)) return pipeline;
+    const body = ctx.request.body;
+    if (
+      !isObject(body) ||
+      typeof body.label !== "string" ||
+      body.label.length === 0 ||
+      typeof body.environment !== "string" ||
+      body.environment.length === 0
+    ) {
+      return error(422, "validation_failed", {
+        issues: [{ message: "label and environment are required" }]
+      });
+    }
+    const trackLatest = body.trackLatest === true;
+    if (
+      !trackLatest &&
+      (typeof body.pipelineVersionId !== "string" || body.pipelineVersionId.length === 0)
+    ) {
+      return error(422, "validation_failed", {
+        issues: [
+          { message: "a pinned activation requires pipelineVersionId or trackLatest:true" }
+        ]
+      });
+    }
+    const row: PipelineActivationRow = {
+      id: typeof body.id === "string" ? body.id : randomUUID(),
+      tenantId: ctx.params.id,
+      pipelineId: pipeline.id,
+      environment: body.environment,
+      label: body.label,
+      pipelineVersionId:
+        typeof body.pipelineVersionId === "string" ? body.pipelineVersionId : null,
+      trackLatest,
+      enabled: body.enabled !== false,
+      createdAt: nowIso()
+    };
+    // Repo throws ConflictError on a duplicate (tenant,pipeline,env,label);
+    // the global handler maps it to 409 conflict.
+    const created = await pipelineActivations.create(row);
+    await audit(ctx, "pipeline_activation.create", "pipeline_activation", created.id, undefined, created);
+    return ok(
+      { activation: projectActivation(created, pipeline.latestVersionId ?? null) },
+      201
+    );
+  });
+
+  route(
+    "PATCH",
+    "/api/tenants/:id/pipelines/:pid/activations/:aid",
+    async (ctx) => {
+      enforce(ctx.principal, "config:edit_tenant", { tenantId: ctx.params.id });
+      const pipeline = await resolvePipelineRef(ctx.params.pid);
+      if (isAppResponse(pipeline)) return pipeline;
+      const before = await pipelineActivations.get(ctx.params.aid);
+      if (
+        !before ||
+        before.tenantId !== ctx.params.id ||
+        before.pipelineId !== pipeline.id
+      ) {
+        return error(404, "not_found");
+      }
+      const body = ctx.request.body;
+      if (!isObject(body)) return error(422, "validation_failed", { issues: [] });
+      const patch: Partial<PipelineActivationRow> = {};
+      if (typeof body.enabled === "boolean") patch.enabled = body.enabled;
+      if (typeof body.trackLatest === "boolean") patch.trackLatest = body.trackLatest;
+      if (typeof body.label === "string" && body.label.length > 0) {
+        patch.label = body.label;
+      }
+      if ("pipelineVersionId" in body) {
+        patch.pipelineVersionId =
+          typeof body.pipelineVersionId === "string"
+            ? body.pipelineVersionId
+            : null;
+      }
+      const updated = await pipelineActivations.update(ctx.params.aid, patch);
+      await audit(ctx, "pipeline_activation.update", "pipeline_activation", updated.id, before, updated);
+      return ok({
+        activation: projectActivation(updated, pipeline.latestVersionId ?? null)
+      });
+    }
+  );
+
+  route(
+    "DELETE",
+    "/api/tenants/:id/pipelines/:pid/activations/:aid",
+    async (ctx) => {
+      enforce(ctx.principal, "config:edit_tenant", { tenantId: ctx.params.id });
+      const pipeline = await resolvePipelineRef(ctx.params.pid);
+      if (isAppResponse(pipeline)) return pipeline;
+      const before = await pipelineActivations.get(ctx.params.aid);
+      if (
+        !before ||
+        before.tenantId !== ctx.params.id ||
+        before.pipelineId !== pipeline.id
+      ) {
+        return error(404, "not_found");
+      }
+      await pipelineActivations.delete(ctx.params.aid);
+      await audit(ctx, "pipeline_activation.delete", "pipeline_activation", ctx.params.aid, before, undefined);
+      return { status: 204, body: undefined, headers: {} };
+    }
+  );
+
+  // ---- schedules ----------------------------------------------------------
+  function scheduleNextRun(cron: string): { ok: true; next: string } | { ok: false } {
+    try {
+      parseCron(cron);
+    } catch (e) {
+      if (e instanceof CronParseError) return { ok: false };
+      throw e;
+    }
+    return { ok: true, next: nextAfter(cron, new Date()).toISOString() };
+  }
+
+  route("GET", "/api/schedules", async (ctx) => {
+    enforce(ctx.principal, "execution:view_logs");
+    let rows = await schedules.list();
+    const tenant = ctx.request.query.tenant;
+    const pipeline = ctx.request.query.pipeline;
+    if (
+      !ctx.principal.roles.includes("platform_admin") &&
+      ctx.principal.tenantId
+    ) {
+      rows = rows.filter((row) => row.tenantId === ctx.principal.tenantId);
+    }
+    if (tenant) rows = rows.filter((row) => row.tenantId === tenant);
+    if (pipeline) rows = rows.filter((row) => row.pipelineId === pipeline);
+    return ok({ schedules: rows });
+  });
+
+  route("POST", "/api/schedules", async (ctx) => {
+    const body = ctx.request.body;
+    if (
+      !isObject(body) ||
+      typeof body.tenantId !== "string" ||
+      typeof body.pipelineId !== "string" ||
+      typeof body.environment !== "string" ||
+      typeof body.cron !== "string"
+    ) {
+      return error(422, "validation_failed", {
+        issues: [
+          { message: "tenantId, pipelineId, environment and cron are required" }
+        ]
+      });
+    }
+    enforce(ctx.principal, "config:edit_tenant", { tenantId: body.tenantId });
+    const next = scheduleNextRun(body.cron);
+    if (!next.ok) {
+      return error(422, "validation_failed", {
+        issues: [{ path: "cron", message: `invalid cron expression: ${body.cron}` }]
+      });
+    }
+    const row: ScheduleRow = {
+      id: typeof body.id === "string" ? body.id : randomUUID(),
+      tenantId: body.tenantId,
+      pipelineId: body.pipelineId,
+      environment: body.environment,
+      activationLabel:
+        typeof body.activationLabel === "string" ? body.activationLabel : null,
+      cron: body.cron,
+      timezone: typeof body.timezone === "string" ? body.timezone : "UTC",
+      input: isObject(body.input) ? body.input : {},
+      enabled: body.enabled !== false,
+      lastRunAt: null,
+      nextRunAt: next.next,
+      createdAt: nowIso()
+    };
+    const created = await schedules.create(row);
+    await audit(ctx, "schedule.create", "schedule", created.id, undefined, created);
+    return ok({ schedule: created }, 201);
+  });
+
+  route("PUT", "/api/schedules/:id", async (ctx) => {
+    const before = await schedules.get(ctx.params.id);
+    if (!before) return error(404, "not_found");
+    enforce(ctx.principal, "config:edit_tenant", { tenantId: before.tenantId });
+    const body = ctx.request.body;
+    if (!isObject(body)) return error(422, "validation_failed", { issues: [] });
+    const patch: Partial<ScheduleRow> = {};
+    if (typeof body.environment === "string") patch.environment = body.environment;
+    if ("activationLabel" in body) {
+      patch.activationLabel =
+        typeof body.activationLabel === "string" ? body.activationLabel : null;
+    }
+    if (typeof body.timezone === "string") patch.timezone = body.timezone;
+    if (isObject(body.input)) patch.input = body.input;
+    if (typeof body.enabled === "boolean") patch.enabled = body.enabled;
+    if (typeof body.cron === "string") {
+      const next = scheduleNextRun(body.cron);
+      if (!next.ok) {
+        return error(422, "validation_failed", {
+          issues: [{ path: "cron", message: `invalid cron expression: ${body.cron}` }]
+        });
+      }
+      patch.cron = body.cron;
+      patch.nextRunAt = next.next;
+    }
+    const updated = await schedules.update(ctx.params.id, patch);
+    await audit(ctx, "schedule.update", "schedule", updated.id, before, updated);
+    return ok({ schedule: updated });
+  });
+
+  route("PATCH", "/api/schedules/:id", async (ctx) => {
+    const before = await schedules.get(ctx.params.id);
+    if (!before) return error(404, "not_found");
+    enforce(ctx.principal, "config:edit_tenant", { tenantId: before.tenantId });
+    const body = ctx.request.body;
+    if (!isObject(body) || typeof body.enabled !== "boolean") {
+      return error(422, "validation_failed", {
+        issues: [{ path: "enabled", message: "enabled (boolean) is required" }]
+      });
+    }
+    const updated = await schedules.update(ctx.params.id, { enabled: body.enabled });
+    await audit(ctx, "schedule.toggle", "schedule", updated.id, before, updated);
+    return ok({ schedule: updated });
+  });
+
+  route("DELETE", "/api/schedules/:id", async (ctx) => {
+    const before = await schedules.get(ctx.params.id);
+    if (!before) return error(404, "not_found");
+    enforce(ctx.principal, "config:edit_tenant", { tenantId: before.tenantId });
+    await schedules.delete(ctx.params.id);
+    await audit(ctx, "schedule.delete", "schedule", ctx.params.id, before, undefined);
+    return { status: 204, body: undefined, headers: {} };
   });
 
   // ---- config definitions -------------------------------------------------
@@ -658,7 +1385,9 @@ export function createApp(deps: AppDeps): App {
     const values = await deps.configValues.listConfigValues({
       key: ctx.request.query.key,
       scope: ctx.request.query.scope as ConfigValueRow["scope"] | undefined,
-      scopeId: ctx.request.query.scope_id
+      // Accept both snake_case (scope_id) and camelCase (scopeId) so the web
+      // can build a global -> tenant -> pipeline tree with either convention.
+      scopeId: ctx.request.query.scope_id ?? ctx.request.query.scopeId
     });
     // Redact sensitive-looking values defensively.
     return ok({
@@ -968,11 +1697,12 @@ export function createApp(deps: AppDeps): App {
 
   // ---- run ----------------------------------------------------------------
   route("POST", "/api/pipelines/:id/run", async (ctx) => {
-    const pipeline = await deps.pipelines.get(ctx.params.id);
-    if (!pipeline) return error(404, "not_found");
+    const pipeline = await resolvePipelineRef(ctx.params.id);
+    if (isAppResponse(pipeline)) return pipeline;
+    const pipelineId = pipeline.id;
     enforce(ctx.principal, "pipeline:run", {
       tenantId: ctx.principal.tenantId,
-      pipelineId: ctx.params.id
+      pipelineId
     });
     const body = isObject(ctx.request.body) ? ctx.request.body : {};
     const tenantId = tenantScope(ctx);
@@ -985,13 +1715,71 @@ export function createApp(deps: AppDeps): App {
       (typeof body.environment === "string" && body.environment) ||
       ctx.request.query.environment ||
       "dev";
+    const activationLabel =
+      typeof body.activation === "string" ? body.activation : undefined;
 
-    const resolved = await resolveDeployedVersion(deps, ctx.params.id, environment, tenantId);
-    if (!resolved) {
-      return error(409, "no_active_deployment", {
-        message: `no active deployment for pipeline ${ctx.params.id} in ${environment}`
-      });
+    // Resolution precedence:
+    //  1. If the tenant has ANY activation for (tenant,pipeline,env), resolve
+    //     through it: resolveActivation(label?) -> effectiveVersionId. This
+    //     supports multiple concurrent activations (pinned + track-latest).
+    //  2. Otherwise fall back to the existing deployment path (so the
+    //     local-demo seed + current e2e keep passing unchanged).
+    let resolved: PipelineVersionRow | undefined;
+    let resolvedVia: "activation" | "deployment" = "deployment";
+    let resolvedLabel: string | undefined;
+
+    const activations = await pipelineActivations.listByTenantPipelineEnv(
+      tenantId,
+      pipelineId,
+      environment
+    );
+    if (activations.length > 0) {
+      resolvedVia = "activation";
+      let chosen: PipelineActivationRow;
+      try {
+        chosen = resolveActivation(activations, activationLabel);
+      } catch (e) {
+        if (e instanceof ActivationResolutionError) {
+          return error(409, "activation_unresolved", { message: e.message });
+        }
+        throw e;
+      }
+      let versionId: string;
+      try {
+        versionId = effectiveVersionId(
+          {
+            trackLatest: chosen.trackLatest,
+            pipelineVersionId: chosen.pipelineVersionId ?? null
+          },
+          pipeline.latestVersionId ?? null
+        );
+      } catch (e) {
+        if (e instanceof ActivationResolutionError) {
+          return error(409, "activation_unresolved", { message: e.message });
+        }
+        throw e;
+      }
+      resolvedLabel = chosen.label;
+      resolved = await deps.pipelineVersions.get(versionId);
+      if (!resolved) {
+        return error(409, "activation_unresolved", {
+          message: `activation "${chosen.label}" resolves to unknown version ${versionId}`
+        });
+      }
+    } else {
+      resolved = await resolveDeployedVersion(
+        deps,
+        pipelineId,
+        environment,
+        tenantId
+      );
+      if (!resolved) {
+        return error(409, "no_active_deployment", {
+          message: `no active deployment for pipeline ${pipelineId} in ${environment}`
+        });
+      }
     }
+
     const validation = validatePipelineSpec(
       resolved.spec as PipelineSpec,
       deps.pluginRegistry
@@ -1009,16 +1797,18 @@ export function createApp(deps: AppDeps): App {
       environment: string;
       executionId: string;
       input: unknown;
+      activationLabel?: string;
     }> = {
       id: jobId,
       type: "run_pipeline",
       payload: {
         tenantId,
-        pipelineId: ctx.params.id,
+        pipelineId,
         pipelineVersionId: resolved.id,
         environment,
         executionId,
-        input: body.input
+        input: body.input,
+        ...(resolvedLabel !== undefined ? { activationLabel: resolvedLabel } : {})
       }
     };
     await deps.queue.enqueue(job as unknown as QueueJob);
@@ -1026,24 +1816,28 @@ export function createApp(deps: AppDeps): App {
     await deps.executionStore.start({
       executionId,
       tenantId,
-      pipelineId: ctx.params.id,
+      pipelineId,
       pipelineVersionId: resolved.id,
       status: "running",
       startedAt: nowIso(),
       input: redactValue(body.input)
     });
     await audit(ctx, "pipeline.run", "execution", executionId, undefined, {
-      pipelineId: ctx.params.id,
+      pipelineId,
       version: resolved.version,
+      resolvedVia,
+      activationLabel: resolvedLabel ?? null,
       input: redactValue(body.input)
     });
     return ok(
       {
         executionId,
         jobId,
-        pipelineId: ctx.params.id,
+        pipelineId,
         pipelineVersionId: resolved.id,
         version: resolved.version,
+        resolvedVia,
+        ...(resolvedLabel !== undefined ? { activationLabel: resolvedLabel } : {}),
         status: "accepted"
       },
       202
@@ -1052,11 +1846,12 @@ export function createApp(deps: AppDeps): App {
 
   // ---- ingest -------------------------------------------------------------
   route("POST", "/api/pipelines/:id/ingest", async (ctx) => {
-    const pipeline = await deps.pipelines.get(ctx.params.id);
-    if (!pipeline) return error(404, "not_found");
+    const pipeline = await resolvePipelineRef(ctx.params.id);
+    if (isAppResponse(pipeline)) return pipeline;
+    const pipelineId = pipeline.id;
     enforce(ctx.principal, "pipeline:run", {
       tenantId: ctx.principal.tenantId,
-      pipelineId: ctx.params.id
+      pipelineId
     });
     const body = isObject(ctx.request.body) ? ctx.request.body : {};
     const tenantId = tenantScope(ctx);
@@ -1069,10 +1864,10 @@ export function createApp(deps: AppDeps): App {
       (typeof body.environment === "string" && body.environment) ||
       ctx.request.query.environment ||
       "dev";
-    const resolved = await resolveDeployedVersion(deps, ctx.params.id, environment, tenantId);
+    const resolved = await resolveDeployedVersion(deps, pipelineId, environment, tenantId);
     if (!resolved) {
       return error(409, "no_active_deployment", {
-        message: `no active deployment for pipeline ${ctx.params.id} in ${environment}`
+        message: `no active deployment for pipeline ${pipelineId} in ${environment}`
       });
     }
     const jobId = randomUUID();
@@ -1087,7 +1882,7 @@ export function createApp(deps: AppDeps): App {
       type: "ingest_datasource",
       payload: {
         tenantId,
-        pipelineId: ctx.params.id,
+        pipelineId,
         pipelineVersionId: resolved.id,
         environment,
         datasource: body.datasource ?? body.input
@@ -1095,22 +1890,23 @@ export function createApp(deps: AppDeps): App {
     };
     await deps.queue.enqueue(job);
     await audit(ctx, "pipeline.ingest", "ingestion", jobId, undefined, {
-      pipelineId: ctx.params.id,
+      pipelineId,
       datasource: redactValue(body.datasource ?? body.input)
     });
     return ok(
-      { jobId, pipelineId: ctx.params.id, pipelineVersionId: resolved.id, status: "accepted" },
+      { jobId, pipelineId, pipelineVersionId: resolved.id, status: "accepted" },
       202
     );
   });
 
   // ---- stream (SSE) -------------------------------------------------------
   route("POST", "/api/pipelines/:id/stream", async (ctx) => {
-    const pipeline = await deps.pipelines.get(ctx.params.id);
-    if (!pipeline) return error(404, "not_found");
+    const pipeline = await resolvePipelineRef(ctx.params.id);
+    if (isAppResponse(pipeline)) return pipeline;
+    const pipelineId = pipeline.id;
     enforce(ctx.principal, "pipeline:run", {
       tenantId: ctx.principal.tenantId,
-      pipelineId: ctx.params.id
+      pipelineId
     });
     const tenantId = tenantScope(ctx);
     if (!tenantId) {
@@ -1124,10 +1920,10 @@ export function createApp(deps: AppDeps): App {
         : undefined) ||
       ctx.request.query.environment ||
       "dev";
-    const resolved = await resolveDeployedVersion(deps, ctx.params.id, environment, tenantId);
+    const resolved = await resolveDeployedVersion(deps, pipelineId, environment, tenantId);
     if (!resolved) {
       return error(409, "no_active_deployment", {
-        message: `no active deployment for pipeline ${ctx.params.id} in ${environment}`
+        message: `no active deployment for pipeline ${pipelineId} in ${environment}`
       });
     }
     // Honest scaffold: no streaming-capable provider wired in the API process.
@@ -1136,7 +1932,7 @@ export function createApp(deps: AppDeps): App {
     // streaming provider in the worker. The body is the raw SSE text.
     const events = [
       `event: status\ndata: ${JSON.stringify({ status: "not_enabled", reason: "streaming provider not configured in control-plane; use /run via worker" })}\n\n`,
-      `event: done\ndata: ${JSON.stringify({ pipelineId: ctx.params.id, pipelineVersionId: resolved.id })}\n\n`
+      `event: done\ndata: ${JSON.stringify({ pipelineId, pipelineVersionId: resolved.id })}\n\n`
     ];
     return {
       status: 200,
@@ -1221,6 +2017,20 @@ export function createApp(deps: AppDeps): App {
       }
       if (e instanceof ConflictError) {
         return error(409, "conflict", { message: e.message });
+      }
+      // A non-UUID value (typically a pipeline slug) reaching a Postgres
+      // `uuid` column raises SQLSTATE 22P02 / "invalid input syntax for type
+      // uuid". That is bad client input, not a server fault: surface 400, not
+      // 500. (The id-or-slug resolver normally prevents this; this is a
+      // defense-in-depth backstop for any path that still casts directly.)
+      if (isInvalidTextRepresentation(e)) {
+        const message = e instanceof Error ? e.message : String(e);
+        deps.logger.error("invalid_identifier", {
+          path: request.path,
+          method: request.method,
+          error: message
+        });
+        return error(400, "invalid_identifier", { message });
       }
       deps.logger.error("unhandled_route_error", {
         path: request.path,

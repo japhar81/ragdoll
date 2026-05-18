@@ -46,6 +46,8 @@ export interface PipelineRow {
   name: string;
   description?: string | null;
   labels: Record<string, string>;
+  folderId?: UUID | null;
+  latestVersionId?: UUID | null;
   createdBy?: UUID | null;
   createdAt: string;
   updatedAt: string;
@@ -58,9 +60,48 @@ export interface PipelineVersionRow {
   status: "draft" | "published" | "archived";
   spec: unknown;
   checksum: string;
+  parentVersionId?: UUID | null;
   createdBy?: UUID | null;
   createdAt: string;
   publishedAt?: string | null;
+}
+
+export interface PipelineFolderRow {
+  id: UUID;
+  parentId?: UUID | null;
+  name: string;
+  createdAt: string;
+}
+
+export interface PipelineFolderTreeNode extends PipelineFolderRow {
+  children: PipelineFolderTreeNode[];
+}
+
+export interface PipelineActivationRow {
+  id: UUID;
+  tenantId: UUID;
+  pipelineId: UUID;
+  environment: string;
+  label: string;
+  pipelineVersionId?: UUID | null;
+  trackLatest: boolean;
+  enabled: boolean;
+  createdAt: string;
+}
+
+export interface ScheduleRow {
+  id: UUID;
+  tenantId: UUID;
+  pipelineId: UUID;
+  environment: string;
+  activationLabel?: string | null;
+  cron: string;
+  timezone: string;
+  input: Record<string, unknown>;
+  enabled: boolean;
+  lastRunAt?: string | null;
+  nextRunAt?: string | null;
+  createdAt: string;
 }
 
 export interface PipelineDeploymentRow {
@@ -259,11 +300,45 @@ export interface UserRoleRepository {
 
 export interface PipelineRepository extends CrudRepository<PipelineRow> {
   findBySlug(slug: string): Promise<PipelineRow | undefined>;
+  setLatestVersion(pipelineId: UUID, versionId: UUID | null): Promise<PipelineRow>;
+  setFolder(pipelineId: UUID, folderId: UUID | null): Promise<PipelineRow>;
 }
 
 export interface PipelineVersionRepository extends CrudRepository<PipelineVersionRow> {
   listByPipeline(pipelineId: UUID): Promise<PipelineVersionRow[]>;
   findByVersion(pipelineId: UUID, version: string): Promise<PipelineVersionRow | undefined>;
+}
+
+export interface PipelineFolderRepository
+  extends CrudRepository<PipelineFolderRow> {
+  /** Rename a folder. Convenience over `update`. */
+  rename(id: UUID, name: string): Promise<PipelineFolderRow>;
+  /** Folders whose parent is `parentId` (pass `null` for root folders). */
+  listChildren(parentId: UUID | null): Promise<PipelineFolderRow[]>;
+  /** The full nested folder forest (root nodes with `children`). */
+  tree(): Promise<PipelineFolderTreeNode[]>;
+}
+
+export interface PipelineActivationRepository
+  extends CrudRepository<PipelineActivationRow> {
+  listByTenantPipelineEnv(
+    tenantId: UUID,
+    pipelineId: UUID,
+    environment: string
+  ): Promise<PipelineActivationRow[]>;
+  listByTenant(tenantId: UUID): Promise<PipelineActivationRow[]>;
+  listByPipeline(pipelineId: UUID): Promise<PipelineActivationRow[]>;
+}
+
+export interface ScheduleRepository extends CrudRepository<ScheduleRow> {
+  listEnabled(): Promise<ScheduleRow[]>;
+  /** Enabled schedules whose `nextRunAt` is set and at/before `nowIso`. */
+  listDue(nowIso: string): Promise<ScheduleRow[]>;
+  markRun(
+    id: UUID,
+    lastRunIso: string,
+    nextRunIso: string | null
+  ): Promise<ScheduleRow>;
 }
 
 export interface PipelineDeploymentRepository extends CrudRepository<PipelineDeploymentRow> {

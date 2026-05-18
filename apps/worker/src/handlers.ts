@@ -33,7 +33,9 @@ import { ConfigResolver } from "../../../packages/config-resolver/src/index.ts";
 import { validatePipelineSpec } from "../../../packages/pipeline-spec/src/index.ts";
 import {
   loadPipelineSpec,
-  selectDeployedVersion
+  selectDeployedVersion,
+  resolveActivation,
+  effectiveVersionId
 } from "../../../packages/pipeline-spec/src/index.ts";
 import type { PipelineDeployment } from "../../../packages/pipeline-spec/src/index.ts";
 import type { VectorStore } from "../../../packages/vector/src/index.ts";
@@ -49,6 +51,8 @@ import type {
   VectorCollectionRepository,
   DatasourceConnectionRepository,
   UsageRecordRepository,
+  PipelineRepository,
+  PipelineActivationRepository,
   PipelineVersionRow,
   ConfigValueRow,
   ProviderModelRow,
@@ -69,6 +73,21 @@ export interface WorkerRepositories {
   vectorCollections: VectorCollectionRepository;
   datasourceConnections: DatasourceConnectionRepository;
   usageRecords: UsageRecordRepository;
+  /**
+   * Optional pipeline repository. When present (alongside `activations`) the
+   * worker can resolve a schedule-originated `run_pipeline` job's effective
+   * version via the org-versioning activation table (track-latest follows
+   * `PipelineRow.latestVersionId`). Omitted in the legacy e2e harness wiring,
+   * which falls back to deployment selection unchanged.
+   */
+  pipelines?: PipelineRepository;
+  /**
+   * Optional activation repository. See {@link resolveRunVersion}: when the
+   * tenant has activations for (tenant, pipeline, environment) they take
+   * precedence over deployment selection for jobs WITHOUT an explicit
+   * `pipelineVersionId` (i.e. schedule-originated runs).
+   */
+  activations?: PipelineActivationRepository;
 }
 
 export interface WorkerDeps {
@@ -124,12 +143,20 @@ export interface RunPipelineJob {
   /** Pin a specific published version; otherwise the deployed version is used. */
   pipelineVersionId?: string;
   version?: string;
+  /**
+   * Org-versioning activation label to resolve when no `pipelineVersionId` is
+   * pinned (schedule-originated jobs). `undefined` -> resolveActivation picks
+   * the `default`/sole-enabled activation.
+   */
+  activationLabel?: string;
   input?: Record<string, unknown>;
   runtimeOverrides?: Record<string, unknown>;
   requestId?: string;
   executionId?: string;
   /** Absolute deadline (epoch ms) honored cooperatively by the executor. */
   deadlineMs?: number;
+  /** Provenance marker; `"schedule"` for scheduler-enqueued runs. */
+  source?: string;
 }
 
 export interface IngestDatasourceJob {
@@ -355,6 +382,67 @@ class UsageMirroringExecutionStore implements ExecutionStore {
   }
 }
 
+/* -------------------------------------------------------------------------- */
+/*  Effective-version resolution (org versioning + schedule-originated runs)   */
+/* -------------------------------------------------------------------------- */
+
+export interface ResolveRunVersionArgs {
+  tenantId: string;
+  pipelineId: string;
+  environment: string;
+  /** Org-versioning activation label; resolved via `resolveActivation`. */
+  activationLabel?: string;
+  /** When already resolved by the API, this wins and nothing else runs. */
+  pipelineVersionId?: string;
+}
+
+/**
+ * Resolves the concrete pipeline version a `run_pipeline` job should execute.
+ *
+ * Precedence (highest first):
+ *  1. An explicit `pipelineVersionId` on the job — the API already resolved
+ *     it. Returned as-is so existing /api/.../run behavior and the local-demo
+ *     e2e are byte-for-byte unchanged.
+ *  2. Org-versioning activations: if `repositories.activations` +
+ *     `repositories.pipelines` are wired AND the tenant has activations for
+ *     (tenant, pipeline, environment), pick one via `resolveActivation(...,
+ *     activationLabel)` and resolve `effectiveVersionId(activation,
+ *     pipeline.latestVersionId)` (track-latest follows the pipeline pointer;
+ *     pinned uses the activation's own version). Schedule-originated jobs
+ *     (no `pipelineVersionId`) land here.
+ *  3. Fallback: `undefined` — the caller then defers to the existing
+ *     `selectVersion` deployment/`selectDeployedVersion` resolution exactly as
+ *     `run_pipeline` does today (no activations table, or none for this key).
+ *
+ * Returning `undefined` (not throwing) for case 3 keeps the legacy
+ * deployment path and its error messages intact.
+ */
+export async function resolveRunVersion(
+  deps: WorkerDeps,
+  args: ResolveRunVersionArgs
+): Promise<string | undefined> {
+  if (args.pipelineVersionId) return args.pipelineVersionId;
+
+  const activationsRepo = deps.repositories.activations;
+  const pipelinesRepo = deps.repositories.pipelines;
+  if (!activationsRepo) return undefined;
+
+  const activations = await activationsRepo.listByTenantPipelineEnv(
+    args.tenantId,
+    args.pipelineId,
+    args.environment
+  );
+  if (activations.length === 0) return undefined;
+
+  const activation = resolveActivation(activations, args.activationLabel);
+  let latestVersionId: string | null | undefined;
+  if (pipelinesRepo) {
+    const pipeline = await pipelinesRepo.get(args.pipelineId);
+    latestVersionId = pipeline?.latestVersionId ?? null;
+  }
+  return effectiveVersionId(activation, latestVersionId);
+}
+
 export function createWorker(deps: WorkerDeps): Worker {
   const tracer = deps.tracer ?? new NoopTracer();
   const now = deps.now ?? (() => new Date());
@@ -506,7 +594,21 @@ export function createWorker(deps: WorkerDeps): Worker {
     payload: RunPipelineJob,
     signal?: AbortSignal
   ): Promise<RunPipelineResult> {
-    const versionRow = await selectVersion(payload);
+    // Resolve the effective version: explicit pin (API-resolved) > org
+    // activation (schedule-originated) > undefined => legacy deployment
+    // selection inside selectVersion. `version` (string) overrides are only
+    // consulted by selectVersion when no concrete id is resolved here.
+    const resolvedVersionId = await resolveRunVersion(deps, {
+      tenantId: payload.tenantId,
+      pipelineId: payload.pipelineId,
+      environment: payload.environment,
+      activationLabel: payload.activationLabel,
+      pipelineVersionId: payload.pipelineVersionId
+    });
+    const versionRow = await selectVersion({
+      ...payload,
+      pipelineVersionId: resolvedVersionId ?? payload.pipelineVersionId
+    });
     const spec = specOf(versionRow);
     const validation = validatePipelineSpec(spec, deps.plugins);
     if (!validation.valid) {

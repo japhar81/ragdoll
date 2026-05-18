@@ -18,6 +18,21 @@ Each execution receives:
 - `deadline`
 - `signal`
 
+## Version resolution
+
+`pipelineVersionId` is resolved before the run (see ADR 0009). Precedence:
+an API-pinned `pipelineVersionId` wins; otherwise, if the tenant has
+activations for `(tenant, pipeline, environment)`, the worker picks one via
+`resolveActivation(label)` (explicit label > `default` > sole-enabled) and
+resolves `effectiveVersionId(activation, pipeline.latestVersionId)`
+(track-latest follows the pointer; pinned uses its own version); otherwise
+it falls back to the legacy `pipeline_deployments` selection. The resolved
+id is what the executor records on the execution and span.
+
+Scheduler-originated jobs enqueue with no `pipelineVersionId` and
+`source: "schedule"`, so they take the activation path identically to API
+runs.
+
 ## Node contract
 
 Input:

@@ -12,6 +12,17 @@ info:
 servers:
   - url: http://localhost:3001
 components:
+  parameters:
+    PipelineRef:
+      name: pipeline_id
+      in: path
+      required: true
+      description: >-
+        A pipeline UUID OR its slug/name. The web builder POSTs
+        `/api/pipelines/<slug>/run`, so every `{pipeline_id}` segment is
+        resolved as a UUID first (then by slug); a non-UUID is never passed
+        into a uuid query. Unknown -> 404 pipeline_not_found.
+      schema: { type: string }
   responses:
     Unauthorized:
       description: Missing or invalid credentials
@@ -38,6 +49,34 @@ components:
             type: object
             properties:
               error: { type: string, const: not_found }
+    PipelineNotFound:
+      description: >-
+        No pipeline matches the `{pipeline_id}` path segment. That segment
+        accepts EITHER a pipeline UUID or its slug/name (the builder POSTs
+        `/api/pipelines/<slug>/run`); the API resolves a UUID first, then
+        falls back to a slug lookup. When neither matches, this is returned.
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              error: { type: string, const: pipeline_not_found }
+              message:
+                type: string
+                description: "e.g. no pipeline with id or slug 'support-rag'"
+    InvalidIdentifier:
+      description: >-
+        A path/identifier value could not be interpreted (e.g. a value
+        reaching a typed `uuid` column produced Postgres SQLSTATE 22P02 /
+        "invalid input syntax for type uuid"). Returned as a clear 4xx
+        instead of a 500.
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              error: { type: string, const: invalid_identifier }
+              message: { type: string }
     ValidationFailed:
       description: Request body or spec failed validation
       content:
@@ -48,7 +87,11 @@ components:
               error: { type: string, const: validation_failed }
               issues: { type: array, items: { type: object } }
     Conflict:
-      description: Slug/version conflict or immutable published version
+      description: >-
+        Slug/version conflict, immutable published version, non-empty folder
+        delete, duplicate activation label, no active deployment, or an
+        activation that cannot be resolved (ambiguous / disabled / missing
+        version).
       content:
         application/json:
           schema:
@@ -56,7 +99,13 @@ components:
             properties:
               error:
                 type: string
-                enum: [conflict, immutable_version, no_active_deployment]
+                enum:
+                  [
+                    conflict,
+                    immutable_version,
+                    no_active_deployment,
+                    activation_unresolved
+                  ]
               message: { type: string }
   schemas:
     JsonSchemaLike:
@@ -105,6 +154,79 @@ components:
               description: >-
                 Optional ESM module URL exporting a custom ConfigEditor React
                 component (see ADR 0008). Type/contract seam only.
+    PipelineFolder:
+      type: object
+      required: [id, name, createdAt]
+      properties:
+        id: { type: string }
+        parentId: { type: [string, "null"] }
+        name: { type: string }
+        createdAt: { type: string }
+    PipelineFolderTreeNode:
+      allOf:
+        - $ref: "#/components/schemas/PipelineFolder"
+        - type: object
+          properties:
+            children:
+              type: array
+              items: { $ref: "#/components/schemas/PipelineFolderTreeNode" }
+    PipelineVersion:
+      type: object
+      required: [id, pipelineId, version, status, checksum, createdAt]
+      properties:
+        id: { type: string }
+        pipelineId: { type: string }
+        version: { type: string }
+        status: { type: string, enum: [draft, published, archived] }
+        checksum: { type: string }
+        parentVersionId:
+          type: [string, "null"]
+          description: Lineage pointer to the version this one was saved on top of.
+        isLatest:
+          type: boolean
+          description: True when pipeline.latestVersionId points at this row.
+        spec: { type: object }
+        createdAt: { type: string }
+        publishedAt: { type: [string, "null"] }
+    Activation:
+      type: object
+      required: [id, label, environment, trackLatest, enabled]
+      properties:
+        id: { type: string }
+        label: { type: string }
+        environment: { type: string }
+        pipelineVersionId:
+          type: [string, "null"]
+          description: Pinned version (null when trackLatest is true).
+        trackLatest:
+          type: boolean
+          description: When true the activation follows pipeline.latestVersionId.
+        enabled: { type: boolean }
+        effectiveVersionId:
+          type: [string, "null"]
+          description: >-
+            Concrete pipeline_version id this activation resolves to right now
+            (pinned id, or the pipeline's latest id when trackLatest). Null when
+            unresolvable.
+    Schedule:
+      type: object
+      required:
+        [id, tenantId, pipelineId, environment, cron, timezone, enabled, createdAt]
+      properties:
+        id: { type: string }
+        tenantId: { type: string }
+        pipelineId: { type: string }
+        environment: { type: string }
+        activationLabel: { type: [string, "null"] }
+        cron: { type: string, description: 5-field Vixie/POSIX cron expression. }
+        timezone: { type: string, default: UTC }
+        input: { type: object }
+        enabled: { type: boolean }
+        lastRunAt: { type: [string, "null"] }
+        nextRunAt:
+          type: [string, "null"]
+          description: Computed via nextAfter(cron, now) on create / cron change.
+        createdAt: { type: string }
   securitySchemes:
     bearerAuth:
       type: http
@@ -176,10 +298,29 @@ paths:
         "200": { description: Pipeline list }
         "401": { $ref: "#/components/responses/Unauthorized" }
     post:
-      summary: Create pipeline
+      summary: Create pipeline (optionally inside a folder)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [slug, name]
+              properties:
+                slug: { type: string }
+                name: { type: string }
+                description: { type: string }
+                labels: { type: object, additionalProperties: { type: string } }
+                folderId:
+                  type: [string, "null"]
+                  description: Optional folder to create the pipeline in.
       responses:
-        "201": { description: Created }
+        "201":
+          description: >-
+            Created. The pipeline response now also carries folderId and
+            latestVersionId (both null until set via /folder or /save).
         "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
         "409": { $ref: "#/components/responses/Conflict" }
         "422": { $ref: "#/components/responses/ValidationFailed" }
   /api/pipelines/{pipeline_id}:
@@ -187,22 +328,122 @@ paths:
       - name: pipeline_id
         in: path
         required: true
+        description: >-
+          A pipeline UUID OR its slug/name. Resolved as a UUID first, then
+          by slug. A non-UUID is never passed into a uuid query.
         schema: { type: string }
     get:
-      summary: Get pipeline
+      summary: Get pipeline (by id or slug)
       responses:
         "200": { description: Pipeline }
-        "404": { $ref: "#/components/responses/NotFound" }
+        "400": { $ref: "#/components/responses/InvalidIdentifier" }
+        "404": { $ref: "#/components/responses/PipelineNotFound" }
     put:
-      summary: Update pipeline
+      summary: Update pipeline (by id or slug)
       responses:
         "200": { description: Updated }
-        "404": { $ref: "#/components/responses/NotFound" }
+        "400": { $ref: "#/components/responses/InvalidIdentifier" }
+        "404": { $ref: "#/components/responses/PipelineNotFound" }
     delete:
-      summary: Delete pipeline
+      summary: Delete pipeline (by id or slug)
+      responses:
+        "204": { description: Deleted }
+        "400": { $ref: "#/components/responses/InvalidIdentifier" }
+        "404": { $ref: "#/components/responses/PipelineNotFound" }
+  /api/folders:
+    get:
+      summary: Nested pipeline-folder tree (root nodes with children[])
+      responses:
+        "200":
+          description: Folder forest
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  folders:
+                    type: array
+                    items: { $ref: "#/components/schemas/PipelineFolderTreeNode" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    post:
+      summary: Create a folder
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string }
+                parentId: { type: [string, "null"] }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  folder: { $ref: "#/components/schemas/PipelineFolder" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+  /api/folders/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
+    put:
+      summary: Rename and/or reparent a folder
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string }
+                parentId: { type: [string, "null"] }
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  folder: { $ref: "#/components/schemas/PipelineFolder" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+    delete:
+      summary: Delete a folder (409 conflict if it still has child folders or pipelines)
       responses:
         "204": { description: Deleted }
         "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /api/pipelines/{pipeline_id}/folder:
+    parameters:
+      - $ref: "#/components/parameters/PipelineRef"
+    put:
+      summary: Move a pipeline (by id or slug) into a folder (or root with folderId=null)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [folderId]
+              properties:
+                folderId: { type: [string, "null"] }
+      responses:
+        "200": { description: Pipeline (with updated folderId) }
+        "400": { $ref: "#/components/responses/InvalidIdentifier" }
+        "404": { $ref: "#/components/responses/PipelineNotFound" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+
   /api/pipelines/validate:
     post:
       summary: Validate a pipeline spec (JSON object or JSON/YAML string)
@@ -211,126 +452,536 @@ paths:
         "422": { $ref: "#/components/responses/ValidationFailed" }
   /api/pipelines/{pipeline_id}/versions:
     parameters:
-      - name: pipeline_id
-        in: path
-        required: true
-        schema: { type: string }
+      - $ref: "#/components/parameters/PipelineRef"
     get:
-      summary: List pipeline versions
+      summary: >-
+        List pipeline versions. Each row is flagged isLatest (against
+        pipeline.latestVersionId) and carries parentVersionId lineage. The
+        envelope also returns latestVersionId.
       responses:
-        "200": { description: Version list }
-        "404": { $ref: "#/components/responses/NotFound" }
+        "200":
+          description: Version list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  versions:
+                    type: array
+                    items: { $ref: "#/components/schemas/PipelineVersion" }
+                  latestVersionId: { type: [string, "null"] }
+        "400": { $ref: "#/components/responses/InvalidIdentifier" }
+        "404": { $ref: "#/components/responses/PipelineNotFound" }
     post:
       summary: >-
         Save a draft (mutable) or publish an immutable version. Set
         body.publish=true to publish. Republishing identical content is
         idempotent (200); republishing changed content under a published
-        version returns 409 immutable_version.
+        version returns 409 immutable_version. (Back-compat route; new clients
+        should prefer POST /save for auto-versioned saves.)
       responses:
         "201": { description: Draft created / version published }
         "200": { description: Idempotent republish or draft re-save }
-        "404": { $ref: "#/components/responses/NotFound" }
+        "400": { $ref: "#/components/responses/InvalidIdentifier" }
+        "404": { $ref: "#/components/responses/PipelineNotFound" }
         "409": { $ref: "#/components/responses/Conflict" }
         "422": { $ref: "#/components/responses/ValidationFailed" }
-  /api/pipelines/{pipeline_id}/versions/{version}/archive:
-    post:
-      summary: Archive a pipeline version
-      parameters:
-        - name: pipeline_id
-          in: path
-          required: true
-          schema: { type: string }
-        - name: version
-          in: path
-          required: true
-          schema: { type: string }
-      responses:
-        "200": { description: Archived version }
-        "404": { $ref: "#/components/responses/NotFound" }
-  /api/pipelines/{pipeline_id}/versions/{version}/export:
-    get:
-      summary: Export a version spec as json or yaml
-      parameters:
-        - name: pipeline_id
-          in: path
-          required: true
-          schema: { type: string }
-        - name: version
-          in: path
-          required: true
-          schema: { type: string }
-        - name: format
-          in: query
-          schema: { type: string, enum: [json, yaml] }
-      responses:
-        "200": { description: Serialized spec }
-        "404": { $ref: "#/components/responses/NotFound" }
-  /api/pipelines/{pipeline_id}/deployments:
+  /api/pipelines/{pipeline_id}/save:
     parameters:
-      - name: pipeline_id
+      - $ref: "#/components/parameters/PipelineRef"
+    post:
+      summary: >-
+        Auto-versioned save. Validates the spec, then via nextVersionOnSave:
+        if the spec is identical to the current latest version it is
+        idempotent (200, created:false, no new row, pointer unchanged);
+        otherwise a new published version is created (201, created:true) whose
+        number is the GLOBAL max version bumped by level (default patch),
+        parentVersionId links to the previous latest, and
+        pipeline.latestVersionId is advanced to the new row.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [spec]
+              properties:
+                spec:
+                  description: PipelineSpec object, or a JSON/YAML spec string.
+                  oneOf:
+                    - type: object
+                    - type: string
+                level:
+                  type: string
+                  enum: [patch, minor, major]
+                  default: patch
+      responses:
+        "200":
+          description: Idempotent (created:false), unchanged latest returned
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  version: { $ref: "#/components/schemas/PipelineVersion" }
+                  created: { type: boolean, const: false }
+        "201":
+          description: New version created (created:true), latest pointer advanced
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  version: { $ref: "#/components/schemas/PipelineVersion" }
+                  created: { type: boolean, const: true }
+        "400": { $ref: "#/components/responses/InvalidIdentifier" }
+        "404": { $ref: "#/components/responses/PipelineNotFound" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+  /api/pipelines/{pipeline_id}/rollback:
+    parameters:
+      - $ref: "#/components/parameters/PipelineRef"
+    post:
+      summary: >-
+        Move pipeline.latestVersionId to an existing version (pointer move
+        only; creates NO new version row). Unknown versionId returns 404.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [versionId]
+              properties:
+                versionId: { type: string }
+      responses:
+        "200":
+          description: Pointer moved
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  pipeline: { type: object }
+                  latestVersionId: { type: string }
+        "400": { $ref: "#/components/responses/InvalidIdentifier" }
+        "404": { $ref: "#/components/responses/PipelineNotFound" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+  /api/pipelines/{pipeline_id}/versions/{version}/archive:
+    parameters:
+      - $ref: "#/components/parameters/PipelineRef"
+      - name: version
         in: path
         required: true
         schema: { type: string }
+    post:
+      summary: Archive a pipeline version (pipeline by id or slug)
+      responses:
+        "200": { description: Archived version }
+        "400": { $ref: "#/components/responses/InvalidIdentifier" }
+        "404": { $ref: "#/components/responses/PipelineNotFound" }
+  /api/pipelines/{pipeline_id}/versions/{version}/export:
+    parameters:
+      - $ref: "#/components/parameters/PipelineRef"
+      - name: version
+        in: path
+        required: true
+        schema: { type: string }
+      - name: format
+        in: query
+        schema: { type: string, enum: [json, yaml] }
     get:
-      summary: List deployments
+      summary: Export a version spec as json or yaml (pipeline by id or slug)
+      responses:
+        "200": { description: Serialized spec }
+        "400": { $ref: "#/components/responses/InvalidIdentifier" }
+        "404": { $ref: "#/components/responses/PipelineNotFound" }
+  /api/pipelines/{pipeline_id}/deployments:
+    parameters:
+      - $ref: "#/components/parameters/PipelineRef"
+    get:
+      summary: List deployments (pipeline by id or slug)
       responses:
         "200": { description: Deployment list }
-        "404": { $ref: "#/components/responses/NotFound" }
+        "400": { $ref: "#/components/responses/InvalidIdentifier" }
+        "404": { $ref: "#/components/responses/PipelineNotFound" }
     post:
-      summary: Deploy a published version (optionally tenant-scoped)
+      summary: Deploy a published version (optionally tenant-scoped; pipeline by id or slug)
       responses:
         "201": { description: Deployment created }
+        "400": { $ref: "#/components/responses/InvalidIdentifier" }
         "403": { $ref: "#/components/responses/Forbidden" }
-        "404": { $ref: "#/components/responses/NotFound" }
+        "404": { $ref: "#/components/responses/PipelineNotFound" }
         "422": { $ref: "#/components/responses/ValidationFailed" }
   /api/pipelines/{pipeline_id}/run:
+    parameters:
+      - $ref: "#/components/parameters/PipelineRef"
     post:
       summary: >-
-        Resolve the active deployed version, validate, enqueue a run_pipeline
-        job, seed a queued execution record, and return 202. Execution happens
-        in the worker, not the API process.
-      parameters:
-        - name: pipeline_id
-          in: path
-          required: true
-          schema: { type: string }
+        Resolve the target pipeline version, validate, enqueue a run_pipeline
+        job, seed a queued execution record, and return 202. Resolution
+        precedence: (1) if the tenant has ANY activation for
+        (tenant,pipeline,environment), resolve via
+        resolveActivation(body.activation?) then
+        effectiveVersionId(activation, pipeline.latestVersionId) — ambiguous /
+        disabled / unresolvable activations return 409 activation_unresolved;
+        (2) otherwise fall back to the existing deployment path (409
+        no_active_deployment when none). The enqueued job payload keeps today's
+        shape plus tenantId/pipelineId/environment and, when resolved via an
+        activation, activationLabel. The {pipeline_id} segment accepts the
+        pipeline UUID OR its slug/name (the builder POSTs
+        `/api/pipelines/<slug>/run`); the resolved real UUID is used for all
+        downstream version/deployment/activation lookups.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                input: {}
+                environment: { type: string, default: dev }
+                activation:
+                  type: string
+                  description: >-
+                    Optional activation label. When omitted and activations
+                    exist, the "default" label or a single enabled activation
+                    is used; multiple enabled with no label/default => 409.
       responses:
-        "202": { description: Execution accepted (executionId + jobId) }
+        "202":
+          description: >-
+            Execution accepted. Body: executionId, jobId, pipelineId,
+            pipelineVersionId, version, status:"accepted", resolvedVia
+            ("activation" | "deployment"), and activationLabel when resolved
+            via an activation.
+        "400": { $ref: "#/components/responses/InvalidIdentifier" }
         "403": { $ref: "#/components/responses/Forbidden" }
-        "404": { $ref: "#/components/responses/NotFound" }
+        "404": { $ref: "#/components/responses/PipelineNotFound" }
         "409": { $ref: "#/components/responses/Conflict" }
         "422": { $ref: "#/components/responses/ValidationFailed" }
   /api/pipelines/{pipeline_id}/ingest:
+    parameters:
+      - $ref: "#/components/parameters/PipelineRef"
     post:
-      summary: Enqueue an ingest_datasource job for the deployed version
-      parameters:
-        - name: pipeline_id
-          in: path
-          required: true
-          schema: { type: string }
+      summary: Enqueue an ingest_datasource job for the deployed version (pipeline by id or slug)
       responses:
         "202": { description: Ingestion accepted (jobId) }
+        "400": { $ref: "#/components/responses/InvalidIdentifier" }
         "403": { $ref: "#/components/responses/Forbidden" }
-        "404": { $ref: "#/components/responses/NotFound" }
+        "404": { $ref: "#/components/responses/PipelineNotFound" }
         "409": { $ref: "#/components/responses/Conflict" }
   /api/pipelines/{pipeline_id}/stream:
+    parameters:
+      - $ref: "#/components/parameters/PipelineRef"
     post:
       summary: >-
-        SSE endpoint. The control plane has no streaming-capable provider, so it
-        honestly emits a `status: not_enabled` event then `done`. Token
-        streaming is delivered by a streaming provider in the worker.
-      parameters:
-        - name: pipeline_id
-          in: path
-          required: true
-          schema: { type: string }
+        SSE endpoint (pipeline by id or slug). The control plane has no
+        streaming-capable provider, so it honestly emits a
+        `status: not_enabled` event then `done`. Token streaming is delivered
+        by a streaming provider in the worker.
       responses:
         "200":
           description: text/event-stream with a not_enabled status event
           content:
             text/event-stream: {}
-        "404": { $ref: "#/components/responses/NotFound" }
+        "400": { $ref: "#/components/responses/InvalidIdentifier" }
+        "404": { $ref: "#/components/responses/PipelineNotFound" }
         "409": { $ref: "#/components/responses/Conflict" }
+
+  /api/tenants/{id}/pipelines:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
+    get:
+      summary: >-
+        Per associated pipeline: association `enabled` plus activations[]
+        (each with effectiveVersionId resolved against
+        pipeline.latestVersionId).
+      responses:
+        "200":
+          description: Associated pipelines
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  pipelines:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        pipelineId: { type: string }
+                        enabled: { type: boolean }
+                        activations:
+                          type: array
+                          items: { $ref: "#/components/schemas/Activation" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      summary: Associate a pipeline with the tenant (tenant_pipelines enabled=true)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [pipelineId]
+              properties:
+                pipelineId: { type: string }
+                environment: { type: string, default: dev }
+      responses:
+        "201": { description: "Association created (enabled true)" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+  /api/tenants/{id}/pipelines/{pid}:
+    patch:
+      summary: Activate/deactivate a tenant<->pipeline association
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+        - name: pid
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [enabled]
+              properties:
+                enabled: { type: boolean }
+                environment: { type: string, default: dev }
+      responses:
+        "200": { description: Association updated }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+  /api/tenants/{id}/pipelines/{pid}/activations:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
+      - name: pid
+        in: path
+        required: true
+        description: >-
+          A pipeline UUID OR its slug/name. Resolved as a UUID first, then
+          by slug; the resolved real UUID is stored on the activation row.
+        schema: { type: string }
+    get:
+      summary: List activations for a tenant+pipeline (pipeline by id or slug)
+      responses:
+        "200":
+          description: Activation list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  activations:
+                    type: array
+                    items: { $ref: "#/components/schemas/Activation" }
+        "400": { $ref: "#/components/responses/InvalidIdentifier" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/PipelineNotFound" }
+    post:
+      summary: >-
+        Create an activation (pipeline by id or slug). Multiple concurrent
+        activations per tenant+pipeline+environment are supported (e.g. one
+        pinned + one track_latest). Duplicate (tenant,pipeline,env,label) => 409.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [label, environment]
+              properties:
+                label: { type: string }
+                environment: { type: string }
+                pipelineVersionId:
+                  type: string
+                  description: Required unless trackLatest is true.
+                trackLatest: { type: boolean, default: false }
+                enabled: { type: boolean, default: true }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  activation: { $ref: "#/components/schemas/Activation" }
+        "400": { $ref: "#/components/responses/InvalidIdentifier" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/PipelineNotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+  /api/tenants/{id}/pipelines/{pid}/activations/{aid}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
+      - name: pid
+        in: path
+        required: true
+        schema: { type: string }
+      - name: aid
+        in: path
+        required: true
+        schema: { type: string }
+    patch:
+      summary: Update an activation (enabled / trackLatest / pipelineVersionId / label)
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                enabled: { type: boolean }
+                trackLatest: { type: boolean }
+                pipelineVersionId: { type: [string, "null"] }
+                label: { type: string }
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  activation: { $ref: "#/components/schemas/Activation" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+    delete:
+      summary: Delete an activation
+      responses:
+        "204": { description: Deleted }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/schedules:
+    get:
+      summary: >-
+        List schedules. Non platform_admin callers are tenant-scoped. Optional
+        tenant / pipeline query filters.
+      parameters:
+        - name: tenant
+          in: query
+          schema: { type: string }
+        - name: pipeline
+          in: query
+          schema: { type: string }
+      responses:
+        "200":
+          description: Schedule list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  schedules:
+                    type: array
+                    items: { $ref: "#/components/schemas/Schedule" }
+    post:
+      summary: >-
+        Create a schedule. The cron is validated via parseCron (422 on
+        CronParseError) and next_run_at is set to nextAfter(cron, now).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [tenantId, pipelineId, environment, cron]
+              properties:
+                tenantId: { type: string }
+                pipelineId: { type: string }
+                environment: { type: string }
+                activationLabel: { type: string }
+                cron: { type: string }
+                timezone: { type: string, default: UTC }
+                input: { type: object }
+                enabled: { type: boolean, default: true }
+      responses:
+        "201":
+          description: Created (nextRunAt computed)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  schedule: { $ref: "#/components/schemas/Schedule" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+  /api/schedules/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
+    put:
+      summary: >-
+        Update a schedule. If cron changes it is re-validated (422 on bad
+        cron) and next_run_at is recomputed.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                environment: { type: string }
+                activationLabel: { type: [string, "null"] }
+                cron: { type: string }
+                timezone: { type: string }
+                input: { type: object }
+                enabled: { type: boolean }
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  schedule: { $ref: "#/components/schemas/Schedule" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+    patch:
+      summary: Enable / disable a schedule
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [enabled]
+              properties:
+                enabled: { type: boolean }
+      responses:
+        "200":
+          description: Toggled
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  schedule: { $ref: "#/components/schemas/Schedule" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+    delete:
+      summary: Delete a schedule
+      responses:
+        "204": { description: Deleted }
+        "404": { $ref: "#/components/responses/NotFound" }
 
   /api/config/definitions:
     get:
@@ -361,16 +1012,25 @@ paths:
         "404": { $ref: "#/components/responses/NotFound" }
   /api/config/values:
     get:
-      summary: List config values (sensitive values defensively redacted)
+      summary: >-
+        List config values (sensitive values defensively redacted). Filter by
+        scope + scopeId so the web can build a global -> tenant -> pipeline
+        config/secret tree. scope_id and scopeId are accepted interchangeably.
       parameters:
         - name: key
           in: query
           schema: { type: string }
         - name: scope
           in: query
-          schema: { type: string }
+          schema:
+            type: string
+            enum: [global, environment, tenant, tenant_pipeline, pipeline, runtime]
         - name: scope_id
           in: query
+          schema: { type: string }
+        - name: scopeId
+          in: query
+          description: camelCase alias of scope_id.
           schema: { type: string }
       responses:
         "200": { description: Config value list }

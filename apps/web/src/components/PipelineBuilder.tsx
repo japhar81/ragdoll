@@ -1,4 +1,4 @@
-import React, { useCallback, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ReactFlow, {
   Background,
   Controls,
@@ -35,6 +35,8 @@ import {
 import { FlowNodeCard } from "./FlowNodeCard.tsx";
 import { PluginEditorSlot } from "./PluginEditorSlot.tsx";
 import { SecretsEditor } from "./SecretsEditor.tsx";
+import { BuilderConsole, useConsoleLog } from "./BuilderConsole.tsx";
+import { hasRealPipeline } from "../lib/consoleLog.ts";
 import type {
   FlowEdge,
   FlowNode,
@@ -43,6 +45,7 @@ import type {
   PluginCategory,
   SecretRef
 } from "../lib/types.ts";
+import type { EditingPipeline } from "../App.tsx";
 
 const nodeTypes = { ragNode: FlowNodeCard };
 
@@ -114,18 +117,26 @@ function download(name: string, text: string, mime: string): void {
   URL.revokeObjectURL(url);
 }
 
-export function PipelineBuilder() {
+export function PipelineBuilder(props: {
+  editing?: EditingPipeline;
+  onClearEditing?: () => void;
+}) {
   const [nodes, setNodes, onNodesChange] = useNodesState(toFlowNodes(STARTER_SPEC));
   const [edges, setEdges, onEdgesChange] = useEdgesState(toFlowEdges(STARTER_SPEC));
   const [pipelineName, setPipelineName] = useState("support-rag");
   const [pipelineId, setPipelineId] = useState("support-rag");
   const [version, setVersion] = useState("0.1.0");
+  const [saveLevel, setSaveLevel] = useState<"patch" | "minor" | "major">("patch");
   const [tenantId, setTenantId] = useState("tenant-a");
   const [environment, setEnvironment] = useState("prod");
   const [selectedId, setSelectedId] = useState<string | undefined>();
   const [testInput, setTestInput] = useState('{ "question": "How do I reset my password?" }');
-  const [log, setLog] = useState<string>("Ready.");
+  const [openedViaTree, setOpenedViaTree] = useState(false);
+  const clog = useConsoleLog();
   const [inspectorWidth, setInspectorWidth] = useState(360);
+  // The pipeline id we last loaded a spec for, so the editing-load effect
+  // only fires once per "Edit" hand-off from the Pipelines tree.
+  const loadedFor = useRef<string | undefined>(undefined);
 
   const rfRef = useRef<ReactFlowInstance | null>(null);
   const canvasRef = useRef<HTMLDivElement | null>(null);
@@ -199,14 +210,86 @@ export function PipelineBuilder() {
     [nodeKinds, edges]
   );
 
-  function report(label: string, value: unknown): void {
-    setLog(`${label}\n\n${typeof value === "string" ? value : JSON.stringify(value, null, 2)}`);
+  /**
+   * Run an API action with full request→result/error logging. Logs the
+   * "→ request" line (method + path + redacted body), then either the
+   * "← result" success line (HTTP status + body) or a clear error line.
+   */
+  async function withLog<T>(
+    okLabel: string,
+    failLabel: string,
+    call: {
+      method: string;
+      path: string;
+      body?: unknown;
+      run: () => Promise<T>;
+      ok?: (result: T) => string;
+    }
+  ): Promise<T | undefined> {
+    clog.request(call.method, call.path, call.body);
+    try {
+      const result = await call.run();
+      clog.result(call.ok ? call.ok(result) : okLabel, 200, result);
+      return result;
+    } catch (e) {
+      clog.failure(failLabel, e, { method: call.method, path: call.path });
+      return undefined;
+    }
   }
 
-  function reportError(label: string, e: unknown): void {
-    if (e instanceof ApiError) report(`${label} (HTTP ${e.status})`, e.body);
-    else report(label, e instanceof Error ? e.message : String(e));
-  }
+  // When the Pipelines tree hands us a pipeline to edit, load its latest
+  // version's spec into the graph (GET versions -> pick latestVersionId).
+  useEffect(() => {
+    const target = props.editing;
+    if (!target || loadedFor.current === target.id) return;
+    loadedFor.current = target.id;
+    setPipelineId(target.id);
+    setPipelineName(target.name);
+    setOpenedViaTree(true);
+    const path = `/api/pipelines/${target.id}/versions`;
+    (async () => {
+      clog.request("GET", path);
+      try {
+        const res = await api.listVersions(target.id);
+        const latest =
+          res.versions.find((v) => v.id === res.latestVersionId) ??
+          res.versions.find((v) => v.isLatest) ??
+          res.versions[res.versions.length - 1];
+        if (!latest) {
+          clog.result(`Editing ${target.name}`, 200, res);
+          clog.log(
+            "warn",
+            `${target.name} has no saved versions — starting from a blank canvas.`
+          );
+          return;
+        }
+        if (latest.spec && typeof latest.spec === "object") {
+          const loaded = latest.spec as PipelineSpec;
+          setPipelineName(loaded.metadata?.name ?? target.name);
+          setNodes(toFlowNodes(loaded));
+          setEdges(toFlowEdges(loaded));
+          setVersion(latest.version);
+          clog.result(
+            `Loaded ${target.name} @ ${latest.version} (${
+              loaded.spec?.nodes?.length ?? 0
+            } nodes)`,
+            200,
+            { version: latest.version, nodes: loaded.spec?.nodes?.length ?? 0 }
+          );
+        } else {
+          setVersion(latest.version);
+          clog.result(`Editing ${target.name}`, 200, res);
+          clog.log(
+            "warn",
+            `Latest version ${latest.version} carries no inline spec; canvas unchanged.`
+          );
+        }
+      } catch (e) {
+        clog.failure(`Load ${target.name} failed`, e, { method: "GET", path });
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [props.editing]);
 
   const onConnect = useCallback(
     (connection: Connection) =>
@@ -304,45 +387,82 @@ export function PipelineBuilder() {
   }
 
   async function validate() {
-    try {
-      report("Validation", await api.validateSpec(spec));
-    } catch (e) {
-      reportError("Validate failed", e);
+    const res = await withLog("Validation passed", "Validate failed", {
+      method: "POST",
+      path: "/api/pipelines/validate",
+      body: spec,
+      run: () => api.validateSpec(spec),
+      ok: (r) =>
+        r.valid
+          ? "Validation passed"
+          : `Validation found ${r.errors.length} error${
+              r.errors.length === 1 ? "" : "s"
+            }`
+    });
+    if (res && !res.valid) {
+      clog.log("warn", `Spec is invalid — ${res.errors.length} error(s)`, {
+        errors: res.errors,
+        warnings: res.warnings
+      });
     }
+  }
+
+  async function savePipeline() {
+    const res = await withLog("Saved", "Save failed", {
+      method: "POST",
+      path: `/api/pipelines/${pipelineId}/save`,
+      body: { spec, level: saveLevel },
+      run: () => api.savePipeline(pipelineId, { spec, level: saveLevel }),
+      ok: (r) =>
+        r.created
+          ? `Saved — new version ${r.version.version} created`
+          : `No change — already at ${r.version.version} (idempotent)`
+    });
+    if (res) setVersion(res.version.version);
   }
 
   async function saveDraft() {
-    try {
-      report("Draft saved", await api.saveVersion(pipelineId, { version, spec }));
-    } catch (e) {
-      reportError("Save draft failed", e);
-    }
+    await withLog("Draft saved", "Save draft failed", {
+      method: "POST",
+      path: `/api/pipelines/${pipelineId}/versions`,
+      body: { version, spec },
+      run: () => api.saveVersion(pipelineId, { version, spec }),
+      ok: (r) => `Draft saved as ${r.version.version}`
+    });
   }
 
   async function publish() {
-    try {
-      report("Published", await api.saveVersion(pipelineId, { version, spec, publish: true }));
-    } catch (e) {
-      reportError("Publish failed", e);
-    }
+    await withLog("Published", "Publish failed", {
+      method: "POST",
+      path: `/api/pipelines/${pipelineId}/versions`,
+      body: { version, spec, publish: true },
+      run: () => api.saveVersion(pipelineId, { version, spec, publish: true }),
+      ok: (r) => `Published ${r.version.version}`
+    });
   }
 
   async function deploy() {
-    try {
-      report("Deployed", await api.deploy(pipelineId, { version, environment, tenantId }));
-    } catch (e) {
-      reportError("Deploy failed", e);
-    }
+    await withLog("Deployed", "Deploy failed", {
+      method: "POST",
+      path: `/api/pipelines/${pipelineId}/deployments`,
+      body: { version, environment, tenantId },
+      run: () => api.deploy(pipelineId, { version, environment, tenantId }),
+      ok: () => `Deployed ${version} to ${environment} (tenant ${tenantId})`
+    });
   }
 
   function exportJson() {
     download(`${pipelineName}.json`, JSON.stringify(spec, null, 2), "application/json");
-    report("Exported JSON", `${pipelineName}.json downloaded.`);
+    clog.log("success", `Exported ${pipelineName}.json`, {
+      nodes: spec.spec?.nodes?.length ?? 0
+    });
   }
 
   function exportYaml() {
     download(`${pipelineName}.yaml`, stringifyYaml(spec), "application/yaml");
-    report("Exported YAML", `${pipelineName}.yaml downloaded.`);
+    clog.log("success", `Exported ${pipelineName}.yaml`, {
+      nodes: spec.spec?.nodes?.length ?? 0
+    });
   }
 
   function importSpecFile() {
@@ -357,12 +477,28 @@ export function PipelineBuilder() {
         setPipelineName(parsed.metadata?.name ?? pipelineName);
         setNodes(toFlowNodes(parsed));
         setEdges(toFlowEdges(parsed));
-        report("Imported", `${parsed.spec?.nodes?.length ?? 0} nodes.`);
+        clog.log(
+          "success",
+          `Imported ${file.name} — ${parsed.spec?.nodes?.length ?? 0} nodes`,
+          { name: parsed.metadata?.name, nodes: parsed.spec?.nodes?.length ?? 0 }
+        );
       } catch (e) {
-        reportError("Import failed", e);
+        clog.failure("Import failed", e);
       }
     };
     input.click();
+  }
+
+  function refreshResolved() {
+    const path = `/api/config/resolved?pipeline_id=${pipelineId}&tenant_id=${tenantId}&environment=${environment}`;
+    clog.request("GET", path, { pipeline_id: pipelineId, tenant_id: tenantId, environment });
+    resolved
+      .refetch()
+      .then((r) => {
+        if (r.error) clog.failure("Resolve config failed", r.error, { method: "GET", path });
+        else clog.result("Resolved config refreshed", 200, r.data);
+      })
+      .catch((e) => clog.failure("Resolve config failed", e, { method: "GET", path }));
   }
 
   async function run() {
@@ -370,14 +506,51 @@ export function PipelineBuilder() {
     try {
       parsedInput = JSON.parse(testInput || "{}");
     } catch {
-      report("Run failed", "Test input is not valid JSON.");
+      clog.log(
+        "error",
+        "Run aborted — Test Input is not valid JSON.",
+        { testInput }
+      );
       return;
     }
+
+    // Guard accidental doomed runs against the placeholder pipeline.
+    if (!hasRealPipeline({ pipelineId, openedViaTree })) {
+      clog.log(
+        "warn",
+        `No saved pipeline selected ("${pipelineId}" is not a saved id) — ` +
+          "open one from Pipelines or Save first. Sending anyway on confirm.",
+        { pipelineId, openedViaTree }
+      );
+      const proceed =
+        typeof window === "undefined" ||
+        window.confirm(
+          `"${pipelineId}" doesn't look like a saved pipeline.\n\n` +
+            "Run it anyway? (The API will likely return a 404/409 — the " +
+            "result will be shown in the Console below.)"
+        );
+      if (!proceed) {
+        clog.log("info", "Run cancelled by user (no saved pipeline).");
+        return;
+      }
+    }
+
+    const path = `/api/pipelines/${pipelineId}/run`;
+    clog.log(
+      "info",
+      `Running pipeline "${pipelineId}" (v${version}) — tenant ${tenantId}, env ${environment}`,
+      { pipelineId, version, tenantId, environment }
+    );
+    clog.request("POST", path, { input: parsedInput, environment });
     try {
       const result = await api.run(pipelineId, { input: parsedInput, environment });
-      report(`Run accepted - execution ${result.executionId}`, result);
+      clog.result(
+        `Run accepted — execution ${result.executionId} (${result.status})`,
+        202,
+        result
+      );
     } catch (e) {
-      reportError("Run failed", e);
+      clog.failure("Run failed", e, { method: "POST", path });
     }
   }
 
@@ -404,6 +577,22 @@ export function PipelineBuilder() {
             style={{ width: 80 }}
           />
         </label>
+        <label>
+          Level
+          <select
+            value={saveLevel}
+            onChange={(e) =>
+              setSaveLevel(e.target.value as "patch" | "minor" | "major")
+            }
+          >
+            <option value="patch">patch</option>
+            <option value="minor">minor</option>
+            <option value="major">major</option>
+          </select>
+        </label>
+        <button className="primary" onClick={savePipeline}>
+          Save
+        </button>
         <button onClick={validate}>Validate</button>
         <button onClick={saveDraft}>Save Draft</button>
         <button onClick={publish}>Publish</button>
@@ -428,6 +617,7 @@ export function PipelineBuilder() {
           </select>
         </label>
       </header>
+      <div className="builder-main">
       <div
         className="builder-grid"
         style={{
@@ -548,7 +738,17 @@ export function PipelineBuilder() {
           <pre>{requiredConfig.join("\n") || "(none)"}</pre>
           <h2>Required secrets</h2>
           <pre>{requiredSecrets.join("\n") || "(none)"}</pre>
-          <h2>Resolved Config</h2>
+          <h2>
+            Resolved Config{" "}
+            <button
+              type="button"
+              className="link-btn"
+              onClick={refreshResolved}
+              title="Re-resolve config and log the result to the Console"
+            >
+              refresh
+            </button>
+          </h2>
           {resolved.isError && (
             <p className="muted">
               Unable to resolve (
@@ -563,9 +763,9 @@ export function PipelineBuilder() {
           <pre>{JSON.stringify(resolvedSpec.spec.nodes, null, 2)}</pre>
           <h2>Test Input (JSON)</h2>
           <textarea value={testInput} onChange={(e) => setTestInput(e.target.value)} />
-          <h2>Output</h2>
-          <pre>{log}</pre>
         </aside>
+      </div>
+      <BuilderConsole log={clog} />
       </div>
     </section>
   );

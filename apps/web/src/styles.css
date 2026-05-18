@@ -71,6 +71,17 @@ body {
   flex-wrap: wrap;
 }
 
+/* Wraps the canvas/inspector grid and the docked console so the console is
+   its own row spanning the full width — the canvas row shrinks instead of
+   the page scrolling. */
+.builder-main {
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) auto;
+  min-height: 0;
+  height: 100%;
+  overflow: hidden;
+}
+
 .builder-grid {
   display: grid;
   /* overridden inline with the draggable inspector width */
@@ -496,4 +507,357 @@ table.grid th {
 .inspector h3 {
   margin: 16px 0 6px;
   font-size: 14px;
+}
+
+/* ---- Sidebar nav groups ---- */
+.sidebar nav .nav-group {
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-size: 11px;
+  color: #64748b;
+  margin-top: 14px;
+  padding: 0 8px;
+}
+
+.sidebar nav .nav-group:first-child {
+  margin-top: 0;
+}
+
+/* ---- Primary toolbar button ---- */
+.toolbar button.primary {
+  background: #2563eb;
+  border-color: #2563eb;
+  color: white;
+  font-weight: 600;
+}
+
+.toolbar button.primary:hover {
+  background: #1d4ed8;
+}
+
+/* ---- Folder / pipeline tree ---- */
+.tree-list {
+  list-style: none;
+  margin: 4px 0;
+  padding-left: 0;
+}
+
+.tree-folder {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+}
+
+.tree-leaf {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 0;
+  font-size: 13px;
+}
+
+.tree-ico {
+  flex: none;
+}
+
+.tree-name {
+  font-weight: 500;
+}
+
+.tree-tools {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+/* ---- Modal ---- */
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.45);
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 48px 16px;
+  z-index: 50;
+  overflow: auto;
+}
+
+.modal {
+  background: white;
+  border-radius: 12px;
+  padding: 20px;
+  width: min(840px, 100%);
+  box-shadow: 0 10px 30px rgba(15, 23, 42, 0.25);
+}
+
+.modal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+
+/* ---- Scope navigator layout (Config / Secrets) ---- */
+.scope-layout {
+  display: grid;
+  grid-template-columns: 240px 1fr;
+  gap: 20px;
+  align-items: start;
+}
+
+.scope-tree {
+  border-right: 1px solid #e5e7eb;
+  padding-right: 16px;
+}
+
+.scope-tree a {
+  display: block;
+  cursor: pointer;
+  color: #334155;
+  padding: 4px 6px;
+  border-radius: 6px;
+  font-size: 13px;
+}
+
+.scope-tree a:hover {
+  background: #f1f5f9;
+}
+
+.scope-tree a.active {
+  background: #2563eb;
+  color: white;
+}
+
+.scope-body {
+  min-width: 0;
+}
+
+/* ---- Cron builder ---- */
+.cron-builder {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin: 8px 0 12px;
+}
+
+.cron-builder label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: #475569;
+}
+
+.cron-builder input {
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  padding: 6px 8px;
+}
+
+/* ---- Tenant association / activations ---- */
+.assoc-card {
+  border: 1px solid #e5e7eb;
+  border-radius: 10px;
+  padding: 14px;
+  margin: 12px 0;
+  background: #f8fafc;
+}
+
+.assoc-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.activations {
+  background: white;
+  border-radius: 8px;
+}
+
+/* ---- Builder bottom Console ---- */
+.builder-console {
+  display: flex;
+  flex-direction: column;
+  position: relative;
+  border-top: 1px solid #e5e7eb;
+  background: #0f172a;
+  color: #e2e8f0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.builder-console.collapsed {
+  height: auto;
+}
+
+.console-resizer {
+  height: 6px;
+  flex: none;
+  cursor: row-resize;
+  background: #1e293b;
+  border-bottom: 1px solid #334155;
+}
+
+.console-resizer:hover {
+  background: #2563eb;
+}
+
+.console-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 12px;
+  background: #111827;
+  border-bottom: 1px solid #1f2937;
+  flex: none;
+  font-size: 12px;
+}
+
+.console-toggle {
+  border: none;
+  background: none;
+  color: #e2e8f0;
+  cursor: pointer;
+  font-weight: 600;
+  font-size: 13px;
+  padding: 2px 4px;
+}
+
+.console-count {
+  color: #94a3b8;
+}
+
+.console-spacer {
+  flex: 1;
+}
+
+.console-head button:not(.console-toggle) {
+  border: 1px solid #334155;
+  background: #1e293b;
+  color: #e2e8f0;
+  border-radius: 6px;
+  padding: 3px 8px;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.console-head button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.console-list {
+  list-style: none;
+  margin: 0;
+  padding: 4px 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  min-height: 0;
+  flex: 1;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+}
+
+.console-row {
+  border-bottom: 1px solid #1f2937;
+}
+
+.console-line {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  width: 100%;
+  text-align: left;
+  border: none;
+  background: none;
+  color: inherit;
+  padding: 4px 12px;
+  font: inherit;
+}
+
+.console-line:hover {
+  background: #172033;
+}
+
+.console-time {
+  color: #64748b;
+  flex: none;
+}
+
+.console-level {
+  flex: none;
+  text-transform: uppercase;
+  font-size: 10px;
+  font-weight: 700;
+  border-radius: 4px;
+  padding: 1px 5px;
+}
+
+.lvl-info {
+  background: #1e3a5f;
+  color: #93c5fd;
+}
+
+.lvl-success {
+  background: #14532d;
+  color: #86efac;
+}
+
+.lvl-warn {
+  background: #713f12;
+  color: #fcd34d;
+}
+
+.lvl-error {
+  background: #7f1d1d;
+  color: #fca5a5;
+}
+
+.console-badge {
+  flex: none;
+  background: #334155;
+  color: #cbd5e1;
+  border-radius: 4px;
+  padding: 1px 6px;
+  font-size: 11px;
+}
+
+.console-label {
+  min-width: 0;
+  flex: 1;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.console-row.console-error .console-label {
+  color: #fca5a5;
+}
+
+.console-row.console-success .console-label {
+  color: #bbf7d0;
+}
+
+.console-row.console-warn .console-label {
+  color: #fde68a;
+}
+
+.console-caret {
+  flex: none;
+  color: #64748b;
+}
+
+.console-detail {
+  margin: 0;
+  border: none;
+  border-radius: 0;
+  background: #0b1220;
+  color: #cbd5e1;
+  min-height: 0;
+  max-height: 280px;
+  font-size: 11px;
 }

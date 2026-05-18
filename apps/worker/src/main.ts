@@ -15,7 +15,9 @@
  */
 
 import { InMemoryQueue } from "./index.ts";
+import type { QueuePort } from "./index.ts";
 import { createWorker, type WorkerDeps, type WorkerRepositories } from "./handlers.ts";
+import { createScheduler } from "./scheduler.ts";
 import { loadRegistries } from "../../../packages/plugin-loader/src/index.ts";
 import { createVectorStore } from "../../../packages/vector/src/index.ts";
 import { getLogger, createTracer } from "../../../packages/observability/src/index.ts";
@@ -27,18 +29,31 @@ import {
 } from "../../../packages/secrets/src/index.ts";
 import {
   InMemoryExecutionStore,
+  InMemoryPipelineRepository,
   InMemoryPipelineVersionRepository,
+  InMemoryPipelineActivationRepository,
   InMemoryConfigDefinitionRepository,
   InMemoryConfigValueRepository,
   InMemoryProviderRepository,
   InMemoryProviderModelRepository,
   InMemoryVectorCollectionRepository,
   InMemoryDatasourceConnectionRepository,
-  InMemoryUsageRecordRepository
+  InMemoryUsageRecordRepository,
+  InMemoryScheduleRepository
 } from "../../../packages/db/src/index.ts";
+import type { ScheduleRepository } from "../../../packages/db/src/index.ts";
 import type { ExecutionStore } from "../../../packages/runtime/src/index.ts";
 
-async function buildDeps(): Promise<WorkerDeps> {
+interface BuiltDeps {
+  deps: WorkerDeps;
+  /**
+   * Schedule repository the cron scheduler scans. Same backend selection as
+   * the control-plane repositories (Postgres when DATABASE_URL else InMemory).
+   */
+  schedules: ScheduleRepository;
+}
+
+async function buildDeps(): Promise<BuiltDeps> {
   const logger = getLogger();
   const { plugins, providers } = loadRegistries();
   const tracer = await createTracer({ enabled: process.env.OTEL_ENABLED !== "false" });
@@ -53,6 +68,7 @@ async function buildDeps(): Promise<WorkerDeps> {
   let repositories: WorkerRepositories;
   let secretProvider: SecretProvider;
   let store: ExecutionStore;
+  let schedules: ScheduleRepository;
   // Mirror runtime usage into the control-plane UsageRecordRepository ONLY in
   // the in-memory wiring. PostgresExecutionStore.recordUsage already writes
   // the shared usage_records table that a Postgres UsageRecordRepository
@@ -78,8 +94,12 @@ async function buildDeps(): Promise<WorkerDeps> {
       datasourceConnections: new db.PostgresDatasourceConnectionRepository(
         pool
       ),
-      usageRecords: new db.PostgresUsageRecordRepository(pool)
+      usageRecords: new db.PostgresUsageRecordRepository(pool),
+      // Org-versioning resolution for schedule-originated run_pipeline jobs.
+      pipelines: new db.PostgresPipelineRepository(pool),
+      activations: new db.PostgresPipelineActivationRepository(pool)
     };
+    schedules = new db.PostgresScheduleRepository(pool);
     secretProvider = new DatabaseEncryptedSecretProvider(
       new db.PostgresSecretRepository(pool),
       new StaticKeyProvider(process.env.SECRET_ENCRYPTION_KEY ?? "dev-secret")
@@ -95,8 +115,12 @@ async function buildDeps(): Promise<WorkerDeps> {
       providerModels: new InMemoryProviderModelRepository(),
       vectorCollections: new InMemoryVectorCollectionRepository(),
       datasourceConnections: new InMemoryDatasourceConnectionRepository(),
-      usageRecords: new InMemoryUsageRecordRepository()
+      usageRecords: new InMemoryUsageRecordRepository(),
+      // Org-versioning resolution for schedule-originated run_pipeline jobs.
+      pipelines: new InMemoryPipelineRepository(),
+      activations: new InMemoryPipelineActivationRepository()
     };
+    schedules = new InMemoryScheduleRepository();
     secretProvider = new DatabaseEncryptedSecretProvider(
       new InMemorySecretRepository(),
       new StaticKeyProvider(process.env.SECRET_ENCRYPTION_KEY ?? "dev-secret")
@@ -106,26 +130,35 @@ async function buildDeps(): Promise<WorkerDeps> {
   }
 
   return {
-    store,
-    plugins,
-    providers,
-    secretProvider,
-    vectorStore,
-    repositories,
-    tracer,
-    logger,
-    maxRetries: Number(process.env.WORKER_MAX_RETRIES ?? 1),
-    mirrorUsageToRepository
+    deps: {
+      store,
+      plugins,
+      providers,
+      secretProvider,
+      vectorStore,
+      repositories,
+      tracer,
+      logger,
+      maxRetries: Number(process.env.WORKER_MAX_RETRIES ?? 1),
+      mirrorUsageToRepository
+    },
+    schedules
   };
 }
 
 export async function main(): Promise<void> {
   const logger = getLogger();
-  const deps = await buildDeps();
+  const { deps, schedules } = await buildDeps();
   const worker = createWorker(deps);
 
+  // The scheduler enqueues `run_pipeline` jobs onto whichever queue the worker
+  // consumes (BullMQ when REDIS_URL is set, else the in-memory queue) so the
+  // SAME worker process picks them up. Single active scheduler instance
+  // assumed — see the leader-election caveat in ./scheduler.ts.
+  let stopScheduler: (() => void) | undefined;
+
   if (process.env.REDIS_URL) {
-    const { startBullMqConsumer } = await import("./bullmq.ts");
+    const { startBullMqConsumer, BullMqQueue } = await import("./bullmq.ts");
     const consumer = await startBullMqConsumer(worker, {
       redisUrl: process.env.REDIS_URL,
       queueName: process.env.WORKER_QUEUE_NAME,
@@ -135,8 +168,18 @@ export async function main(): Promise<void> {
     logger.info("worker consuming BullMQ queue", {
       queue: process.env.WORKER_QUEUE_NAME ?? "ragdoll-jobs"
     });
+    const queue: QueuePort = new BullMqQueue({
+      redisUrl: process.env.REDIS_URL,
+      queueName: process.env.WORKER_QUEUE_NAME
+    });
+    const scheduler = createScheduler({ schedules, queue, logger });
+    stopScheduler = scheduler.start(
+      Number(process.env.SCHEDULER_INTERVAL_MS ?? 60000)
+    );
+    logger.info("scheduler started (BullMQ enqueue)");
     const shutdown = async (): Promise<void> => {
       logger.info("worker shutting down");
+      stopScheduler?.();
       await consumer.close();
       process.exit(0);
     };
@@ -145,9 +188,14 @@ export async function main(): Promise<void> {
   } else {
     // No Redis: there is no external transport to consume. Expose an
     // InMemoryQueue (mainly used by tests / single-process embedding) and log
-    // readiness. The worker remains importable + usable in-process.
+    // readiness. The worker remains importable + usable in-process. The
+    // scheduler enqueues onto the same in-memory queue.
     const queue = new InMemoryQueue();
-    void queue;
+    const scheduler = createScheduler({ schedules, queue, logger });
+    stopScheduler = scheduler.start(
+      Number(process.env.SCHEDULER_INTERVAL_MS ?? 60000)
+    );
+    void stopScheduler;
     logger.info("worker ready (in-memory queue; set REDIS_URL for BullMQ)", {
       handlers: [
         "run_pipeline",
@@ -158,7 +206,8 @@ export async function main(): Promise<void> {
         "delete_tenant_vector_data",
         "rotate_provider_model_metadata",
         "plugin_health_check"
-      ]
+      ],
+      scheduler: "started"
     });
   }
 }
