@@ -650,11 +650,47 @@ export function PipelineBuilder(props: {
 
   async function savePipeline() {
     const layoutSpec = specWithLayout();
+
+    // A fresh builder points at a placeholder slug with no pipeline row yet.
+    // The /save route only versions an *existing* pipeline (404s otherwise),
+    // so create the pipeline first, adopt its real UUID, then mint v1.
+    let saveId = pipelineId;
+    if (!hasRealPipeline({ pipelineId, openedViaTree })) {
+      const slug = pipelineId.trim();
+      const created = await withLog("Pipeline created", "Create failed", {
+        method: "POST",
+        path: "/api/pipelines",
+        body: { slug, name: pipelineName },
+        run: async () => {
+          try {
+            return (await api.createPipeline({ slug, name: pipelineName }))
+              .pipeline;
+          } catch (e) {
+            // Slug already taken — adopt the existing pipeline rather than
+            // failing, so a re-Save of the same name keeps working.
+            if (e instanceof ApiError && e.status === 409) {
+              const existing = (await api.listPipelines()).pipelines.find(
+                (p) => p.slug === slug
+              );
+              if (existing) return existing;
+            }
+            throw e;
+          }
+        },
+        ok: (p) => `Pipeline "${p.slug}" ready (${p.id})`
+      });
+      if (!created) return; // create failed; failure already logged
+      saveId = created.id;
+      setPipelineId(created.id);
+      setPipelineName(created.name);
+      setOpenedViaTree(true);
+    }
+
     const res = await withLog("Saved", "Save failed", {
       method: "POST",
-      path: `/api/pipelines/${pipelineId}/save`,
+      path: `/api/pipelines/${saveId}/save`,
       body: { spec: layoutSpec, level: saveLevel },
-      run: () => api.savePipeline(pipelineId, { spec: layoutSpec, level: saveLevel }),
+      run: () => api.savePipeline(saveId, { spec: layoutSpec, level: saveLevel }),
       ok: (r) =>
         r.created
           ? `Saved — new version ${r.version.version} created`
