@@ -112,6 +112,11 @@ function qs(params: Record<string, string | number | undefined>): string {
 export const api = {
   health: () => request<{ ok: boolean; status: string }>("GET", "/healthz"),
 
+  // ---- auth/tenant context (also exported standalone above) -------------
+  setTenant,
+  setAuth,
+  getAuth,
+
   // ---- tenants ----------------------------------------------------------
   listTenants: () => request<{ tenants: TenantRow[] }>("GET", "/api/tenants"),
   createTenant: (input: { slug: string; name: string; status?: string }) =>
