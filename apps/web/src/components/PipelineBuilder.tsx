@@ -19,12 +19,14 @@ import { stringifyYaml } from "../lib/yaml.ts";
 import {
   PLUGIN_CATEGORIES,
   applyResolved,
+  decodeViewport,
   extractConfigRefs,
   extractSecretRefs,
   graphToSpec,
   newIoNode,
   newNodeForCategory,
-  specToGraph
+  specToGraph,
+  withViewportAnnotation
 } from "../lib/spec.ts";
 import {
   DND_MIME,
@@ -38,6 +40,13 @@ import { SecretsEditor } from "./SecretsEditor.tsx";
 import { BuilderConsole, useConsoleLog } from "./BuilderConsole.tsx";
 import { TenantSelect, useSelectedTenant } from "./useTenants.tsx";
 import { hasRealPipeline } from "../lib/consoleLog.ts";
+import {
+  diffNodeEvents,
+  isTerminalStatus,
+  sampleForDisplay,
+  summarizeExecution,
+  type NodeLike
+} from "../lib/execTrace.ts";
 import type {
   FlowEdge,
   FlowNode,
@@ -49,6 +58,18 @@ import type {
 import type { EditingPipeline } from "../App.tsx";
 
 const nodeTypes = { ragNode: FlowNodeCard };
+
+/**
+ * Run poller: the worker runs the pipeline async and writes the per-node
+ * trace to Postgres; the API serves it. We poll the trace every
+ * RUN_POLL_INTERVAL_MS, emitting only the *new* node transitions each tick,
+ * and stop on a terminal status or after RUN_POLL_MAX_MS (so a stuck/lost
+ * worker can't poll forever). Polling (not WS) is deliberate: the trace lives
+ * in a shared store, so cross-process polling is reliable with zero
+ * worker->API pub/sub. SSE/WS is a clean future upgrade.
+ */
+const RUN_POLL_INTERVAL_MS = 1000;
+const RUN_POLL_MAX_MS = 3 * 60 * 1000;
 
 const EDGE_DEFAULTS = {
   type: "smoothstep",
@@ -153,6 +174,122 @@ export function PipelineBuilder(props: {
 
   const rfRef = useRef<ReactFlowInstance | null>(null);
   const canvasRef = useRef<HTMLDivElement | null>(null);
+  // A viewport (pan + zoom) decoded from a just-loaded spec, waiting to be
+  // applied to the React Flow instance once the loaded nodes have rendered.
+  // Set by the editing-load effect; consumed by restorePendingViewport.
+  const pendingViewport = useRef<{ x: number; y: number; zoom: number } | null>(
+    null
+  );
+
+  // Run poller bookkeeping. `pollTimer` holds the pending setTimeout id;
+  // `pollToken` is bumped on every new run / unmount so an in-flight tick
+  // belonging to a superseded run is ignored (no cross-run log spam).
+  const pollTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pollToken = useRef(0);
+
+  const stopPoll = useCallback(() => {
+    pollToken.current += 1;
+    if (pollTimer.current !== null) {
+      clearTimeout(pollTimer.current);
+      pollTimer.current = null;
+    }
+  }, []);
+
+  // Cancel any in-flight poller when the Builder unmounts.
+  useEffect(() => stopPoll, [stopPoll]);
+
+  /**
+   * Poll GET /api/executions/:id/trace until the execution is terminal (or the
+   * cap is hit). Each tick logs only the node transitions not yet emitted
+   * (diffNodeEvents, keyed by nodeId+status) with a sampled output preview,
+   * and a final SUCCESS/ERROR line with duration + sampled final output/error.
+   */
+  const pollExecution = useCallback(
+    (executionId: string) => {
+      stopPoll();
+      const myToken = ++pollToken.current;
+      const startedAt = Date.now();
+      let seenNodes: NodeLike[] = [];
+
+      const tick = async () => {
+        if (myToken !== pollToken.current) return; // superseded by a new run
+        try {
+          const trace = await api.getExecutionTrace(executionId);
+          if (myToken !== pollToken.current) return;
+
+          const nodes = (trace.nodes ?? []) as NodeLike[];
+          for (const ev of diffNodeEvents(seenNodes, nodes)) {
+            clog.log(ev.level, ev.message, ev.detail);
+          }
+          seenNodes = nodes;
+
+          const sum = summarizeExecution(trace.execution);
+          if (sum.terminal) {
+            if (sum.status === "succeeded") {
+              clog.log(
+                "success",
+                `▶ execution ${executionId} ${sum.line}`,
+                sampleForDisplay(trace.execution.output)
+              );
+            } else {
+              const failed = nodes.find((n) => n.status === "failed");
+              if (failed) {
+                clog.log(
+                  "error",
+                  `▶ node ${failed.nodeId} failed — ${
+                    failed.error ?? "unknown error"
+                  }`,
+                  sampleForDisplay(
+                    failed.output !== undefined && failed.output !== null
+                      ? failed.output
+                      : failed.input
+                  )
+                );
+              }
+              clog.log(
+                "error",
+                `▶ execution ${executionId} ${sum.line}`,
+                sampleForDisplay(
+                  trace.execution.error ?? trace.execution.output
+                )
+              );
+            }
+            stopPoll();
+            return;
+          }
+
+          if (Date.now() - startedAt > RUN_POLL_MAX_MS) {
+            clog.log(
+              "warn",
+              `▶ stopped polling execution ${executionId} after ${Math.round(
+                RUN_POLL_MAX_MS / 1000
+              )}s — still ${sum.status}. Check the Executions screen.`,
+              { executionId, lastStatus: sum.status }
+            );
+            stopPoll();
+            return;
+          }
+        } catch (e) {
+          // A transient trace fetch error shouldn't kill the run feed; log
+          // once and keep polling until the cap.
+          clog.failure("Trace poll failed (will retry)", e, {
+            method: "GET",
+            path: `/api/executions/${executionId}/trace`
+          });
+          if (Date.now() - startedAt > RUN_POLL_MAX_MS) {
+            stopPoll();
+            return;
+          }
+        }
+        if (myToken !== pollToken.current) return;
+        pollTimer.current = setTimeout(tick, RUN_POLL_INTERVAL_MS);
+      };
+
+      // First poll on the next interval so the worker has a beat to start.
+      pollTimer.current = setTimeout(tick, RUN_POLL_INTERVAL_MS);
+    },
+    [clog, stopPoll]
+  );
 
   const spec: PipelineSpec = useMemo(
     () =>
@@ -161,6 +298,45 @@ export function PipelineBuilder(props: {
       }),
     [nodes, edges, pipelineName]
   );
+
+  /**
+   * The spec to persist/export: the graph-derived `spec` plus the *current*
+   * React Flow viewport (pan + zoom) baked into `metadata.annotations` via
+   * VIEWPORT_ANNOTATION. Node X/Y already round-trip via `node.ui.position`;
+   * this adds zoom/pan so the canvas reopens exactly as the user left it.
+   * Read at call time (not memoized) because the viewport lives on the
+   * imperative React Flow instance, not in React state. If the instance
+   * isn't ready, `withViewportAnnotation` is a no-op and `spec` is unchanged.
+   */
+  const specWithLayout = useCallback(
+    (): PipelineSpec => withViewportAnnotation(spec, rfRef.current?.getViewport()),
+    [spec]
+  );
+
+  /**
+   * Apply a viewport stashed by the editing-load effect onto the React Flow
+   * instance, overriding the `fitView` prop so the canvas reopens at the saved
+   * zoom/pan (node X/Y already restored via specToGraph -> node.ui.position).
+   * Retries briefly if the instance or nodes aren't ready yet; if no viewport
+   * was stored, this is a no-op and the default fitView stands.
+   */
+  const restorePendingViewport = useCallback((attempt = 0) => {
+    const vp = pendingViewport.current;
+    if (!vp) return;
+    const rf = rfRef.current;
+    if (rf && rf.getNodes().length > 0) {
+      rf.setViewport(vp);
+      pendingViewport.current = null;
+      return;
+    }
+    // Instance / nodes not mounted yet; retry a few times then give up so a
+    // missing instance simply falls back to the existing fitView behavior.
+    if (attempt < 10) {
+      setTimeout(() => restorePendingViewport(attempt + 1), 50);
+    } else {
+      pendingViewport.current = null;
+    }
+  }, []);
 
   const resolved = useQuery({
     queryKey: ["resolved-config", pipelineId, tenantId, environment],
@@ -284,6 +460,16 @@ export function PipelineBuilder(props: {
           setNodes(toFlowNodes(loaded));
           setEdges(toFlowEdges(loaded));
           setVersion(latest.version);
+          // Restore the saved zoom/pan after the loaded graph renders. Node
+          // X/Y already came back via specToGraph -> node.ui.position; this
+          // overrides the `fitView` prop only when a viewport was stored
+          // (decodeViewport tolerates missing/garbage -> undefined). Runs once
+          // per Edit hand-off (gated by loadedFor above).
+          const savedViewport = decodeViewport(loaded);
+          if (savedViewport) {
+            pendingViewport.current = savedViewport;
+            restorePendingViewport();
+          }
           clog.result(
             `Loaded ${target.name} @ ${latest.version} (${
               loaded.spec?.nodes?.length ?? 0
@@ -423,11 +609,12 @@ export function PipelineBuilder(props: {
   }
 
   async function savePipeline() {
+    const layoutSpec = specWithLayout();
     const res = await withLog("Saved", "Save failed", {
       method: "POST",
       path: `/api/pipelines/${pipelineId}/save`,
-      body: { spec, level: saveLevel },
-      run: () => api.savePipeline(pipelineId, { spec, level: saveLevel }),
+      body: { spec: layoutSpec, level: saveLevel },
+      run: () => api.savePipeline(pipelineId, { spec: layoutSpec, level: saveLevel }),
       ok: (r) =>
         r.created
           ? `Saved — new version ${r.version.version} created`
@@ -437,21 +624,23 @@ export function PipelineBuilder(props: {
   }
 
   async function saveDraft() {
+    const layoutSpec = specWithLayout();
     await withLog("Draft saved", "Save draft failed", {
       method: "POST",
       path: `/api/pipelines/${pipelineId}/versions`,
-      body: { version, spec },
-      run: () => api.saveVersion(pipelineId, { version, spec }),
+      body: { version, spec: layoutSpec },
+      run: () => api.saveVersion(pipelineId, { version, spec: layoutSpec }),
       ok: (r) => `Draft saved as ${r.version.version}`
     });
   }
 
   async function publish() {
+    const layoutSpec = specWithLayout();
     await withLog("Published", "Publish failed", {
       method: "POST",
       path: `/api/pipelines/${pipelineId}/versions`,
-      body: { version, spec, publish: true },
-      run: () => api.saveVersion(pipelineId, { version, spec, publish: true }),
+      body: { version, spec: layoutSpec, publish: true },
+      run: () => api.saveVersion(pipelineId, { version, spec: layoutSpec, publish: true }),
       ok: (r) => `Published ${r.version.version}`
     });
   }
@@ -470,16 +659,18 @@ export function PipelineBuilder(props: {
   }
 
   function exportJson() {
-    download(`${pipelineName}.json`, JSON.stringify(spec, null, 2), "application/json");
+    const layoutSpec = specWithLayout();
+    download(`${pipelineName}.json`, JSON.stringify(layoutSpec, null, 2), "application/json");
     clog.log("success", `Exported ${pipelineName}.json`, {
-      nodes: spec.spec?.nodes?.length ?? 0
+      nodes: layoutSpec.spec?.nodes?.length ?? 0
     });
   }
 
   function exportYaml() {
-    download(`${pipelineName}.yaml`, stringifyYaml(spec), "application/yaml");
+    const layoutSpec = specWithLayout();
+    download(`${pipelineName}.yaml`, stringifyYaml(layoutSpec), "application/yaml");
     clog.log("success", `Exported ${pipelineName}.yaml`, {
-      nodes: spec.spec?.nodes?.length ?? 0
+      nodes: layoutSpec.spec?.nodes?.length ?? 0
     });
   }
 
@@ -585,6 +776,8 @@ export function PipelineBuilder(props: {
       { pipelineId, version, tenantId, tenantSlug: selectedTenant?.slug, environment }
     );
     clog.request("POST", path, { input: parsedInput, environment });
+    // A new run supersedes any poller still chasing a previous execution.
+    stopPoll();
     try {
       const result = await api.run(pipelineId, { input: parsedInput, environment });
       clog.result(
@@ -592,6 +785,14 @@ export function PipelineBuilder(props: {
         202,
         result
       );
+      clog.log(
+        "info",
+        `▶ tracing execution ${result.executionId} — polling every ${
+          RUN_POLL_INTERVAL_MS / 1000
+        }s for node progress…`,
+        { executionId: result.executionId, jobId: result.jobId }
+      );
+      pollExecution(result.executionId);
     } catch (e) {
       clog.failure("Run failed", e, { method: "POST", path });
     }

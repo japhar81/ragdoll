@@ -2,15 +2,19 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   PLUGIN_CATEGORIES,
+  VIEWPORT_ANNOTATION,
   applyResolved,
+  decodeViewport,
   defaultPluginRef,
+  encodeViewport,
   extractConfigRefs,
   extractDeclaredSecrets,
   extractSecretRefs,
   graphToSpec,
   newIoNode,
   newNodeForCategory,
-  specToGraph
+  specToGraph,
+  withViewportAnnotation
 } from "../src/lib/spec.ts";
 import type { FlowEdge, FlowNode, PipelineSpec } from "../src/lib/types.ts";
 
@@ -81,12 +85,17 @@ test("graphToSpec is a faithful inverse of specToGraph (round-trip)", () => {
   const graph = specToGraph(SAMPLE);
   const spec = graphToSpec(graph.nodes, graph.edges, {
     name: "support-rag",
-    labels: { domain: "support" }
+    labels: { domain: "support" },
+    annotations: { "ragdoll.ui/viewport": '{"x":1,"y":2,"zoom":3}' }
   });
   assert.equal(spec.apiVersion, "rag-platform/v1");
   assert.equal(spec.kind, "Pipeline");
   assert.equal(spec.metadata.name, "support-rag");
   assert.deepEqual(spec.metadata.labels, { domain: "support" });
+  // graphToSpec PRESERVES (does not drop) metadata.annotations.
+  assert.deepEqual(spec.metadata.annotations, {
+    "ragdoll.ui/viewport": '{"x":1,"y":2,"zoom":3}'
+  });
   assert.equal(spec.spec.nodes.length, 4);
   assert.equal(spec.spec.edges.length, 3);
 
@@ -100,6 +109,117 @@ test("graphToSpec is a faithful inverse of specToGraph (round-trip)", () => {
   // Layout is persisted under ui.position so re-import preserves it.
   const input = spec.spec.nodes.find((n) => n.id === "input");
   assert.deepEqual((input?.ui as { position: unknown }).position, { x: 10, y: 20 });
+});
+
+test("graphToSpec omits labels/annotations keys entirely when not passed", () => {
+  const graph = specToGraph(SAMPLE);
+  const spec = graphToSpec(graph.nodes, graph.edges, { name: "support-rag" });
+  assert.equal(spec.metadata.name, "support-rag");
+  assert.equal("labels" in spec.metadata, false);
+  assert.equal("annotations" in spec.metadata, false);
+});
+
+test("graphToSpec preserves labels AND annotations together (no drop)", () => {
+  const graph = specToGraph(SAMPLE);
+  const labels = { domain: "support", team: "core" };
+  const annotations = { "x.io/owner": "me", [VIEWPORT_ANNOTATION]: "{}" };
+  const spec = graphToSpec(graph.nodes, graph.edges, {
+    name: "p",
+    labels,
+    annotations
+  });
+  assert.deepEqual(spec.metadata.labels, labels);
+  assert.deepEqual(spec.metadata.annotations, annotations);
+});
+
+test("node.ui.position round-trips through specToGraph -> graphToSpec unchanged", () => {
+  const graph = specToGraph(SAMPLE);
+  const spec = graphToSpec(graph.nodes, graph.edges, { name: "support-rag" });
+  for (const original of SAMPLE.spec.nodes) {
+    const back = spec.spec.nodes.find((n) => n.id === original.id);
+    const origPos = (original.ui as { position?: unknown } | undefined)?.position;
+    const backPos = (back?.ui as { position?: unknown } | undefined)?.position;
+    if (origPos) {
+      // Positions that existed in the source survive the round-trip exactly.
+      assert.deepEqual(backPos, origPos);
+    } else {
+      // No source position -> specToGraph synthesized a layout coordinate
+      // which graphToSpec then persists (so re-import is stable).
+      assert.equal(typeof (backPos as { x: number }).x, "number");
+      assert.equal(typeof (backPos as { y: number }).y, "number");
+    }
+  }
+});
+
+test("encodeViewport / decodeViewport round-trip", () => {
+  const vp = { x: 12.5, y: -340, zoom: 1.75 };
+  const encoded = encodeViewport(vp);
+  assert.equal(typeof encoded, "string");
+  const spec = withViewportAnnotation(SAMPLE, vp);
+  assert.deepEqual(decodeViewport(spec), vp);
+  // encodeViewport only keeps x/y/zoom (no extra keys leak through).
+  assert.deepEqual(JSON.parse(encodeViewport({ ...vp, junk: 1 } as never)), vp);
+});
+
+test("decodeViewport tolerates missing / garbage annotations -> undefined", () => {
+  // No annotations at all.
+  assert.equal(decodeViewport(SAMPLE), undefined);
+  // Annotation present but not valid JSON.
+  const garbage: PipelineSpec = {
+    ...SAMPLE,
+    metadata: {
+      ...SAMPLE.metadata,
+      annotations: { [VIEWPORT_ANNOTATION]: "not json {{{" }
+    }
+  };
+  assert.equal(decodeViewport(garbage), undefined);
+  // Valid JSON but wrong shape (missing numeric fields).
+  const wrongShape: PipelineSpec = {
+    ...SAMPLE,
+    metadata: {
+      ...SAMPLE.metadata,
+      annotations: { [VIEWPORT_ANNOTATION]: '{"x":"a","y":1}' }
+    }
+  };
+  assert.equal(decodeViewport(wrongShape), undefined);
+  // Non-finite numbers are rejected too.
+  const nonFinite: PipelineSpec = {
+    ...SAMPLE,
+    metadata: {
+      ...SAMPLE.metadata,
+      annotations: { [VIEWPORT_ANNOTATION]: '{"x":1,"y":2,"zoom":null}' }
+    }
+  };
+  assert.equal(decodeViewport(nonFinite), undefined);
+});
+
+test("withViewportAnnotation is immutable and a no-op when vp undefined", () => {
+  const before = JSON.stringify(SAMPLE);
+  const noop = withViewportAnnotation(SAMPLE, undefined);
+  // Same reference back, source untouched.
+  assert.equal(noop, SAMPLE);
+  assert.equal(JSON.stringify(SAMPLE), before);
+
+  const vp = { x: 5, y: 6, zoom: 2 };
+  const next = withViewportAnnotation(SAMPLE, vp);
+  assert.notEqual(next, SAMPLE);
+  assert.notEqual(next.metadata, SAMPLE.metadata);
+  // Source spec still has no annotations (no mutation).
+  assert.equal(SAMPLE.metadata.annotations, undefined);
+  assert.equal(JSON.stringify(SAMPLE), before);
+  assert.equal(next.metadata.annotations?.[VIEWPORT_ANNOTATION], encodeViewport(vp));
+  // Existing annotations are merged, not clobbered.
+  const withExisting: PipelineSpec = {
+    ...SAMPLE,
+    metadata: { ...SAMPLE.metadata, annotations: { keep: "yes" } }
+  };
+  const merged = withViewportAnnotation(withExisting, vp);
+  assert.equal(merged.metadata.annotations?.keep, "yes");
+  assert.equal(
+    merged.metadata.annotations?.[VIEWPORT_ANNOTATION],
+    encodeViewport(vp)
+  );
+  assert.equal(withExisting.metadata.annotations?.[VIEWPORT_ANNOTATION], undefined);
 });
 
 test("graphToSpec preserves edge ports when present", () => {

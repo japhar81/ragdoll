@@ -35,7 +35,11 @@ test("core api methods the screens rely on exist", () => {
     "rollbackPipeline",
     "listFolders",
     "listSchedules",
-    "resolvedConfig"
+    "resolvedConfig",
+    "listExecutions",
+    "getExecution",
+    "getExecutionTrace",
+    "getTrace"
   ]) {
     assert.equal(
       typeof (api as Record<string, unknown>)[name],

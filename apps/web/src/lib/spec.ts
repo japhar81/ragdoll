@@ -67,6 +67,68 @@ export function defaultPluginRef(category: PluginCategory): PluginRef {
   return DEFAULT_PLUGIN[category] ?? { category, id: `${category}_default`, version: "1.0.0" };
 }
 
+/**
+ * Annotation key under which the editor stores the React Flow viewport
+ * (pan x/y + zoom). This lives in `spec.metadata.annotations` — a free-form
+ * string map the pipeline-spec validator IGNORES, so it round-trips through
+ * Save/load without touching the executable DAG or the API/core contract.
+ * Node X/Y positions are persisted separately on `node.ui.position`.
+ */
+export const VIEWPORT_ANNOTATION = "ragdoll.ui/viewport";
+
+/** Serialize a React Flow viewport to the annotation string (JSON). */
+export function encodeViewport(vp: { x: number; y: number; zoom: number }): string {
+  return JSON.stringify({ x: vp.x, y: vp.y, zoom: vp.zoom });
+}
+
+/**
+ * Read & parse the stored viewport from `spec.metadata.annotations`. Tolerant:
+ * a missing annotation, non-JSON garbage, or a value missing numeric x/y/zoom
+ * all yield `undefined` so callers fall back to the default fitView behavior.
+ */
+export function decodeViewport(
+  spec: PipelineSpec
+): { x: number; y: number; zoom: number } | undefined {
+  const raw = spec.metadata?.annotations?.[VIEWPORT_ANNOTATION];
+  if (typeof raw !== "string") return undefined;
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!parsed || typeof parsed !== "object") return undefined;
+    const { x, y, zoom } = parsed as Record<string, unknown>;
+    if (typeof x !== "number" || typeof y !== "number" || typeof zoom !== "number") {
+      return undefined;
+    }
+    if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(zoom)) {
+      return undefined;
+    }
+    return { x, y, zoom };
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Immutably set the viewport annotation on a spec. When `vp` is undefined the
+ * spec is returned unchanged (no annotations key is invented). The server
+ * tolerates this annotation — it is editor UI state, not part of the DAG.
+ */
+export function withViewportAnnotation(
+  spec: PipelineSpec,
+  vp: { x: number; y: number; zoom: number } | undefined
+): PipelineSpec {
+  if (!vp) return spec;
+  return {
+    ...spec,
+    metadata: {
+      ...spec.metadata,
+      annotations: {
+        ...(spec.metadata.annotations ?? {}),
+        [VIEWPORT_ANNOTATION]: encodeViewport(vp)
+      }
+    }
+  };
+}
+
 function nodeLabel(node: PipelineNode): string {
   if (node.type === "input") return "Input";
   if (node.type === "output") return "Output";
@@ -109,11 +171,19 @@ export function specToGraph(spec: PipelineSpec): { nodes: FlowNode[]; edges: Flo
 /**
  * Convert a React Flow graph back into a PipelineSpec. Node positions are
  * persisted under `node.ui.position` so a round-trip preserves layout.
+ *
+ * `metadata.labels` and `metadata.annotations` (when passed in) are PRESERVED,
+ * not dropped — `annotations` is where the editor stores UI state such as the
+ * viewport (see VIEWPORT_ANNOTATION), which the server tolerates and ignores.
  */
 export function graphToSpec(
   nodes: FlowNode[],
   edges: FlowEdge[],
-  metadata: { name: string; labels?: Record<string, string> }
+  metadata: {
+    name: string;
+    labels?: Record<string, string>;
+    annotations?: Record<string, string>;
+  }
 ): PipelineSpec {
   const specNodes: PipelineNode[] = nodes.map((flowNode) => {
     const node = flowNode.data.node;
@@ -132,7 +202,11 @@ export function graphToSpec(
   return {
     apiVersion: "rag-platform/v1",
     kind: "Pipeline",
-    metadata: { name: metadata.name, ...(metadata.labels ? { labels: metadata.labels } : {}) },
+    metadata: {
+      name: metadata.name,
+      ...(metadata.labels ? { labels: metadata.labels } : {}),
+      ...(metadata.annotations ? { annotations: metadata.annotations } : {})
+    },
     spec: { nodes: specNodes, edges: specEdges }
   };
 }

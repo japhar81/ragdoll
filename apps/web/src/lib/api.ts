@@ -373,8 +373,24 @@ export const api = {
   }) => request<{ secret: SecretMeta }>("POST", "/api/secrets", input),
 
   // ---- executions -------------------------------------------------------
-  listExecutions: () =>
-    request<{ executions: ExecutionRecord[] }>("GET", "/api/executions"),
+  // Tenant context rides on x-tenant-id (set via api.setTenant) like every
+  // other route — these add no special-casing. The worker writes the trace to
+  // Postgres and the API reads it, so the Builder/Executions screens *poll*
+  // these (1–1.5s) until the execution is terminal; see lib/execTrace.ts.
+  listExecutions: (params: { pipeline_id?: string; tenant_id?: string; status?: string; limit?: number } = {}) =>
+    request<{ executions: ExecutionRecord[] }>("GET", `/api/executions${qs(params)}`),
+  getExecution: (executionId: string) =>
+    request<{ execution: ExecutionRecord }>(
+      "GET",
+      `/api/executions/${encodeURIComponent(executionId)}`
+    ),
+  getExecutionTrace: (executionId: string) =>
+    request<{
+      executionId: string;
+      execution: ExecutionRecord;
+      nodes: ExecutionNodeRecord[];
+    }>("GET", `/api/executions/${encodeURIComponent(executionId)}/trace`),
+  /** Back-compat alias for getExecutionTrace (older callers). */
   getTrace: (executionId: string) =>
     request<{
       executionId: string;
