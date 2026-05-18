@@ -22,9 +22,14 @@ import {
   PostgresExecutionStore,
   PostgresSecretRepository,
   PostgresTenantRepository,
+  PostgresPipelineRepository,
   PostgresPipelineVersionRepository,
   PostgresPipelineDeploymentRepository,
+  PostgresConfigDefinitionRepository,
   PostgresConfigValueRepository,
+  PostgresProviderRepository,
+  PostgresDatasourceConnectionRepository,
+  PostgresVectorCollectionRepository,
   PostgresAuditLogRepository,
   PostgresUsageRecordRepository,
   PostgresApiKeyRepository,
@@ -87,18 +92,19 @@ async function buildDeps(): Promise<{ deps: AppDeps; pool?: PoolLike }> {
     });
     deps = {
       tenants: new PostgresTenantRepository(pool),
-      // No Postgres repos exist for these entities yet; use InMemory.
-      pipelines: new InMemoryPipelineRepository(),
+      pipelines: new PostgresPipelineRepository(pool),
       pipelineVersions: new PostgresPipelineVersionRepository(pool),
       deployments: new PostgresPipelineDeploymentRepository(pool),
-      configDefinitions: new InMemoryConfigDefinitionRepository(),
+      configDefinitions: new PostgresConfigDefinitionRepository(pool),
       configValues: new PostgresConfigValueRepository(pool),
       auditLogs: new PostgresAuditLogRepository(pool),
       usageRecords: new PostgresUsageRecordRepository(pool),
+      // No control-plane plugin registry table is read on the API path; the
+      // in-process plugin registry below is the source of truth for /plugins.
       plugins: new InMemoryPluginRepository(),
-      providers: new InMemoryProviderRepository(),
-      datasources: new InMemoryDatasourceConnectionRepository(),
-      vectorCollections: new InMemoryVectorCollectionRepository(),
+      providers: new PostgresProviderRepository(pool),
+      datasources: new PostgresDatasourceConnectionRepository(pool),
+      vectorCollections: new PostgresVectorCollectionRepository(pool),
       // PostgresExecutionStore is write-only; expose an InMemory reader for the
       // control-plane read paths until a Postgres execution reader exists.
       executionStore: new InMemoryExecutionStore() as ReadableExecutionStore,

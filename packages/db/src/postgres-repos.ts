@@ -6,17 +6,29 @@ import type {
   ApiKeyRow,
   AuditLogRepository,
   AuditLogRow,
+  ConfigDefinitionRepository,
+  ConfigDefinitionRow,
   ConfigValueRepository,
   ConfigValueRow,
   ConfigValueScopeFilter,
+  DatasourceConnectionRepository,
+  DatasourceConnectionRow,
   PipelineDeploymentRepository,
   PipelineDeploymentRow,
+  PipelineRepository,
+  PipelineRow,
   PipelineVersionRepository,
   PipelineVersionRow,
+  ProviderModelRepository,
+  ProviderModelRow,
+  ProviderRepository,
+  ProviderRow,
   TenantRepository,
   TenantRow,
   UsageRecordRepository,
-  UsageRecordRow
+  UsageRecordRow,
+  VectorCollectionRepository,
+  VectorCollectionRow
 } from "./types.ts";
 
 function camelToSnake(key: string): string {
@@ -152,6 +164,206 @@ export class PostgresTenantRepository
       await this.queryRows(`SELECT * FROM tenants WHERE slug = $1`, [slug])
     )[0];
   }
+}
+
+export class PostgresPipelineRepository
+  extends PostgresCrudRepository<PipelineRow>
+  implements PipelineRepository
+{
+  constructor(pool: PoolLike) {
+    super(pool, "pipelines", "pipeline", ["labels"]);
+  }
+  async findBySlug(slug: string): Promise<PipelineRow | undefined> {
+    return (
+      await this.queryRows(`SELECT * FROM pipelines WHERE slug = $1`, [slug])
+    )[0];
+  }
+}
+
+export class PostgresProviderRepository
+  extends PostgresCrudRepository<ProviderRow>
+  implements ProviderRepository
+{
+  constructor(pool: PoolLike) {
+    super(pool, "providers", "provider", ["config"]);
+  }
+  async findByProviderId(providerId: string): Promise<ProviderRow | undefined> {
+    return (
+      await this.queryRows(`SELECT * FROM providers WHERE provider_id = $1`, [
+        providerId
+      ])
+    )[0];
+  }
+}
+
+export class PostgresProviderModelRepository
+  extends PostgresCrudRepository<ProviderModelRow>
+  implements ProviderModelRepository
+{
+  constructor(pool: PoolLike) {
+    super(pool, "provider_models", "provider_model", ["metadata"]);
+  }
+  async listByProvider(providerId: string): Promise<ProviderModelRow[]> {
+    return this.queryRows(
+      `SELECT * FROM provider_models WHERE provider_id = $1`,
+      [providerId]
+    );
+  }
+}
+
+export class PostgresDatasourceConnectionRepository
+  extends PostgresCrudRepository<DatasourceConnectionRow>
+  implements DatasourceConnectionRepository
+{
+  constructor(pool: PoolLike) {
+    super(pool, "datasource_connections", "datasource_connection", [
+      "configRedacted"
+    ]);
+  }
+  async listByTenant(tenantId: string): Promise<DatasourceConnectionRow[]> {
+    return this.queryRows(
+      `SELECT * FROM datasource_connections WHERE tenant_id = $1`,
+      [tenantId]
+    );
+  }
+}
+
+export class PostgresVectorCollectionRepository
+  extends PostgresCrudRepository<VectorCollectionRow>
+  implements VectorCollectionRepository
+{
+  constructor(pool: PoolLike) {
+    super(pool, "vector_collections", "vector_collection", [
+      "embeddingProfile"
+    ]);
+  }
+  async findByName(
+    collectionName: string
+  ): Promise<VectorCollectionRow | undefined> {
+    return (
+      await this.queryRows(
+        `SELECT * FROM vector_collections WHERE collection_name = $1`,
+        [collectionName]
+      )
+    )[0];
+  }
+  async listByTenantPipeline(
+    tenantId: string,
+    pipelineId: string,
+    environment: string
+  ): Promise<VectorCollectionRow[]> {
+    return this.queryRows(
+      `SELECT * FROM vector_collections
+       WHERE tenant_id = $1 AND pipeline_id = $2 AND environment = $3`,
+      [tenantId, pipelineId, environment]
+    );
+  }
+}
+
+/**
+ * Postgres `ConfigDefinitionRepository` over the `config_definitions` table.
+ * The table is keyed by `key` (not `id`), so it cannot reuse the generic
+ * `PostgresCrudRepository`; `upsert` performs an `ON CONFLICT (key)` merge.
+ */
+export class PostgresConfigDefinitionRepository
+  implements ConfigDefinitionRepository
+{
+  private pool: PoolLike;
+
+  constructor(pool: PoolLike) {
+    this.pool = pool;
+  }
+
+  async upsert(row: ConfigDefinitionRow): Promise<ConfigDefinitionRow> {
+    const result = await this.pool.query<Record<string, unknown>>(
+      `INSERT INTO config_definitions
+         (key, type, default_value, allowed_scopes, required, secret,
+          sensitive, overridable, inherited, nullable, tenant_overridable,
+          runtime_overridable, validation, description)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+       ON CONFLICT (key) DO UPDATE SET
+         type = EXCLUDED.type,
+         default_value = EXCLUDED.default_value,
+         allowed_scopes = EXCLUDED.allowed_scopes,
+         required = EXCLUDED.required,
+         secret = EXCLUDED.secret,
+         sensitive = EXCLUDED.sensitive,
+         overridable = EXCLUDED.overridable,
+         inherited = EXCLUDED.inherited,
+         nullable = EXCLUDED.nullable,
+         tenant_overridable = EXCLUDED.tenant_overridable,
+         runtime_overridable = EXCLUDED.runtime_overridable,
+         validation = EXCLUDED.validation,
+         description = EXCLUDED.description
+       RETURNING *`,
+      [
+        row.key,
+        row.type,
+        row.defaultValue === undefined ? null : JSON.stringify(row.defaultValue),
+        row.allowedScopes,
+        row.required,
+        row.secret,
+        row.sensitive,
+        row.overridable,
+        row.inherited,
+        row.nullable,
+        row.tenantOverridable,
+        row.runtimeOverridable,
+        JSON.stringify(row.validation ?? {}),
+        row.description ?? null
+      ]
+    );
+    return mapConfigDefinition(result.rows[0]);
+  }
+
+  async get(key: string): Promise<ConfigDefinitionRow | undefined> {
+    const result = await this.pool.query<Record<string, unknown>>(
+      `SELECT * FROM config_definitions WHERE key = $1`,
+      [key]
+    );
+    return result.rows[0] ? mapConfigDefinition(result.rows[0]) : undefined;
+  }
+
+  async require(key: string): Promise<ConfigDefinitionRow> {
+    const row = await this.get(key);
+    if (!row) throw new NotFoundError("config_definition", key);
+    return row;
+  }
+
+  async delete(key: string): Promise<void> {
+    await this.pool.query(`DELETE FROM config_definitions WHERE key = $1`, [
+      key
+    ]);
+  }
+
+  async list(): Promise<ConfigDefinitionRow[]> {
+    const result = await this.pool.query<Record<string, unknown>>(
+      `SELECT * FROM config_definitions`
+    );
+    return result.rows.map(mapConfigDefinition);
+  }
+}
+
+function mapConfigDefinition(
+  row: Record<string, unknown>
+): ConfigDefinitionRow {
+  return {
+    key: row.key as string,
+    type: row.type as ConfigDefinitionRow["type"],
+    defaultValue: row.default_value,
+    allowedScopes: (row.allowed_scopes ??
+      []) as ConfigDefinitionRow["allowedScopes"],
+    required: row.required as boolean,
+    secret: row.secret as boolean,
+    sensitive: row.sensitive as boolean,
+    overridable: row.overridable as boolean,
+    inherited: row.inherited as boolean,
+    nullable: row.nullable as boolean,
+    tenantOverridable: row.tenant_overridable as boolean,
+    runtimeOverridable: row.runtime_overridable as boolean,
+    validation: (row.validation ?? {}) as Record<string, unknown>,
+    description: (row.description as string | null) ?? null
+  };
 }
 
 export class PostgresPipelineVersionRepository

@@ -12,8 +12,13 @@ import {
   InMemoryTenantPipelineRepository,
   InMemoryTenantRepository,
   InMemoryUsageRecordRepository,
-  NotFoundError
+  NotFoundError,
+  PostgresConfigDefinitionRepository,
+  PostgresPipelineRepository,
+  PostgresProviderRepository,
+  PostgresVectorCollectionRepository
 } from "../src/index.ts";
+import type { PoolLike, QueryResultLike } from "../src/pool.ts";
 import { defaultMigrationsDir } from "../src/migrate.ts";
 import { readdir } from "node:fs/promises";
 
@@ -328,4 +333,164 @@ test("migrations directory resolves and contains ordered sql files", async () =>
   assert.ok(files.includes("001_initial_schema.sql"));
   assert.ok(files.includes("002_auth.sql"));
   assert.deepEqual([...files], files.slice().sort());
+});
+
+/**
+ * A scripted fake `PoolLike` that records every SQL call and replays canned
+ * result rows. Lets the Postgres repos be unit-tested for table name + column
+ * mapping with no `pg` import (keeps `npm test` install-free / offline).
+ */
+class FakePool implements PoolLike {
+  calls: Array<{ text: string; params: unknown[] }> = [];
+  private results: QueryResultLike[];
+  private cursor = 0;
+
+  constructor(results: QueryResultLike[]) {
+    this.results = results;
+  }
+
+  async query<R = Record<string, unknown>>(
+    text: string,
+    params: unknown[] = []
+  ): Promise<QueryResultLike<R>> {
+    this.calls.push({ text, params });
+    const next = this.results[this.cursor] ?? { rows: [], rowCount: 0 };
+    this.cursor += 1;
+    return next as QueryResultLike<R>;
+  }
+
+  async connect(): Promise<never> {
+    throw new Error("connect not used in these tests");
+  }
+
+  async end(): Promise<void> {}
+}
+
+test("PostgresPipelineRepository maps table/columns and findBySlug", async () => {
+  const pool = new FakePool([
+    {
+      rows: [
+        {
+          id: "p1",
+          slug: "local-demo",
+          name: "Local Demo",
+          description: null,
+          labels: {},
+          created_at: "2026-01-01T00:00:00.000Z",
+          updated_at: "2026-01-01T00:00:00.000Z"
+        }
+      ],
+      rowCount: 1
+    }
+  ]);
+  const repo = new PostgresPipelineRepository(pool);
+  const found = await repo.findBySlug("local-demo");
+  assert.equal(found?.id, "p1");
+  assert.equal(found?.slug, "local-demo");
+  assert.match(pool.calls[0].text, /FROM pipelines WHERE slug = \$1/);
+  assert.deepEqual(pool.calls[0].params, ["local-demo"]);
+});
+
+test("PostgresProviderRepository.findByProviderId targets providers table", async () => {
+  const pool = new FakePool([
+    {
+      rows: [
+        {
+          id: "pr1",
+          provider_id: "ollama",
+          display_name: "Ollama-compatible",
+          config: {},
+          enabled: true,
+          created_at: "2026-01-01T00:00:00.000Z",
+          updated_at: "2026-01-01T00:00:00.000Z"
+        }
+      ],
+      rowCount: 1
+    }
+  ]);
+  const repo = new PostgresProviderRepository(pool);
+  const found = await repo.findByProviderId("ollama");
+  assert.equal(found?.providerId, "ollama");
+  assert.equal(found?.displayName, "Ollama-compatible");
+  assert.match(pool.calls[0].text, /FROM providers WHERE provider_id = \$1/);
+});
+
+test("PostgresVectorCollectionRepository.findByName maps embeddingProfile", async () => {
+  const pool = new FakePool([
+    {
+      rows: [
+        {
+          id: "vc1",
+          tenant_id: "t1",
+          pipeline_id: "p1",
+          environment: "dev",
+          collection_name: "rag_dev",
+          isolation_mode: "shared_collection_tenant_filter",
+          embedding_profile: { provider: "ollama", dimensions: 768 },
+          created_at: "2026-01-01T00:00:00.000Z"
+        }
+      ],
+      rowCount: 1
+    }
+  ]);
+  const repo = new PostgresVectorCollectionRepository(pool);
+  const found = await repo.findByName("rag_dev");
+  assert.equal(found?.collectionName, "rag_dev");
+  assert.deepEqual(found?.embeddingProfile, {
+    provider: "ollama",
+    dimensions: 768
+  });
+  assert.match(
+    pool.calls[0].text,
+    /FROM vector_collections WHERE collection_name = \$1/
+  );
+});
+
+test("PostgresConfigDefinitionRepository upsert/list maps key-scoped rows", async () => {
+  const dbRow = {
+    key: "llm.provider",
+    type: "string",
+    default_value: "openai",
+    allowed_scopes: ["global", "tenant"],
+    required: false,
+    secret: false,
+    sensitive: false,
+    overridable: true,
+    inherited: true,
+    nullable: false,
+    tenant_overridable: true,
+    runtime_overridable: true,
+    validation: {},
+    description: "Default chat provider"
+  };
+  const pool = new FakePool([
+    { rows: [dbRow], rowCount: 1 },
+    { rows: [dbRow], rowCount: 1 }
+  ]);
+  const repo = new PostgresConfigDefinitionRepository(pool);
+  const saved = await repo.upsert({
+    key: "llm.provider",
+    type: "string",
+    defaultValue: "openai",
+    allowedScopes: ["global", "tenant"],
+    required: false,
+    secret: false,
+    sensitive: false,
+    overridable: true,
+    inherited: true,
+    nullable: false,
+    tenantOverridable: true,
+    runtimeOverridable: true,
+    validation: {},
+    description: "Default chat provider"
+  });
+  assert.equal(saved.key, "llm.provider");
+  assert.equal(saved.tenantOverridable, true);
+  assert.match(
+    pool.calls[0].text,
+    /INSERT INTO config_definitions[\s\S]*ON CONFLICT \(key\) DO UPDATE/
+  );
+  const all = await repo.list();
+  assert.equal(all.length, 1);
+  assert.deepEqual(all[0].allowedScopes, ["global", "tenant"]);
 });
