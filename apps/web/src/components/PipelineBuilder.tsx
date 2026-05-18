@@ -14,17 +14,15 @@ import ReactFlow, {
 } from "reactflow";
 import "reactflow/dist/style.css";
 import { useQuery } from "@tanstack/react-query";
-import { api, ApiError } from "../lib/api.ts";
+import { api, ApiError, type PluginInfo } from "../lib/api.ts";
 import { stringifyYaml } from "../lib/yaml.ts";
 import {
-  PLUGIN_CATEGORIES,
   applyResolved,
   decodeViewport,
   extractConfigRefs,
   extractSecretRefs,
   graphToSpec,
   newIoNode,
-  newNodeForCategory,
   specToGraph,
   withViewportAnnotation
 } from "../lib/spec.ts";
@@ -34,6 +32,12 @@ import {
   nodeKind,
   validateConnection
 } from "../lib/graph.ts";
+import {
+  decodePaletteDrag,
+  newNodeFromPlugin,
+  type PaletteDragItem
+} from "../lib/palette.ts";
+import { PalettePanel } from "./PalettePanel.tsx";
 import { FlowNodeCard } from "./FlowNodeCard.tsx";
 import { PluginEditorSlot } from "./PluginEditorSlot.tsx";
 import { SecretsEditor } from "./SecretsEditor.tsx";
@@ -52,7 +56,6 @@ import type {
   FlowNode,
   PipelineNode,
   PipelineSpec,
-  PluginCategory,
   SecretRef
 } from "../lib/types.ts";
 import type { EditingPipeline } from "../App.tsx";
@@ -338,6 +341,21 @@ export function PipelineBuilder(props: {
     }
   }, []);
 
+  // Every registered plugin, fetched once and shared with the palette. The
+  // descriptor a drag/click carries only holds the plugin REF; we look the
+  // full PluginInfo back up here so a dropped node arrives with its
+  // schema-default config pre-filled (no JSON incantations).
+  const plugins = useQuery({
+    queryKey: ["plugins"],
+    queryFn: () => api.listPlugins(),
+    retry: false,
+    staleTime: 5 * 60 * 1000
+  });
+  const pluginList = useMemo<PluginInfo[]>(
+    () => plugins.data?.plugins ?? [],
+    [plugins.data]
+  );
+
   const resolved = useQuery({
     queryKey: ["resolved-config", pipelineId, tenantId, environment],
     queryFn: () =>
@@ -499,16 +517,37 @@ export function PipelineBuilder(props: {
   );
 
   const addNode = useCallback(
-    (category: PluginCategory | "input" | "output", position?: { x: number; y: number }) => {
+    (item: PaletteDragItem, position?: { x: number; y: number }) => {
       setNodes((current) => {
         const existing = new Set(current.map((n) => n.id));
-        let id = category;
+        // Base id seed: the io kind, or the plugin id (so dropped nodes read
+        // as e.g. `crawl4ai_crawler`, not `datasource`). Uniqueness preserved.
+        const base = item.kind === "io" ? item.io : item.id;
+        let id = base;
         let n = 1;
-        while (existing.has(id)) id = `${category}_${n++}`;
-        const pipelineNode: PipelineNode =
-          category === "input" || category === "output"
-            ? newIoNode(category, id)
-            : newNodeForCategory(category, id);
+        while (existing.has(id)) id = `${base}_${n++}`;
+        let pipelineNode: PipelineNode;
+        if (item.kind === "io") {
+          pipelineNode = newIoNode(item.io, id);
+        } else {
+          // Look the full PluginInfo back up so the dropped node arrives with
+          // its schema-default config seeded for the inspector form.
+          const info = pluginList.find(
+            (p) =>
+              p.category === item.category &&
+              p.id === item.id &&
+              p.version === item.version
+          );
+          pipelineNode = newNodeFromPlugin(
+            {
+              category: item.category,
+              id: item.id,
+              version: item.version,
+              configSchema: info?.configSchema
+            },
+            id
+          );
+        }
         const flow = specToGraph({
           ...STARTER_SPEC,
           spec: { nodes: [pipelineNode], edges: [] }
@@ -519,7 +558,7 @@ export function PipelineBuilder(props: {
         return [...current, { ...flow, type: "ragNode" } as unknown as Node];
       });
     },
-    [setNodes]
+    [setNodes, pluginList]
   );
 
   const onDragOver = useCallback((event: React.DragEvent) => {
@@ -531,13 +570,14 @@ export function PipelineBuilder(props: {
     (event: React.DragEvent) => {
       event.preventDefault();
       const raw = event.dataTransfer.getData(DND_MIME);
-      if (!raw || !rfRef.current || !canvasRef.current) return;
+      const item = decodePaletteDrag(raw);
+      if (!item || !rfRef.current || !canvasRef.current) return;
       const bounds = canvasRef.current.getBoundingClientRect();
       const position = rfRef.current.project({
         x: event.clientX - bounds.left,
         y: event.clientY - bounds.top
       });
-      addNode(raw as PluginCategory | "input" | "output", position);
+      addNode(item, position);
     },
     [addNode]
   );
@@ -886,23 +926,12 @@ export function PipelineBuilder(props: {
           gridTemplateColumns: `220px minmax(0, 1fr) 6px ${inspectorWidth}px`
         }}
       >
-        <aside className="palette">
-          <h2>Node Palette</h2>
-          <p className="muted">Click to add, or drag onto the canvas.</p>
-          {(["input", "output", ...PLUGIN_CATEGORIES] as const).map((cat) => (
-            <button
-              key={cat}
-              draggable
-              onDragStart={(e) => {
-                e.dataTransfer.setData(DND_MIME, cat);
-                e.dataTransfer.effectAllowed = "move";
-              }}
-              onClick={() => addNode(cat)}
-            >
-              + {cat}
-            </button>
-          ))}
-        </aside>
+        <PalettePanel
+          plugins={pluginList}
+          isLoading={plugins.isLoading}
+          isError={plugins.isError}
+          onAdd={(item) => addNode(item)}
+        />
         <div
           className="canvas"
           ref={canvasRef}
