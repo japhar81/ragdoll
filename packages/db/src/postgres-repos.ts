@@ -31,6 +31,20 @@ import type {
   VectorCollectionRow
 } from "./types.ts";
 
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Coerce a value to a Postgres `uuid` literal, or NULL when it is not a valid
+ * UUID. Dev principals use non-UUID ids (e.g. "smoke", "dev-user"); writing
+ * those into nullable `uuid` FK columns would raise
+ * `invalid input syntax for type uuid`. The audit/identity columns that are
+ * NOT uuid-typed still preserve the original identity.
+ */
+export function toUuidOrNull(value: unknown): string | null {
+  return typeof value === "string" && UUID_RE.test(value) ? value : null;
+}
+
 function camelToSnake(key: string): string {
   return key.replace(/[A-Z]/g, (c) => `_${c.toLowerCase()}`);
 }
@@ -527,9 +541,9 @@ export class PostgresAuditLogRepository implements AuditLogRepository {
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
        RETURNING *`,
       [
-        row.actorId ?? null,
-        row.tenantId ?? null,
-        row.pipelineId ?? null,
+        toUuidOrNull(row.actorId),
+        toUuidOrNull(row.tenantId),
+        toUuidOrNull(row.pipelineId),
         row.action,
         row.targetType,
         row.targetId,

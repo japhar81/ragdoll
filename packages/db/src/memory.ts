@@ -563,4 +563,26 @@ export class InMemoryExecutionStore implements ExecutionStore {
   async recordUsage(record: UsageRecord): Promise<void> {
     this.usage.push(structuredClone(record));
   }
+
+  // Async read methods (the control-plane `ReadableExecutionStore` contract).
+  async listExecutions(tenantId?: string): Promise<ExecutionRecord[]> {
+    return this.executions
+      .filter((e) => tenantId === undefined || e.tenantId === tenantId)
+      .map((e) => structuredClone(e));
+  }
+
+  async getExecution(
+    executionId: string
+  ): Promise<ExecutionRecord | undefined> {
+    const found = this.executions.find(
+      (e) => e.executionId === executionId
+    );
+    return found ? structuredClone(found) : undefined;
+  }
+
+  async listNodes(executionId: string): Promise<ExecutionNodeRecord[]> {
+    return this.nodes
+      .filter((n) => n.executionId === executionId)
+      .map((n) => structuredClone(n));
+  }
 }

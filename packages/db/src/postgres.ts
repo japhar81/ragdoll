@@ -123,6 +123,81 @@ export class PostgresExecutionStore implements ExecutionStore {
       ]
     );
   }
+
+  // ---- read path (control-plane ReadableExecutionStore) -----------------
+  async listExecutions(tenantId?: string): Promise<ExecutionRecord[]> {
+    const result =
+      tenantId === undefined
+        ? await this.pool.query<Record<string, unknown>>(
+            `SELECT * FROM executions ORDER BY started_at DESC`
+          )
+        : await this.pool.query<Record<string, unknown>>(
+            `SELECT * FROM executions WHERE tenant_id = $1 ORDER BY started_at DESC`,
+            [tenantId]
+          );
+    return result.rows.map(rowToExecutionRecord);
+  }
+
+  async getExecution(
+    executionId: string
+  ): Promise<ExecutionRecord | undefined> {
+    const result = await this.pool.query<Record<string, unknown>>(
+      `SELECT * FROM executions WHERE execution_id = $1`,
+      [executionId]
+    );
+    return result.rows[0]
+      ? rowToExecutionRecord(result.rows[0])
+      : undefined;
+  }
+
+  async listNodes(executionId: string): Promise<ExecutionNodeRecord[]> {
+    const result = await this.pool.query<Record<string, unknown>>(
+      `SELECT * FROM execution_nodes WHERE execution_id = $1 ORDER BY started_at`,
+      [executionId]
+    );
+    return result.rows.map(rowToExecutionNodeRecord);
+  }
+}
+
+function toIso(value: unknown): string | undefined {
+  if (value instanceof Date) return value.toISOString();
+  return typeof value === "string" ? value : undefined;
+}
+
+function rowToExecutionRecord(
+  row: Record<string, unknown>
+): ExecutionRecord {
+  return {
+    executionId: row.execution_id as string,
+    tenantId: row.tenant_id as string,
+    pipelineId: row.pipeline_id as string,
+    pipelineVersionId: row.pipeline_version_id as string,
+    status: row.status as ExecutionRecord["status"],
+    startedAt: toIso(row.started_at) ?? new Date(0).toISOString(),
+    completedAt: toIso(row.completed_at),
+    input: row.input_redacted ?? undefined,
+    output: row.output_redacted ?? undefined,
+    error: (row.error as string | null) ?? undefined
+  };
+}
+
+function rowToExecutionNodeRecord(
+  row: Record<string, unknown>
+): ExecutionNodeRecord {
+  return {
+    executionId: row.execution_id as string,
+    nodeId: row.node_id as string,
+    status: row.status as ExecutionNodeRecord["status"],
+    startedAt: toIso(row.started_at) ?? new Date(0).toISOString(),
+    completedAt: toIso(row.completed_at),
+    latencyMs:
+      row.latency_ms === null || row.latency_ms === undefined
+        ? undefined
+        : Number(row.latency_ms),
+    input: row.input_redacted ?? undefined,
+    output: row.output_redacted ?? undefined,
+    error: (row.error as string | null) ?? undefined
+  };
 }
 
 interface SecretJoinRow {

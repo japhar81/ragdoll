@@ -41,7 +41,7 @@ worker, and the nginx-served web UI.
 
 URLs:
 
-- Web UI: `http://localhost:8080` (nginx serves the SPA and reverse-proxies
+- Web UI: `http://localhost:8088` (nginx serves the SPA and reverse-proxies
   `/api`, `/healthz`, `/readyz` to the API)
 - API: `http://localhost:3001`
 - Postgres: `localhost:5432` (`ragdoll`/`ragdoll`)
@@ -82,7 +82,7 @@ Smoke it end to end (health, plugins, then a question through the worker):
 make smoke         # or: ./scripts/smoke.sh "What is RAGdoll?"
 ```
 
-Or via the web UI at `http://localhost:8080`.
+Or via the web UI at `http://localhost:8088`.
 
 Equivalent raw curl (the script discovers the seeded pipeline + tenant ids
 for you):

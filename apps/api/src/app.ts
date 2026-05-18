@@ -104,14 +104,19 @@ export interface AppResponse {
 /**
  * An execution store the API can both write to (when seeding from a queued
  * run) and read traces from. The runtime `ExecutionStore` only defines writes;
- * for the control plane we also need read access, so the app accepts a
- * `ReadableExecutionStore` that exposes the underlying records. The InMemory
- * store satisfies this structurally; a Postgres-backed reader can wrap the
- * pool.
+ * for the control plane we also need read access via async query methods, so
+ * the app accepts a `ReadableExecutionStore`. The InMemory store implements
+ * the async methods over its in-process arrays (which it still exposes as the
+ * optional sync `executions`/`nodes` for tests); a Postgres-backed reader
+ * queries the executions / execution_nodes tables.
  */
 export interface ReadableExecutionStore extends ExecutionStore {
-  executions: ExecutionRecord[];
-  nodes: ExecutionNodeRecord[];
+  listExecutions(tenantId?: string): Promise<ExecutionRecord[]>;
+  getExecution(executionId: string): Promise<ExecutionRecord | undefined>;
+  listNodes(executionId: string): Promise<ExecutionNodeRecord[]>;
+  /** Optional sync arrays kept by the InMemory store for tests. */
+  executions?: ExecutionRecord[];
+  nodes?: ExecutionNodeRecord[];
 }
 
 export interface AppDeps {
@@ -846,19 +851,17 @@ export function createApp(deps: AppDeps): App {
   route("GET", "/api/executions", async (ctx) => {
     enforce(ctx.principal, "execution:view_logs");
     const tenantId = tenantScope(ctx);
-    const executions = deps.executionStore.executions.filter((execution) =>
+    const scope =
       ctx.principal.roles.includes("platform_admin") || !tenantId
-        ? true
-        : execution.tenantId === tenantId
-    );
+        ? undefined
+        : tenantId;
+    const executions = await deps.executionStore.listExecutions(scope);
     return ok({ executions });
   });
 
   route("GET", "/api/executions/:id", async (ctx) => {
     enforce(ctx.principal, "execution:view_logs");
-    const execution = deps.executionStore.executions.find(
-      (record) => record.executionId === ctx.params.id
-    );
+    const execution = await deps.executionStore.getExecution(ctx.params.id);
     if (!execution) return error(404, "not_found");
     if (
       !ctx.principal.roles.includes("platform_admin") &&
@@ -872,9 +875,7 @@ export function createApp(deps: AppDeps): App {
 
   route("GET", "/api/executions/:id/trace", async (ctx) => {
     enforce(ctx.principal, "execution:view_logs");
-    const execution = deps.executionStore.executions.find(
-      (record) => record.executionId === ctx.params.id
-    );
+    const execution = await deps.executionStore.getExecution(ctx.params.id);
     if (!execution) return error(404, "not_found");
     if (
       !ctx.principal.roles.includes("platform_admin") &&
@@ -883,9 +884,7 @@ export function createApp(deps: AppDeps): App {
     ) {
       return error(403, "forbidden");
     }
-    const nodes = deps.executionStore.nodes.filter(
-      (node) => node.executionId === ctx.params.id
-    );
+    const nodes = await deps.executionStore.listNodes(ctx.params.id);
     return ok({ executionId: ctx.params.id, execution, nodes });
   });
 
