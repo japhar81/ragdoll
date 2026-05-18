@@ -96,6 +96,68 @@ test("representative built-in manifests expose schema-driven config", () => {
   }
 });
 
+const ALL_CATEGORIES = [
+  "datasource",
+  "loader",
+  "parser",
+  "chunker",
+  "embedder",
+  "vector_store",
+  "retriever",
+  "reranker",
+  "llm",
+  "prompt_template",
+  "tool",
+  "guardrail",
+  "evaluator",
+  "output_parser",
+  "transformer",
+  "router",
+  "memory",
+  "sink"
+] as const;
+
+test("loaded registry has at least one plugin for every category", () => {
+  const registry = loadPluginRegistry();
+  for (const category of ALL_CATEGORIES) {
+    const plugins = registry.list(category as never);
+    assert.ok(
+      plugins.length >= 1,
+      `category ${category} should have at least one registered plugin`
+    );
+  }
+});
+
+test("every registered manifest is form-renderable (configSchema + ui icon/group)", () => {
+  const registry = loadPluginRegistry();
+  for (const plugin of registry.list()) {
+    const manifest = plugin.manifest;
+    const schema = manifest.configSchema;
+    assert.ok(schema && typeof schema === "object", `${manifest.id} has a configSchema object`);
+    assert.equal(schema?.type, "object", `${manifest.id} configSchema is an object schema`);
+    assert.ok(
+      schema?.properties !== undefined && typeof schema.properties === "object",
+      `${manifest.id} configSchema declares a properties object`
+    );
+    assert.ok(
+      typeof manifest.ui?.icon === "string" && manifest.ui.icon.length > 0,
+      `${manifest.id} declares ui.icon`
+    );
+    assert.ok(
+      typeof manifest.ui?.paletteGroup === "string" && manifest.ui.paletteGroup.length > 0,
+      `${manifest.id} declares ui.paletteGroup`
+    );
+    // Plugins that actually expose config properties must also have formHints
+    // so the UI renders proper widgets instead of guessing.
+    if (Object.keys(schema?.properties ?? {}).length > 0) {
+      assert.ok(
+        manifest.ui?.formHints && typeof manifest.ui.formHints === "object",
+        `${manifest.id} has config properties so must declare ui.formHints`
+      );
+    }
+  }
+});
+
 test("loadProviderRegistry has openai/anthropic/ollama", () => {
   const providers = loadProviderRegistry();
   assert.equal(providers.require("openai").id, "openai");
