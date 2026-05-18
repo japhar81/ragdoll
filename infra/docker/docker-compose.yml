@@ -112,8 +112,11 @@ services:
       db-init:
         condition: service_completed_successfully
     healthcheck:
+      # 127.0.0.1 (not localhost): inside the container `localhost` resolves to
+      # IPv6 ::1 first, where the IPv4-bound server does not listen, so the
+      # check would never pass and the API would stay `unhealthy`.
       test:
-        ["CMD-SHELL", "wget -qO- http://localhost:3001/healthz || exit 1"]
+        ["CMD-SHELL", "wget -qO- http://127.0.0.1:3001/healthz || exit 1"]
       interval: 5s
       timeout: 3s
       retries: 20
@@ -143,7 +146,7 @@ services:
       context: ../..
       dockerfile: infra/docker/web.Dockerfile
     ports:
-      - "8080:80"
+      - "8088:80"
     depends_on:
       api:
         condition: service_started

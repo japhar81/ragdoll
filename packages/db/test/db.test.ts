@@ -13,10 +13,13 @@ import {
   InMemoryTenantRepository,
   InMemoryUsageRecordRepository,
   NotFoundError,
+  PostgresAuditLogRepository,
   PostgresConfigDefinitionRepository,
+  PostgresExecutionStore,
   PostgresPipelineRepository,
   PostgresProviderRepository,
-  PostgresVectorCollectionRepository
+  PostgresVectorCollectionRepository,
+  toUuidOrNull
 } from "../src/index.ts";
 import type { PoolLike, QueryResultLike } from "../src/pool.ts";
 import { defaultMigrationsDir } from "../src/migrate.ts";
@@ -493,4 +496,138 @@ test("PostgresConfigDefinitionRepository upsert/list maps key-scoped rows", asyn
   const all = await repo.list();
   assert.equal(all.length, 1);
   assert.deepEqual(all[0].allowedScopes, ["global", "tenant"]);
+});
+
+test("toUuidOrNull coerces non-UUID actor ids to null", () => {
+  const uuid = "11111111-2222-4333-8444-555555555555";
+  assert.equal(toUuidOrNull(uuid), uuid);
+  assert.equal(toUuidOrNull("smoke"), null);
+  assert.equal(toUuidOrNull("dev-user"), null);
+  assert.equal(toUuidOrNull(undefined), null);
+  assert.equal(toUuidOrNull(null), null);
+});
+
+test("PostgresAuditLogRepository.append nulls non-UUID actor/tenant/pipeline", async () => {
+  const pool = new FakePool([
+    {
+      rows: [
+        {
+          id: "a1",
+          actor_id: null,
+          tenant_id: null,
+          pipeline_id: null,
+          action: "pipeline.run",
+          target_type: "execution",
+          target_id: "exec-1",
+          before_redacted: null,
+          after_redacted: null,
+          request_id: null,
+          source_ip: null,
+          user_agent: null,
+          created_at: "2026-01-01T00:00:00.000Z"
+        }
+      ],
+      rowCount: 1
+    }
+  ]);
+  const repo = new PostgresAuditLogRepository(pool);
+  await repo.append({
+    actorId: "smoke",
+    tenantId: "tenant-local",
+    pipelineId: "not-a-uuid",
+    action: "pipeline.run",
+    targetType: "execution",
+    targetId: "exec-1",
+    requestId: null,
+    sourceIp: null,
+    userAgent: null,
+    createdAt: "2026-01-01T00:00:00.000Z"
+  });
+  assert.match(pool.calls[0].text, /INSERT INTO audit_logs/);
+  // params: actor_id, tenant_id, pipeline_id, action, ...
+  assert.equal(pool.calls[0].params[0], null);
+  assert.equal(pool.calls[0].params[1], null);
+  assert.equal(pool.calls[0].params[2], null);
+});
+
+test("PostgresExecutionStore reader maps execution + node rows", async () => {
+  const pool = new FakePool([
+    {
+      rows: [
+        {
+          execution_id: "exec-1",
+          tenant_id: "t1",
+          pipeline_id: "p1",
+          pipeline_version_id: "v1",
+          environment: "dev",
+          status: "succeeded",
+          input_redacted: { question: "hi" },
+          output_redacted: { answer: "ok" },
+          error: null,
+          started_at: "2026-01-01T00:00:00.000Z",
+          completed_at: "2026-01-01T00:00:05.000Z"
+        }
+      ],
+      rowCount: 1
+    },
+    {
+      rows: [
+        {
+          execution_id: "exec-1",
+          node_id: "llm",
+          status: "succeeded",
+          input_redacted: null,
+          output_redacted: { text: "ok" },
+          error: null,
+          latency_ms: 1200,
+          started_at: "2026-01-01T00:00:01.000Z",
+          completed_at: "2026-01-01T00:00:04.000Z"
+        }
+      ],
+      rowCount: 1
+    },
+    {
+      rows: [
+        {
+          execution_id: "exec-1",
+          tenant_id: "t1",
+          pipeline_id: "p1",
+          pipeline_version_id: "v1",
+          environment: "dev",
+          status: "running",
+          input_redacted: null,
+          output_redacted: null,
+          error: null,
+          started_at: "2026-01-01T00:00:00.000Z",
+          completed_at: null
+        }
+      ],
+      rowCount: 1
+    }
+  ]);
+  const store = new PostgresExecutionStore(pool);
+
+  const one = await store.getExecution("exec-1");
+  assert.equal(one?.executionId, "exec-1");
+  assert.equal(one?.status, "succeeded");
+  assert.deepEqual(one?.output, { answer: "ok" });
+  assert.equal(one?.completedAt, "2026-01-01T00:00:05.000Z");
+  assert.match(pool.calls[0].text, /FROM executions WHERE execution_id = \$1/);
+
+  const nodes = await store.listNodes("exec-1");
+  assert.equal(nodes.length, 1);
+  assert.equal(nodes[0].nodeId, "llm");
+  assert.equal(nodes[0].latencyMs, 1200);
+  assert.match(
+    pool.calls[1].text,
+    /FROM execution_nodes WHERE execution_id = \$1/
+  );
+
+  const scoped = await store.listExecutions("t1");
+  assert.equal(scoped.length, 1);
+  assert.equal(scoped[0].tenantId, "t1");
+  assert.match(
+    pool.calls[2].text,
+    /FROM executions WHERE tenant_id = \$1/
+  );
 });

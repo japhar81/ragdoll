@@ -8,7 +8,7 @@
  */
 import { randomUUID } from "node:crypto";
 import Fastify from "fastify";
-import { createApp, type AppDeps, type ReadableExecutionStore } from "./app.ts";
+import { createApp, type AppDeps } from "./app.ts";
 import {
   AuthResolver,
   DevAuthProvider,
@@ -56,14 +56,31 @@ import {
   type SecretRepository
 } from "../../../packages/secrets/src/index.ts";
 import { getLogger } from "../../../packages/observability/src/index.ts";
-import { InMemoryQueue } from "../../../apps/worker/src/index.ts";
+import { InMemoryQueue, type QueuePort } from "../../../apps/worker/src/index.ts";
 
 async function buildDeps(): Promise<{ deps: AppDeps; pool?: PoolLike }> {
   const logger = getLogger();
   const env = process.env.RAGDOLL_ENV ?? "development";
   const databaseUrl = process.env.DATABASE_URL;
+  const redisUrl = process.env.REDIS_URL;
   const { plugins: pluginRegistry, providers: providerRegistry } = loadRegistries();
-  const queue = new InMemoryQueue();
+  // When REDIS_URL is set, enqueue onto the SAME BullMQ queue the separate
+  // worker container consumes (both default to "ragdoll-jobs"); otherwise an
+  // in-process queue. bullmq/ioredis are lazy-imported so `npm test` stays
+  // install-free.
+  let queue: QueuePort;
+  if (redisUrl) {
+    const { BullMqQueue } = await import("../../../apps/worker/src/bullmq.ts");
+    queue = new BullMqQueue({
+      redisUrl,
+      queueName: process.env.WORKER_QUEUE_NAME
+    });
+    logger.info("api using BullMQ queue", {
+      queue: process.env.WORKER_QUEUE_NAME ?? "ragdoll-jobs"
+    });
+  } else {
+    queue = new InMemoryQueue();
+  }
 
   // Auth: dev provider only outside production; session/API-key always wired.
   const sessionSecret = process.env.SESSION_SECRET ?? "dev-insecure-session-secret";
@@ -77,6 +94,7 @@ async function buildDeps(): Promise<{ deps: AppDeps; pool?: PoolLike }> {
 
   if (databaseUrl) {
     pool = await createPool({ connectionString: databaseUrl });
+    const executionStore = new PostgresExecutionStore(pool);
     const migration = await runMigrations(pool, defaultMigrationsDir());
     logger.info("migrations_applied", {
       applied: migration.applied,
@@ -105,9 +123,10 @@ async function buildDeps(): Promise<{ deps: AppDeps; pool?: PoolLike }> {
       providers: new PostgresProviderRepository(pool),
       datasources: new PostgresDatasourceConnectionRepository(pool),
       vectorCollections: new PostgresVectorCollectionRepository(pool),
-      // PostgresExecutionStore is write-only; expose an InMemory reader for the
-      // control-plane read paths until a Postgres execution reader exists.
-      executionStore: new InMemoryExecutionStore() as ReadableExecutionStore,
+      // Single Postgres store: the worker writes executions here and the
+      // control-plane read routes query the same tables, so GET
+      // /api/executions/:id reflects worker runs.
+      executionStore,
       auth,
       queue,
       secretProvider: new DatabaseEncryptedSecretProvider(
@@ -119,9 +138,6 @@ async function buildDeps(): Promise<{ deps: AppDeps; pool?: PoolLike }> {
       logger,
       env
     };
-    // Touch PostgresExecutionStore so the symbol stays referenced for ops that
-    // wire a real reader in future; not used on the read path here.
-    void PostgresExecutionStore;
   } else {
     secretRepository = new InMemorySecretRepository();
     const { InMemoryApiKeyRepository } = await import(

@@ -45,7 +45,10 @@ EXEC_ID="$(echo "$RUN" | py "print(json.load(sys.stdin)['executionId'])")"
 
 echo
 echo "== polling execution $EXEC_ID (worker runs it via CPU Ollama) =="
-for i in $(seq 1 60); do
+# CPU Ollama (first token especially) is slow: poll for up to ~10 minutes
+# with a gentle backoff before giving up.
+DONE=0
+for i in $(seq 1 120); do
   EXEC="$(curl -fsS "${ADMIN[@]}" "$API/api/executions/$EXEC_ID")"
   STATUS="$(echo "$EXEC" | py "print(json.load(sys.stdin)['execution']['status'])")"
   echo "  [$i] status=$STATUS"
@@ -53,10 +56,16 @@ for i in $(seq 1 60); do
     echo
     echo "== final execution =="
     echo "$EXEC" | py "print(json.dumps(json.load(sys.stdin),indent=2))"
+    DONE=1
     break
   fi
-  sleep 3
+  # Backoff: 3s for the first ~30s, then 5s.
+  if [ "$i" -lt 10 ]; then sleep 3; else sleep 5; fi
 done
+if [ "$DONE" -ne 1 ]; then
+  echo "ERROR: execution $EXEC_ID did not reach a terminal state in time" >&2
+  exit 1
+fi
 
 echo
-echo "Done. Web UI: http://localhost:8080  API: $API"
+echo "Done. Web UI: http://localhost:8088  API: $API"
