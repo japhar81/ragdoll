@@ -9,6 +9,7 @@ import {
   validateCron,
   type CronParts
 } from "../lib/cron.ts";
+import { useTenants } from "./useTenants.tsx";
 import { Screen } from "./Screen.tsx";
 
 function errText(e: unknown): string {
@@ -52,10 +53,7 @@ export function SchedulerScreen() {
   const [enabled, setEnabled] = useState(true);
   const [formError, setFormError] = useState<string | undefined>();
 
-  const tenants = useQuery({
-    queryKey: ["tenants"],
-    queryFn: () => api.listTenants()
-  });
+  const tenants = useTenants();
   const pipelines = useQuery({
     queryKey: ["pipelines"],
     queryFn: () => api.listPipelines()
@@ -143,11 +141,19 @@ export function SchedulerScreen() {
     >
       <h2>Create schedule</h2>
       <form className="inline-form" onSubmit={submit}>
-        <select value={tenantId} onChange={(e) => setTenantId(e.target.value)} required>
+        <select
+          value={tenantId}
+          onChange={(e) => {
+            setTenantId(e.target.value);
+            // Scope POST /api/schedules to the chosen tenant.
+            api.setTenant(e.target.value || undefined);
+          }}
+          required
+        >
           <option value="">tenant…</option>
           {(tenants.data?.tenants ?? []).map((t) => (
             <option key={t.id} value={t.id}>
-              {t.name}
+              {t.slug ? `${t.slug} — ${t.name}` : t.name}
             </option>
           ))}
         </select>

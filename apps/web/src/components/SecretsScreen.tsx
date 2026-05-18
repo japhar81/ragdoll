@@ -1,7 +1,9 @@
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../lib/api.ts";
 import { buildScopeTree, findScopeNode } from "../lib/orgtree.ts";
+import { tenantIdFromScopeKey } from "../lib/tenantContext.ts";
+import { useTenants } from "./useTenants.tsx";
 import { Screen, Table } from "./Screen.tsx";
 import { ScopeTree } from "./ConfigScreen.tsx";
 
@@ -20,10 +22,7 @@ export function SecretsScreen() {
   const [key, setKey] = useState("");
   const [value, setValue] = useState("");
 
-  const tenants = useQuery({
-    queryKey: ["tenants"],
-    queryFn: () => api.listTenants()
-  });
+  const tenants = useTenants();
   const pipelines = useQuery({
     queryKey: ["pipelines"],
     queryFn: () => api.listPipelines()
@@ -42,6 +41,12 @@ export function SecretsScreen() {
     [tenants.data, pipelines.data]
   );
   const node = findScopeNode(scopeRoot, selectedKey) ?? scopeRoot;
+
+  // Tenant/pipeline scope nodes are tenant-scoped on the API; push the tenant
+  // id (parsed from the scope key) so x-tenant-id rides every secret request.
+  useEffect(() => {
+    api.setTenant(tenantIdFromScopeKey(selectedKey));
+  }, [selectedKey]);
 
   // Secrets are managed-secret references with scope metadata. Map the scope
   // navigator to the closest secret scope: tenant node -> tenant scope,
