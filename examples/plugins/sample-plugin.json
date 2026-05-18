@@ -1,0 +1,16 @@
+{
+  "id": "sample_uppercase_transformer",
+  "name": "Sample Uppercase Transformer",
+  "version": "1.0.0",
+  "category": "transformer",
+  "description": "Example plugin manifest for docs and registry tests.",
+  "configSchema": {
+    "type": "object",
+    "properties": {
+      "field": { "type": "string", "description": "Field to uppercase." }
+    }
+  },
+  "inputSchema": { "type": "object" },
+  "outputSchema": { "type": "object" },
+  "capabilities": ["query"]
+}

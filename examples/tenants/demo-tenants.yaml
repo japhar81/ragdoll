@@ -1,0 +1,13 @@
+tenants:
+  - id: tenant-a
+    slug: tenant-a
+    name: Tenant A
+    provider: openai
+  - id: tenant-b
+    slug: tenant-b
+    name: Tenant B
+    provider: anthropic
+  - id: tenant-local
+    slug: tenant-local
+    name: Tenant Local Ollama
+    provider: ollama

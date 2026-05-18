@@ -1,0 +1,72 @@
+apiVersion: rag-platform/v1
+kind: Pipeline
+metadata:
+  name: support-rag
+  labels:
+    domain: support
+spec:
+  parameters:
+    - key: retrieval.top_k
+      type: integer
+      defaultValue: 5
+      allowedScopes: [global, pipeline, tenant_pipeline, runtime]
+      tenantOverridable: true
+      runtimeOverridable: true
+      description: Number of retrieved chunks.
+    - key: chunking.chunk_size
+      type: integer
+      defaultValue: 1000
+      allowedScopes: [pipeline]
+      tenantOverridable: false
+      runtimeOverridable: false
+      description: Locked chunk size for index compatibility.
+  nodes:
+    - id: input
+      type: input
+    - id: retrieve
+      plugin:
+        category: retriever
+        id: qdrant_retriever
+        version: "1.0.0"
+      config:
+        top_k: "${config.retrieval.top_k}"
+        collection: "${config.vector.collection}"
+    - id: prompt
+      plugin:
+        category: prompt_template
+        id: basic_rag_prompt
+        version: "1.0.0"
+    - id: guardrail
+      plugin:
+        category: guardrail
+        id: simple_keyword_guardrail
+        version: "1.0.0"
+      config:
+        blockedKeywords: ["ignore previous instructions"]
+    - id: llm
+      plugin:
+        category: llm
+        id: provider_chat
+        version: "1.0.0"
+      config:
+        provider: "${config.llm.provider}"
+        model: "${config.llm.model}"
+        temperature: "${config.llm.temperature}"
+        baseUrl: "${config.llm.base_url}"
+      secrets:
+        apiKey:
+          scope: tenant
+          key: llm.api_key
+    - id: output
+      type: output
+  edges:
+    - from: input
+      to: retrieve
+    - from: retrieve
+      to: prompt
+    - from: prompt
+      to: guardrail
+    - from: guardrail
+      to: llm
+    - from: llm
+      to: output

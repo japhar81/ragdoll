@@ -1,0 +1,20 @@
+tenant_pipeline_overrides:
+  - tenant_id: tenant-a
+    pipeline_id: support-rag
+    environment: prod
+    values:
+      llm.provider: openai
+      llm.model: gpt-4o-mini
+  - tenant_id: tenant-b
+    pipeline_id: support-rag
+    environment: prod
+    values:
+      llm.provider: anthropic
+      llm.model: claude-3-5-sonnet-latest
+  - tenant_id: tenant-local
+    pipeline_id: support-rag
+    environment: prod
+    values:
+      llm.provider: ollama
+      llm.model: llama3.1
+      llm.base_url: http://ollama:11434

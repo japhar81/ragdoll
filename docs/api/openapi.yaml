@@ -1,0 +1,479 @@
+openapi: 3.1.0
+info:
+  title: RAGdoll Control Plane API
+  version: 0.1.0
+  description: >-
+    Framework-agnostic control plane implemented in apps/api/src/app.ts and
+    served via Fastify in apps/api/src/server.ts. All /api/* routes require
+    authentication (Bearer session token, ApiKey, x-api-key, or — outside
+    production — the insecure DevAuthProvider header fallback). Authorization is
+    enforced per-route with RBAC permissions and tenant scoping. Mutating and
+    execution actions write a redacted audit log entry.
+servers:
+  - url: http://localhost:3001
+components:
+  responses:
+    Unauthorized:
+      description: Missing or invalid credentials
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              error: { type: string, const: unauthorized }
+              message: { type: string }
+    Forbidden:
+      description: Authenticated but lacking the required permission / tenant scope
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              error: { type: string, const: forbidden }
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              error: { type: string, const: not_found }
+    ValidationFailed:
+      description: Request body or spec failed validation
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              error: { type: string, const: validation_failed }
+              issues: { type: array, items: { type: object } }
+    Conflict:
+      description: Slug/version conflict or immutable published version
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              error:
+                type: string
+                enum: [conflict, immutable_version, no_active_deployment]
+              message: { type: string }
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+    apiKeyAuth:
+      type: apiKey
+      in: header
+      name: x-api-key
+security:
+  - bearerAuth: []
+  - apiKeyAuth: []
+paths:
+  /healthz:
+    get:
+      summary: Liveness probe (public, unauthenticated)
+      security: []
+      responses:
+        "200": { description: Alive }
+  /readyz:
+    get:
+      summary: Readiness probe (public, unauthenticated)
+      security: []
+      responses:
+        "200": { description: Ready }
+
+  /api/tenants:
+    get:
+      summary: List tenants (platform_admin sees all; others see own tenant)
+      responses:
+        "200": { description: Tenant list }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      summary: Create tenant
+      responses:
+        "201": { description: Created }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+  /api/tenants/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
+    get:
+      summary: Get tenant
+      responses:
+        "200": { description: Tenant }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    put:
+      summary: Update tenant
+      responses:
+        "200": { description: Updated }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+    delete:
+      summary: Delete tenant
+      responses:
+        "204": { description: Deleted }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/pipelines:
+    get:
+      summary: List pipelines
+      responses:
+        "200": { description: Pipeline list }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    post:
+      summary: Create pipeline
+      responses:
+        "201": { description: Created }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+  /api/pipelines/{pipeline_id}:
+    parameters:
+      - name: pipeline_id
+        in: path
+        required: true
+        schema: { type: string }
+    get:
+      summary: Get pipeline
+      responses:
+        "200": { description: Pipeline }
+        "404": { $ref: "#/components/responses/NotFound" }
+    put:
+      summary: Update pipeline
+      responses:
+        "200": { description: Updated }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      summary: Delete pipeline
+      responses:
+        "204": { description: Deleted }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /api/pipelines/validate:
+    post:
+      summary: Validate a pipeline spec (JSON object or JSON/YAML string)
+      responses:
+        "200": { description: PipelineValidationResult }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+  /api/pipelines/{pipeline_id}/versions:
+    parameters:
+      - name: pipeline_id
+        in: path
+        required: true
+        schema: { type: string }
+    get:
+      summary: List pipeline versions
+      responses:
+        "200": { description: Version list }
+        "404": { $ref: "#/components/responses/NotFound" }
+    post:
+      summary: >-
+        Save a draft (mutable) or publish an immutable version. Set
+        body.publish=true to publish. Republishing identical content is
+        idempotent (200); republishing changed content under a published
+        version returns 409 immutable_version.
+      responses:
+        "201": { description: Draft created / version published }
+        "200": { description: Idempotent republish or draft re-save }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+  /api/pipelines/{pipeline_id}/versions/{version}/archive:
+    post:
+      summary: Archive a pipeline version
+      parameters:
+        - name: pipeline_id
+          in: path
+          required: true
+          schema: { type: string }
+        - name: version
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200": { description: Archived version }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /api/pipelines/{pipeline_id}/versions/{version}/export:
+    get:
+      summary: Export a version spec as json or yaml
+      parameters:
+        - name: pipeline_id
+          in: path
+          required: true
+          schema: { type: string }
+        - name: version
+          in: path
+          required: true
+          schema: { type: string }
+        - name: format
+          in: query
+          schema: { type: string, enum: [json, yaml] }
+      responses:
+        "200": { description: Serialized spec }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /api/pipelines/{pipeline_id}/deployments:
+    parameters:
+      - name: pipeline_id
+        in: path
+        required: true
+        schema: { type: string }
+    get:
+      summary: List deployments
+      responses:
+        "200": { description: Deployment list }
+        "404": { $ref: "#/components/responses/NotFound" }
+    post:
+      summary: Deploy a published version (optionally tenant-scoped)
+      responses:
+        "201": { description: Deployment created }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+  /api/pipelines/{pipeline_id}/run:
+    post:
+      summary: >-
+        Resolve the active deployed version, validate, enqueue a run_pipeline
+        job, seed a queued execution record, and return 202. Execution happens
+        in the worker, not the API process.
+      parameters:
+        - name: pipeline_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "202": { description: Execution accepted (executionId + jobId) }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+  /api/pipelines/{pipeline_id}/ingest:
+    post:
+      summary: Enqueue an ingest_datasource job for the deployed version
+      parameters:
+        - name: pipeline_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "202": { description: Ingestion accepted (jobId) }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /api/pipelines/{pipeline_id}/stream:
+    post:
+      summary: >-
+        SSE endpoint. The control plane has no streaming-capable provider, so it
+        honestly emits a `status: not_enabled` event then `done`. Token
+        streaming is delivered by a streaming provider in the worker.
+      parameters:
+        - name: pipeline_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: text/event-stream with a not_enabled status event
+          content:
+            text/event-stream: {}
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /api/config/definitions:
+    get:
+      summary: List config definitions
+      responses:
+        "200": { description: Definition list }
+  /api/config/definitions/{key}:
+    put:
+      summary: Upsert a config definition
+      parameters:
+        - name: key
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200": { description: Updated }
+        "201": { description: Created }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+    delete:
+      summary: Delete a config definition
+      parameters:
+        - name: key
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "204": { description: Deleted }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /api/config/values:
+    get:
+      summary: List config values (sensitive values defensively redacted)
+      parameters:
+        - name: key
+          in: query
+          schema: { type: string }
+        - name: scope
+          in: query
+          schema: { type: string }
+        - name: scope_id
+          in: query
+          schema: { type: string }
+      responses:
+        "200": { description: Config value list }
+    post:
+      summary: >-
+        Upsert a config value. The required permission is chosen from the scope
+        (config:edit_global / config:edit_tenant / config:edit_pipeline).
+      responses:
+        "201": { description: Upserted (value redacted in response) }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+  /api/config/values/{id}:
+    delete:
+      summary: Delete a config value
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "204": { description: Deleted }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /api/config/resolved:
+    get:
+      summary: >-
+        Resolve effective configuration for a pipeline/tenant/environment with
+        secret redaction. Non-platform-admin callers may only resolve their own
+        tenant.
+      parameters:
+        - name: pipeline_id
+          in: query
+          required: true
+          schema: { type: string }
+        - name: tenant_id
+          in: query
+          required: true
+          schema: { type: string }
+        - name: environment
+          in: query
+          required: true
+          schema: { type: string }
+      responses:
+        "200": { description: ResolvedConfig with explanations + violations }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+
+  /api/secrets:
+    get:
+      summary: List secret metadata only (value always REDACTED)
+      responses:
+        "200": { description: Redacted secret metadata }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      summary: Create a secret via DatabaseEncryptedSecretProvider
+      responses:
+        "201": { description: Created (value REDACTED, never plaintext) }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+  /api/secrets/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
+    put:
+      summary: Rotate a secret (returns new version, value REDACTED)
+      responses:
+        "200": { description: Rotated }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+    delete:
+      summary: Delete a secret (body must carry key/scope to identify the ref)
+      responses:
+        "204": { description: Deleted }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+
+  /api/executions:
+    get:
+      summary: List executions (tenant-scoped for non platform_admin)
+      responses:
+        "200": { description: Execution list }
+  /api/executions/{execution_id}:
+    get:
+      summary: Get an execution
+      parameters:
+        - name: execution_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200": { description: Execution record }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /api/executions/{execution_id}/trace:
+    get:
+      summary: Get execution trace (execution + node records)
+      parameters:
+        - name: execution_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200": { description: Trace events }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/audit:
+    get:
+      summary: List audit logs (tenant-scoped for non platform_admin)
+      parameters:
+        - name: tenant_id
+          in: query
+          schema: { type: string }
+        - name: limit
+          in: query
+          schema: { type: integer }
+      responses:
+        "200": { description: Audit log list }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /api/usage:
+    get:
+      summary: Usage and cost summary (aggregated + raw records)
+      parameters:
+        - name: tenant_id
+          in: query
+          schema: { type: string }
+        - name: execution_id
+          in: query
+          schema: { type: string }
+      responses:
+        "200": { description: Usage summary }
+  /api/plugins:
+    get:
+      summary: List plugins from the loaded plugin registry
+      responses:
+        "200": { description: Plugin list }
+  /api/providers:
+    get:
+      summary: List providers from the loaded provider registry
+      responses:
+        "200": { description: Provider list }
+  /api/providers/{id}/models:
+    get:
+      summary: List a provider's model catalog
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200": { description: Model catalog }
+        "404": { $ref: "#/components/responses/NotFound" }

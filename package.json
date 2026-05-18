@@ -1,0 +1,47 @@
+{
+  "name": "ragdoll",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Enterprise-grade multi-tenant OSS RAG pipeline platform foundation.",
+  "type": "module",
+  "workspaces": [
+    "apps/*",
+    "packages/*",
+    "plugins/*"
+  ],
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "test": "node --experimental-strip-types --test \"packages/*/test/*.test.ts\"",
+    "test:core": "node --experimental-strip-types --test \"packages/config-resolver/test/*.test.ts\" \"packages/secrets/test/*.test.ts\" \"packages/pipeline-spec/test/*.test.ts\" \"packages/runtime/test/*.test.ts\" \"packages/providers/test/*.test.ts\"",
+    "test:functional": "node --experimental-strip-types --test \"apps/api/test/*.test.ts\" \"apps/worker/test/*.test.ts\"",
+    "test:e2e": "node --experimental-strip-types --test \"tests/e2e/*.test.ts\"",
+    "test:all": "npm run test && npm run test:functional && npm run test:e2e",
+    "typecheck": "tsc --noEmit",
+    "build:web": "npm --workspace @ragdoll/web run build",
+    "dev:api": "node --experimental-strip-types apps/api/src/server.ts",
+    "dev:worker": "node --experimental-strip-types apps/worker/src/index.ts"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.39.0",
+    "@opentelemetry/api": "^1.9.0",
+    "@opentelemetry/exporter-trace-otlp-http": "^0.57.0",
+    "@opentelemetry/resources": "^1.30.0",
+    "@opentelemetry/sdk-node": "^0.57.0",
+    "@opentelemetry/semantic-conventions": "^1.28.0",
+    "@qdrant/js-client-rest": "^1.13.0",
+    "bullmq": "^5.34.0",
+    "fastify": "^5.2.0",
+    "ioredis": "^5.5.0",
+    "openai": "^4.85.0",
+    "pg": "^8.13.1",
+    "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.1",
+    "typescript": "^5.7.3",
+    "vite": "^6.1.0",
+    "vitest": "^3.0.5"
+  }
+}

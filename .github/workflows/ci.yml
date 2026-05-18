@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build-and-test:
+    name: Build & Test (Node 22.x)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node 22.x
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.x
+
+      # The repo has no committed lockfile, so fall back to `npm install`
+      # when `npm ci` cannot run. Either way this is the only network step.
+      - name: Install dependencies
+        run: npm ci || npm install
+
+      # ---- Test gates (offline, install-free, must pass) ----------------
+      # These run on Node's built-in test runner with
+      # --experimental-strip-types and require no network or secrets.
+      - name: Unit tests (packages)
+        run: npm test
+
+      - name: Functional tests (api + worker)
+        run: npm run test:functional
+
+      - name: End-to-end tests (cross-component)
+        run: npm run test:e2e
+
+      # ---- Typecheck -----------------------------------------------------
+      # Advisory until first confirmed green CI run. The offline, install-free
+      # dev/test design means `tsc` cannot be validated locally (ambient
+      # @types/node and dependency type decls require the install step above).
+      # All known source-level type defects have been fixed and the root
+      # tsconfig excludes the web app (it has its own tsconfig + Vite build).
+      # Flip `continue-on-error` to false once CI confirms a clean run.
+      - name: Typecheck
+        run: npm run typecheck
+        continue-on-error: true
+
+      # ---- Web build -----------------------------------------------------
+      # Fatal: with dependencies installed by the step above, `vite build`
+      # for the @ragdoll/web workspace must succeed in CI.
+      - name: Build web
+        run: npm run build:web

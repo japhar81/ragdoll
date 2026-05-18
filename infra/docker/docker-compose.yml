@@ -1,0 +1,80 @@
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: ragdoll
+      POSTGRES_PASSWORD: ragdoll
+      POSTGRES_DB: ragdoll
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ../../packages/db/migrations:/docker-entrypoint-initdb.d/migrations:ro
+      - ../../packages/db/seeds:/docker-entrypoint-initdb.d/seeds:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ragdoll"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+  redis:
+    image: redis:7
+    ports:
+      - "6379:6379"
+  qdrant:
+    image: qdrant/qdrant:v1.13.4
+    ports:
+      - "6333:6333"
+    volumes:
+      - qdrant-data:/qdrant/storage
+  ollama:
+    image: ollama/ollama:latest
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-data:/root/.ollama
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.119.0
+    command: ["--config=/etc/otelcol/config.yaml"]
+    volumes:
+      - ../otel/otel-collector.yaml:/etc/otelcol/config.yaml:ro
+    ports:
+      - "4317:4317"
+      - "4318:4318"
+  api:
+    image: node:22-alpine
+    working_dir: /workspace
+    command: ["node", "--experimental-strip-types", "apps/api/src/server.ts"]
+    environment:
+      PORT: "3001"
+      RAGDOLL_ENV: development
+      DATABASE_URL: postgres://ragdoll:ragdoll@postgres:5432/ragdoll
+      REDIS_URL: redis://redis:6379
+      SECRET_ENCRYPTION_KEY: local-dev-only-change-me-32-bytes-min
+      SESSION_SECRET: local-dev-only-change-me-session-hmac
+    volumes:
+      - ../..:/workspace
+    ports:
+      - "3001:3001"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+  worker:
+    image: node:22-alpine
+    working_dir: /workspace
+    command: ["node", "--experimental-strip-types", "apps/worker/src/index.ts"]
+    environment:
+      DATABASE_URL: postgres://ragdoll:ragdoll@postgres:5432/ragdoll
+      REDIS_URL: redis://redis:6379
+      SECRET_ENCRYPTION_KEY: local-dev-only-change-me-32-bytes-min
+      SESSION_SECRET: local-dev-only-change-me-session-hmac
+      QDRANT_URL: http://qdrant:6333
+    volumes:
+      - ../..:/workspace
+    depends_on:
+      - api
+volumes:
+  postgres-data:
+  qdrant-data:
+  ollama-data:

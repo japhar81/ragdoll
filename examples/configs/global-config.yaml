@@ -1,0 +1,7 @@
+scope: global
+values:
+  llm.provider: openai
+  llm.model: gpt-4o-mini
+  llm.temperature: 0.2
+  retrieval.top_k: 5
+  vector.isolation.mode: collection_per_tenant_pipeline

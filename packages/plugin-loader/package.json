@@ -1,0 +1,8 @@
+{
+  "name": "@ragdoll/plugin-loader",
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  }
+}

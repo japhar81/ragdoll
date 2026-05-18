@@ -1,0 +1,7 @@
+scope: pipeline
+pipeline_id: support-rag
+values:
+  retrieval.top_k: 8
+  chunking.chunk_size:
+    value: 1000
+    locked: true
