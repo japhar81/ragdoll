@@ -181,6 +181,7 @@ export function graphToSpec(
   edges: FlowEdge[],
   metadata: {
     name: string;
+    description?: string;
     labels?: Record<string, string>;
     annotations?: Record<string, string>;
   }
@@ -204,6 +205,7 @@ export function graphToSpec(
     kind: "Pipeline",
     metadata: {
       name: metadata.name,
+      ...(metadata.description ? { description: metadata.description } : {}),
       ...(metadata.labels ? { labels: metadata.labels } : {}),
       ...(metadata.annotations ? { annotations: metadata.annotations } : {})
     },

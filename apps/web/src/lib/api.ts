@@ -134,6 +134,20 @@ export const api = {
     description?: string;
     folderId?: string | null;
   }) => request<{ pipeline: PipelineRow }>("POST", "/api/pipelines", input),
+  getPipeline: (pipelineId: string) =>
+    request<{ pipeline: PipelineRow }>(
+      "GET",
+      `/api/pipelines/${encodeURIComponent(pipelineId)}`
+    ),
+  updatePipeline: (
+    pipelineId: string,
+    input: { name?: string; description?: string }
+  ) =>
+    request<{ pipeline: PipelineRow }>(
+      "PUT",
+      `/api/pipelines/${encodeURIComponent(pipelineId)}`,
+      input
+    ),
   validateSpec: (spec: PipelineSpec | string) =>
     request<PipelineValidationResult>("POST", "/api/pipelines/validate", spec),
   listVersions: (pipelineId: string) =>
