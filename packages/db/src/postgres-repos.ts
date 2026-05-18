@@ -82,21 +82,34 @@ export class PostgresCrudRepository<T extends { id: string }> {
   protected table: string;
   protected entity: string;
   protected jsonColumns: Set<string>;
+  /**
+   * Columns that are nullable `uuid` FKs to `users(id)` populated from a
+   * caller-supplied principal id (e.g. `created_by`, `deployed_by`). Dev
+   * principals use non-UUID ids ("dev-user"); writing those into a `uuid`
+   * column raises `invalid input syntax for type uuid`. Values here are
+   * coerced via `toUuidOrNull` so non-UUID actors become NULL.
+   */
+  protected principalUuidColumns: Set<string>;
 
   constructor(
     pool: PoolLike,
     table: string,
     entity: string,
-    jsonColumns: string[] = []
+    jsonColumns: string[] = [],
+    principalUuidColumns: string[] = []
   ) {
     this.pool = pool;
     this.table = table;
     this.entity = entity;
     this.jsonColumns = new Set(jsonColumns.map(camelToSnake));
+    this.principalUuidColumns = new Set(
+      principalUuidColumns.map(camelToSnake)
+    );
   }
 
   private serialize(column: string, value: unknown): unknown {
     if (this.jsonColumns.has(column)) return JSON.stringify(value ?? null);
+    if (this.principalUuidColumns.has(column)) return toUuidOrNull(value);
     return value === undefined ? null : value;
   }
 
@@ -195,7 +208,7 @@ export class PostgresPipelineRepository
   implements PipelineRepository
 {
   constructor(pool: PoolLike) {
-    super(pool, "pipelines", "pipeline", ["labels"]);
+    super(pool, "pipelines", "pipeline", ["labels"], ["createdBy"]);
   }
   async findBySlug(slug: string): Promise<PipelineRow | undefined> {
     return (
@@ -421,7 +434,9 @@ export class PostgresPipelineVersionRepository
   implements PipelineVersionRepository
 {
   constructor(pool: PoolLike) {
-    super(pool, "pipeline_versions", "pipeline_version", ["spec"]);
+    super(pool, "pipeline_versions", "pipeline_version", ["spec"], [
+      "createdBy"
+    ]);
   }
   async listByPipeline(pipelineId: UUID): Promise<PipelineVersionRow[]> {
     return this.queryRows(
@@ -447,7 +462,9 @@ export class PostgresPipelineDeploymentRepository
   implements PipelineDeploymentRepository
 {
   constructor(pool: PoolLike) {
-    super(pool, "pipeline_deployments", "pipeline_deployment");
+    super(pool, "pipeline_deployments", "pipeline_deployment", [], [
+      "deployedBy"
+    ]);
   }
   async getActiveDeployment(
     pipelineId: UUID,
@@ -785,7 +802,9 @@ export class PostgresConfigValueRepository implements ConfigValueRepository {
         input.scope,
         input.scopeId ?? null,
         input.locked,
-        input.createdBy ?? null
+        // created_by is a nullable uuid FK to users(id); a dev/non-UUID
+        // principal id ("dev-user") must be coerced to NULL, not raw-bound.
+        toUuidOrNull(input.createdBy)
       ]
     );
     return mapConfigValue(result.rows[0]);

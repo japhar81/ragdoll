@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../lib/api.ts";
 import {
@@ -6,6 +6,8 @@ import {
   findScopeNode,
   type ScopeNode
 } from "../lib/orgtree.ts";
+import { tenantIdFromScopeKey } from "../lib/tenantContext.ts";
+import { useTenants } from "./useTenants.tsx";
 import { Screen, Table } from "./Screen.tsx";
 
 /**
@@ -19,10 +21,7 @@ export function ConfigScreen() {
   const [key, setKey] = useState("");
   const [value, setValue] = useState("");
 
-  const tenants = useQuery({
-    queryKey: ["tenants"],
-    queryFn: () => api.listTenants()
-  });
+  const tenants = useTenants();
   const pipelines = useQuery({
     queryKey: ["pipelines"],
     queryFn: () => api.listPipelines()
@@ -41,6 +40,12 @@ export function ConfigScreen() {
     [tenants.data, pipelines.data]
   );
   const node = findScopeNode(scopeRoot, selectedKey) ?? scopeRoot;
+
+  // Tenant/pipeline scope nodes are tenant-scoped on the API; push the tenant
+  // id (parsed from the scope key) so x-tenant-id rides every config request.
+  useEffect(() => {
+    api.setTenant(tenantIdFromScopeKey(selectedKey));
+  }, [selectedKey]);
 
   const values = useQuery({
     queryKey: ["config-values", node.scope, node.scopeId],

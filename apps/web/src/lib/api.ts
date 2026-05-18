@@ -3,9 +3,13 @@
  * (see docs/api/openapi.yaml). Routes/methods/status codes mirror that spec
  * exactly. Pure module: no React. The dev server proxies `/api` -> :3001.
  *
- * Auth: every /api/* route requires a credential. We send a Bearer token (or
- * x-api-key) when one is configured, plus an optional x-tenant-id scope. With
- * no token the server's DevAuthProvider fallback applies outside production.
+ * Auth: every /api/* route requires a credential. We always send `x-roles`
+ * (so the server's DevAuthProvider grants admin outside production), a Bearer
+ * token / x-api-key when configured, and `x-tenant-id` when a tenant is
+ * selected. Tenant-scoped routes (run, resolved-config, deploy,
+ * tenant-pipelines, activations, schedules, config, secrets) 422 with
+ * "tenant context required" when that header is absent. The header MUST carry
+ * the tenant **UUID**, never the slug — buildAuthHeaders enforces this.
  */
 import type {
   ExecutionNodeRecord,
@@ -14,13 +18,17 @@ import type {
   PipelineValidationResult
 } from "./types.ts";
 import type { JsonSchemaLike } from "./schemaForm.ts";
+import { buildAuthHeaders } from "./tenantContext.ts";
 
 export type { JsonSchemaLike } from "./schemaForm.ts";
 
 export interface ApiAuth {
   token?: string;
   apiKey?: string;
+  /** Selected tenant — MUST be a tenant UUID, not a slug. */
   tenantId?: string;
+  /** Dev roles header (defaults to `platform_admin`). */
+  roles?: string;
 }
 
 export class ApiError extends Error {
@@ -45,16 +53,27 @@ export function setAuth(next: ApiAuth): void {
   auth = next;
 }
 
+/**
+ * Set (or clear) the tenant scope all subsequent requests carry as
+ * `x-tenant-id`. Pass a tenant **UUID**; a slug is dropped by the header
+ * builder rather than sent (it would 409/empty downstream). Pass `undefined`
+ * to clear the scope. Other credentials (token/api key/roles) are preserved.
+ */
+export function setTenant(tenantId?: string): void {
+  auth = { ...auth, tenantId };
+}
+
 export function getAuth(): ApiAuth {
   return auth;
 }
 
+/**
+ * Headers every request carries: always `x-roles` (dev auth), Bearer/api-key
+ * when configured, and `x-tenant-id` only when a UUID tenant is set. Slug
+ * tenant ids are intentionally NOT sent (see buildAuthHeaders).
+ */
 export function authHeaders(): Record<string, string> {
-  const headers: Record<string, string> = {};
-  if (auth.token) headers.authorization = `Bearer ${auth.token}`;
-  if (auth.apiKey) headers["x-api-key"] = auth.apiKey;
-  if (auth.tenantId) headers["x-tenant-id"] = auth.tenantId;
-  return headers;
+  return buildAuthHeaders(auth);
 }
 
 async function request<T>(

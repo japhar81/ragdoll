@@ -36,6 +36,7 @@ import { FlowNodeCard } from "./FlowNodeCard.tsx";
 import { PluginEditorSlot } from "./PluginEditorSlot.tsx";
 import { SecretsEditor } from "./SecretsEditor.tsx";
 import { BuilderConsole, useConsoleLog } from "./BuilderConsole.tsx";
+import { TenantSelect, useSelectedTenant } from "./useTenants.tsx";
 import { hasRealPipeline } from "../lib/consoleLog.ts";
 import type {
   FlowEdge,
@@ -127,8 +128,20 @@ export function PipelineBuilder(props: {
   const [pipelineId, setPipelineId] = useState("support-rag");
   const [version, setVersion] = useState("0.1.0");
   const [saveLevel, setSaveLevel] = useState<"patch" | "minor" | "major">("patch");
-  const [tenantId, setTenantId] = useState("tenant-a");
-  const [environment, setEnvironment] = useState("prod");
+  // Tenant comes from real data (GET /api/tenants); the value is the tenant
+  // UUID. Defaults to the `tenant-local` demo tenant once the list loads and
+  // pushes the id into the api client (x-tenant-id) via api.setTenant.
+  const {
+    tenants,
+    isLoading: tenantsLoading,
+    error: tenantsError,
+    tenantId,
+    setTenantId,
+    selected: selectedTenant,
+    ready: tenantReady
+  } = useSelectedTenant("tenant-local");
+  // Demo defaults: dev environment so the bundled Local Demo just works.
+  const [environment, setEnvironment] = useState("dev");
   const [selectedId, setSelectedId] = useState<string | undefined>();
   const [testInput, setTestInput] = useState('{ "question": "How do I reset my password?" }');
   const [openedViaTree, setOpenedViaTree] = useState(false);
@@ -153,6 +166,8 @@ export function PipelineBuilder(props: {
     queryKey: ["resolved-config", pipelineId, tenantId, environment],
     queryFn: () =>
       api.resolvedConfig({ pipeline_id: pipelineId, tenant_id: tenantId, environment }),
+    // Don't fire a doomed request before a tenant UUID is selected.
+    enabled: tenantReady,
     retry: false
   });
 
@@ -447,7 +462,10 @@ export function PipelineBuilder(props: {
       path: `/api/pipelines/${pipelineId}/deployments`,
       body: { version, environment, tenantId },
       run: () => api.deploy(pipelineId, { version, environment, tenantId }),
-      ok: () => `Deployed ${version} to ${environment} (tenant ${tenantId})`
+      ok: () =>
+        `Deployed ${version} to ${environment} (tenant ${
+          selectedTenant?.slug ?? tenantId
+        })`
     });
   }
 
@@ -490,6 +508,14 @@ export function PipelineBuilder(props: {
   }
 
   function refreshResolved() {
+    if (!tenantReady) {
+      clog.log(
+        "warn",
+        "Resolve config unavailable — select a tenant first (no tenant context).",
+        { tenantId, tenantsLoading }
+      );
+      return;
+    }
     const path = `/api/config/resolved?pipeline_id=${pipelineId}&tenant_id=${tenantId}&environment=${environment}`;
     clog.request("GET", path, { pipeline_id: pipelineId, tenant_id: tenantId, environment });
     resolved
@@ -502,6 +528,20 @@ export function PipelineBuilder(props: {
   }
 
   async function run() {
+    // Tenant-scoped route: without an x-tenant-id (UUID) the API 422s with
+    // "tenant context required". Surface a console hint instead of firing a
+    // doomed request.
+    if (!tenantReady) {
+      clog.log(
+        "warn",
+        tenantsLoading
+          ? "Run unavailable — still loading tenants. Pick a tenant once the list loads."
+          : "Run unavailable — select a tenant first (no tenant context to scope the request).",
+        { tenantId, tenantsLoading }
+      );
+      return;
+    }
+
     let parsedInput: unknown;
     try {
       parsedInput = JSON.parse(testInput || "{}");
@@ -536,10 +576,13 @@ export function PipelineBuilder(props: {
     }
 
     const path = `/api/pipelines/${pipelineId}/run`;
+    const tenantDesc = selectedTenant
+      ? `${selectedTenant.slug} (${tenantId})`
+      : tenantId;
     clog.log(
       "info",
-      `Running pipeline "${pipelineId}" (v${version}) — tenant ${tenantId}, env ${environment}`,
-      { pipelineId, version, tenantId, environment }
+      `Running pipeline "${pipelineId}" (v${version}) — tenant ${tenantDesc}, env ${environment}`,
+      { pipelineId, version, tenantId, tenantSlug: selectedTenant?.slug, environment }
     );
     clog.request("POST", path, { input: parsedInput, environment });
     try {
@@ -600,14 +643,27 @@ export function PipelineBuilder(props: {
         <button onClick={exportJson}>Export JSON</button>
         <button onClick={exportYaml}>Export YAML</button>
         <button onClick={importSpecFile}>Import</button>
-        <button onClick={run}>Run</button>
+        <button
+          onClick={run}
+          disabled={!tenantReady}
+          title={
+            tenantReady
+              ? "Run this pipeline"
+              : tenantsLoading
+                ? "Loading tenants…"
+                : "Select a tenant first (no tenant context)"
+          }
+        >
+          Run
+        </button>
         <label>
           Tenant
-          <select value={tenantId} onChange={(e) => setTenantId(e.target.value)}>
-            <option value="tenant-a">tenant-a</option>
-            <option value="tenant-b">tenant-b</option>
-            <option value="tenant-local">tenant-local</option>
-          </select>
+          <TenantSelect
+            tenants={tenants}
+            value={tenantId}
+            onChange={setTenantId}
+            isLoading={tenantsLoading}
+          />
         </label>
         <label>
           Environment
@@ -616,6 +672,11 @@ export function PipelineBuilder(props: {
             <option value="prod">prod</option>
           </select>
         </label>
+        {tenantsError && (
+          <span className="error" title={String(tenantsError)}>
+            tenants unavailable
+          </span>
+        )}
       </header>
       <div className="builder-main">
       <div

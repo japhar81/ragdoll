@@ -5,6 +5,7 @@ import {
   activationVersionLabel,
   type ActivationLike
 } from "../lib/orgtree.ts";
+import { useTenants } from "./useTenants.tsx";
 import { Screen } from "./Screen.tsx";
 import type { ActivationRow, PipelineVersionRow } from "../lib/api.ts";
 
@@ -28,10 +29,7 @@ export function TenantsScreen() {
   const [name, setName] = useState("");
   const [selected, setSelected] = useState<string | undefined>();
 
-  const tenants = useQuery({
-    queryKey: ["tenants"],
-    queryFn: () => api.listTenants()
-  });
+  const tenants = useTenants();
 
   const create = useMutation({
     mutationFn: () => api.createTenant({ slug, name }),
@@ -96,7 +94,12 @@ export function TenantsScreen() {
               <td>
                 <button
                   className="link-btn"
-                  onClick={() => setSelected(selected === t.id ? undefined : t.id)}
+                  onClick={() => {
+                    const next = selected === t.id ? undefined : t.id;
+                    setSelected(next);
+                    // Scope subsequent tenant-pipeline/activation requests.
+                    api.setTenant(next);
+                  }}
                 >
                   {selected === t.id ? "Hide pipelines" : "Pipelines"}
                 </button>

@@ -565,3 +565,134 @@ test("PostgresTenantPipelineRepository upsert maps PK duplicate to ConflictError
     ConflictError
   );
 });
+
+/**
+ * For a generic `INSERT INTO t (c1, c2, ...) VALUES ($1, $2, ...)` call,
+ * return the bound param value for `column` so we can assert a non-UUID
+ * principal id was coerced to NULL (never bound raw into a uuid column).
+ */
+function paramForColumn(
+  call: { text: string; params: unknown[] },
+  column: string
+): unknown {
+  const cols = call.text
+    .replace(/[\s\S]*?\(([^)]*)\)[\s\S]*/, "$1")
+    .split(",")
+    .map((c) => c.trim());
+  const idx = cols.indexOf(column);
+  assert.notEqual(idx, -1, `column ${column} present in INSERT`);
+  return call.params[idx];
+}
+
+const NON_UUID = "dev-user";
+
+test("PostgresPipelineRepository.create coerces non-UUID createdBy to NULL", async () => {
+  const { PostgresPipelineRepository } = await import("../src/index.ts");
+  const pool = new FakePool([
+    { rows: [{ id: "p1", slug: "s", name: "n", labels: {} }], rowCount: 1 }
+  ]);
+  const repo = new PostgresPipelineRepository(pool);
+  await repo.create({
+    id: "p1",
+    slug: "s",
+    name: "n",
+    labels: {},
+    createdBy: NON_UUID,
+    createdAt: "2026-05-18T00:00:00.000Z",
+    updatedAt: "2026-05-18T00:00:00.000Z"
+  });
+  assert.match(pool.calls[0].text, /INSERT INTO pipelines/);
+  assert.equal(paramForColumn(pool.calls[0], "created_by"), null);
+  assert.ok(
+    !pool.calls[0].params.includes(NON_UUID),
+    "raw non-UUID principal id never bound"
+  );
+});
+
+test("PostgresPipelineVersionRepository.create coerces non-UUID createdBy", async () => {
+  const { PostgresPipelineVersionRepository } = await import(
+    "../src/index.ts"
+  );
+  const pool = new FakePool([{ rows: [{ id: "v1" }], rowCount: 1 }]);
+  const repo = new PostgresPipelineVersionRepository(pool);
+  await repo.create({
+    id: "v1",
+    pipelineId: "p1",
+    version: "1.0.0",
+    status: "draft",
+    spec: {},
+    checksum: "c1",
+    createdBy: NON_UUID,
+    createdAt: "2026-05-18T00:00:00.000Z"
+  });
+  assert.match(pool.calls[0].text, /INSERT INTO pipeline_versions/);
+  assert.equal(paramForColumn(pool.calls[0], "created_by"), null);
+  // A real UUID still passes through untouched.
+  const uuid = "11111111-2222-4333-8444-555555555555";
+  const pool2 = new FakePool([{ rows: [{ id: "v2" }], rowCount: 1 }]);
+  const repo2 = new PostgresPipelineVersionRepository(pool2);
+  await repo2.create({
+    id: "v2",
+    pipelineId: "p1",
+    version: "2.0.0",
+    status: "draft",
+    spec: {},
+    checksum: "c2",
+    createdBy: uuid,
+    createdAt: "2026-05-18T00:00:00.000Z"
+  });
+  assert.equal(paramForColumn(pool2.calls[0], "created_by"), uuid);
+});
+
+test("PostgresPipelineDeploymentRepository.create coerces non-UUID deployedBy", async () => {
+  const { PostgresPipelineDeploymentRepository } = await import(
+    "../src/index.ts"
+  );
+  const pool = new FakePool([{ rows: [{ id: "d1" }], rowCount: 1 }]);
+  const repo = new PostgresPipelineDeploymentRepository(pool);
+  await repo.create({
+    id: "d1",
+    pipelineId: "p1",
+    pipelineVersionId: "v1",
+    environment: "prod",
+    tenantId: "t1",
+    status: "active",
+    deployedBy: NON_UUID,
+    deployedAt: "2026-05-18T00:00:00.000Z"
+  });
+  assert.match(pool.calls[0].text, /INSERT INTO pipeline_deployments/);
+  assert.equal(paramForColumn(pool.calls[0], "deployed_by"), null);
+  // Real entity ids must NOT be coerced.
+  assert.equal(paramForColumn(pool.calls[0], "pipeline_id"), "p1");
+  assert.equal(paramForColumn(pool.calls[0], "pipeline_version_id"), "v1");
+  assert.equal(paramForColumn(pool.calls[0], "tenant_id"), "t1");
+});
+
+test("PostgresConfigValueRepository.upsert coerces non-UUID createdBy to NULL", async () => {
+  const { PostgresConfigValueRepository } = await import("../src/index.ts");
+  const dbRow = {
+    id: "cv1",
+    key: "llm.model",
+    value: "gpt",
+    scope: "tenant",
+    scope_id: "t1",
+    locked: false,
+    created_by: null,
+    created_at: "2026-05-18T00:00:00.000Z",
+    updated_at: "2026-05-18T00:00:00.000Z"
+  };
+  const pool = new FakePool([{ rows: [dbRow], rowCount: 1 }]);
+  const repo = new PostgresConfigValueRepository(pool);
+  await repo.upsert({
+    key: "llm.model",
+    value: "gpt",
+    scope: "tenant",
+    scopeId: "t1",
+    locked: false,
+    createdBy: NON_UUID
+  });
+  assert.match(pool.calls[0].text, /INSERT INTO config_values/);
+  // params order: key, value, scope, scope_id, locked, created_by
+  assert.equal(pool.calls[0].params[5], null);
+  assert.ok(!pool.calls[0].params.includes(NON_UUID));
+});
