@@ -9,6 +9,8 @@
 # NOTE: the first `up` downloads the qwen2.5:0.5b + nomic-embed-text models
 # and CPU inference is slow — the first /run can take tens of seconds.
 
+name: ragdoll
+
 services:
   postgres:
     image: postgres:16

@@ -1,14 +1,16 @@
-import React, { useCallback, useMemo, useState } from "react";
+import React, { useCallback, useMemo, useRef, useState } from "react";
 import ReactFlow, {
   Background,
   Controls,
   MiniMap,
+  MarkerType,
   addEdge,
   useEdgesState,
   useNodesState,
   type Connection,
   type Edge,
-  type Node
+  type Node,
+  type ReactFlowInstance
 } from "reactflow";
 import "reactflow/dist/style.css";
 import { useQuery } from "@tanstack/react-query";
@@ -24,7 +26,21 @@ import {
   newNodeForCategory,
   specToGraph
 } from "../lib/spec.ts";
+import {
+  DND_MIME,
+  clampInspectorWidth,
+  nodeKind,
+  validateConnection
+} from "../lib/graph.ts";
+import { FlowNodeCard } from "./FlowNodeCard.tsx";
 import type { FlowEdge, FlowNode, PipelineNode, PipelineSpec, PluginCategory } from "../lib/types.ts";
+
+const nodeTypes = { ragNode: FlowNodeCard };
+
+const EDGE_DEFAULTS = {
+  type: "smoothstep",
+  markerEnd: { type: MarkerType.ArrowClosed }
+} as const;
 
 const STARTER_SPEC: PipelineSpec = {
   apiVersion: "rag-platform/v1",
@@ -32,17 +48,17 @@ const STARTER_SPEC: PipelineSpec = {
   metadata: { name: "support-rag" },
   spec: {
     nodes: [
-      { id: "input", type: "input", ui: { position: { x: 40, y: 140 } } },
+      { id: "input", type: "input", ui: { position: { x: 40, y: 160 } } },
       {
         id: "retrieve",
         plugin: { category: "retriever", id: "qdrant_retriever", version: "1.0.0" },
         config: { top_k: "${config.retrieval.top_k}" },
-        ui: { position: { x: 280, y: 140 } }
+        ui: { position: { x: 300, y: 160 } }
       },
       {
         id: "prompt",
         plugin: { category: "prompt_template", id: "basic_rag_prompt", version: "1.0.0" },
-        ui: { position: { x: 520, y: 140 } }
+        ui: { position: { x: 560, y: 160 } }
       },
       {
         id: "llm",
@@ -53,9 +69,9 @@ const STARTER_SPEC: PipelineSpec = {
           temperature: "${config.llm.temperature}"
         },
         secrets: { apiKey: { scope: "tenant", key: "llm.api_key" } },
-        ui: { position: { x: 760, y: 140 } }
+        ui: { position: { x: 820, y: 160 } }
       },
-      { id: "output", type: "output", ui: { position: { x: 1000, y: 140 } } }
+      { id: "output", type: "output", ui: { position: { x: 1080, y: 160 } } }
     ],
     edges: [
       { from: "input", to: "retrieve" },
@@ -66,7 +82,18 @@ const STARTER_SPEC: PipelineSpec = {
   }
 };
 
-const starter = specToGraph(STARTER_SPEC);
+/** React Flow nodes use our colored custom renderer; tag every node. */
+function toFlowNodes(spec: PipelineSpec): Node[] {
+  return specToGraph(spec).nodes.map(
+    (n) => ({ ...n, type: "ragNode" }) as unknown as Node
+  );
+}
+
+function toFlowEdges(spec: PipelineSpec): Edge[] {
+  return specToGraph(spec).edges.map(
+    (e) => ({ ...e, ...EDGE_DEFAULTS }) as unknown as Edge
+  );
+}
 
 function download(name: string, text: string, mime: string): void {
   const blob = new Blob([text], { type: mime });
@@ -79,8 +106,8 @@ function download(name: string, text: string, mime: string): void {
 }
 
 export function PipelineBuilder() {
-  const [nodes, setNodes, onNodesChange] = useNodesState(starter.nodes as Node[]);
-  const [edges, setEdges, onEdgesChange] = useEdgesState(starter.edges as Edge[]);
+  const [nodes, setNodes, onNodesChange] = useNodesState(toFlowNodes(STARTER_SPEC));
+  const [edges, setEdges, onEdgesChange] = useEdgesState(toFlowEdges(STARTER_SPEC));
   const [pipelineName, setPipelineName] = useState("support-rag");
   const [pipelineId, setPipelineId] = useState("support-rag");
   const [version, setVersion] = useState("0.1.0");
@@ -89,6 +116,10 @@ export function PipelineBuilder() {
   const [selectedId, setSelectedId] = useState<string | undefined>();
   const [testInput, setTestInput] = useState('{ "question": "How do I reset my password?" }');
   const [log, setLog] = useState<string>("Ready.");
+  const [inspectorWidth, setInspectorWidth] = useState(360);
+
+  const rfRef = useRef<ReactFlowInstance | null>(null);
+  const canvasRef = useRef<HTMLDivElement | null>(null);
 
   const spec: PipelineSpec = useMemo(
     () =>
@@ -101,11 +132,7 @@ export function PipelineBuilder() {
   const resolved = useQuery({
     queryKey: ["resolved-config", pipelineId, tenantId, environment],
     queryFn: () =>
-      api.resolvedConfig({
-        pipeline_id: pipelineId,
-        tenant_id: tenantId,
-        environment
-      }),
+      api.resolvedConfig({ pipeline_id: pipelineId, tenant_id: tenantId, environment }),
     retry: false
   });
 
@@ -123,9 +150,26 @@ export function PipelineBuilder() {
   );
 
   const selectedNode = useMemo(
-    () =>
-      (nodes as unknown as FlowNode[]).find((n) => n.id === selectedId)?.data.node,
+    () => (nodes as unknown as FlowNode[]).find((n) => n.id === selectedId)?.data.node,
     [nodes, selectedId]
+  );
+
+  const nodeKinds = useMemo(
+    () =>
+      new Map(
+        (nodes as unknown as FlowNode[]).map((n) => [n.id, nodeKind(n.data.node)])
+      ),
+    [nodes]
+  );
+
+  const isValidConnection = useCallback(
+    (c: Connection) =>
+      validateConnection(
+        { source: c.source, target: c.target },
+        nodeKinds,
+        edges.map((e) => ({ source: e.source, target: e.target }))
+      ),
+    [nodeKinds, edges]
   );
 
   function report(label: string, value: unknown): void {
@@ -138,28 +182,70 @@ export function PipelineBuilder() {
   }
 
   const onConnect = useCallback(
-    (connection: Connection) => setEdges((current) => addEdge(connection, current)),
+    (connection: Connection) =>
+      setEdges((current) => addEdge({ ...connection, ...EDGE_DEFAULTS }, current)),
     [setEdges]
   );
 
-  function addPaletteNode(category: PluginCategory | "input" | "output") {
-    const base = category === "input" || category === "output" ? category : `${category}`;
-    let id = base;
-    let n = 1;
-    const existing = new Set((nodes as Node[]).map((node) => node.id));
-    while (existing.has(id)) id = `${base}_${n++}`;
-    const node: PipelineNode =
-      category === "input" || category === "output"
-        ? newIoNode(category, id)
-        : newNodeForCategory(category, id);
-    const flow = specToGraph({
-      ...STARTER_SPEC,
-      spec: { nodes: [node], edges: [] }
-    }).nodes[0];
-    flow.position = { x: 120 + (nodes.length % 5) * 60, y: 320 + (nodes.length % 4) * 60 };
-    setNodes((current) => [...current, flow as unknown as Node]);
-    setSelectedId(id);
-  }
+  const addNode = useCallback(
+    (category: PluginCategory | "input" | "output", position?: { x: number; y: number }) => {
+      setNodes((current) => {
+        const existing = new Set(current.map((n) => n.id));
+        let id = category;
+        let n = 1;
+        while (existing.has(id)) id = `${category}_${n++}`;
+        const pipelineNode: PipelineNode =
+          category === "input" || category === "output"
+            ? newIoNode(category, id)
+            : newNodeForCategory(category, id);
+        const flow = specToGraph({
+          ...STARTER_SPEC,
+          spec: { nodes: [pipelineNode], edges: [] }
+        }).nodes[0];
+        flow.position =
+          position ?? { x: 160 + (current.length % 5) * 60, y: 360 + (current.length % 4) * 60 };
+        setSelectedId(id);
+        return [...current, { ...flow, type: "ragNode" } as unknown as Node];
+      });
+    },
+    [setNodes]
+  );
+
+  const onDragOver = useCallback((event: React.DragEvent) => {
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "move";
+  }, []);
+
+  const onDrop = useCallback(
+    (event: React.DragEvent) => {
+      event.preventDefault();
+      const raw = event.dataTransfer.getData(DND_MIME);
+      if (!raw || !rfRef.current || !canvasRef.current) return;
+      const bounds = canvasRef.current.getBoundingClientRect();
+      const position = rfRef.current.project({
+        x: event.clientX - bounds.left,
+        y: event.clientY - bounds.top
+      });
+      addNode(raw as PluginCategory | "input" | "output", position);
+    },
+    [addNode]
+  );
+
+  const startResize = useCallback((event: React.MouseEvent) => {
+    event.preventDefault();
+    const move = (ev: MouseEvent) =>
+      setInspectorWidth(clampInspectorWidth(window.innerWidth - ev.clientX, window.innerWidth));
+    const up = () => {
+      window.removeEventListener("mousemove", move);
+      window.removeEventListener("mouseup", up);
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+    };
+    window.addEventListener("mousemove", move);
+    window.addEventListener("mouseup", up);
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+  }, []);
 
   function updateSelectedNode(mutate: (node: PipelineNode) => PipelineNode) {
     if (!selectedId) return;
@@ -168,29 +254,24 @@ export function PipelineBuilder() {
         if (flow.id !== selectedId) return flow;
         const fn = flow as unknown as FlowNode;
         const next = mutate(fn.data.node);
-        return {
-          ...flow,
-          data: { ...fn.data, node: next }
-        } as unknown as Node;
+        return { ...flow, data: { ...fn.data, node: next } } as unknown as Node;
       })
     );
   }
 
   function setConfigText(text: string) {
     try {
-      const parsed = JSON.parse(text || "{}");
-      updateSelectedNode((node) => ({ ...node, config: parsed }));
+      updateSelectedNode((node) => ({ ...node, config: JSON.parse(text || "{}") }));
     } catch {
-      /* keep typing; ignore parse errors until valid */
+      /* keep typing until valid JSON */
     }
   }
 
   function setSecretsText(text: string) {
     try {
-      const parsed = JSON.parse(text || "{}");
-      updateSelectedNode((node) => ({ ...node, secrets: parsed }));
+      updateSelectedNode((node) => ({ ...node, secrets: JSON.parse(text || "{}") }));
     } catch {
-      /* ignore until valid */
+      /* keep typing until valid JSON */
     }
   }
 
@@ -221,10 +302,7 @@ export function PipelineBuilder() {
 
   async function publish() {
     try {
-      report(
-        "Published",
-        await api.saveVersion(pipelineId, { version, spec, publish: true })
-      );
+      report("Published", await api.saveVersion(pipelineId, { version, spec, publish: true }));
     } catch (e) {
       reportError("Publish failed", e);
     }
@@ -232,10 +310,7 @@ export function PipelineBuilder() {
 
   async function deploy() {
     try {
-      report(
-        "Deployed",
-        await api.deploy(pipelineId, { version, environment, tenantId })
-      );
+      report("Deployed", await api.deploy(pipelineId, { version, environment, tenantId }));
     } catch (e) {
       reportError("Deploy failed", e);
     }
@@ -259,13 +334,11 @@ export function PipelineBuilder() {
       const file = input.files?.[0];
       if (!file) return;
       try {
-        const text = await file.text();
-        const parsed = JSON.parse(text) as PipelineSpec;
-        const graph = specToGraph(parsed);
+        const parsed = JSON.parse(await file.text()) as PipelineSpec;
         setPipelineName(parsed.metadata?.name ?? pipelineName);
-        setNodes(graph.nodes as unknown as Node[]);
-        setEdges(graph.edges as unknown as Edge[]);
-        report("Imported", `${graph.nodes.length} nodes, ${graph.edges.length} edges.`);
+        setNodes(toFlowNodes(parsed));
+        setEdges(toFlowEdges(parsed));
+        report("Imported", `${parsed.spec?.nodes?.length ?? 0} nodes.`);
       } catch (e) {
         reportError("Import failed", e);
       }
@@ -336,37 +409,67 @@ export function PipelineBuilder() {
           </select>
         </label>
       </header>
-      <div className="builder-grid">
+      <div
+        className="builder-grid"
+        style={{
+          gridTemplateColumns: `220px minmax(0, 1fr) 6px ${inspectorWidth}px`
+        }}
+      >
         <aside className="palette">
           <h2>Node Palette</h2>
-          <button onClick={() => addPaletteNode("input")}>+ input</button>
-          <button onClick={() => addPaletteNode("output")}>+ output</button>
-          {PLUGIN_CATEGORIES.map((cat) => (
-            <button key={cat} onClick={() => addPaletteNode(cat)}>
+          <p className="muted">Click to add, or drag onto the canvas.</p>
+          {(["input", "output", ...PLUGIN_CATEGORIES] as const).map((cat) => (
+            <button
+              key={cat}
+              draggable
+              onDragStart={(e) => {
+                e.dataTransfer.setData(DND_MIME, cat);
+                e.dataTransfer.effectAllowed = "move";
+              }}
+              onClick={() => addNode(cat)}
+            >
               + {cat}
             </button>
           ))}
         </aside>
-        <div className="canvas">
+        <div
+          className="canvas"
+          ref={canvasRef}
+          onDrop={onDrop}
+          onDragOver={onDragOver}
+        >
           <ReactFlow
             nodes={nodes}
             edges={edges}
+            nodeTypes={nodeTypes}
+            onInit={(instance) => {
+              rfRef.current = instance;
+            }}
             onNodesChange={onNodesChange}
             onEdgesChange={onEdgesChange}
             onConnect={onConnect}
+            isValidConnection={isValidConnection}
+            defaultEdgeOptions={EDGE_DEFAULTS}
             onNodeClick={(_, node) => setSelectedId(node.id)}
             onPaneClick={() => setSelectedId(undefined)}
             deleteKeyCode={["Backspace", "Delete"]}
             fitView
           >
-            <MiniMap />
+            <MiniMap pannable zoomable />
             <Controls />
             <Background />
           </ReactFlow>
         </div>
+        <div
+          className="col-resizer"
+          onMouseDown={startResize}
+          role="separator"
+          aria-orientation="vertical"
+          title="Drag to resize the inspector"
+        />
         <aside className="inspector">
           <h2>Inspector</h2>
-          {!selectedNode && <p>Select a node to edit its plugin ref, config and secrets.</p>}
+          {!selectedNode && <p className="muted">Select a node to edit its plugin ref, config and secrets.</p>}
           {selectedNode && (
             <>
               <p>
