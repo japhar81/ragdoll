@@ -149,6 +149,10 @@ export function PipelineBuilder(props: {
   const [nodes, setNodes, onNodesChange] = useNodesState(toFlowNodes(STARTER_SPEC));
   const [edges, setEdges, onEdgesChange] = useEdgesState(toFlowEdges(STARTER_SPEC));
   const [pipelineName, setPipelineName] = useState("support-rag");
+  const [pipelineSlug, setPipelineSlug] = useState("support-rag");
+  const [pipelineDescription, setPipelineDescription] = useState("");
+  // The identifier used for every API call: the slug until the pipeline row
+  // exists, then its real UUID (set on create / open-from-tree).
   const [pipelineId, setPipelineId] = useState("support-rag");
   const [version, setVersion] = useState("0.1.0");
   const [saveLevel, setSaveLevel] = useState<"patch" | "minor" | "major">("patch");
@@ -297,9 +301,10 @@ export function PipelineBuilder(props: {
   const spec: PipelineSpec = useMemo(
     () =>
       graphToSpec(nodes as unknown as FlowNode[], edges as unknown as FlowEdge[], {
-        name: pipelineName
+        name: pipelineName,
+        description: pipelineDescription.trim() || undefined
       }),
-    [nodes, edges, pipelineName]
+    [nodes, edges, pipelineName, pipelineDescription]
   );
 
   /**
@@ -455,6 +460,17 @@ export function PipelineBuilder(props: {
     setPipelineId(target.id);
     setPipelineName(target.name);
     setOpenedViaTree(true);
+    // Pull the pipeline row so the toolbar shows the real slug + description
+    // (EditingPipeline only carries id + name).
+    (async () => {
+      try {
+        const { pipeline } = await api.getPipeline(target.id);
+        setPipelineSlug(pipeline.slug);
+        setPipelineDescription(pipeline.description ?? "");
+      } catch {
+        setPipelineSlug(target.id);
+      }
+    })();
     const path = `/api/pipelines/${target.id}/versions`;
     (async () => {
       clog.request("GET", path);
@@ -475,6 +491,9 @@ export function PipelineBuilder(props: {
         if (latest.spec && typeof latest.spec === "object") {
           const loaded = latest.spec as PipelineSpec;
           setPipelineName(loaded.metadata?.name ?? target.name);
+          if (loaded.metadata?.description) {
+            setPipelineDescription(loaded.metadata.description);
+          }
           setNodes(toFlowNodes(loaded));
           setEdges(toFlowEdges(loaded));
           setVersion(latest.version);
@@ -654,17 +673,19 @@ export function PipelineBuilder(props: {
     // A fresh builder points at a placeholder slug with no pipeline row yet.
     // The /save route only versions an *existing* pipeline (404s otherwise),
     // so create the pipeline first, adopt its real UUID, then mint v1.
+    const description = pipelineDescription.trim() || undefined;
     let saveId = pipelineId;
     if (!hasRealPipeline({ pipelineId, openedViaTree })) {
-      const slug = pipelineId.trim();
+      const slug = pipelineSlug.trim();
       const created = await withLog("Pipeline created", "Create failed", {
         method: "POST",
         path: "/api/pipelines",
-        body: { slug, name: pipelineName },
+        body: { slug, name: pipelineName, description },
         run: async () => {
           try {
-            return (await api.createPipeline({ slug, name: pipelineName }))
-              .pipeline;
+            return (
+              await api.createPipeline({ slug, name: pipelineName, description })
+            ).pipeline;
           } catch (e) {
             // Slug already taken — adopt the existing pipeline rather than
             // failing, so a re-Save of the same name keeps working.
@@ -682,8 +703,23 @@ export function PipelineBuilder(props: {
       if (!created) return; // create failed; failure already logged
       saveId = created.id;
       setPipelineId(created.id);
+      setPipelineSlug(created.slug);
       setPipelineName(created.name);
+      setPipelineDescription(created.description ?? "");
       setOpenedViaTree(true);
+    } else {
+      // Existing pipeline: keep its row name/description in sync with the
+      // toolbar before minting the new version (slug is immutable).
+      await withLog("Metadata updated", "Metadata update failed", {
+        method: "PUT",
+        path: `/api/pipelines/${saveId}`,
+        body: { name: pipelineName, description: description ?? "" },
+        run: () =>
+          api.updatePipeline(saveId, {
+            name: pipelineName,
+            description: description ?? ""
+          })
+      });
     }
 
     const res = await withLog("Saved", "Save failed", {
@@ -876,17 +912,47 @@ export function PipelineBuilder(props: {
 
   const requiredConfig = extractConfigRefs(spec);
   const requiredSecrets = extractSecretRefs(spec);
+  // Slug is the create-time identity; immutable once the pipeline row exists.
+  const realPipeline = hasRealPipeline({ pipelineId, openedViaTree });
 
   return (
     <section className="builder">
       <header className="toolbar">
         <strong>Visual Pipeline Builder</strong>
         <label>
-          Pipeline
+          Name
           <input
-            value={pipelineId}
-            onChange={(e) => setPipelineId(e.target.value)}
+            value={pipelineName}
+            onChange={(e) => setPipelineName(e.target.value)}
+            style={{ width: 140 }}
+          />
+        </label>
+        <label>
+          Slug
+          <input
+            value={pipelineSlug}
+            disabled={realPipeline}
+            title={
+              realPipeline
+                ? "Slug is fixed once the pipeline is created"
+                : "URL-safe identifier; set on first Save"
+            }
+            onChange={(e) => {
+              const v = e.target.value;
+              setPipelineSlug(v);
+              // Keep the API ref pointed at the slug until a real row exists.
+              if (!realPipeline) setPipelineId(v);
+            }}
             style={{ width: 120 }}
+          />
+        </label>
+        <label>
+          Description
+          <input
+            value={pipelineDescription}
+            placeholder="optional"
+            onChange={(e) => setPipelineDescription(e.target.value)}
+            style={{ width: 200 }}
           />
         </label>
         <label>

@@ -45,6 +45,39 @@ services:
     volumes:
       - qdrant-data:/qdrant/storage
 
+  # Single-node OpenSearch for the opensearch_* plugins (BM25 / kNN / hybrid
+  # retrievers + input/output). Security plugin disabled for local dev so the
+  # client can talk plain HTTP with no credentials.
+  opensearch:
+    image: opensearchproject/opensearch:2.13.0
+    environment:
+      discovery.type: single-node
+      DISABLE_SECURITY_PLUGIN: "true"
+      DISABLE_INSTALL_DEMO_CONFIG: "true"
+      bootstrap.memory_lock: "true"
+      OPENSEARCH_JAVA_OPTS: "-Xms512m -Xmx512m"
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    ports:
+      - "9200:9200"
+    volumes:
+      - opensearch-data:/usr/share/opensearch/data
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "curl -s http://127.0.0.1:9200/_cluster/health | grep -q '\"status\":\"\\(green\\|yellow\\)\"'",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+
   ollama:
     image: ollama/ollama:latest
     ports:
@@ -135,6 +168,7 @@ services:
       SECRET_ENCRYPTION_KEY: local-dev-only-change-me-32-bytes-min
       SESSION_SECRET: local-dev-only-change-me-session-hmac
       QDRANT_URL: http://qdrant:6333
+      OPENSEARCH_URL: http://opensearch:9200
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
       # Setting this makes the plugin-loader auto-register the external
       # crawl4ai_crawler / scrapy_spider plugins so they appear in the
@@ -150,6 +184,8 @@ services:
       db-init:
         condition: service_completed_successfully
       python-plugins:
+        condition: service_started
+      opensearch:
         condition: service_started
     healthcheck:
       # 127.0.0.1 (not localhost): inside the container `localhost` resolves to
@@ -170,6 +206,7 @@ services:
       REDIS_URL: redis://redis:6379
       SECRET_ENCRYPTION_KEY: local-dev-only-change-me-32-bytes-min
       QDRANT_URL: http://qdrant:6333
+      OPENSEARCH_URL: http://opensearch:9200
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
       # The worker executes crawl jobs against the Python plugin service, so
       # it waits for python-plugins to be healthy (Chromium ready) before
@@ -187,6 +224,8 @@ services:
         condition: service_started
       python-plugins:
         condition: service_healthy
+      opensearch:
+        condition: service_healthy
 
   web:
     build:
@@ -201,4 +240,5 @@ services:
 volumes:
   postgres-data:
   qdrant-data:
+  opensearch-data:
   ollama-data:

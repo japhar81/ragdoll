@@ -137,6 +137,11 @@ is picked up automatically with no loader edits. Plugins are keyed by
 - `json_output_parser` (output_parser)
 - `simple_keyword_guardrail` (guardrail)
 - `simple_evaluator_stub` (evaluator)
+- `opensearch_input` (datasource)
+- `opensearch_output` (sink)
+- `opensearch_bm25_retriever` (retriever)
+- `opensearch_vector_retriever` (retriever)
+- `opensearch_hybrid_retriever` (retriever)
 
 Together with the `sample_uppercase_transformer` (transformer) plugin from
 `plugins/sample-text`, every palette category has at least one built-in,
@@ -145,6 +150,11 @@ schema-bearing plugin so the visual builder always renders a real form.
 `vector_upsert` and `qdrant_retriever` use the shared `VectorStore` (in-memory
 singleton offline, Qdrant when configured), so an upsert followed by a retrieve
 round-trips in-process and in tests.
+
+The `opensearch_*` family adds lexical (BM25), vector (kNN), and hybrid
+retrieval over OpenSearch plus index input/output sinks. See
+[opensearch-plugins.md](./opensearch-plugins.md) for configuration, the hybrid
+fusion strategies, and the local `make` stack.
 
 ## External / Python plugins
 

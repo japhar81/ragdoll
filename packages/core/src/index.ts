@@ -115,6 +115,7 @@ export interface PipelineSpec {
   kind: "Pipeline";
   metadata: {
     name: string;
+    description?: string;
     labels?: Record<string, string>;
     annotations?: Record<string, string>;
   };
