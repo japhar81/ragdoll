@@ -50,6 +50,16 @@ URLs:
 - Ollama-compatible API: `http://localhost:11434`
 - OTLP: `localhost:4317` / `localhost:4318`
 
+Apply code changes to a running stack (rebuild + restart api/worker/web;
+keeps the DB and pulled models; no re-seed):
+
+```bash
+make refresh       # or: ./scripts/dev-refresh.sh   (then just reload the browser)
+```
+
+Changed `packages/db/migrations` or `packages/db/seeds`? Those run once in
+the `db-init` one-shot, so re-seed with `make down && make up`.
+
 Tear down (also deletes volumes / pulled models):
 
 ```bash
