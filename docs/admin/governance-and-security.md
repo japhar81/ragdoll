@@ -52,10 +52,23 @@ in:
 ## Audit events
 
 Audited actions include tenant create/update/delete, pipeline
-create/update/delete, version save-draft/publish/archive, deployment, config
-definition/value upsert/delete, secret create/rotate/delete, pipeline
-run/ingest. Every audit record stores `actorId`, `tenantId`, `requestId`,
-source IP, and user agent.
+create/update/delete, version save-draft/save/publish/rollback/archive,
+deployment, pipeline-activation create/update/delete, schedule
+create/update/toggle/delete, config definition/value upsert/delete, secret
+create/rotate/delete, pipeline run/ingest. Every audit record stores
+`actorId`, `tenantId`, `requestId`, source IP, and user agent.
+
+`pipeline_activations` is the per-tenant version-binding control surface
+(which version a tenant runs in an environment; ADR 0009). It carries no
+secret material; activation create/update/delete plus version
+save/rollback and schedule changes are all audited with before/after
+diffs, so a tenant's effective-version changes are fully attributable.
+
+The scheduler is not a user-facing API: it runs inside the worker and
+enqueues `run_pipeline` jobs with `source: "schedule"` under the worker
+process's identity (no end-user principal). Scheduled runs resolve their
+version through the same activation precedence as API runs, so the same
+tenant-isolation and version-binding controls apply.
 
 Before/after diffs are passed through `redactValue` before persistence, and
 secret values are written as `REDACTED`. The secrets API never returns a

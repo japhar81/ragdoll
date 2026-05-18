@@ -104,12 +104,16 @@ export const api = {
 
   // ---- pipelines --------------------------------------------------------
   listPipelines: () => request<{ pipelines: PipelineRow[] }>("GET", "/api/pipelines"),
-  createPipeline: (input: { slug: string; name: string; description?: string }) =>
-    request<{ pipeline: PipelineRow }>("POST", "/api/pipelines", input),
+  createPipeline: (input: {
+    slug: string;
+    name: string;
+    description?: string;
+    folderId?: string | null;
+  }) => request<{ pipeline: PipelineRow }>("POST", "/api/pipelines", input),
   validateSpec: (spec: PipelineSpec | string) =>
     request<PipelineValidationResult>("POST", "/api/pipelines/validate", spec),
   listVersions: (pipelineId: string) =>
-    request<{ versions: PipelineVersionRow[] }>(
+    request<{ versions: PipelineVersionRow[]; latestVersionId?: string | null }>(
       "GET",
       `/api/pipelines/${encodeURIComponent(pipelineId)}/versions`
     ),
@@ -121,6 +125,48 @@ export const api = {
       "POST",
       `/api/pipelines/${encodeURIComponent(pipelineId)}/versions`,
       input
+    ),
+  /**
+   * Auto-versioned save (POST /api/pipelines/:id/save). 200 + created:false
+   * when the spec is identical to the current latest (idempotent, no new
+   * row); 201 + created:true when a new published version is minted.
+   */
+  savePipeline: (
+    pipelineId: string,
+    input: { spec: PipelineSpec; level?: "patch" | "minor" | "major" }
+  ) =>
+    request<{ version: PipelineVersionRow; created: boolean }>(
+      "POST",
+      `/api/pipelines/${encodeURIComponent(pipelineId)}/save`,
+      input
+    ),
+  rollbackPipeline: (pipelineId: string, versionId: string) =>
+    request<{ pipeline: PipelineRow; latestVersionId: string }>(
+      "POST",
+      `/api/pipelines/${encodeURIComponent(pipelineId)}/rollback`,
+      { versionId }
+    ),
+
+  // ---- folders ----------------------------------------------------------
+  listFolders: () => request<{ folders: FolderTreeNode[] }>("GET", "/api/folders"),
+  createFolder: (input: { name: string; parentId?: string | null }) =>
+    request<{ folder: PipelineFolderRow }>("POST", "/api/folders", input),
+  updateFolder: (
+    id: string,
+    patch: { name?: string; parentId?: string | null }
+  ) =>
+    request<{ folder: PipelineFolderRow }>(
+      "PUT",
+      `/api/folders/${encodeURIComponent(id)}`,
+      patch
+    ),
+  deleteFolder: (id: string) =>
+    request<void>("DELETE", `/api/folders/${encodeURIComponent(id)}`),
+  movePipelineToFolder: (pipelineId: string, folderId: string | null) =>
+    request<{ pipeline: PipelineRow }>(
+      "PUT",
+      `/api/pipelines/${encodeURIComponent(pipelineId)}/folder`,
+      { folderId }
     ),
   exportVersion: (pipelineId: string, version: string, format: "json" | "yaml") =>
     request<string>(
@@ -143,12 +189,138 @@ export const api = {
       `/api/pipelines/${encodeURIComponent(pipelineId)}/deployments`,
       input
     ),
-  run: (pipelineId: string, input: { input?: unknown; environment?: string }) =>
+  run: (
+    pipelineId: string,
+    input: { input?: unknown; environment?: string; activation?: string }
+  ) =>
     request<RunAccepted>(
       "POST",
       `/api/pipelines/${encodeURIComponent(pipelineId)}/run`,
       input
     ),
+
+  // ---- tenant <-> pipeline associations + activations -------------------
+  listTenantPipelines: (tenantId: string) =>
+    request<{ pipelines: TenantPipelineRow[] }>(
+      "GET",
+      `/api/tenants/${encodeURIComponent(tenantId)}/pipelines`
+    ),
+  associatePipeline: (
+    tenantId: string,
+    input: { pipelineId: string; environment?: string }
+  ) =>
+    request<{ association?: unknown }>(
+      "POST",
+      `/api/tenants/${encodeURIComponent(tenantId)}/pipelines`,
+      input
+    ),
+  updateTenantPipeline: (
+    tenantId: string,
+    pipelineId: string,
+    patch: { enabled: boolean; environment?: string }
+  ) =>
+    request<{ association?: unknown }>(
+      "PATCH",
+      `/api/tenants/${encodeURIComponent(tenantId)}/pipelines/${encodeURIComponent(
+        pipelineId
+      )}`,
+      patch
+    ),
+  listActivations: (tenantId: string, pipelineId: string) =>
+    request<{ activations: ActivationRow[] }>(
+      "GET",
+      `/api/tenants/${encodeURIComponent(tenantId)}/pipelines/${encodeURIComponent(
+        pipelineId
+      )}/activations`
+    ),
+  createActivation: (
+    tenantId: string,
+    pipelineId: string,
+    input: {
+      label: string;
+      environment: string;
+      pipelineVersionId?: string;
+      trackLatest?: boolean;
+      enabled?: boolean;
+    }
+  ) =>
+    request<{ activation: ActivationRow }>(
+      "POST",
+      `/api/tenants/${encodeURIComponent(tenantId)}/pipelines/${encodeURIComponent(
+        pipelineId
+      )}/activations`,
+      input
+    ),
+  updateActivation: (
+    tenantId: string,
+    pipelineId: string,
+    activationId: string,
+    patch: {
+      enabled?: boolean;
+      trackLatest?: boolean;
+      pipelineVersionId?: string | null;
+      label?: string;
+    }
+  ) =>
+    request<{ activation: ActivationRow }>(
+      "PATCH",
+      `/api/tenants/${encodeURIComponent(tenantId)}/pipelines/${encodeURIComponent(
+        pipelineId
+      )}/activations/${encodeURIComponent(activationId)}`,
+      patch
+    ),
+  deleteActivation: (
+    tenantId: string,
+    pipelineId: string,
+    activationId: string
+  ) =>
+    request<void>(
+      "DELETE",
+      `/api/tenants/${encodeURIComponent(tenantId)}/pipelines/${encodeURIComponent(
+        pipelineId
+      )}/activations/${encodeURIComponent(activationId)}`
+    ),
+
+  // ---- schedules --------------------------------------------------------
+  listSchedules: (params: { tenant?: string; pipeline?: string } = {}) =>
+    request<{ schedules: ScheduleRow[] }>(
+      "GET",
+      `/api/schedules${qs(params)}`
+    ),
+  createSchedule: (input: {
+    tenantId: string;
+    pipelineId: string;
+    environment: string;
+    activationLabel?: string;
+    cron: string;
+    timezone?: string;
+    input?: unknown;
+    enabled?: boolean;
+  }) => request<{ schedule: ScheduleRow }>("POST", "/api/schedules", input),
+  updateSchedule: (
+    id: string,
+    patch: {
+      environment?: string;
+      activationLabel?: string | null;
+      cron?: string;
+      timezone?: string;
+      input?: unknown;
+      enabled?: boolean;
+    }
+  ) =>
+    request<{ schedule: ScheduleRow }>(
+      "PUT",
+      `/api/schedules/${encodeURIComponent(id)}`,
+      patch
+    ),
+  toggleSchedule: (id: string, enabled: boolean) =>
+    request<{ schedule: ScheduleRow }>(
+      "PATCH",
+      `/api/schedules/${encodeURIComponent(id)}`,
+      { enabled }
+    ),
+  deleteSchedule: (id: string) =>
+    request<void>("DELETE", `/api/schedules/${encodeURIComponent(id)}`),
 
   // ---- config -----------------------------------------------------------
   listConfigDefinitions: () =>
@@ -245,6 +417,8 @@ export interface PipelineRow {
   slug: string;
   name: string;
   description?: string | null;
+  folderId?: string | null;
+  latestVersionId?: string | null;
 }
 
 export interface PipelineVersionRow {
@@ -255,6 +429,56 @@ export interface PipelineVersionRow {
   checksum: string;
   createdAt: string;
   publishedAt?: string | null;
+  parentVersionId?: string | null;
+  isLatest?: boolean;
+  spec?: unknown;
+}
+
+/** Nested folder node as returned by GET /api/folders. */
+export interface FolderTreeNode {
+  id: string;
+  parentId?: string | null;
+  name: string;
+  createdAt?: string;
+  children?: FolderTreeNode[];
+}
+
+export interface PipelineFolderRow {
+  id: string;
+  parentId?: string | null;
+  name: string;
+  createdAt: string;
+}
+
+export interface ActivationRow {
+  id: string;
+  label: string;
+  environment: string;
+  pipelineVersionId?: string | null;
+  trackLatest: boolean;
+  enabled: boolean;
+  effectiveVersionId?: string | null;
+}
+
+export interface TenantPipelineRow {
+  pipelineId: string;
+  enabled: boolean;
+  activations: ActivationRow[];
+}
+
+export interface ScheduleRow {
+  id: string;
+  tenantId: string;
+  pipelineId: string;
+  environment: string;
+  activationLabel?: string | null;
+  cron: string;
+  timezone: string;
+  input?: unknown;
+  enabled: boolean;
+  lastRunAt?: string | null;
+  nextRunAt?: string | null;
+  createdAt: string;
 }
 
 export interface DeploymentRow {

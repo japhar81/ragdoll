@@ -1,27 +1,51 @@
-import React, { useState } from "react";
+import React, { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../lib/api.ts";
+import {
+  buildScopeTree,
+  findScopeNode,
+  type ScopeNode
+} from "../lib/orgtree.ts";
 import { Screen, Table } from "./Screen.tsx";
 
 /**
- * Config admin: lists definitions (GET /api/config/definitions) and values
- * (GET /api/config/values, values defensively redacted by the server) and
- * upserts a value via POST /api/config/values.
+ * Config admin with a left Global -> Tenant -> Pipeline scope navigator.
+ * Selecting a node drives GET /api/config/values?scope&scopeId and scopes the
+ * upsert (POST /api/config/values). Definitions are listed for reference.
  */
 export function ConfigScreen() {
   const qc = useQueryClient();
+  const [selectedKey, setSelectedKey] = useState("global");
   const [key, setKey] = useState("");
   const [value, setValue] = useState("");
-  const [scope, setScope] = useState("global");
-  const [scopeId, setScopeId] = useState("");
 
+  const tenants = useQuery({
+    queryKey: ["tenants"],
+    queryFn: () => api.listTenants()
+  });
+  const pipelines = useQuery({
+    queryKey: ["pipelines"],
+    queryFn: () => api.listPipelines()
+  });
   const definitions = useQuery({
     queryKey: ["config-definitions"],
     queryFn: () => api.listConfigDefinitions()
   });
+
+  const scopeRoot = useMemo(
+    () =>
+      buildScopeTree(
+        tenants.data?.tenants ?? [],
+        pipelines.data?.pipelines ?? []
+      ),
+    [tenants.data, pipelines.data]
+  );
+  const node = findScopeNode(scopeRoot, selectedKey) ?? scopeRoot;
+
   const values = useQuery({
-    queryKey: ["config-values"],
-    queryFn: () => api.listConfigValues()
+    queryKey: ["config-values", node.scope, node.scopeId],
+    queryFn: () =>
+      api.listConfigValues({ scope: node.scope, scope_id: node.scopeId })
   });
 
   const upsert = useMutation({
@@ -29,8 +53,8 @@ export function ConfigScreen() {
       api.upsertConfigValue({
         key,
         value,
-        scope,
-        scopeId: scopeId || undefined
+        scope: node.scope,
+        scopeId: node.scopeId
       }),
     onSuccess: () => {
       setKey("");
@@ -42,69 +66,102 @@ export function ConfigScreen() {
   return (
     <Screen
       title="Config"
-      isLoading={definitions.isLoading || values.isLoading}
-      error={definitions.error ?? values.error}
+      isLoading={definitions.isLoading}
+      error={definitions.error}
     >
-      <h2>Set a config value</h2>
-      <form
-        className="inline-form"
-        onSubmit={(e) => {
-          e.preventDefault();
-          upsert.mutate();
-        }}
-      >
-        <input
-          placeholder="key"
-          value={key}
-          onChange={(e) => setKey(e.target.value)}
-          required
-        />
-        <input
-          placeholder="value"
-          value={value}
-          onChange={(e) => setValue(e.target.value)}
-        />
-        <select value={scope} onChange={(e) => setScope(e.target.value)}>
-          <option value="global">global</option>
-          <option value="environment">environment</option>
-          <option value="pipeline">pipeline</option>
-          <option value="tenant">tenant</option>
-          <option value="tenant_pipeline">tenant_pipeline</option>
-        </select>
-        <input
-          placeholder="scope id (optional)"
-          value={scopeId}
-          onChange={(e) => setScopeId(e.target.value)}
-        />
-        <button type="submit" disabled={upsert.isPending}>
-          Upsert
-        </button>
-        {upsert.isError && <span className="error">{String(upsert.error)}</span>}
-      </form>
+      <div className="scope-layout">
+        <aside className="scope-tree">
+          <h2>Scope</h2>
+          <ScopeTree
+            root={scopeRoot}
+            selectedKey={selectedKey}
+            onSelect={setSelectedKey}
+          />
+        </aside>
+        <div className="scope-body">
+          <h2>
+            {node.scope}
+            {node.scopeId ? ` · ${node.label}` : ""} config values
+          </h2>
+          <form
+            className="inline-form"
+            onSubmit={(e) => {
+              e.preventDefault();
+              upsert.mutate();
+            }}
+          >
+            <input
+              placeholder="key"
+              value={key}
+              onChange={(e) => setKey(e.target.value)}
+              required
+            />
+            <input
+              placeholder="value"
+              value={value}
+              onChange={(e) => setValue(e.target.value)}
+            />
+            <button type="submit" disabled={upsert.isPending}>
+              Upsert at {node.scope}
+            </button>
+            {upsert.isError && (
+              <span className="error">{String(upsert.error)}</span>
+            )}
+          </form>
 
-      <h2>Definitions</h2>
-      <Table
-        columns={["Key", "Type", "Scopes", "Secret", "Required"]}
-        rows={(definitions.data?.definitions ?? []).map((d) => [
-          d.key,
-          d.type,
-          (d.allowedScopes ?? []).join(", "),
-          d.secret ? "yes" : "no",
-          d.required ? "yes" : "no"
-        ])}
-      />
+          {values.isLoading && <p className="muted">Loading values…</p>}
+          {values.error && (
+            <p className="error">{String(values.error)}</p>
+          )}
+          <Table
+            columns={["Key", "Scope", "Scope ID", "Value", "Locked"]}
+            rows={(values.data?.values ?? []).map((v) => [
+              v.key,
+              v.scope,
+              v.scopeId ?? "-",
+              String(v.value),
+              v.locked ? "yes" : "no"
+            ])}
+          />
 
-      <h2>Values (sensitive values redacted by server)</h2>
-      <Table
-        columns={["Key", "Scope", "Scope ID", "Value", "Locked"]}
-        rows={(values.data?.values ?? []).map((v) => [
-          v.key,
-          v.scope,
-          v.scopeId ?? "-",
-          String(v.value),
-          v.locked ? "yes" : "no"
-        ])}
-      />
+          <h2>Definitions</h2>
+          <Table
+            columns={["Key", "Type", "Scopes", "Secret", "Required"]}
+            rows={(definitions.data?.definitions ?? []).map((d) => [
+              d.key,
+              d.type,
+              (d.allowedScopes ?? []).join(", "),
+              d.secret ? "yes" : "no",
+              d.required ? "yes" : "no"
+            ])}
+          />
+        </div>
+      </div>
     </Screen>
   );
+}
+
+export function ScopeTree(props: {
+  root: ScopeNode;
+  selectedKey: string;
+  onSelect: (key: string) => void;
+}) {
+  const render = (n: ScopeNode, depth: number): React.ReactNode => (
+    <li key={n.key}>
+      <a
+        className={n.key === props.selectedKey ? "active" : undefined}
+        style={{ paddingLeft: depth * 14 }}
+        onClick={() => props.onSelect(n.key)}
+      >
+        {depth === 0 ? "\u{1F310} " : depth === 1 ? "\u{1F3E2} " : "\u{1F4C4} "}
+        {n.label}
+      </a>
+      {n.children.length > 0 && (
+        <ul className="tree-list">
+          {n.children.map((c) => render(c, depth + 1))}
+        </ul>
+      )}
+    </li>
+  );
+  return <ul className="tree-list">{render(props.root, 0)}</ul>;
 }

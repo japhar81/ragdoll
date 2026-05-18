@@ -82,7 +82,7 @@ functional, and e2e together. Full local development is described in
 
 - Architecture: `docs/architecture/initial-design.md`,
   `docs/architecture/runtime.md`
-- ADRs: `docs/adr/0001`–`0007`
+- ADRs: `docs/adr/0001`–`0009`
 - Developer: `docs/developer/local-development.md`,
   `docs/developer/plugin-development.md`,
   `docs/developer/provider-development.md`

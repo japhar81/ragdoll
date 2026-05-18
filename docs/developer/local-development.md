@@ -113,6 +113,43 @@ picks it up off the BullMQ queue and calls CPU Ollama. Poll
 `GET /api/executions/<id>` until it leaves `running` (the smoke script does
 this automatically).
 
+### Organizing pipelines (folders), versioning & rollback, per-tenant activations, scheduling
+
+See ADR 0009 for the model. Quick local flows (all behind the dev auth
+headers):
+
+- **Folders.** `GET /api/folders` returns the nested tree; `POST
+  /api/folders` creates one; `PUT/DELETE /api/folders/:id` rename/reparent
+  or delete (deleting a non-empty folder is `409`). Move a pipeline with
+  `PUT /api/pipelines/:id/folder` (`folderId: null` = root).
+- **Versioning & rollback.** `POST /api/pipelines/:id/save` is the
+  auto-versioned save: identical spec => idempotent (`created:false`);
+  otherwise a new published version is created at the global-max version
+  bumped by `level` (default `patch`), with `parentVersionId` lineage, and
+  `pipelines.latestVersionId` advances. `GET
+  /api/pipelines/:id/versions` flags `isLatest` against that pointer.
+  `POST /api/pipelines/:id/rollback {versionId}` moves the latest pointer
+  only — no new version, no mutation (unknown id => `404`).
+- **Per-tenant activations.** `GET/POST
+  /api/tenants/:id/pipelines/:pid/activations` and
+  `PUT/DELETE .../activations/:aid` manage 1..N labeled bindings per
+  tenant+pipeline+environment, each pinned or `trackLatest`, each
+  independently `enabled`. `POST /api/pipelines/:id/run` resolves the
+  version via `activation` label > `default` > sole-enabled, then falls
+  back to the legacy deployment if no activations exist.
+- **Scheduling.** `GET/POST /api/schedules`, `PUT/PATCH/DELETE
+  /api/schedules/:id`. The `cron` is a 5-field expression validated on
+  create/change (`422` on bad cron); `nextRunAt` is computed then.
+  Locally the scheduler runs **inside the single worker process**, ticks
+  ~every 60s, and is **UTC-only** — the `timezone` field is stored for
+  display, not evaluation. It enqueues onto the same queue this worker
+  consumes, so a scheduled run executes end to end locally with no extra
+  setup.
+
+After changing any of this code, `make refresh` (rebuild + restart
+api/worker/web; DB and pulled models kept) and reload the browser;
+changes to `packages/db/migrations` still need `make down && make up`.
+
 ## Run services directly
 
 ```bash

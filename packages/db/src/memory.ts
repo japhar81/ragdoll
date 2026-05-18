@@ -19,12 +19,19 @@ import type {
   CrudRepository,
   DatasourceConnectionRepository,
   DatasourceConnectionRow,
+  PipelineActivationRepository,
+  PipelineActivationRow,
   PipelineDeploymentRepository,
   PipelineDeploymentRow,
+  PipelineFolderRepository,
+  PipelineFolderRow,
+  PipelineFolderTreeNode,
   PipelineRepository,
   PipelineRow,
   PipelineVersionRepository,
   PipelineVersionRow,
+  ScheduleRepository,
+  ScheduleRow,
   PluginRepository,
   PluginRow,
   PluginVersionRepository,
@@ -172,6 +179,22 @@ export class InMemoryPipelineRepository
   async findBySlug(slug: string): Promise<PipelineRow | undefined> {
     return (await this.list()).find((row) => row.slug === slug);
   }
+  async setLatestVersion(
+    pipelineId: UUID,
+    versionId: UUID | null
+  ): Promise<PipelineRow> {
+    return this.update(pipelineId, {
+      latestVersionId: versionId
+    } as Partial<PipelineRow>);
+  }
+  async setFolder(
+    pipelineId: UUID,
+    folderId: UUID | null
+  ): Promise<PipelineRow> {
+    return this.update(pipelineId, {
+      folderId
+    } as Partial<PipelineRow>);
+  }
 }
 
 export class InMemoryPipelineVersionRepository
@@ -220,6 +243,194 @@ export class InMemoryPipelineDeploymentRepository
   }
   async listByPipeline(pipelineId: UUID): Promise<PipelineDeploymentRow[]> {
     return (await this.list()).filter((row) => row.pipelineId === pipelineId);
+  }
+}
+
+export class InMemoryPipelineFolderRepository
+  extends InMemoryCrudRepository<PipelineFolderRow>
+  implements PipelineFolderRepository
+{
+  // Pipelines that live in folders are tracked here so delete() can block a
+  // non-empty folder without coupling to the pipeline repository.
+  private pipelinesByFolder = new Map<string, Set<string>>();
+
+  constructor() {
+    super("pipeline_folder");
+  }
+
+  /**
+   * Test/wiring hook: record which folder a pipeline currently lives in so a
+   * non-empty folder delete raises ConflictError. Pass `null` to detach.
+   */
+  trackPipelineFolder(pipelineId: string, folderId: string | null): void {
+    for (const set of this.pipelinesByFolder.values()) {
+      set.delete(pipelineId);
+    }
+    if (folderId !== null) {
+      const set = this.pipelinesByFolder.get(folderId) ?? new Set<string>();
+      set.add(pipelineId);
+      this.pipelinesByFolder.set(folderId, set);
+    }
+  }
+
+  override async create(row: PipelineFolderRow): Promise<PipelineFolderRow> {
+    const dupe = (await this.list()).find(
+      (existing) =>
+        (existing.parentId ?? null) === (row.parentId ?? null) &&
+        existing.name === row.name
+    );
+    if (dupe) {
+      throw new ConflictError(
+        "pipeline_folder",
+        `name already exists under parent: ${row.name}`
+      );
+    }
+    return super.create(row);
+  }
+
+  async rename(id: UUID, name: string): Promise<PipelineFolderRow> {
+    const existing = await this.require(id);
+    const dupe = (await this.list()).find(
+      (row) =>
+        row.id !== id &&
+        (row.parentId ?? null) === (existing.parentId ?? null) &&
+        row.name === name
+    );
+    if (dupe) {
+      throw new ConflictError(
+        "pipeline_folder",
+        `name already exists under parent: ${name}`
+      );
+    }
+    return this.update(id, { name } as Partial<PipelineFolderRow>);
+  }
+
+  async listChildren(parentId: UUID | null): Promise<PipelineFolderRow[]> {
+    return (await this.list()).filter(
+      (row) => (row.parentId ?? null) === (parentId ?? null)
+    );
+  }
+
+  override async delete(id: string): Promise<void> {
+    const childFolders = await this.listChildren(id);
+    if (childFolders.length > 0) {
+      throw new ConflictError(
+        "pipeline_folder",
+        `folder has ${childFolders.length} child folder(s): ${id}`
+      );
+    }
+    const pipelines = this.pipelinesByFolder.get(id);
+    if (pipelines && pipelines.size > 0) {
+      throw new ConflictError(
+        "pipeline_folder",
+        `folder has ${pipelines.size} pipeline(s): ${id}`
+      );
+    }
+    this.pipelinesByFolder.delete(id);
+    await super.delete(id);
+  }
+
+  async tree(): Promise<PipelineFolderTreeNode[]> {
+    const all = await this.list();
+    const byParent = new Map<string, PipelineFolderRow[]>();
+    for (const row of all) {
+      const key = row.parentId ?? " root";
+      const bucket = byParent.get(key) ?? [];
+      bucket.push(row);
+      byParent.set(key, bucket);
+    }
+    const build = (row: PipelineFolderRow): PipelineFolderTreeNode => ({
+      ...row,
+      children: (byParent.get(row.id) ?? [])
+        .sort((a, b) => a.name.localeCompare(b.name))
+        .map(build)
+    });
+    return (byParent.get(" root") ?? [])
+      .sort((a, b) => a.name.localeCompare(b.name))
+      .map(build);
+  }
+}
+
+export class InMemoryPipelineActivationRepository
+  extends InMemoryCrudRepository<PipelineActivationRow>
+  implements PipelineActivationRepository
+{
+  constructor() {
+    super("pipeline_activation");
+  }
+
+  override async create(
+    row: PipelineActivationRow
+  ): Promise<PipelineActivationRow> {
+    const dupe = (await this.list()).find(
+      (existing) =>
+        existing.tenantId === row.tenantId &&
+        existing.pipelineId === row.pipelineId &&
+        existing.environment === row.environment &&
+        existing.label === row.label
+    );
+    if (dupe) {
+      throw new ConflictError(
+        "pipeline_activation",
+        `label already exists for tenant+pipeline+environment: ${row.label}`
+      );
+    }
+    return super.create(row);
+  }
+
+  async listByTenantPipelineEnv(
+    tenantId: UUID,
+    pipelineId: UUID,
+    environment: string
+  ): Promise<PipelineActivationRow[]> {
+    return (await this.list()).filter(
+      (row) =>
+        row.tenantId === tenantId &&
+        row.pipelineId === pipelineId &&
+        row.environment === environment
+    );
+  }
+
+  async listByTenant(tenantId: UUID): Promise<PipelineActivationRow[]> {
+    return (await this.list()).filter((row) => row.tenantId === tenantId);
+  }
+
+  async listByPipeline(pipelineId: UUID): Promise<PipelineActivationRow[]> {
+    return (await this.list()).filter((row) => row.pipelineId === pipelineId);
+  }
+}
+
+export class InMemoryScheduleRepository
+  extends InMemoryCrudRepository<ScheduleRow>
+  implements ScheduleRepository
+{
+  constructor() {
+    super("schedule");
+  }
+
+  async listEnabled(): Promise<ScheduleRow[]> {
+    return (await this.list()).filter((row) => row.enabled);
+  }
+
+  async listDue(nowIso: string): Promise<ScheduleRow[]> {
+    return (await this.list()).filter(
+      (row) =>
+        row.enabled &&
+        row.nextRunAt !== null &&
+        row.nextRunAt !== undefined &&
+        row.nextRunAt <= nowIso
+    );
+  }
+
+  async markRun(
+    id: UUID,
+    lastRunIso: string,
+    nextRunIso: string | null
+  ): Promise<ScheduleRow> {
+    return this.update(id, {
+      lastRunAt: lastRunIso,
+      nextRunAt: nextRunIso
+    } as Partial<ScheduleRow>);
   }
 }
 
