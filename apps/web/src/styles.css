@@ -335,6 +335,49 @@ table.grid th {
   align-items: center;
 }
 
+/* Execution detail panel: node rows stack (line + error + expandable io). */
+.exec-detail {
+  margin-top: 16px;
+}
+
+.exec-detail .timeline li {
+  display: block;
+}
+
+.exec-node-line {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+}
+
+.exec-node-line .link-btn {
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  color: inherit;
+  font: inherit;
+}
+
+.exec-io {
+  margin-top: 6px;
+}
+
+.exec-io .console-detail {
+  border-radius: 6px;
+  margin: 4px 0 8px;
+}
+
+.exec-block {
+  margin: 12px 0;
+}
+
+.exec-block .console-detail {
+  border-radius: 6px;
+  max-height: 360px;
+  overflow: auto;
+}
+
 .metric-row {
   display: flex;
   gap: 16px;
