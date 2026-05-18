@@ -33,7 +33,16 @@ import {
   validateConnection
 } from "../lib/graph.ts";
 import { FlowNodeCard } from "./FlowNodeCard.tsx";
-import type { FlowEdge, FlowNode, PipelineNode, PipelineSpec, PluginCategory } from "../lib/types.ts";
+import { PluginEditorSlot } from "./PluginEditorSlot.tsx";
+import { SecretsEditor } from "./SecretsEditor.tsx";
+import type {
+  FlowEdge,
+  FlowNode,
+  PipelineNode,
+  PipelineSpec,
+  PluginCategory,
+  SecretRef
+} from "../lib/types.ts";
 
 const nodeTypes = { ragNode: FlowNodeCard };
 
@@ -154,6 +163,24 @@ export function PipelineBuilder() {
     [nodes, selectedId]
   );
 
+  const selectedPluginRef = selectedNode?.plugin;
+  const selectedPlugin = useQuery({
+    queryKey: [
+      "plugin",
+      selectedPluginRef?.category,
+      selectedPluginRef?.id,
+      selectedPluginRef?.version
+    ],
+    queryFn: () =>
+      api.getPlugin(
+        selectedPluginRef!.category,
+        selectedPluginRef!.id,
+        selectedPluginRef!.version
+      ),
+    enabled: !!selectedPluginRef,
+    retry: false
+  });
+
   const nodeKinds = useMemo(
     () =>
       new Map(
@@ -259,20 +286,12 @@ export function PipelineBuilder() {
     );
   }
 
-  function setConfigText(text: string) {
-    try {
-      updateSelectedNode((node) => ({ ...node, config: JSON.parse(text || "{}") }));
-    } catch {
-      /* keep typing until valid JSON */
-    }
+  function setNodeConfig(config: Record<string, unknown>) {
+    updateSelectedNode((node) => ({ ...node, config }));
   }
 
-  function setSecretsText(text: string) {
-    try {
-      updateSelectedNode((node) => ({ ...node, secrets: JSON.parse(text || "{}") }));
-    } catch {
-      /* keep typing until valid JSON */
-    }
+  function setNodeSecrets(secrets: Record<string, SecretRef>) {
+    updateSelectedNode((node) => ({ ...node, secrets }));
   }
 
   function deleteSelected() {
@@ -497,17 +516,28 @@ export function PipelineBuilder() {
                       }
                     }}
                   />
-                  <label>Config (JSON) - supports {"${config.*}"}</label>
-                  <textarea
+                  <h3>Config</h3>
+                  {selectedPlugin.isLoading && (
+                    <p className="muted">Loading plugin schema…</p>
+                  )}
+                  {selectedPlugin.isError && (
+                    <p className="muted">
+                      Plugin metadata unavailable — editing raw config.
+                    </p>
+                  )}
+                  <PluginEditorSlot
                     key={`config-${selectedNode.id}`}
-                    defaultValue={JSON.stringify(selectedNode.config ?? {}, null, 2)}
-                    onChange={(e) => setConfigText(e.target.value)}
+                    value={selectedNode.config}
+                    schema={selectedPlugin.data?.configSchema}
+                    ui={selectedPlugin.data?.ui}
+                    onChange={setNodeConfig}
                   />
-                  <label>Secrets (JSON) - SecretRef map</label>
-                  <textarea
+                  <h3>Secrets</h3>
+                  <SecretsEditor
                     key={`secrets-${selectedNode.id}`}
-                    defaultValue={JSON.stringify(selectedNode.secrets ?? {}, null, 2)}
-                    onChange={(e) => setSecretsText(e.target.value)}
+                    secrets={selectedNode.secrets}
+                    schema={selectedPlugin.data?.secretsSchema}
+                    onChange={setNodeSecrets}
                   />
                 </>
               )}

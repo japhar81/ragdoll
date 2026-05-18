@@ -50,6 +50,52 @@ test("loader tolerates non-plugin exports", () => {
   assert.doesNotThrow(() => loadPluginRegistry());
 });
 
+test("representative built-in manifests expose schema-driven config", () => {
+  const registry = loadPluginRegistry();
+
+  const chat = registry.get({ category: "llm", id: "provider_chat", version: "1.0.0" });
+  assert.ok(chat, "provider_chat registered");
+  const chatSchema = chat?.manifest.configSchema;
+  assert.equal(chatSchema?.type, "object");
+  assert.ok(
+    chatSchema?.properties && Object.keys(chatSchema.properties).length > 0,
+    "provider_chat configSchema has properties"
+  );
+  // provider is a real enum and temperature has a default.
+  assert.deepEqual(chatSchema?.properties?.provider?.enum, ["openai", "anthropic", "ollama"]);
+  assert.equal(chatSchema?.properties?.temperature?.default, 0.2);
+  // secretsSchema marks apiKey as a secret reference.
+  assert.equal(
+    chat?.manifest.secretsSchema?.properties?.apiKey?.format,
+    "secret-ref"
+  );
+  // formHints are present for nicer rendering.
+  assert.ok(chat?.manifest.ui?.formHints?.temperature, "temperature formHint present");
+
+  const chunker = registry.get({ category: "chunker", id: "basic_text_chunker", version: "1.0.0" });
+  const chunkerSchema = chunker?.manifest.configSchema;
+  assert.equal(chunkerSchema?.properties?.chunkSize?.default, 1000);
+  assert.equal(chunkerSchema?.properties?.overlap?.default, 100);
+
+  const sample = registry.get({
+    category: "transformer",
+    id: "sample_uppercase_transformer",
+    version: "1.0.0"
+  });
+  assert.equal(sample?.manifest.configSchema?.properties?.field?.default, "text");
+
+  // Every registered plugin now exposes a non-empty object configSchema.
+  for (const plugin of registry.list()) {
+    const schema = plugin.manifest.configSchema;
+    assert.ok(schema, `${plugin.manifest.id} has a configSchema`);
+    assert.equal(schema?.type, "object", `${plugin.manifest.id} configSchema is object`);
+    assert.ok(
+      schema?.properties !== undefined,
+      `${plugin.manifest.id} configSchema declares properties`
+    );
+  }
+});
+
 test("loadProviderRegistry has openai/anthropic/ollama", () => {
   const providers = loadProviderRegistry();
   assert.equal(providers.require("openai").id, "openai");

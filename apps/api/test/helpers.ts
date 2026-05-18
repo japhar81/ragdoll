@@ -43,7 +43,20 @@ export const fakeEchoPlugin: InProcessPlugin = {
     name: "Fake Echo",
     version: "1.0.0",
     category: "transformer",
-    description: "Returns its inputs verbatim for tests."
+    description: "Returns its inputs verbatim for tests.",
+    configSchema: {
+      type: "object",
+      properties: {
+        label: { type: "string", default: "echo", description: "Test label." }
+      },
+      additionalProperties: false
+    },
+    capabilities: ["query"],
+    ui: {
+      icon: "repeat",
+      paletteGroup: "Test",
+      formHints: { label: { widget: "text" } }
+    }
   },
   async execute(input) {
     return { outputs: { echoed: input.inputs }, usage: { inputTokens: 1, outputTokens: 1 } };

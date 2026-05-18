@@ -36,6 +36,77 @@ export const plugin: InProcessPlugin = {
 
 See `plugins/sample-text/index.ts`.
 
+## Declaring config / secrets schemas (schema-driven forms)
+
+The web UI renders a real config/secrets form from the manifest instead of a
+JSON textarea (see ADR 0008). Populate these manifest fields so the form is
+accurate:
+
+- `configSchema` — a `JsonSchemaLike` describing exactly what `execute` reads
+  from `config`. Use `enum` for fixed choices, `default` to seed the control
+  with the plugin's runtime default, and `description` for inline help.
+- `secretsSchema` — declare only if the plugin reads `secrets`. Mark secret
+  fields with `format: "secret-ref"`; the UI renders a secret picker and only a
+  *reference* (never raw key material) is stored in node config.
+- `ui.formHints` — per-field rendering hints keyed by property name, e.g.
+  `{ temperature: { widget: "range", min: 0, max: 2, step: 0.1 },
+  apiKey: { widget: "secret" } }`. Values are opaque to the control plane.
+- `ui.icon` / `ui.color` / `ui.paletteGroup` — palette presentation metadata.
+
+`JsonSchemaLike` is the dependency-free subset in `@ragdoll/plugin-sdk`:
+`{ type?, properties?, required?, items?, additionalProperties?, description?,
+enum?, default?, format? }`. No JSON-Schema library is used.
+
+```ts
+manifest: {
+  // ...
+  configSchema: {
+    type: "object",
+    properties: {
+      provider: { type: "string", enum: ["openai", "anthropic", "ollama"], default: "ollama" },
+      temperature: { type: "number", default: 0.2 }
+    },
+    additionalProperties: false
+  },
+  secretsSchema: {
+    type: "object",
+    properties: {
+      apiKey: { type: "string", format: "secret-ref", description: "Provider API key" }
+    }
+  },
+  ui: {
+    formHints: {
+      temperature: { widget: "range", min: 0, max: 2, step: 0.1 },
+      apiKey: { widget: "secret" }
+    }
+  }
+}
+```
+
+Keep the schema in lockstep with what `execute` actually reads — the schema is
+the contract the UI builds the form from.
+
+### Optional custom editor (`ui.module`, Tier-2 seam)
+
+For the rare plugin that needs a bespoke editor, a manifest may set
+`ui.module`: an ESM module URL. The module default-exports (or exports a named
+`ConfigEditor`) a React component with the signature:
+
+```ts
+(props: {
+  value: Record<string, unknown>;
+  schema?: JsonSchemaLike;
+  onChange: (next: Record<string, unknown>) => void;
+}) => ReactNode
+```
+
+`value` is the controlled non-secret config; call `onChange` with the full next
+config object on every edit; `schema` is the plugin's `configSchema` for
+reference. Secret values are never passed to or returned from a custom editor —
+it may only emit secret references. Custom editors are untrusted code: hosts
+load them admin-only/registered and sandboxed, defaulting to the schema-driven
+form otherwise. This is a typed contract seam only; see ADR 0008.
+
 ## Auto-discovery
 
 `packages/plugin-loader` builds the registry by scanning `Object.values()` of

@@ -7,7 +7,23 @@ export const sampleUppercaseTransformer: InProcessPlugin = {
     version: "1.0.0",
     category: "transformer",
     description: "Uppercases a configured field in the input payload.",
-    capabilities: ["query"]
+    configSchema: {
+      type: "object",
+      properties: {
+        field: {
+          type: "string",
+          default: "text",
+          description: "Name of the input field to uppercase."
+        }
+      },
+      additionalProperties: false
+    },
+    capabilities: ["query"],
+    ui: {
+      icon: "type",
+      paletteGroup: "Transforms",
+      formHints: { field: { widget: "text" } }
+    }
   },
   async execute({ inputs, config }) {
     const field = String(config.field ?? "text");

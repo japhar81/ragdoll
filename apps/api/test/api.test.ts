@@ -426,6 +426,39 @@ test("plugins + providers come from the loaded registries", async () => {
   assert.equal(missing.status, 404);
 });
 
+test("GET /api/plugins exposes configSchema + ui; per-plugin route returns a manifest", async () => {
+  const { request } = buildHarness();
+  const admin = { "x-actor-id": "a", "x-roles": "platform_admin" };
+
+  const list = await request({ method: "GET", path: "/api/plugins", headers: admin });
+  assert.equal(list.status, 200);
+  const echo = list.body.plugins.find((p: any) => p.id === "fake_echo");
+  assert.ok(echo, "fake_echo present in list");
+  assert.equal(echo.configSchema?.type, "object");
+  assert.ok(echo.configSchema?.properties?.label, "configSchema projected");
+  assert.equal(echo.ui?.icon, "repeat");
+  assert.ok(echo.ui?.formHints?.label, "ui.formHints projected");
+  assert.deepEqual(echo.capabilities, ["query"]);
+
+  const one = await request({
+    method: "GET",
+    path: "/api/plugins/transformer/fake_echo/1.0.0",
+    headers: admin
+  });
+  assert.equal(one.status, 200);
+  assert.equal(one.body.plugin.id, "fake_echo");
+  assert.equal(one.body.plugin.configSchema?.properties?.label?.default, "echo");
+  assert.equal(one.body.plugin.ui?.paletteGroup, "Test");
+
+  const unknown = await request({
+    method: "GET",
+    path: "/api/plugins/transformer/does_not_exist/9.9.9",
+    headers: admin
+  });
+  assert.equal(unknown.status, 404);
+  assert.equal(unknown.body.error, "not_found");
+});
+
 test("ingest enqueues a job and stream reports not_enabled honestly", async () => {
   const { request, queue } = buildHarness();
   const admin = { "x-actor-id": "a", "x-roles": "platform_admin", "x-tenant-id": "tenant-a" };
