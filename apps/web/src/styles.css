@@ -5,10 +5,15 @@ html, body, #root {
   color: #111827;
 }
 
+body {
+  overflow: hidden;
+}
+
 .app-shell {
   display: grid;
   grid-template-columns: 220px 1fr;
-  height: 100%;
+  height: 100vh;
+  overflow: hidden;
   background: #f8fafc;
 }
 
@@ -17,6 +22,7 @@ html, body, #root {
   background: #0f172a;
   color: white;
   padding: 20px;
+  overflow: auto;
 }
 
 .sidebar h1 {
@@ -50,6 +56,9 @@ html, body, #root {
   display: grid;
   grid-template-rows: auto 1fr;
   min-width: 0;
+  min-height: 0;
+  height: 100%;
+  overflow: hidden;
 }
 
 .toolbar {
@@ -59,24 +68,37 @@ html, body, #root {
   padding: 12px;
   background: white;
   border-bottom: 1px solid #e5e7eb;
+  flex-wrap: wrap;
 }
 
 .builder-grid {
   display: grid;
-  grid-template-columns: 220px 1fr 360px;
+  /* overridden inline with the draggable inspector width */
+  grid-template-columns: 220px minmax(0, 1fr) 6px 360px;
   min-height: 0;
+  height: 100%;
+  overflow: hidden;
 }
 
 .palette, .inspector {
-  overflow: auto;
+  overflow-y: auto;
+  overflow-x: hidden;
   padding: 16px;
   background: white;
+  min-height: 0;
+  height: 100%;
+  box-sizing: border-box;
+}
+
+.palette {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
   border-right: 1px solid #e5e7eb;
 }
 
 .inspector {
   border-left: 1px solid #e5e7eb;
-  border-right: none;
 }
 
 .palette button, .toolbar button {
@@ -85,17 +107,95 @@ html, body, #root {
   border-radius: 8px;
   padding: 8px 10px;
   cursor: pointer;
+  text-align: left;
 }
 
-.palette {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
+.palette button {
+  cursor: grab;
+}
+
+.palette button:active {
+  cursor: grabbing;
 }
 
 .canvas {
+  position: relative;
   min-width: 0;
   min-height: 0;
+  height: 100%;
+  background: #f1f5f9;
+}
+
+.canvas .react-flow {
+  width: 100%;
+  height: 100%;
+}
+
+.col-resizer {
+  cursor: col-resize;
+  background: #e5e7eb;
+  border-left: 1px solid #d1d5db;
+  border-right: 1px solid #d1d5db;
+}
+
+.col-resizer:hover {
+  background: #93c5fd;
+}
+
+/* ---- Custom flow node ---- */
+.rf-node {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 150px;
+  max-width: 240px;
+  padding: 8px 10px;
+  background: #ffffff;
+  border: 2px solid #64748b;
+  border-radius: 10px;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.08);
+  font-size: 12px;
+}
+
+.rf-node.selected {
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.35);
+}
+
+.rf-ico {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 6px;
+  color: white;
+  font-size: 14px;
+  flex: none;
+}
+
+.rf-body {
+  min-width: 0;
+}
+
+.rf-title {
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.rf-sub {
+  color: #64748b;
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.rf-handle {
+  width: 9px;
+  height: 9px;
+  background: #475569;
 }
 
 textarea, pre {
@@ -141,6 +241,9 @@ pre {
   overflow: auto;
   padding: 20px;
   background: white;
+  min-height: 0;
+  height: 100%;
+  box-sizing: border-box;
 }
 
 .screen-body h2 {
