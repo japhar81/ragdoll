@@ -1,0 +1,27 @@
+apiVersion: rag-platform/v1
+kind: Pipeline
+metadata:
+  name: web-crawl-demo
+spec:
+  nodes:
+    - id: input
+      type: input
+    - id: crawl
+      plugin:
+        category: datasource
+        id: crawl4ai_crawler
+        version: "1.0.0"
+      config:
+        url: "https://www.cnn.com"
+        maxPages: 5
+        maxDepth: 1
+        sameDomainOnly: true
+        extract: "markdown"
+        timeoutMs: 60000
+    - id: output
+      type: output
+  edges:
+    - from: input
+      to: crawl
+    - from: crawl
+      to: output
