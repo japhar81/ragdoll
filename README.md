@@ -3,8 +3,8 @@
 RAGdoll is a multi-tenant RAG / LLM pipeline platform. It separates the visual
 builder, control plane, and runtime so pipeline definitions stay versioned,
 portable, diffable, and executable outside the UI. The platform is working and
-tested: 68 offline unit tests plus functional tests for the API and worker pass
-with no dependency install.
+tested: a large offline unit suite plus functional, e2e, and web-logic
+tests pass with no dependency install.
 
 ## What is implemented
 
@@ -20,6 +20,9 @@ with no dependency install.
 - Plugin loader auto-discovering builtin in-process plugins and provider
   adapters; built-in RAG plugins covering ingest, chunk, embed, upsert,
   retrieve, prompt, chat, parse, guardrail, and evaluation.
+- External-plugin HTTP transport (contract v1) with an optional Python
+  crawler sidecar (`crawl4ai_crawler`, `scrapy_spider`) gated on
+  `PYTHON_PLUGIN_URL`, with a default-deny SSRF guard (ADR 0010).
 - Provider abstraction with OpenAI, Anthropic, and Ollama-compatible adapters.
 - Runtime `DagExecutor` with tenant context, redaction, retries, usage
   capture, real deadline and cancellation handling, and OpenTelemetry spans.
@@ -45,7 +48,7 @@ not yet stream tokens (it reports `not_enabled`).
 ## Quick start
 
 ```bash
-npm test                  # 68 unit tests, offline, no install
+npm test                  # unit tests (packages), offline, no install
 npm run test:functional   # API + worker functional tests, offline
 npm run typecheck         # tsc --noEmit (requires install)
 
@@ -82,7 +85,7 @@ functional, and e2e together. Full local development is described in
 
 - Architecture: `docs/architecture/initial-design.md`,
   `docs/architecture/runtime.md`
-- ADRs: `docs/adr/0001`–`0009`
+- ADRs: `docs/adr/0001`–`0010`
 - Developer: `docs/developer/local-development.md`,
   `docs/developer/plugin-development.md`,
   `docs/developer/provider-development.md`

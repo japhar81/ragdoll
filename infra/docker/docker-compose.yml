@@ -79,6 +79,36 @@ services:
       - "4317:4317"
       - "4318:4318"
 
+  # Python-only crawler plugins (crawl4ai + scrapy) over HTTP. Internal
+  # service — the api/worker reach it via the compose network at
+  # http://python-plugins:8000. The image bundles a headless Chromium so it
+  # is large/slow to build; it is deliberately NOT in scripts/dev-refresh.sh
+  # (rebuild explicitly with `docker compose up -d --build python-plugins`
+  # or `make crawl-up`).
+  python-plugins:
+    build:
+      context: ../..
+      dockerfile: services/python-plugins/Dockerfile
+    environment:
+      PORT: "8000"
+    # Optional debugging only; the service is reachable in-network without
+    # publishing. Uncomment to hit it from the host.
+    # ports:
+    #   - "8000:8000"
+    healthcheck:
+      # python:slim has no curl in the base, but the Dockerfile installs it;
+      # use a stdlib urllib check so the probe works regardless.
+      test:
+        [
+          "CMD-SHELL",
+          "python -c \"import urllib.request,sys; sys.exit(0) if urllib.request.urlopen('http://127.0.0.1:8000/healthz').status==200 else sys.exit(1)\"",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+    restart: unless-stopped
+
   # One-shot: run migrations + seeds, then exit. Reuses the api image.
   db-init:
     build:
@@ -106,6 +136,12 @@ services:
       SESSION_SECRET: local-dev-only-change-me-session-hmac
       QDRANT_URL: http://qdrant:6333
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+      # Setting this makes the plugin-loader auto-register the external
+      # crawl4ai_crawler / scrapy_spider plugins so they appear in the
+      # builder palette. api only lists/validates them — it does not need
+      # the (slow) python-plugins build to be healthy to start.
+      PYTHON_PLUGIN_URL: http://python-plugins:8000
+      PYTHON_PLUGIN_TIMEOUT_MS: "300000"
     ports:
       - "3001:3001"
     depends_on:
@@ -113,6 +149,8 @@ services:
         condition: service_healthy
       db-init:
         condition: service_completed_successfully
+      python-plugins:
+        condition: service_started
     healthcheck:
       # 127.0.0.1 (not localhost): inside the container `localhost` resolves to
       # IPv6 ::1 first, where the IPv4-bound server does not listen, so the
@@ -133,6 +171,11 @@ services:
       SECRET_ENCRYPTION_KEY: local-dev-only-change-me-32-bytes-min
       QDRANT_URL: http://qdrant:6333
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+      # The worker executes crawl jobs against the Python plugin service, so
+      # it waits for python-plugins to be healthy (Chromium ready) before
+      # starting.
+      PYTHON_PLUGIN_URL: http://python-plugins:8000
+      PYTHON_PLUGIN_TIMEOUT_MS: "300000"
     depends_on:
       postgres:
         condition: service_healthy
@@ -142,6 +185,8 @@ services:
         condition: service_completed_successfully
       api:
         condition: service_started
+      python-plugins:
+        condition: service_healthy
 
   web:
     build:

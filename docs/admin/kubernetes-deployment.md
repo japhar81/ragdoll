@@ -6,6 +6,10 @@
   `/readyz` readiness and `/healthz` liveness probes.
 - `ragdoll-worker`: runtime and async worker (`apps/worker/src/index.ts`).
 - `ragdoll-web`: static frontend, deployable behind any ingress.
+- `ragdoll-python-plugins` (optional): Python crawler sidecar
+  (`services/python-plugins/`) hosting the external `crawl4ai_crawler` and
+  `scrapy_spider` plugins over HTTP contract v1 (see ADR 0010). Only
+  needed if those datasource plugins are used.
 - Postgres: metadata, encrypted secrets, audit, executions, usage.
 - Redis: BullMQ-compatible queue.
 - Qdrant: default vector database.
@@ -44,6 +48,108 @@ helm install ragdoll infra/helm/ragdoll \
 `web.replicas`/`web.port`, `postgres.externalUrl`, `redis.externalUrl`,
 `qdrant.url`, `otel.endpoint`, and `secrets.existingSecret`.
 
+## Python crawler sidecar (optional)
+
+The `crawl4ai_crawler` / `scrapy_spider` plugins run in a separate Python
+service, not in the worker (ADR 0010). It is only required if those
+datasource plugins are used; skip it otherwise. The image is built from
+`services/python-plugins/Dockerfile` and bundles a full headless Chromium.
+
+> The local Compose stack (`infra/docker/docker-compose.yml`) already
+> defines the `python-plugins` service and wires `PYTHON_PLUGIN_URL` /
+> `PYTHON_PLUGIN_TIMEOUT_MS` into the API and worker. The Helm chart does
+> **not** ship a `python-plugins` template yet — deploy it with the
+> manifests below (or add an equivalent chart template) when enabling
+> external crawlers in Kubernetes.
+
+Deployment and Service (one replica is fine; the crawl4ai engine is
+single-process per request):
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ragdoll-python-plugins
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ragdoll-python-plugins
+  template:
+    metadata:
+      labels:
+        app: ragdoll-python-plugins
+    spec:
+      containers:
+        - name: python-plugins
+          image: "your-registry/ragdoll-python-plugins:0.1.0"
+          ports:
+            - containerPort: 8000
+          env:
+            - name: PORT
+              value: "8000"
+          readinessProbe:
+            httpGet: { path: /healthz, port: 8000 }
+            initialDelaySeconds: 30
+          livenessProbe:
+            httpGet: { path: /healthz, port: 8000 }
+          resources:
+            requests:
+              cpu: 500m
+              memory: 1Gi
+            limits:
+              cpu: "2"
+              memory: 2Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ragdoll-python-plugins
+spec:
+  selector:
+    app: ragdoll-python-plugins
+  ports:
+    - port: 8000
+      targetPort: 8000
+```
+
+**Resource / memory note.** A headless Chromium is memory-hungry and the
+image is large and slow to pull/build (the first build downloads Chromium
+plus OS libraries). Size requests/limits with headroom (start at ~1–2Gi
+memory) and expect a slow first pull; give the readiness probe a generous
+`initialDelaySeconds`.
+
+**Wiring into the API and worker.** Set `PYTHON_PLUGIN_URL` (and
+optionally `PYTHON_PLUGIN_TIMEOUT_MS`, default `300000`) on **both** the
+API and worker so the loader registers the external plugins and the worker
+can execute them. Add these to the shared secret/config consumed via
+`envFrom`, or add explicit `env` entries to the api/worker Deployments:
+
+```yaml
+env:
+  - name: PYTHON_PLUGIN_URL
+    value: "http://ragdoll-python-plugins:8000"
+  - name: PYTHON_PLUGIN_TIMEOUT_MS
+    value: "300000"
+```
+
+A suggested set of values keys to add if you template this in the chart:
+`pythonPlugins.enabled`, `pythonPlugins.replicas`,
+`pythonPlugins.image.repository`/`tag`, `pythonPlugins.resources`, and
+`pythonPlugins.url` (the value plumbed into `PYTHON_PLUGIN_URL`).
+
+**Security (sidecar trust boundary).** The `POST /execute` body carries
+resolved non-secret config **and resolved secret values** for the node, so
+the sidecar is inside the trust boundary: keep its Service
+cluster-internal (no Ingress, no public LoadBalancer) and reachable only
+from the API/worker. It is a network-facing crawler — its in-process SSRF
+guard is default-deny (private/loopback/link-local/reserved blocked,
+scheme + domain allowlists), but for a real multi-tenant deployment add a
+`NetworkPolicy` that (a) restricts ingress to the API/worker pods and
+(b) constrains egress (block RFC1918 / metadata IPs, allow only intended
+crawl egress). Defense in depth: the application guard plus network
+egress controls, not either alone.
+
 ## Scaling notes
 
 - Scale API horizontally behind an ingress.
@@ -60,5 +166,9 @@ helm install ragdoll infra/helm/ragdoll \
 - Disable global fallback API keys unless explicitly approved.
 - Require tenant-scoped provider credentials for SaaS LLM providers.
 - Deny datasource connectors from private networks by default.
+- If the Python crawler sidecar is deployed, keep its Service
+  cluster-internal and apply a `NetworkPolicy` for ingress (API/worker
+  only) and egress (block private/metadata ranges) in addition to the
+  built-in SSRF guard.
 - Export OpenTelemetry to a secured collector.
 - Enable Postgres backups and point-in-time recovery.

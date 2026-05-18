@@ -1,0 +1,32 @@
+[tool.poetry]
+name = "ragdoll-python-plugins"
+version = "0.1.0"
+description = "RAGdoll external plugin HTTP service hosting Python-only crawler plugins (crawl4ai, scrapy)."
+authors = ["RAGdoll"]
+readme = "README.md"
+packages = [{ include = "app" }]
+
+[tool.poetry.dependencies]
+python = "^3.11"
+fastapi = "^0.115.0"
+uvicorn = { extras = ["standard"], version = "^0.30.0" }
+crawl4ai = "^0.4.0"
+scrapy = "^2.11.0"
+pydantic = "^2.7.0"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.2.0"
+pytest-asyncio = "^0.23.0"
+httpx = "^0.27.0"
+
+[tool.poetry.scripts]
+serve = "app.cli:serve"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+addopts = "-q"
+
+[build-system]
+requires = ["poetry-core>=1.9.0"]
+build-backend = "poetry.core.masonry.api"

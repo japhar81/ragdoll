@@ -9,7 +9,7 @@
 ## Tests
 
 ```bash
-npm test                  # 68 unit tests (packages only), offline, no install
+npm test                  # unit tests (packages only), offline, no install
 npm run test:functional   # apps/api + apps/worker functional tests, offline
 npm run test:e2e          # cross-component e2e (API+queue+worker), offline
 npm run test:all          # test + test:functional + test:e2e
@@ -113,6 +113,49 @@ picks it up off the BullMQ queue and calls CPU Ollama. Poll
 `GET /api/executions/<id>` until it leaves `running` (the smoke script does
 this automatically).
 
+### Python crawler plugins (crawl4ai / scrapy)
+
+`make up` also builds and starts the `python-plugins` FastAPI sidecar
+(`services/python-plugins/`) and Compose sets `PYTHON_PLUGIN_URL` (and
+`PYTHON_PLUGIN_TIMEOUT_MS`) on both the API and worker, so the
+`crawl4ai_crawler` and `scrapy_spider` datasource nodes appear in the
+builder palette under "Crawling" automatically.
+
+> **First build is slow and large.** The `python-plugins` image bundles a
+> full headless Chromium plus its OS libraries
+> (`playwright install --with-deps chromium`). This is intentional and
+> only happens on `make up`. `make refresh` rebuilds **only**
+> `api worker web` by design, so it does **not** rebuild this service.
+> After changing `services/python-plugins/`, rebuild it explicitly:
+>
+> ```bash
+> docker compose -f infra/docker/docker-compose.yml up -d --build python-plugins
+> ```
+
+The API depends on `python-plugins` only as `service_started` (it just
+lists/validates the manifests), while the worker waits for it to be
+healthy (Chromium ready) before executing crawl jobs. The service is
+internal — it is reachable in-network at `http://python-plugins:8000` and
+is not published to the host (uncomment the `ports:` block in
+`docker-compose.yml` to debug it directly).
+
+Crawl a public site via the builder: open `http://localhost:8088`, add a
+**Crawl4AI Crawler** datasource node, set `url`
+(e.g. `https://example.com`), keep `sameDomainOnly` and the default
+`maxPages`/`maxDepth`, wire it into a pipeline, save, and run. The
+SSRF guard blocks private/loopback targets by default — use a real public
+URL. `scrapy_spider` is the same but takes `startUrls` (list) and
+`allowedDomains`.
+
+Run the Python unit tests (offline, no network/browser/Twisted):
+
+```bash
+cd services/python-plugins && poetry run pytest
+```
+
+The suite monkeypatches the crawl engines and injects a fake DNS
+resolver, so `poetry install` of dev deps is enough — no Chromium needed.
+
 ### Organizing pipelines (folders), versioning & rollback, per-tenant activations, scheduling
 
 See ADR 0009 for the model. Quick local flows (all behind the dev auth
@@ -173,6 +216,11 @@ migrations automatically when `DATABASE_URL` is set.
 - `OTEL_ENABLED` — set to `false` to force the no-op tracer.
 - `WORKER_QUEUE_NAME`, `WORKER_CONCURRENCY`, `WORKER_MAX_RETRIES` — worker
   tuning.
+- `PYTHON_PLUGIN_URL` — base URL of the Python crawler sidecar. When set,
+  `@ragdoll/plugin-loader` registers the external `crawl4ai_crawler` /
+  `scrapy_spider` plugins (no-op when unset).
+- `PYTHON_PLUGIN_TIMEOUT_MS` — external plugin execute/health timeout
+  (default `300000`; crawls are slow).
 - `PORT`, `HOST` — API bind address.
 
 ## API smoke checks

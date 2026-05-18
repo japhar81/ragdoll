@@ -1,6 +1,7 @@
 import {
   PluginRegistry,
   type InProcessPlugin,
+  type PluginManifest,
   type RegisteredPlugin
 } from "../../plugin-sdk/src/index.ts";
 import {
@@ -41,12 +42,191 @@ export function isInProcessPlugin(value: unknown): value is InProcessPlugin {
 }
 
 /**
+ * Manifest for the external `crawl4ai_crawler` data source. The configSchema
+ * mirrors the {@link PluginManifest} JsonSchemaLike shape used by the builtin
+ * manifests so the web pipeline builder renders a real form.
+ */
+const CRAWL4AI_MANIFEST: PluginManifest = {
+  id: "crawl4ai_crawler",
+  name: "Crawl4AI Crawler",
+  version: "1.0.0",
+  category: "datasource",
+  description:
+    "Crawls one or more URLs via the Crawl4AI engine and emits markdown/text documents for ingestion.",
+  configSchema: {
+    type: "object",
+    properties: {
+      url: {
+        type: "string",
+        description: "Single seed URL to crawl. Use this or `urls`."
+      },
+      urls: {
+        type: "array",
+        items: { type: "string" },
+        description: "Multiple seed URLs to crawl. Use this or `url`."
+      },
+      maxPages: {
+        type: "integer",
+        default: 10,
+        description: "Maximum number of pages to fetch."
+      },
+      maxDepth: {
+        type: "integer",
+        default: 1,
+        description: "Maximum link depth to follow from each seed URL."
+      },
+      sameDomainOnly: {
+        type: "boolean",
+        default: true,
+        description: "Restrict crawling to the seed URL's domain."
+      },
+      allowedDomains: {
+        type: "array",
+        items: { type: "string" },
+        description: "Additional domains the crawler may visit."
+      },
+      extract: {
+        type: "string",
+        enum: ["markdown", "text"],
+        default: "markdown",
+        description: "Content extraction format for fetched pages."
+      },
+      timeoutMs: {
+        type: "integer",
+        default: 60000,
+        description: "Per-page fetch timeout in milliseconds."
+      },
+      allowPrivateNetworks: {
+        type: "boolean",
+        default: false,
+        description: "Allow crawling private/loopback addresses (SSRF guard off)."
+      }
+    },
+    additionalProperties: false
+  },
+  secretsSchema: {
+    type: "object",
+    properties: {},
+    additionalProperties: false
+  },
+  capabilities: ["ingestion"],
+  ui: {
+    icon: "spider",
+    color: "#0ea5e9",
+    paletteGroup: "Crawling",
+    formHints: {
+      url: { widget: "text" },
+      urls: { widget: "tags" },
+      maxPages: { widget: "number", min: 1, step: 1 },
+      maxDepth: { widget: "number", min: 0, step: 1 },
+      sameDomainOnly: { widget: "checkbox" },
+      allowedDomains: { widget: "tags" },
+      extract: { widget: "select" },
+      timeoutMs: { widget: "number", min: 1000, step: 1000 },
+      allowPrivateNetworks: { widget: "checkbox" }
+    }
+  }
+};
+
+/**
+ * Manifest for the external `scrapy_spider` data source. See
+ * {@link CRAWL4AI_MANIFEST} for the schema/ui conventions.
+ */
+const SCRAPY_MANIFEST: PluginManifest = {
+  id: "scrapy_spider",
+  name: "Scrapy Spider",
+  version: "1.0.0",
+  category: "datasource",
+  description:
+    "Runs a Scrapy spider across the given start URLs and emits crawled documents for ingestion.",
+  configSchema: {
+    type: "object",
+    properties: {
+      startUrls: {
+        type: "array",
+        items: { type: "string" },
+        description: "Seed URLs the spider starts from."
+      },
+      allowedDomains: {
+        type: "array",
+        items: { type: "string" },
+        description: "Domains the spider is permitted to follow links into."
+      },
+      maxPages: {
+        type: "integer",
+        default: 20,
+        description: "Maximum number of pages to fetch."
+      },
+      maxDepth: {
+        type: "integer",
+        default: 2,
+        description: "Maximum link depth to follow."
+      },
+      allowPrivateNetworks: {
+        type: "boolean",
+        default: false,
+        description: "Allow crawling private/loopback addresses (SSRF guard off)."
+      }
+    },
+    required: ["startUrls"],
+    additionalProperties: false
+  },
+  secretsSchema: {
+    type: "object",
+    properties: {},
+    additionalProperties: false
+  },
+  capabilities: ["ingestion"],
+  ui: {
+    icon: "bug",
+    color: "#16a34a",
+    paletteGroup: "Crawling",
+    formHints: {
+      startUrls: { widget: "tags" },
+      allowedDomains: { widget: "tags" },
+      maxPages: { widget: "number", min: 1, step: 1 },
+      maxDepth: { widget: "number", min: 0, step: 1 },
+      allowPrivateNetworks: { widget: "checkbox" }
+    }
+  }
+};
+
+/**
+ * If `process.env.PYTHON_PLUGIN_URL` is set, registers the `crawl4ai_crawler`
+ * and `scrapy_spider` plugins as external HTTP plugins pointed at that base
+ * URL. When the env var is unset this is a no-op, so default/offline behavior
+ * is unchanged. Registration is additive to in-process auto-discovery.
+ */
+function registerExternalPlugins(registry: PluginRegistry): void {
+  const baseUrl = process.env.PYTHON_PLUGIN_URL;
+  if (!baseUrl) return;
+  const timeoutMs = Number(process.env.PYTHON_PLUGIN_TIMEOUT_MS ?? 300000);
+  for (const manifest of [CRAWL4AI_MANIFEST, SCRAPY_MANIFEST]) {
+    const registered: RegisteredPlugin = {
+      mode: "external",
+      manifest,
+      external: {
+        mode: "http",
+        baseUrl,
+        healthPath: "/healthz",
+        executePath: "/execute",
+        timeoutMs
+      }
+    };
+    registry.register(registered);
+  }
+}
+
+/**
  * Builds a `PluginRegistry` containing every `InProcessPlugin` exported by the
  * builtin-rag and sample-text modules. Each is registered as an in-process
  * plugin keyed by `category:id:version` (see `pluginKey`).
  *
  * Iteration is over `Object.values(moduleNamespace)`, so plugins added
  * concurrently to those modules are automatically included with no edits here.
+ *
+ * When `process.env.PYTHON_PLUGIN_URL` is set, the external Python crawler
+ * plugins are also registered (additive; see {@link registerExternalPlugins}).
  */
 export function loadPluginRegistry(): PluginRegistry {
   const registry = new PluginRegistry();
@@ -62,6 +242,7 @@ export function loadPluginRegistry(): PluginRegistry {
       registry.register(registered);
     }
   }
+  registerExternalPlugins(registry);
   return registry;
 }
 

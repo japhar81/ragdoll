@@ -14,6 +14,29 @@ web:
   replicas: 2
   port: 80
 
+# Python crawler plugin service (crawl4ai + scrapy). The image bundles a
+# headless Chromium so it needs noticeably more memory than the JS services.
+# When enabled, the api/worker get PYTHON_PLUGIN_URL pointing at its Service
+# so the plugin-loader auto-registers the external crawler plugins.
+pythonPlugins:
+  enabled: true
+  replicas: 1
+  port: 8000
+  image:
+    # Defaults to the shared image repo with a distinct tag; override for a
+    # separately built Chromium image.
+    repository: ragdoll-python-plugins
+    tag: latest
+    pullPolicy: IfNotPresent
+  timeoutMs: 300000
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: "2"
+      memory: 2Gi
+
 postgres:
   externalUrl: ""
 

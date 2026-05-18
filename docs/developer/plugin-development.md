@@ -146,18 +146,102 @@ schema-bearing plugin so the visual builder always renders a real form.
 singleton offline, Qdrant when configured), so an upsert followed by a retrieve
 round-trips in-process and in tests.
 
-## External plugins
+## External / Python plugins
 
-External plugins register an HTTP or gRPC endpoint. The gateway contract is the
-same shape as the in-process `execute`:
+A plugin can run out-of-process behind an HTTP endpoint
+(`RegisteredPlugin.mode: "external"`). This is how the Python-only crawlers
+(`crawl4ai_crawler`, `scrapy_spider`) ship: a separate FastAPI sidecar
+(`services/python-plugins/`) so a headless Chromium and Scrapy's Twisted
+reactor never enter the Node worker. See ADR 0010.
 
-- request: context metadata, node metadata, inputs, resolved non-secret
-  config, resolved secrets
-- response: outputs, metadata, usage, artifacts
+### Wire contract v1
 
-External execution is scaffolded in the SDK and should be enabled through a
-plugin gateway with sandboxing, timeouts, mTLS, request signing, and payload
-size limits.
+`@ragdoll/plugin-sdk` (`executeRegisteredPlugin` → `executeExternalHttp`)
+speaks this contract. The exact request body is built by
+`buildExternalRequestBody`:
+
+- `GET {baseUrl}{healthPath ?? "/healthz"}` → `200 { ok: true, plugins:
+  string[] }`. Probed by `externalPluginHealth` (never throws).
+- `POST {baseUrl}{executePath ?? "/execute"}` with JSON:
+
+  ```json
+  {
+    "plugin":  { "category": "...", "id": "...", "version": "..." },
+    "node":    { "id": "...", "config": {}, "secrets": {} },
+    "inputs":  {},
+    "config":  {},
+    "secrets": {},
+    "context": {
+      "requestId": "...", "executionId": "...", "tenantId": "...",
+      "pipelineId": "...", "pipelineVersionId": "...", "environment": "...",
+      "deadline": "ISO-8601 or null",
+      "resolvedConfig": { "values": { "<key>": { "value": "<any>" } } }
+    }
+  }
+  ```
+
+  The context is deliberately reduced: the `AbortSignal` and functions are
+  stripped, `deadline` is an ISO string or `null`, and `resolvedConfig`
+  carries only `{ values: { key: { value } } }` — no sensitivity/secret
+  metadata leaves the control plane.
+
+- **Success** → `200 { "outputs": {...}, "metadata"?: {...}, "usage"?:
+  {...}, "artifacts"?: [...] }` (optional keys included only when present).
+- **Expected failure** → `200 { "error": "<message>" }` (unknown plugin,
+  SSRF-blocked, bad config, malformed body).
+- **Unexpected failure** → any non-2xx (the service uses HTTP 500).
+
+The TS client treats a 200 `{error}` **or** any non-2xx as a plugin
+failure (it throws). Calls use an `AbortController` timeout
+(`endpoint.timeoutMs`, default 300000 ms). `endpoint.mode: "grpc"` is
+**not implemented** and fails fast.
+
+### Adding a Python plugin
+
+In `services/python-plugins/`:
+
+1. Add `app/plugins/<name>_plugin.py` with `PLUGIN_ID = "<id>"` and a
+   `handle(request) -> {"outputs": {...}, "usage"?: {...},
+   "metadata"?: {...}}`. Read effective config via
+   `request.effective_config()` (merges `node.config` <
+   `context.resolvedConfig.values` < top-level `config`, last wins).
+2. Validate every target URL through `app.safety.SafetyPolicy` before
+   fetching; raise `ValueError`/`SSRFError` for expected failures (the
+   dispatcher maps `ValueError` → `200 {error}`, anything else → 500).
+3. Register it in the `HANDLERS` dispatch map in `app/main.py`.
+4. Add a matching `PluginManifest` (with `configSchema`,
+   `ui.formHints`, `ui.paletteGroup`) to `packages/plugin-loader`'s
+   external manifest list (`registerExternalPlugins`) so it appears in
+   the builder palette with a schema-driven form like any plugin.
+5. Add a pytest in `tests/` that monkeypatches the network/engine seam
+   (`run_crawl4ai` / `run_scrapy` style) and injects a fake DNS resolver
+   so the suite stays offline and browser-free.
+
+### Enabling it
+
+The external manifests are registered **only when `PYTHON_PLUGIN_URL` is
+set** (e.g. `http://python-plugins:8000`); unset is a no-op so offline
+behavior is unchanged. `PYTHON_PLUGIN_TIMEOUT_MS` (default 300000)
+overrides the endpoint timeout. Local Compose sets both for the API and
+worker, so the crawler nodes show up in the builder automatically.
+
+### SSRF guard / config knobs
+
+`services/python-plugins/app/safety.py` is **default-deny** for a
+multi-tenant crawler. Per target URL: scheme must be `http`/`https`; host
+must be present; `allowedDomains` allowlist; `sameDomainOnly` against seed
+hosts (crawl4ai default `true`; `scrapy_spider` relies on
+`allowedDomains`); *every* resolved address is checked and the URL is
+blocked if any is private / loopback / link-local / multicast / reserved /
+unspecified (incl. IPv4-mapped IPv6) — overridable only with explicit
+`allowPrivateNetworks: true`. Crawl caps: `maxPages`, `maxDepth`,
+`timeoutMs`. These are the real containment knobs for untrusted targets;
+deep link-following relies on the engine plus these caps, not a
+per-fetched-URL proxy.
+
+External plugins are still subject to the standard security rules below;
+because resolved secret values cross the wire, the sidecar must be
+cluster-internal and trusted (ADR 0010, kubernetes-deployment doc).
 
 ## Security rules
 

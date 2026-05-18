@@ -20,6 +20,16 @@ spec:
           envFrom:
             - secretRef:
                 name: {{ .Values.secrets.existingSecret }}
+          {{- if .Values.pythonPlugins.enabled }}
+          # Worker executes crawl jobs. Setting PYTHON_PLUGIN_URL makes the
+          # plugin-loader register the external crawl4ai_crawler /
+          # scrapy_spider plugins, pointed at the in-cluster Service.
+          env:
+            - name: PYTHON_PLUGIN_URL
+              value: "http://{{ .Release.Name }}-python-plugins:{{ .Values.pythonPlugins.port }}"
+            - name: PYTHON_PLUGIN_TIMEOUT_MS
+              value: "{{ .Values.pythonPlugins.timeoutMs }}"
+          {{- end }}
           resources:
             requests:
               cpu: 250m
