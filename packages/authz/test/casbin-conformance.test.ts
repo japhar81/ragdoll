@@ -59,6 +59,19 @@ test(
     const builtin = new BuiltinPolicyEngine();
     const casbin = new CasbinPolicyEngine();
 
+    // Empty catalog AND no grants: both engines must default-deny without
+    // throwing (Casbin's StringAdapter rejects an empty policy document; the
+    // engine must short-circuit). Regression guard for the startup probe.
+    {
+      const empty = new Map<string, Set<string>>();
+      const b = await builtin.prepare([], empty);
+      const c = await casbin.prepare([], empty);
+      assert.equal(b("pipeline:run", "*"), false);
+      assert.equal(c("pipeline:run", "*"), false);
+    }
+    // And the factory probe must succeed (real Casbin, not the fallback).
+    await (await import("../src/casbin.ts")).createCasbinEngine();
+
     for (const grants of grantSets) {
       const b = await builtin.prepare(grants, catalog);
       const c = await casbin.prepare(grants, catalog);
