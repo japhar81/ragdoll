@@ -5,16 +5,26 @@ INSERT INTO roles (name, description) VALUES
   ('auditor', 'Audit read-only')
 ON CONFLICT (name) DO NOTHING;
 
-INSERT INTO environments (name, description, is_production) VALUES
-  ('dev', 'Local development', false),
-  ('prod', 'Production', true)
-ON CONFLICT (name) DO NOTHING;
-
 INSERT INTO tenants (slug, name) VALUES
   ('tenant-a', 'Tenant A'),
   ('tenant-b', 'Tenant B'),
   ('tenant-local', 'Tenant Local Ollama')
 ON CONFLICT (slug) DO NOTHING;
+
+-- Per-tenant environments. The environments table is keyed by id (no unique
+-- constraint on (tenant_id, name)), so re-runnability uses a NOT EXISTS
+-- guard rather than ON CONFLICT. Every demo tenant starts with dev + prod.
+INSERT INTO environments (tenant_id, name, description, is_production)
+SELECT t.id, e.name, e.description, e.is_production
+FROM tenants t
+CROSS JOIN (VALUES
+  ('dev',  'Local development', false),
+  ('prod', 'Production',        true)
+) AS e(name, description, is_production)
+WHERE NOT EXISTS (
+  SELECT 1 FROM environments x
+  WHERE x.tenant_id = t.id AND x.name = e.name
+);
 
 INSERT INTO providers (provider_id, display_name) VALUES
   ('openai', 'OpenAI'),

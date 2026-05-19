@@ -22,6 +22,7 @@ import {
   PostgresExecutionStore,
   PostgresSecretRepository,
   PostgresTenantRepository,
+  PostgresEnvironmentRepository,
   PostgresPipelineRepository,
   PostgresPipelineVersionRepository,
   PostgresPipelineDeploymentRepository,
@@ -38,6 +39,7 @@ import {
   PostgresUsageRecordRepository,
   PostgresApiKeyRepository,
   InMemoryTenantRepository,
+  InMemoryEnvironmentRepository,
   InMemoryPipelineRepository,
   InMemoryPipelineVersionRepository,
   InMemoryPipelineDeploymentRepository,
@@ -118,6 +120,7 @@ async function buildDeps(): Promise<{ deps: AppDeps; pool?: PoolLike }> {
     });
     deps = {
       tenants: new PostgresTenantRepository(pool),
+      environments: new PostgresEnvironmentRepository(pool),
       pipelines: new PostgresPipelineRepository(pool),
       pipelineVersions: new PostgresPipelineVersionRepository(pool),
       deployments: new PostgresPipelineDeploymentRepository(pool),
@@ -166,6 +169,7 @@ async function buildDeps(): Promise<{ deps: AppDeps; pool?: PoolLike }> {
     });
     deps = {
       tenants: new InMemoryTenantRepository(),
+      environments: new InMemoryEnvironmentRepository(),
       pipelines: new InMemoryPipelineRepository(),
       pipelineVersions: new InMemoryPipelineVersionRepository(),
       deployments: new InMemoryPipelineDeploymentRepository(),

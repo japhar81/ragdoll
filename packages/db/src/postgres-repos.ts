@@ -13,6 +13,8 @@ import type {
   ConfigValueScopeFilter,
   DatasourceConnectionRepository,
   DatasourceConnectionRow,
+  EnvironmentRepository,
+  EnvironmentRow,
   PipelineActivationRepository,
   PipelineActivationRow,
   PipelineDeploymentRepository,
@@ -200,6 +202,21 @@ export class PostgresTenantRepository
     return (
       await this.queryRows(`SELECT * FROM tenants WHERE slug = $1`, [slug])
     )[0];
+  }
+}
+
+export class PostgresEnvironmentRepository
+  extends PostgresCrudRepository<EnvironmentRow>
+  implements EnvironmentRepository
+{
+  constructor(pool: PoolLike) {
+    super(pool, "environments", "environment");
+  }
+  async listByTenant(tenantId: string): Promise<EnvironmentRow[]> {
+    return this.queryRows(
+      `SELECT * FROM environments WHERE tenant_id = $1 ORDER BY name`,
+      [tenantId]
+    );
   }
 }
 

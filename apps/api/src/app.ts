@@ -53,7 +53,9 @@ import {
   InMemoryPipelineActivationRepository,
   InMemoryScheduleRepository,
   InMemoryTenantPipelineRepository,
+  InMemoryEnvironmentRepository,
   type TenantRepository,
+  type EnvironmentRepository,
   type PipelineRepository,
   type PipelineVersionRepository,
   type PipelineDeploymentRepository,
@@ -70,6 +72,7 @@ import {
   type DatasourceConnectionRepository,
   type VectorCollectionRepository,
   type TenantRow,
+  type EnvironmentRow,
   type PipelineRow,
   type PipelineVersionRow,
   type PipelineDeploymentRow,
@@ -157,6 +160,7 @@ export interface AppDeps {
   pipelineActivations?: PipelineActivationRepository;
   schedules?: ScheduleRepository;
   tenantPipelines?: TenantPipelineRepository;
+  environments?: EnvironmentRepository;
   configDefinitions: ConfigDefinitionRepository;
   configValues: ConfigValueRepository;
   auditLogs: AuditLogRepository;
@@ -302,6 +306,8 @@ export function createApp(deps: AppDeps): App {
     deps.schedules ?? new InMemoryScheduleRepository();
   const tenantPipelines: TenantPipelineRepository =
     deps.tenantPipelines ?? new InMemoryTenantPipelineRepository();
+  const environments: EnvironmentRepository =
+    deps.environments ?? new InMemoryEnvironmentRepository();
 
   // ---- audit helper -------------------------------------------------------
   async function audit(
@@ -458,6 +464,103 @@ export function createApp(deps: AppDeps): App {
     if (!before) return error(404, "not_found");
     await deps.tenants.delete(ctx.params.id);
     await audit(ctx, "tenant.delete", "tenant", ctx.params.id, before, undefined);
+    return { status: 204, body: undefined, headers: {} };
+  });
+
+  // ---- tenant environments ------------------------------------------------
+  // Per-tenant environment catalog. Each row is identified by its uuid id;
+  // names are not unique (a tenant may keep its own "staging"). This feeds
+  // every environment picker in the web app and is managed from the tenant
+  // screen. `environment` stays free text on the rest of the stack.
+  route("GET", "/api/tenants/:id/environments", async (ctx) => {
+    enforce(ctx.principal, "audit:view", { tenantId: ctx.params.id });
+    if (
+      !ctx.principal.roles.includes("platform_admin") &&
+      ctx.principal.tenantId !== ctx.params.id
+    ) {
+      return error(403, "forbidden");
+    }
+    return ok({ environments: await environments.listByTenant(ctx.params.id) });
+  });
+
+  route("POST", "/api/tenants/:id/environments", async (ctx) => {
+    enforce(ctx.principal, "config:edit_global");
+    const tenant = await deps.tenants.get(ctx.params.id);
+    if (!tenant) {
+      return error(404, "not_found", { message: "tenant not found" });
+    }
+    const body = ctx.request.body;
+    if (!isObject(body) || typeof body.name !== "string" || !body.name.trim()) {
+      return error(422, "validation_failed", {
+        issues: [{ path: "name", message: "name is required" }]
+      });
+    }
+    const row: EnvironmentRow = {
+      id: typeof body.id === "string" ? body.id : randomUUID(),
+      tenantId: ctx.params.id,
+      name: body.name.trim(),
+      description:
+        typeof body.description === "string" ? body.description : null,
+      isProduction: body.isProduction === true,
+      createdAt: nowIso()
+    };
+    const created = await environments.create(row);
+    await audit(
+      ctx,
+      "environment.create",
+      "environment",
+      created.id,
+      undefined,
+      created
+    );
+    return ok({ environment: created }, 201);
+  });
+
+  route("PUT", "/api/tenants/:id/environments/:envId", async (ctx) => {
+    enforce(ctx.principal, "config:edit_global");
+    const before = await environments.get(ctx.params.envId);
+    if (!before || before.tenantId !== ctx.params.id) {
+      return error(404, "not_found");
+    }
+    const body = ctx.request.body;
+    if (!isObject(body)) return error(422, "validation_failed", { issues: [] });
+    const patch: Partial<EnvironmentRow> = {};
+    if (typeof body.name === "string" && body.name.trim()) {
+      patch.name = body.name.trim();
+    }
+    if (typeof body.description === "string" || body.description === null) {
+      patch.description = body.description as string | null;
+    }
+    if (typeof body.isProduction === "boolean") {
+      patch.isProduction = body.isProduction;
+    }
+    const updated = await environments.update(ctx.params.envId, patch);
+    await audit(
+      ctx,
+      "environment.update",
+      "environment",
+      updated.id,
+      before,
+      updated
+    );
+    return ok({ environment: updated });
+  });
+
+  route("DELETE", "/api/tenants/:id/environments/:envId", async (ctx) => {
+    enforce(ctx.principal, "config:edit_global");
+    const before = await environments.get(ctx.params.envId);
+    if (!before || before.tenantId !== ctx.params.id) {
+      return error(404, "not_found");
+    }
+    await environments.delete(ctx.params.envId);
+    await audit(
+      ctx,
+      "environment.delete",
+      "environment",
+      ctx.params.envId,
+      before,
+      undefined
+    );
     return { status: 204, body: undefined, headers: {} };
   });
 

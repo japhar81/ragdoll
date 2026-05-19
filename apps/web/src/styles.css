@@ -1021,3 +1021,67 @@ table.grid th {
   max-height: 280px;
   font-size: 11px;
 }
+
+/* ---- Toolbar dropdown menus ---- */
+.tb-menu {
+  position: relative;
+  display: inline-flex;
+}
+
+.tb-menu-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.tb-menu-caret {
+  font-size: 10px;
+  color: #64748b;
+}
+
+.tb-menu-panel {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  /* Above the canvas, below modal overlays (z-index: 50). */
+  z-index: 40;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 200px;
+  padding: 12px;
+  background: white;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.12);
+}
+
+.tb-menu-panel.align-right {
+  left: auto;
+  right: 0;
+}
+
+/* Inside the popover, lay fields out as stacked label-over-control rows
+   instead of the inline row the toolbar uses. */
+.tb-menu-panel label {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 4px;
+}
+
+.tb-menu-panel input,
+.tb-menu-panel select {
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.tb-menu-panel button {
+  width: 100%;
+  text-align: center;
+}
+
+.tb-menu-divider {
+  height: 1px;
+  background: #e5e7eb;
+  margin: 2px 0;
+}

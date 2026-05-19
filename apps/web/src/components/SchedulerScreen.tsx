@@ -10,6 +10,7 @@ import {
   type CronParts
 } from "../lib/cron.ts";
 import { useTenants } from "./useTenants.tsx";
+import { useEnvironments, EnvironmentSelect } from "./useEnvironments.tsx";
 import { Screen } from "./Screen.tsx";
 
 function errText(e: unknown): string {
@@ -54,6 +55,7 @@ export function SchedulerScreen() {
   const [formError, setFormError] = useState<string | undefined>();
 
   const tenants = useTenants();
+  const envs = useEnvironments(tenantId);
   const pipelines = useQuery({
     queryKey: ["pipelines"],
     queryFn: () => api.listPipelines()
@@ -169,12 +171,11 @@ export function SchedulerScreen() {
             </option>
           ))}
         </select>
-        <input
-          placeholder="environment"
+        <EnvironmentSelect
+          environments={envs.environments}
           value={environment}
-          onChange={(e) => setEnvironment(e.target.value)}
-          required
-          style={{ width: 110 }}
+          onChange={setEnvironment}
+          isLoading={envs.isLoading}
         />
         <input
           placeholder="activation label (optional)"

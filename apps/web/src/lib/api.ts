@@ -126,6 +126,41 @@ export const api = {
   deleteTenant: (id: string) =>
     request<void>("DELETE", `/api/tenants/${encodeURIComponent(id)}`),
 
+  // ---- per-tenant environments -----------------------------------------
+  listEnvironments: (tenantId: string) =>
+    request<{ environments: EnvironmentRow[] }>(
+      "GET",
+      `/api/tenants/${encodeURIComponent(tenantId)}/environments`
+    ),
+  createEnvironment: (
+    tenantId: string,
+    input: { name: string; description?: string; isProduction?: boolean }
+  ) =>
+    request<{ environment: EnvironmentRow }>(
+      "POST",
+      `/api/tenants/${encodeURIComponent(tenantId)}/environments`,
+      input
+    ),
+  updateEnvironment: (
+    tenantId: string,
+    envId: string,
+    patch: { name?: string; description?: string | null; isProduction?: boolean }
+  ) =>
+    request<{ environment: EnvironmentRow }>(
+      "PUT",
+      `/api/tenants/${encodeURIComponent(tenantId)}/environments/${encodeURIComponent(
+        envId
+      )}`,
+      patch
+    ),
+  deleteEnvironment: (tenantId: string, envId: string) =>
+    request<void>(
+      "DELETE",
+      `/api/tenants/${encodeURIComponent(tenantId)}/environments/${encodeURIComponent(
+        envId
+      )}`
+    ),
+
   // ---- pipelines --------------------------------------------------------
   listPipelines: () => request<{ pipelines: PipelineRow[] }>("GET", "/api/pipelines"),
   createPipeline: (input: {
@@ -463,6 +498,15 @@ export interface TenantRow {
   slug: string;
   name: string;
   status: string;
+  createdAt?: string;
+}
+
+export interface EnvironmentRow {
+  id: string;
+  tenantId: string;
+  name: string;
+  description?: string | null;
+  isProduction: boolean;
   createdAt?: string;
 }
 

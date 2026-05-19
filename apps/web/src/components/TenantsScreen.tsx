@@ -6,6 +6,7 @@ import {
   type ActivationLike
 } from "../lib/orgtree.ts";
 import { useTenants } from "./useTenants.tsx";
+import { useEnvironments, EnvironmentSelect } from "./useEnvironments.tsx";
 import { Screen } from "./Screen.tsx";
 import type { ActivationRow, PipelineVersionRow } from "../lib/api.ts";
 
@@ -101,7 +102,7 @@ export function TenantsScreen() {
                     api.setTenant(next);
                   }}
                 >
-                  {selected === t.id ? "Hide pipelines" : "Pipelines"}
+                  {selected === t.id ? "Hide" : "Manage"}
                 </button>
               </td>
             </tr>
@@ -109,8 +110,138 @@ export function TenantsScreen() {
         </tbody>
       </table>
 
-      {selected && <TenantPipelines tenantId={selected} />}
+      {selected && (
+        <>
+          <TenantEnvironments tenantId={selected} />
+          <TenantPipelines tenantId={selected} />
+        </>
+      )}
     </Screen>
+  );
+}
+
+/**
+ * Per-tenant environment catalog: create/list/delete the environment names
+ * this tenant can deploy/run/schedule against. Names are not unique (the
+ * table is keyed by id) so duplicates are allowed if the user really wants.
+ */
+function TenantEnvironments(props: { tenantId: string }) {
+  const qc = useQueryClient();
+  const { tenantId } = props;
+  const { environments, isLoading, error } = useEnvironments(tenantId);
+  const [banner, setBanner] = useState<string | undefined>();
+  const [envName, setEnvName] = useState("");
+  const [envDesc, setEnvDesc] = useState("");
+  const [isProd, setIsProd] = useState(false);
+
+  function invalidate() {
+    qc.invalidateQueries({ queryKey: ["environments", tenantId] });
+  }
+
+  const createEnv = useMutation({
+    mutationFn: () =>
+      api.createEnvironment(tenantId, {
+        name: envName.trim(),
+        description: envDesc.trim() || undefined,
+        isProduction: isProd
+      }),
+    onSuccess: () => {
+      setBanner(undefined);
+      setEnvName("");
+      setEnvDesc("");
+      setIsProd(false);
+      invalidate();
+    },
+    onError: (e) => setBanner(errText(e))
+  });
+  const delEnv = useMutation({
+    mutationFn: (id: string) => api.deleteEnvironment(tenantId, id),
+    onSuccess: () => invalidate(),
+    onError: (e) => setBanner(errText(e))
+  });
+
+  return (
+    <>
+      <h2>Environments for {tenantId}</h2>
+      {banner && <p className="error">{banner}</p>}
+      {error && <p className="error">{errText(error)}</p>}
+      <form
+        className="inline-form"
+        onSubmit={(e) => {
+          e.preventDefault();
+          if (envName.trim()) createEnv.mutate();
+        }}
+      >
+        <input
+          placeholder="name (e.g. staging)"
+          value={envName}
+          onChange={(e) => setEnvName(e.target.value)}
+          required
+        />
+        <input
+          placeholder="description (optional)"
+          value={envDesc}
+          onChange={(e) => setEnvDesc(e.target.value)}
+          style={{ width: 200 }}
+        />
+        <label>
+          production
+          <input
+            type="checkbox"
+            checked={isProd}
+            onChange={(e) => setIsProd(e.target.checked)}
+          />
+        </label>
+        <button
+          type="submit"
+          disabled={!envName.trim() || createEnv.isPending}
+        >
+          Add environment
+        </button>
+      </form>
+
+      {isLoading && <p className="muted">Loading environments…</p>}
+      {!isLoading && environments.length === 0 && (
+        <p className="muted">No environments yet.</p>
+      )}
+      {environments.length > 0 && (
+        <table className="grid">
+          <thead>
+            <tr>
+              <th>Name</th>
+              <th>Description</th>
+              <th>Production</th>
+              <th />
+            </tr>
+          </thead>
+          <tbody>
+            {environments.map((env) => (
+              <tr key={env.id}>
+                <td>{env.name}</td>
+                <td className="muted">{env.description ?? "—"}</td>
+                <td>{env.isProduction ? "yes" : "no"}</td>
+                <td>
+                  <button
+                    className="link-btn"
+                    onClick={() => {
+                      if (
+                        window.confirm(
+                          `Delete environment "${env.name}"? Existing deployments/schedules that reference it by name are unaffected.`
+                        )
+                      ) {
+                        delEnv.mutate(env.id);
+                      }
+                    }}
+                  >
+                    Delete
+                  </button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </>
   );
 }
 
@@ -120,6 +251,7 @@ function TenantPipelines(props: { tenantId: string }) {
   const [banner, setBanner] = useState<string | undefined>();
   const [addPipelineId, setAddPipelineId] = useState("");
   const [addEnv, setAddEnv] = useState("dev");
+  const envs = useEnvironments(tenantId);
 
   const allPipelines = useQuery({
     queryKey: ["pipelines"],
@@ -173,10 +305,11 @@ function TenantPipelines(props: { tenantId: string }) {
             </option>
           ))}
         </select>
-        <input
+        <EnvironmentSelect
+          environments={envs.environments}
           value={addEnv}
-          onChange={(e) => setAddEnv(e.target.value)}
-          style={{ width: 90 }}
+          onChange={setAddEnv}
+          isLoading={envs.isLoading}
         />
         <button
           disabled={!addPipelineId || associate.isPending}
@@ -234,6 +367,7 @@ function ActivationsPanel(props: {
   const [banner, setBanner] = useState<string | undefined>();
   const [label, setLabel] = useState("default");
   const [env, setEnv] = useState("dev");
+  const envs = useEnvironments(tenantId);
   const [trackLatest, setTrackLatest] = useState(true);
   const [pinVersionId, setPinVersionId] = useState("");
 
@@ -395,11 +529,11 @@ function ActivationsPanel(props: {
           onChange={(e) => setLabel(e.target.value)}
           style={{ width: 110 }}
         />
-        <input
-          placeholder="env"
+        <EnvironmentSelect
+          environments={envs.environments}
           value={env}
-          onChange={(e) => setEnv(e.target.value)}
-          style={{ width: 80 }}
+          onChange={setEnv}
+          isLoading={envs.isLoading}
         />
         <label>
           track latest

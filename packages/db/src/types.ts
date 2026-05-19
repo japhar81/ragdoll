@@ -18,6 +18,15 @@ export interface TenantRow {
   updatedAt: string;
 }
 
+export interface EnvironmentRow {
+  id: UUID;
+  tenantId: UUID;
+  name: string;
+  description?: string | null;
+  isProduction: boolean;
+  createdAt: string;
+}
+
 export interface UserRow {
   id: UUID;
   email: string;
@@ -282,6 +291,11 @@ export interface CrudRepository<T, K = string> {
 
 export interface TenantRepository extends CrudRepository<TenantRow> {
   findBySlug(slug: string): Promise<TenantRow | undefined>;
+}
+
+export interface EnvironmentRepository
+  extends CrudRepository<EnvironmentRow> {
+  listByTenant(tenantId: UUID): Promise<EnvironmentRow[]>;
 }
 
 export interface UserRepository extends CrudRepository<UserRow> {

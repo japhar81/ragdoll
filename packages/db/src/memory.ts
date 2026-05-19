@@ -19,6 +19,8 @@ import type {
   CrudRepository,
   DatasourceConnectionRepository,
   DatasourceConnectionRow,
+  EnvironmentRepository,
+  EnvironmentRow,
   PipelineActivationRepository,
   PipelineActivationRow,
   PipelineDeploymentRepository,
@@ -113,6 +115,20 @@ export class InMemoryTenantRepository
   }
   async findBySlug(slug: string): Promise<TenantRow | undefined> {
     return (await this.list()).find((row) => row.slug === slug);
+  }
+}
+
+export class InMemoryEnvironmentRepository
+  extends InMemoryCrudRepository<EnvironmentRow>
+  implements EnvironmentRepository
+{
+  constructor() {
+    super("environment");
+  }
+  async listByTenant(tenantId: string): Promise<EnvironmentRow[]> {
+    return (await this.list())
+      .filter((row) => row.tenantId === tenantId)
+      .sort((a, b) => a.name.localeCompare(b.name));
   }
 }
 

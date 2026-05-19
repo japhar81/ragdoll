@@ -43,6 +43,8 @@ import { PluginEditorSlot } from "./PluginEditorSlot.tsx";
 import { SecretsEditor } from "./SecretsEditor.tsx";
 import { BuilderConsole, useConsoleLog } from "./BuilderConsole.tsx";
 import { TenantSelect, useSelectedTenant } from "./useTenants.tsx";
+import { useEnvironments, EnvironmentSelect } from "./useEnvironments.tsx";
+import { ToolbarMenu } from "./ToolbarMenu.tsx";
 import { hasRealPipeline } from "../lib/consoleLog.ts";
 import {
   diffNodeEvents,
@@ -170,6 +172,7 @@ export function PipelineBuilder(props: {
   } = useSelectedTenant("tenant-local");
   // Demo defaults: dev environment so the bundled Local Demo just works.
   const [environment, setEnvironment] = useState("dev");
+  const envs = useEnvironments(tenantId);
   const [selectedId, setSelectedId] = useState<string | undefined>();
   const [testInput, setTestInput] = useState('{ "question": "How do I reset my password?" }');
   const [openedViaTree, setOpenedViaTree] = useState(false);
@@ -919,6 +922,7 @@ export function PipelineBuilder(props: {
     <section className="builder">
       <header className="toolbar">
         <strong>Visual Pipeline Builder</strong>
+
         <label>
           Name
           <input
@@ -927,65 +931,88 @@ export function PipelineBuilder(props: {
             style={{ width: 140 }}
           />
         </label>
-        <label>
-          Slug
-          <input
-            value={pipelineSlug}
-            disabled={realPipeline}
-            title={
-              realPipeline
-                ? "Slug is fixed once the pipeline is created"
-                : "URL-safe identifier; set on first Save"
-            }
-            onChange={(e) => {
-              const v = e.target.value;
-              setPipelineSlug(v);
-              // Keep the API ref pointed at the slug until a real row exists.
-              if (!realPipeline) setPipelineId(v);
-            }}
-            style={{ width: 120 }}
-          />
-        </label>
-        <label>
-          Description
-          <input
-            value={pipelineDescription}
-            placeholder="optional"
-            onChange={(e) => setPipelineDescription(e.target.value)}
-            style={{ width: 200 }}
-          />
-        </label>
-        <label>
-          Version
-          <input
-            value={version}
-            onChange={(e) => setVersion(e.target.value)}
-            style={{ width: 80 }}
-          />
-        </label>
-        <label>
-          Level
-          <select
-            value={saveLevel}
-            onChange={(e) =>
-              setSaveLevel(e.target.value as "patch" | "minor" | "major")
-            }
-          >
-            <option value="patch">patch</option>
-            <option value="minor">minor</option>
-            <option value="major">major</option>
-          </select>
-        </label>
+
+        <ToolbarMenu label="Details">
+          <label>
+            Slug
+            <input
+              value={pipelineSlug}
+              disabled={realPipeline}
+              title={
+                realPipeline
+                  ? "Slug is fixed once the pipeline is created"
+                  : "URL-safe identifier; set on first Save"
+              }
+              onChange={(e) => {
+                const v = e.target.value;
+                setPipelineSlug(v);
+                // Keep the API ref pointed at the slug until a real row exists.
+                if (!realPipeline) setPipelineId(v);
+              }}
+            />
+          </label>
+          <label>
+            Description
+            <input
+              value={pipelineDescription}
+              placeholder="optional"
+              onChange={(e) => setPipelineDescription(e.target.value)}
+            />
+          </label>
+        </ToolbarMenu>
+
         <button className="primary" onClick={savePipeline}>
           Save
         </button>
         <button onClick={validate}>Validate</button>
-        <button onClick={saveDraft}>Save Draft</button>
-        <button onClick={publish}>Publish</button>
-        <button onClick={deploy}>Deploy</button>
-        <button onClick={exportJson}>Export JSON</button>
-        <button onClick={exportYaml}>Export YAML</button>
-        <button onClick={importSpecFile}>Import</button>
+
+        <ToolbarMenu label="Versioning">
+          <label>
+            Version
+            <input
+              value={version}
+              onChange={(e) => setVersion(e.target.value)}
+            />
+          </label>
+          <label>
+            Level
+            <select
+              value={saveLevel}
+              onChange={(e) =>
+                setSaveLevel(e.target.value as "patch" | "minor" | "major")
+              }
+            >
+              <option value="patch">patch</option>
+              <option value="minor">minor</option>
+              <option value="major">major</option>
+            </select>
+          </label>
+          <div className="tb-menu-divider" />
+          <button onClick={saveDraft}>Save Draft</button>
+          <button onClick={publish}>Publish</button>
+        </ToolbarMenu>
+
+        <ToolbarMenu label="Deploy">
+          <label>
+            Environment
+            <EnvironmentSelect
+              environments={envs.environments}
+              value={environment}
+              onChange={setEnvironment}
+              isLoading={envs.isLoading}
+            />
+          </label>
+          <div className="tb-menu-divider" />
+          <button onClick={deploy}>Deploy</button>
+        </ToolbarMenu>
+
+        <ToolbarMenu label="Import / Export">
+          <button onClick={importSpecFile}>Import…</button>
+          <div className="tb-menu-divider" />
+          <button onClick={exportJson}>Export JSON</button>
+          <button onClick={exportYaml}>Export YAML</button>
+        </ToolbarMenu>
+
         <button
           onClick={run}
           disabled={!tenantReady}
@@ -1007,13 +1034,6 @@ export function PipelineBuilder(props: {
             onChange={setTenantId}
             isLoading={tenantsLoading}
           />
-        </label>
-        <label>
-          Environment
-          <select value={environment} onChange={(e) => setEnvironment(e.target.value)}>
-            <option value="dev">dev</option>
-            <option value="prod">prod</option>
-          </select>
         </label>
         {tenantsError && (
           <span className="error" title={String(tenantsError)}>
