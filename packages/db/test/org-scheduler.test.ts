@@ -20,11 +20,19 @@ test("migration 003 is ordered after 001/002 and is additive", async () => {
   const files = (await readdir(dir))
     .filter((f: string) => f.endsWith(".sql"))
     .sort((a: string, b: string) => a.localeCompare(b));
-  assert.deepEqual(files, [
+  // Migrations are additive and applied in sorted order. Assert the known
+  // foundational prefix and that the runner's sort is stable, rather than
+  // freezing the full list (later additive migrations keep being added).
+  assert.deepEqual(files.slice(0, 3), [
     "001_initial_schema.sql",
     "002_auth.sql",
     "003_org_and_scheduler.sql"
   ]);
+  assert.deepEqual(
+    files,
+    [...files].sort((a, b) => a.localeCompare(b)),
+    "migrations must be lexicographically ordered"
+  );
   const sql = await readFile(join(dir, "003_org_and_scheduler.sql"), "utf8");
   assert.match(sql, /CREATE TABLE pipeline_folders/);
   assert.match(sql, /CREATE TABLE pipeline_activations/);

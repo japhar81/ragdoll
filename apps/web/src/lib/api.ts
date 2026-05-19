@@ -488,7 +488,139 @@ export const api = {
         (p) => p.category === category && p.id === id && p.version === version
       );
     }
-  }
+  },
+
+  // ---- auth / session ---------------------------------------------------
+  login: (email: string, password: string) =>
+    request<{ token: string; user: AccountUser }>("POST", "/api/auth/login", {
+      email,
+      password
+    }),
+  signup: (input: { email: string; password: string; displayName?: string }) =>
+    request<{ token: string; user: AccountUser }>(
+      "POST",
+      "/api/auth/signup",
+      input
+    ),
+  logout: () => request<void>("POST", "/api/auth/logout"),
+  me: () =>
+    request<{
+      principal: { id: string; type: string; tenantId: string | null };
+      user: AccountUser | null;
+      grants: GrantView[];
+      permissions: string[];
+    }>("GET", "/api/auth/me"),
+  authProviders: () =>
+    request<{ providers: Array<{ slug: string; kind: string; displayName: string }> }>(
+      "GET",
+      "/api/auth/providers"
+    ),
+  ssoStartUrl: (slug: string) =>
+    `/api/auth/sso/${encodeURIComponent(slug)}/start`,
+  getAuthSettings: () =>
+    request<{ settings: AuthSettings }>("GET", "/api/auth/settings"),
+  updateAuthSettings: (settings: AuthSettings) =>
+    request<{ settings: AuthSettings }>("PUT", "/api/auth/settings", settings),
+
+  // ---- users ------------------------------------------------------------
+  listUsers: () => request<{ users: AccountUser[] }>("GET", "/api/users"),
+  createUser: (input: {
+    email: string;
+    password?: string;
+    displayName?: string;
+    status?: string;
+  }) => request<{ user: AccountUser }>("POST", "/api/users", input),
+  updateUser: (
+    id: string,
+    patch: { displayName?: string | null; status?: string; password?: string }
+  ) =>
+    request<{ user: AccountUser }>(
+      "PATCH",
+      `/api/users/${encodeURIComponent(id)}`,
+      patch
+    ),
+  deleteUser: (id: string) =>
+    request<void>("DELETE", `/api/users/${encodeURIComponent(id)}`),
+  listGrants: (userId: string) =>
+    request<{ grants: GrantView[] }>(
+      "GET",
+      `/api/users/${encodeURIComponent(userId)}/grants`
+    ),
+  addGrant: (
+    userId: string,
+    input: {
+      role: string;
+      tenantId?: string;
+      environment?: string;
+      pipelineId?: string;
+    }
+  ) =>
+    request<{ grant: GrantView }>(
+      "POST",
+      `/api/users/${encodeURIComponent(userId)}/grants`,
+      input
+    ),
+  removeGrant: (userId: string, grantId: string) =>
+    request<void>(
+      "DELETE",
+      `/api/users/${encodeURIComponent(userId)}/grants/${encodeURIComponent(
+        grantId
+      )}`
+    ),
+
+  // ---- roles & permissions ---------------------------------------------
+  listRoles: () =>
+    request<{ roles: RoleView[]; allPermissions: string[] }>(
+      "GET",
+      "/api/roles"
+    ),
+  createRole: (input: { name: string; description?: string }) =>
+    request<{ role: unknown }>("POST", "/api/roles", input),
+  setRolePermissions: (name: string, permissions: string[]) =>
+    request<{ role: string; permissions: string[] }>(
+      "PUT",
+      `/api/roles/${encodeURIComponent(name)}/permissions`,
+      { permissions }
+    ),
+  deleteRole: (name: string) =>
+    request<void>("DELETE", `/api/roles/${encodeURIComponent(name)}`),
+
+  // ---- identity providers ----------------------------------------------
+  listIdentityProviders: () =>
+    request<{ providers: IdentityProviderView[] }>(
+      "GET",
+      "/api/identity-providers"
+    ),
+  createIdentityProvider: (input: {
+    slug: string;
+    kind: "oidc" | "saml";
+    displayName: string;
+    enabled?: boolean;
+    config: Record<string, unknown>;
+  }) =>
+    request<{ provider: IdentityProviderView }>(
+      "POST",
+      "/api/identity-providers",
+      input
+    ),
+  updateIdentityProvider: (
+    id: string,
+    patch: {
+      displayName?: string;
+      enabled?: boolean;
+      config?: Record<string, unknown>;
+    }
+  ) =>
+    request<{ provider: IdentityProviderView }>(
+      "PUT",
+      `/api/identity-providers/${encodeURIComponent(id)}`,
+      patch
+    ),
+  deleteIdentityProvider: (id: string) =>
+    request<void>(
+      "DELETE",
+      `/api/identity-providers/${encodeURIComponent(id)}`
+    )
 };
 
 // ---- response row shapes (loosely typed; only fields the UI reads) -------
@@ -691,4 +823,46 @@ export interface PluginInfo {
   configSchema?: JsonSchemaLike;
   secretsSchema?: JsonSchemaLike;
   ui?: PluginUi;
+}
+
+// ---- auth / RBAC view shapes --------------------------------------------
+
+export interface AccountUser {
+  id: string;
+  email: string;
+  displayName?: string | null;
+  status: string;
+  sso?: boolean;
+  createdAt?: string;
+}
+
+export interface GrantView {
+  id: string;
+  role: string;
+  scope: string;
+  tenantId?: string;
+  environment?: string;
+  pipelineId?: string;
+}
+
+export interface RoleView {
+  name: string;
+  builtin: boolean;
+  description?: string | null;
+  permissions: string[];
+}
+
+export interface IdentityProviderView {
+  id: string;
+  slug: string;
+  kind: "oidc" | "saml";
+  displayName: string;
+  enabled: boolean;
+  config: Record<string, unknown>;
+}
+
+export interface AuthSettings {
+  signupMode: "admin_only" | "open_default_role" | "open_no_access";
+  defaultRole?: string | null;
+  updatedAt?: string;
 }

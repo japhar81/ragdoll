@@ -2,7 +2,9 @@
 
 ## Status
 
-Accepted
+Accepted. Extended by [ADR 0011](./0011-auth-rbac-casbin.md), which adds
+local/SSO login and Casbin scoped RBAC (the "added later" federated auth and
+finer authorization referenced below).
 
 ## Context
 

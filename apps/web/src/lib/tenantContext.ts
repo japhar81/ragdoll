@@ -49,17 +49,17 @@ export interface AuthContext {
 /**
  * Build the headers every `/api/*` request should carry.
  *
- * - always sends `x-roles` (dev auth) so the DevAuthProvider grants admin;
- * - sends `authorization: Bearer …` / `x-api-key` when configured;
- * - sends `x-tenant-id` **only** when a tenant id is set AND it is a UUID —
- *   a slug is intentionally dropped (sending it would 409/empty downstream).
+ * The control plane is default-deny: real auth is a `Bearer` session token
+ * (issued by /api/auth/login or SSO). The insecure `x-roles` dev header is
+ * only emitted when a caller *explicitly* sets `roles` AND the server has
+ * RAGDOLL_DEV_AUTH=1 — it is never defaulted. `x-tenant-id` is sent only when
+ * a UUID tenant is selected (a slug is dropped; it would 409/empty downstream).
  *
  * Returns a fresh object; never mutates the input.
  */
 export function buildAuthHeaders(ctx: AuthContext = {}): Record<string, string> {
-  const headers: Record<string, string> = {
-    "x-roles": ctx.roles && ctx.roles.trim() ? ctx.roles : DEV_ADMIN_ROLE
-  };
+  const headers: Record<string, string> = {};
+  if (ctx.roles && ctx.roles.trim()) headers["x-roles"] = ctx.roles.trim();
   if (ctx.token) headers.authorization = `Bearer ${ctx.token}`;
   if (ctx.apiKey) headers["x-api-key"] = ctx.apiKey;
   if (ctx.tenantId && isUuid(ctx.tenantId)) {

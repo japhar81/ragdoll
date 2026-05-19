@@ -1,6 +1,7 @@
 import type { UUID } from "../../core/src/index.ts";
 import { ConflictError, NotFoundError } from "./errors.ts";
 import type { PoolLike } from "./pool.ts";
+import { withTransaction } from "./pool.ts";
 import type {
   ApiKeyRepository,
   ApiKeyRow,
@@ -39,6 +40,19 @@ import type {
   TenantRow,
   UsageRecordRepository,
   UsageRecordRow,
+  UserRepository,
+  UserRow,
+  RoleRepository,
+  RoleRow,
+  UserIdentityRepository,
+  UserIdentityRow,
+  IdentityProviderRepository,
+  IdentityProviderRow,
+  RbacPolicyRepository,
+  RbacRolePermissionRow,
+  RbacGrantRow,
+  AuthSettingsRepository,
+  AuthSettingsRow,
   VectorCollectionRepository,
   VectorCollectionRow
 } from "./types.ts";
@@ -1136,4 +1150,229 @@ function mapApiKey(row: Record<string, unknown>): ApiKeyRow {
         ? row.revoked_at.toISOString()
         : ((row.revoked_at as string | null) ?? undefined)
   };
+}
+
+// --- Auth / RBAC -----------------------------------------------------------
+
+export class PostgresUserRepository
+  extends PostgresCrudRepository<UserRow>
+  implements UserRepository
+{
+  constructor(pool: PoolLike) {
+    super(pool, "users", "user");
+  }
+  async findByEmail(email: string): Promise<UserRow | undefined> {
+    const result = await this.pool.query<Record<string, unknown>>(
+      `SELECT * FROM users WHERE lower(email) = lower($1)`,
+      [email]
+    );
+    return result.rows[0] ? rowFromDb<UserRow>(result.rows[0]) : undefined;
+  }
+}
+
+export class PostgresRoleRepository
+  extends PostgresCrudRepository<RoleRow>
+  implements RoleRepository
+{
+  constructor(pool: PoolLike) {
+    super(pool, "roles", "role");
+  }
+  async findByName(name: string): Promise<RoleRow | undefined> {
+    const result = await this.pool.query<Record<string, unknown>>(
+      `SELECT * FROM roles WHERE name = $1`,
+      [name]
+    );
+    return result.rows[0] ? rowFromDb<RoleRow>(result.rows[0]) : undefined;
+  }
+}
+
+export class PostgresUserIdentityRepository
+  implements UserIdentityRepository
+{
+  private pool: PoolLike;
+  constructor(pool: PoolLike) {
+    this.pool = pool;
+  }
+
+  async create(row: UserIdentityRow): Promise<UserIdentityRow> {
+    try {
+      const r = await this.pool.query<Record<string, unknown>>(
+        `INSERT INTO user_identities (id, user_id, provider, subject, email)
+         VALUES ($1, $2, $3, $4, $5) RETURNING *`,
+        [row.id, row.userId, row.provider, row.subject, row.email ?? null]
+      );
+      return rowFromDb<UserIdentityRow>(r.rows[0]);
+    } catch (error) {
+      if (
+        error instanceof Error &&
+        /duplicate key|unique constraint/i.test(error.message)
+      ) {
+        throw new ConflictError("user_identity", error.message);
+      }
+      throw error;
+    }
+  }
+
+  async findBySubject(
+    provider: string,
+    subject: string
+  ): Promise<UserIdentityRow | undefined> {
+    const r = await this.pool.query<Record<string, unknown>>(
+      `SELECT * FROM user_identities WHERE provider = $1 AND subject = $2`,
+      [provider, subject]
+    );
+    return r.rows[0] ? rowFromDb<UserIdentityRow>(r.rows[0]) : undefined;
+  }
+
+  async listForUser(userId: string): Promise<UserIdentityRow[]> {
+    const r = await this.pool.query<Record<string, unknown>>(
+      `SELECT * FROM user_identities WHERE user_id = $1 ORDER BY created_at`,
+      [userId]
+    );
+    return r.rows.map((row) => rowFromDb<UserIdentityRow>(row));
+  }
+
+  async delete(id: string): Promise<void> {
+    await this.pool.query(`DELETE FROM user_identities WHERE id = $1`, [id]);
+  }
+}
+
+export class PostgresIdentityProviderRepository
+  extends PostgresCrudRepository<IdentityProviderRow>
+  implements IdentityProviderRepository
+{
+  constructor(pool: PoolLike) {
+    super(pool, "identity_providers", "identity_provider", ["config"]);
+  }
+  async findBySlug(slug: string): Promise<IdentityProviderRow | undefined> {
+    const r = await this.pool.query<Record<string, unknown>>(
+      `SELECT * FROM identity_providers WHERE slug = $1`,
+      [slug]
+    );
+    return r.rows[0] ? rowFromDb<IdentityProviderRow>(r.rows[0]) : undefined;
+  }
+  async listEnabled(): Promise<IdentityProviderRow[]> {
+    const r = await this.pool.query<Record<string, unknown>>(
+      `SELECT * FROM identity_providers WHERE enabled = true ORDER BY display_name`
+    );
+    return r.rows.map((row) => rowFromDb<IdentityProviderRow>(row));
+  }
+}
+
+export class PostgresRbacPolicyRepository implements RbacPolicyRepository {
+  private pool: PoolLike;
+  constructor(pool: PoolLike) {
+    this.pool = pool;
+  }
+
+  async listRolePermissions(): Promise<RbacRolePermissionRow[]> {
+    const r = await this.pool.query<Record<string, unknown>>(
+      `SELECT role, permission FROM rbac_role_permissions`
+    );
+    return r.rows.map((row) => ({
+      role: row.role as string,
+      permission: row.permission as string
+    }));
+  }
+
+  async addRolePermission(row: RbacRolePermissionRow): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO rbac_role_permissions (role, permission)
+       VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+      [row.role, row.permission]
+    );
+  }
+
+  async removeRolePermission(row: RbacRolePermissionRow): Promise<void> {
+    await this.pool.query(
+      `DELETE FROM rbac_role_permissions WHERE role = $1 AND permission = $2`,
+      [row.role, row.permission]
+    );
+  }
+
+  async setRolePermissions(
+    role: string,
+    permissions: string[]
+  ): Promise<void> {
+    await withTransaction(this.pool, async (client) => {
+      await client.query(
+        `DELETE FROM rbac_role_permissions WHERE role = $1`,
+        [role]
+      );
+      for (const permission of new Set(permissions)) {
+        await client.query(
+          `INSERT INTO rbac_role_permissions (role, permission)
+           VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+          [role, permission]
+        );
+      }
+    });
+  }
+
+  async listGrants(): Promise<RbacGrantRow[]> {
+    const r = await this.pool.query<Record<string, unknown>>(
+      `SELECT * FROM rbac_grants`
+    );
+    return r.rows.map((row) => rowFromDb<RbacGrantRow>(row));
+  }
+
+  async listGrantsForUser(userId: string): Promise<RbacGrantRow[]> {
+    const r = await this.pool.query<Record<string, unknown>>(
+      `SELECT * FROM rbac_grants WHERE user_id = $1`,
+      [userId]
+    );
+    return r.rows.map((row) => rowFromDb<RbacGrantRow>(row));
+  }
+
+  async addGrant(row: RbacGrantRow): Promise<RbacGrantRow> {
+    const r = await this.pool.query<Record<string, unknown>>(
+      `INSERT INTO rbac_grants (id, user_id, role, scope)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT (user_id, role, scope) DO UPDATE SET role = EXCLUDED.role
+       RETURNING *`,
+      [row.id, row.userId, row.role, row.scope]
+    );
+    return rowFromDb<RbacGrantRow>(r.rows[0]);
+  }
+
+  async removeGrant(id: string): Promise<void> {
+    await this.pool.query(`DELETE FROM rbac_grants WHERE id = $1`, [id]);
+  }
+}
+
+export class PostgresAuthSettingsRepository
+  implements AuthSettingsRepository
+{
+  private pool: PoolLike;
+  constructor(pool: PoolLike) {
+    this.pool = pool;
+  }
+
+  async get(): Promise<AuthSettingsRow> {
+    const r = await this.pool.query<Record<string, unknown>>(
+      `SELECT signup_mode, default_role, updated_at FROM auth_settings WHERE id = true`
+    );
+    if (!r.rows[0]) {
+      return {
+        signupMode: "admin_only",
+        defaultRole: "viewer",
+        updatedAt: new Date(0).toISOString()
+      };
+    }
+    return rowFromDb<AuthSettingsRow>(r.rows[0]);
+  }
+
+  async set(row: AuthSettingsRow): Promise<AuthSettingsRow> {
+    const r = await this.pool.query<Record<string, unknown>>(
+      `INSERT INTO auth_settings (id, signup_mode, default_role, updated_at)
+       VALUES (true, $1, $2, now())
+       ON CONFLICT (id) DO UPDATE SET
+         signup_mode = EXCLUDED.signup_mode,
+         default_role = EXCLUDED.default_role,
+         updated_at = now()
+       RETURNING signup_mode, default_role, updated_at`,
+      [row.signupMode, row.defaultRole ?? null]
+    );
+    return rowFromDb<AuthSettingsRow>(r.rows[0]);
+  }
 }
