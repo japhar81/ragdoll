@@ -257,6 +257,79 @@ test("editing a role's permissions changes effective access live", async () => {
   assert.equal(res.status, 201);
 });
 
+// --- session principal reflects resolved grants for data scoping ----------
+
+test("platform admin (session token) sees all tenants", async () => {
+  const h = buildHarness({ withAuth: true });
+  await h.deps.tenants.create({
+    id: randomUUID(),
+    slug: "acme",
+    name: "Acme",
+    status: "active",
+    metadata: {},
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  });
+  const { bearer } = await seedUser(h, {
+    email: "padmin@x.io",
+    grants: [{ role: "platform_admin", scope: "*" }]
+  });
+  const res = await h.request({
+    method: "GET",
+    path: "/api/tenants",
+    headers: bearer
+  });
+  assert.equal(res.status, 200);
+  assert.equal(res.body.tenants.length, 1);
+});
+
+test("tenant-scoped session user sees only its tenant and cannot spoof", async () => {
+  const h = buildHarness({ withAuth: true });
+  const tA = randomUUID();
+  const tB = randomUUID();
+  for (const [id, slug] of [
+    [tA, "ten-a"],
+    [tB, "ten-b"]
+  ]) {
+    await h.deps.tenants.create({
+      id,
+      slug,
+      name: slug,
+      status: "active",
+      metadata: {},
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    });
+  }
+  // auditor has audit:view (which GET /api/tenants requires), scoped to tA.
+  const { bearer } = await seedUser(h, {
+    email: "aud@scoped.io",
+    grants: [{ role: "auditor", scope: `t/${tA}` }]
+  });
+
+  // Selecting the granted tenant -> authorized, and the principal is bound to
+  // tA so the list is filtered to exactly that tenant.
+  const okRes = await h.request({
+    method: "GET",
+    path: "/api/tenants",
+    headers: { ...bearer, "x-tenant-id": tA }
+  });
+  assert.equal(okRes.status, 200);
+  assert.deepEqual(
+    okRes.body.tenants.map((t: { id: string }) => t.id),
+    [tA]
+  );
+
+  // Spoofing a tenant they hold no grant for: the scoped Casbin check denies
+  // it outright (audit:view @ t/tB is not covered) — no data leak.
+  const spoof = await h.request({
+    method: "GET",
+    path: "/api/tenants",
+    headers: { ...bearer, "x-tenant-id": tB }
+  });
+  assert.equal(spoof.status, 403);
+});
+
 // --- identity providers + settings ----------------------------------------
 
 test("identity provider CRUD redacts secrets and powers the public list", async () => {

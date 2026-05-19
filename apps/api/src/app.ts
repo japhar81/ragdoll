@@ -43,6 +43,7 @@ import {
   DEFAULT_ROLE_PERMISSIONS,
   parseScope,
   scopeToString,
+  scopeCovers,
   type ScopeInput
 } from "../../../packages/authz/src/index.ts";
 import { ConfigResolver } from "../../../packages/config-resolver/src/index.ts";
@@ -2795,6 +2796,41 @@ export function createApp(deps: AppDeps): App {
             { id: principal.id, type: principal.type, tenantId: principal.tenantId, roles: principal.roles },
             { defaultTenantId }
           );
+          // Session tokens carry NO roles/tenant (grants live in the policy
+          // store). Many handlers still scope *which rows to return* by
+          // `principal.roles.includes("platform_admin")` and
+          // `principal.tenantId`. Reflect the user's resolved grants onto the
+          // principal so that data scoping stays correct — derived from stored
+          // grants (never spoofable headers); real authz is still Casbin via
+          // `enforce`. Dev/API-key principals already carry these.
+          if (principal.type === "user" && (!principal.roles || principal.roles.length === 0)) {
+            const grants = await authorizer.resolveGrants({
+              id: principal.id,
+              type: principal.type,
+              tenantId: principal.tenantId,
+              roles: principal.roles
+            });
+            // Global-scope roles power the "see everything" superuser branches.
+            principal.roles = [
+              ...new Set(
+                grants
+                  .filter((g) => g.scope === "*")
+                  .map((g) => g.role)
+              )
+            ] as Principal["roles"];
+            // Bind the selected tenant only when a grant actually covers it,
+            // so a tenant-scoped user's list/filter endpoints work for that
+            // tenant without letting anyone spoof `x-tenant-id`.
+            if (
+              !principal.tenantId &&
+              defaultTenantId &&
+              grants.some((g) =>
+                scopeCovers(g.scope, scopeToString({ tenantId: defaultTenantId }))
+              )
+            ) {
+              principal.tenantId = defaultTenantId;
+            }
+          }
         } catch (e) {
           deps.logger.error("authorizer_failed", {
             error: e instanceof Error ? e.message : String(e)
