@@ -33,17 +33,18 @@ test("isUuid only accepts canonical UUIDs", () => {
 
 // ---- buildAuthHeaders ---------------------------------------------------
 
-test("buildAuthHeaders always sends x-roles (defaults to platform_admin)", () => {
+test("buildAuthHeaders sends NO x-roles by default (default-deny)", () => {
   const h = buildAuthHeaders();
-  assert.equal(h["x-roles"], DEV_ADMIN_ROLE);
-  assert.equal(h["x-roles"], "platform_admin");
-  // no tenant/token configured -> only the roles header
-  assert.deepEqual(Object.keys(h), ["x-roles"]);
+  assert.equal("x-roles" in h, false);
+  assert.deepEqual(Object.keys(h), []);
 });
 
-test("buildAuthHeaders honours a custom roles value but falls back when blank", () => {
+test("buildAuthHeaders emits x-roles only when explicitly set (dev opt-in)", () => {
   assert.equal(buildAuthHeaders({ roles: "viewer" })["x-roles"], "viewer");
-  assert.equal(buildAuthHeaders({ roles: "   " })["x-roles"], DEV_ADMIN_ROLE);
+  // blank is treated as unset, not defaulted.
+  assert.equal("x-roles" in buildAuthHeaders({ roles: "   " }), false);
+  // The dev-admin constant is still exported for explicit opt-in tooling.
+  assert.equal(buildAuthHeaders({ roles: DEV_ADMIN_ROLE })["x-roles"], "platform_admin");
 });
 
 test("buildAuthHeaders includes x-tenant-id ONLY when set and a UUID", () => {
@@ -76,7 +77,7 @@ test("buildAuthHeaders carries bearer / api-key when configured, alongside tenan
   assert.equal(h.authorization, "Bearer tok");
   assert.equal(h["x-api-key"], "ak");
   assert.equal(h["x-tenant-id"], UUID);
-  assert.equal(h["x-roles"], DEV_ADMIN_ROLE);
+  assert.equal("x-roles" in h, false);
 });
 
 test("buildAuthHeaders does not mutate its input and returns a fresh object", () => {

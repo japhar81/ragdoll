@@ -31,6 +31,13 @@ export interface UserRow {
   id: UUID;
   email: string;
   displayName?: string | null;
+  /**
+   * scrypt hash for local-password users (see @ragdoll/auth `PasswordService`).
+   * Null for SSO-only users, who authenticate via a `user_identities` row.
+   */
+  passwordHash?: string | null;
+  /** `active` | `disabled`. Disabled users can authenticate to nothing. */
+  status: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -47,6 +54,60 @@ export interface UserRoleRow {
   tenantId?: UUID | null;
   environment?: string | null;
   pipelineId?: UUID | null;
+}
+
+/**
+ * A federated identity: maps an external IdP subject onto a local user so the
+ * same person keeps one identity/grant set across OIDC, SAML, and local login.
+ */
+export interface UserIdentityRow {
+  id: UUID;
+  userId: UUID;
+  /** Identity-provider slug (`local` is reserved for password auth). */
+  provider: string;
+  /** Stable external subject (OIDC `sub` / SAML NameID). */
+  subject: string;
+  email?: string | null;
+  createdAt: string;
+}
+
+export type IdentityProviderKind = "oidc" | "saml";
+
+/** A configurable SSO connection. Secrets are referenced, never stored here. */
+export interface IdentityProviderRow {
+  id: UUID;
+  slug: string;
+  kind: IdentityProviderKind;
+  displayName: string;
+  enabled: boolean;
+  config: Record<string, unknown>;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** Casbin `p` policy row: a role grants a permission (scope-independent). */
+export interface RbacRolePermissionRow {
+  role: string;
+  permission: string;
+}
+
+/** Casbin `g` policy row: a user holds a role within a hierarchical scope. */
+export interface RbacGrantRow {
+  id: UUID;
+  userId: UUID;
+  role: string;
+  /** `*` | `t/<tenantId>` | `t/<tenantId>/e/<env>` | `t/<tenantId>/p/<pipelineId>`. */
+  scope: string;
+  createdAt: string;
+}
+
+export type SignupMode = "admin_only" | "open_default_role" | "open_no_access";
+
+export interface AuthSettingsRow {
+  signupMode: SignupMode;
+  /** Role assigned at global scope to self-signups when `open_default_role`. */
+  defaultRole?: string | null;
+  updatedAt: string;
 }
 
 export interface PipelineRow {
@@ -310,6 +371,42 @@ export interface UserRoleRepository {
   assign(row: UserRoleRow): Promise<UserRoleRow>;
   remove(row: UserRoleRow): Promise<void>;
   listForUser(userId: UUID): Promise<UserRoleRow[]>;
+}
+
+export interface UserIdentityRepository {
+  create(row: UserIdentityRow): Promise<UserIdentityRow>;
+  findBySubject(
+    provider: string,
+    subject: string
+  ): Promise<UserIdentityRow | undefined>;
+  listForUser(userId: UUID): Promise<UserIdentityRow[]>;
+  delete(id: UUID): Promise<void>;
+}
+
+export interface IdentityProviderRepository
+  extends CrudRepository<IdentityProviderRow> {
+  findBySlug(slug: string): Promise<IdentityProviderRow | undefined>;
+  listEnabled(): Promise<IdentityProviderRow[]>;
+}
+
+/** The Casbin `p`/`g` policy store. Used by @ragdoll/authz. */
+export interface RbacPolicyRepository {
+  /** Every role -> permission edge (the editable permission catalog). */
+  listRolePermissions(): Promise<RbacRolePermissionRow[]>;
+  addRolePermission(row: RbacRolePermissionRow): Promise<void>;
+  removeRolePermission(row: RbacRolePermissionRow): Promise<void>;
+  /** Replace the full permission set for a single role atomically. */
+  setRolePermissions(role: string, permissions: string[]): Promise<void>;
+  /** Every grant (user -> role @ scope). */
+  listGrants(): Promise<RbacGrantRow[]>;
+  listGrantsForUser(userId: UUID): Promise<RbacGrantRow[]>;
+  addGrant(row: RbacGrantRow): Promise<RbacGrantRow>;
+  removeGrant(id: UUID): Promise<void>;
+}
+
+export interface AuthSettingsRepository {
+  get(): Promise<AuthSettingsRow>;
+  set(row: AuthSettingsRow): Promise<AuthSettingsRow>;
 }
 
 export interface PipelineRepository extends CrudRepository<PipelineRow> {

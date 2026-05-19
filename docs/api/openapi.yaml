@@ -1222,3 +1222,257 @@ paths:
       responses:
         "200": { description: Model catalog }
         "404": { $ref: "#/components/responses/NotFound" }
+  /api/auth/login:
+    post:
+      summary: Local password login (public). Returns a session token.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email: { type: string }
+                password: { type: string }
+      responses:
+        "200": { description: "{ token, user }" }
+        "401": { description: Invalid credentials }
+        "403": { description: Account disabled }
+  /api/auth/signup:
+    post:
+      summary: >-
+        Self-service signup (public). Allowed only when the configured signup
+        mode is open_*; admin_only returns 403 signup_disabled.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email: { type: string }
+                password: { type: string }
+                displayName: { type: string }
+      responses:
+        "201": { description: "{ token, user }" }
+        "403": { description: Signup disabled }
+        "409": { description: Email already in use }
+        "422": { description: Weak password }
+  /api/auth/logout:
+    post:
+      summary: Logout (stateless; the client discards the token).
+      responses:
+        "204": { description: No content }
+  /api/auth/me:
+    get:
+      summary: Current principal, linked user, scoped grants, and effective permissions.
+      responses:
+        "200": { description: "{ principal, user, grants, permissions }" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /api/auth/providers:
+    get:
+      summary: Enabled SSO providers for the login page (public).
+      security: []
+      responses:
+        "200": { description: "{ providers: [{ slug, kind, displayName }] }" }
+  /api/auth/sso/{slug}/start:
+    get:
+      summary: Begin SSO (302 to the IdP). Public.
+      security: []
+      parameters:
+        - { name: slug, in: path, required: true, schema: { type: string } }
+      responses:
+        "302": { description: Redirect to the identity provider }
+        "404": { description: Provider not found or disabled }
+  /api/auth/sso/{slug}/callback:
+    get:
+      summary: OIDC redirect callback (public). 302s back to the web app with the token.
+      security: []
+      parameters:
+        - { name: slug, in: path, required: true, schema: { type: string } }
+        - { name: code, in: query, schema: { type: string } }
+        - { name: state, in: query, schema: { type: string } }
+      responses:
+        "302": { description: "Redirect to WEB_BASE_URL with #access_token" }
+        "401": { description: SSO validation failed }
+    post:
+      summary: SAML ACS callback (public, form POST of SAMLResponse/RelayState).
+      security: []
+      parameters:
+        - { name: slug, in: path, required: true, schema: { type: string } }
+      responses:
+        "302": { description: "Redirect to WEB_BASE_URL with #access_token" }
+        "401": { description: SSO validation failed }
+  /api/auth/settings:
+    get:
+      summary: Read instance auth settings (permission auth:settings).
+      responses:
+        "200": { description: "{ settings: { signupMode, defaultRole } }" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    put:
+      summary: Update signup mode / default role (permission auth:settings).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [signupMode]
+              properties:
+                signupMode:
+                  type: string
+                  enum: [admin_only, open_default_role, open_no_access]
+                defaultRole: { type: string, nullable: true }
+      responses:
+        "200": { description: Updated settings }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /api/users:
+    get:
+      summary: List users (permission user:manage).
+      responses:
+        "200": { description: "{ users }" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      summary: Provision a user (permission user:manage). Omit password for SSO-only.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email]
+              properties:
+                email: { type: string }
+                password: { type: string }
+                displayName: { type: string }
+                status: { type: string, enum: [active, disabled] }
+      responses:
+        "201": { description: Created user }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { description: Email exists }
+  /api/users/{id}:
+    patch:
+      summary: Update displayName / status / password (permission user:manage).
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        "200": { description: Updated user }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      summary: Delete a user and its grants (permission user:manage).
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        "204": { description: Deleted }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /api/users/{id}/grants:
+    get:
+      summary: List a user's scoped role grants (permission user:manage).
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        "200": { description: "{ grants }" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      summary: >-
+        Grant a role at a scope. The caller must hold user:manage over the
+        TARGET scope, so a tenant admin cannot mint platform-wide grants.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [role]
+              properties:
+                role: { type: string }
+                scope:
+                  type: string
+                  description: "Explicit scope string; or use the parts below."
+                tenantId: { type: string }
+                environment: { type: string }
+                pipelineId: { type: string }
+      responses:
+        "201": { description: Created grant }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /api/users/{id}/grants/{grantId}:
+    delete:
+      summary: Revoke a grant (requires user:manage over that grant's scope).
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - { name: grantId, in: path, required: true, schema: { type: string } }
+      responses:
+        "204": { description: Revoked }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /api/roles:
+    get:
+      summary: Roles, their permissions, and the full permission catalog (role:manage).
+      responses:
+        "200": { description: "{ roles, allPermissions }" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      summary: Create a custom role (permission role:manage).
+      responses:
+        "201": { description: Created role }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /api/roles/{name}/permissions:
+    put:
+      summary: Replace a role's permission set (role:manage). Effective immediately.
+      parameters:
+        - { name: name, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [permissions]
+              properties:
+                permissions: { type: array, items: { type: string } }
+      responses:
+        "200": { description: Updated }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /api/roles/{name}:
+    delete:
+      summary: Delete a custom role (role:manage). Built-in roles cannot be deleted.
+      parameters:
+        - { name: name, in: path, required: true, schema: { type: string } }
+      responses:
+        "204": { description: Deleted }
+        "409": { description: Built-in role }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /api/identity-providers:
+    get:
+      summary: List SSO connections; secrets redacted (permission idp:manage).
+      responses:
+        "200": { description: "{ providers }" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      summary: Create an OIDC/SAML connection (permission idp:manage).
+      responses:
+        "201": { description: Created }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { description: Slug exists }
+  /api/identity-providers/{id}:
+    put:
+      summary: Update a connection; REDACTED secret fields are preserved (idp:manage).
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        "200": { description: Updated }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    delete:
+      summary: Delete a connection (permission idp:manage).
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        "204": { description: Deleted }
+        "403": { $ref: "#/components/responses/Forbidden" }

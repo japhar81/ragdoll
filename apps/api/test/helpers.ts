@@ -7,7 +7,9 @@ import { createApp, type AppDeps, type AppRequest } from "../src/app.ts";
 import {
   AuthResolver,
   DevAuthProvider,
-  ApiKeyService
+  ApiKeyService,
+  SessionTokenService,
+  Authorizer
 } from "../../../packages/auth/src/index.ts";
 import {
   InMemoryTenantRepository,
@@ -27,7 +29,13 @@ import {
   InMemoryDatasourceConnectionRepository,
   InMemoryVectorCollectionRepository,
   InMemoryExecutionStore,
-  InMemoryApiKeyRepository
+  InMemoryApiKeyRepository,
+  InMemoryUserRepository,
+  InMemoryUserIdentityRepository,
+  InMemoryIdentityProviderRepository,
+  InMemoryRbacPolicyRepository,
+  InMemoryAuthSettingsRepository,
+  InMemoryRoleRepository
 } from "../../../packages/db/src/index.ts";
 import {
   DatabaseEncryptedSecretProvider,
@@ -85,6 +93,8 @@ export interface Harness {
   app: ReturnType<typeof createApp>;
   deps: AppDeps;
   queue: InMemoryQueue;
+  /** Session signer (mint Bearer tokens directly in tests). */
+  sessions: SessionTokenService;
   request(req: Partial<AppRequest> & { method: string; path: string }): Promise<{
     status: number;
     body: any;
@@ -98,6 +108,13 @@ export interface BuildOptions {
   devRoles?: string[];
   /** Tenant assigned to the dev fallback principal. */
   devTenant?: string;
+  /**
+   * Wire the full auth/RBAC stack (sessions, accounts, Authorizer + scoped
+   * default-deny) and DISABLE the dev provider, exercising the real production
+   * code path. Existing tests omit this and keep the legacy dev/flat-RBAC
+   * behaviour unchanged.
+   */
+  withAuth?: boolean;
 }
 
 export function buildHarness(options: BuildOptions = {}): Harness {
@@ -112,15 +129,35 @@ export function buildHarness(options: BuildOptions = {}): Harness {
 
   const queue = new InMemoryQueue();
 
+  const sessions = new SessionTokenService("test-session-secret");
   const auth = new AuthResolver({
+    sessions,
     apiKeys: new ApiKeyService(new InMemoryApiKeyRepository()),
-    dev: new DevAuthProvider({
-      roles: (options.devRoles as any) ?? ["platform_admin"],
-      tenantId: options.devTenant
-    })
+    // Strict default-deny harness: no header-trusting dev provider.
+    dev: options.withAuth
+      ? undefined
+      : new DevAuthProvider({
+          roles: (options.devRoles as any) ?? ["platform_admin"],
+          tenantId: options.devTenant
+        })
   });
 
+  const rbacPolicies = new InMemoryRbacPolicyRepository();
+  const authStack = options.withAuth
+    ? {
+        users: new InMemoryUserRepository(),
+        userIdentities: new InMemoryUserIdentityRepository(),
+        identityProviders: new InMemoryIdentityProviderRepository(),
+        rbacPolicies,
+        authSettings: new InMemoryAuthSettingsRepository(),
+        roles: new InMemoryRoleRepository(),
+        authorizer: new Authorizer({ store: rbacPolicies }),
+        sessions
+      }
+    : {};
+
   const deps: AppDeps = {
+    ...authStack,
     tenants: new InMemoryTenantRepository(),
     pipelines: new InMemoryPipelineRepository(),
     pipelineVersions: new InMemoryPipelineVersionRepository(),
@@ -164,7 +201,7 @@ export function buildHarness(options: BuildOptions = {}): Harness {
     });
   }
 
-  return { app, deps, queue, request };
+  return { app, deps, queue, request, sessions };
 }
 
 /** A minimal valid pipeline spec referencing only the fake echo plugin. */

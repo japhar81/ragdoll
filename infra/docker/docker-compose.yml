@@ -167,6 +167,16 @@ services:
       REDIS_URL: redis://redis:6379
       SECRET_ENCRYPTION_KEY: local-dev-only-change-me-32-bytes-min
       SESSION_SECRET: local-dev-only-change-me-session-hmac
+      # Auth is strict default-deny (no x-roles header trust). The first boot
+      # provisions this platform admin so you can sign in at the login page.
+      # Change these for any non-local deployment.
+      BOOTSTRAP_ADMIN_EMAIL: admin@ragdoll.local
+      BOOTSTRAP_ADMIN_PASSWORD: ragdoll-admin
+      # Where the SSO callback sends the browser back with its session token.
+      WEB_BASE_URL: "http://localhost:8088"
+      # Opt back into the insecure header-trusting dev provider if you really
+      # want the old x-roles flow locally: set RAGDOLL_DEV_AUTH=1 (never in prod).
+      # RAGDOLL_DEV_AUTH: "1"
       QDRANT_URL: http://qdrant:6333
       OPENSEARCH_URL: http://opensearch:9200
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318

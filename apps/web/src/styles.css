@@ -1085,3 +1085,197 @@ table.grid th {
   background: #e5e7eb;
   margin: 2px 0;
 }
+
+/* ===== Auth: login + access-control admin ============================== */
+
+.link-btn.danger { color: #b91c1c; }
+
+.login-shell {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(160deg, #0f172a 0%, #1e293b 60%, #334155 100%);
+  padding: 24px;
+}
+
+.login-card {
+  width: 100%;
+  max-width: 380px;
+  background: #ffffff;
+  border-radius: 16px;
+  padding: 32px 28px;
+  box-shadow: 0 20px 50px rgba(2, 6, 23, 0.45);
+}
+
+.login-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.login-brand h1 { font-size: 22px; margin: 0; color: #0f172a; }
+.login-logo {
+  display: inline-grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 9px;
+  background: #2563eb;
+  color: #fff;
+  font-size: 16px;
+}
+.login-sub { color: #64748b; font-size: 13px; margin: 6px 0 20px; }
+
+.login-form { display: flex; flex-direction: column; gap: 12px; }
+.login-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #334155;
+}
+.login-opt { font-weight: 400; color: #94a3b8; }
+.login-form input {
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  padding: 9px 11px;
+  font-size: 14px;
+}
+.login-form input:focus {
+  outline: none;
+  border-color: #2563eb;
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.18);
+}
+.login-submit { width: 100%; padding: 10px; border-radius: 8px; margin-top: 4px; }
+.login-error {
+  background: #fee2e2;
+  color: #991b1b;
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 12px;
+}
+
+.login-divider {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: #94a3b8;
+  font-size: 11px;
+  margin: 18px 0 14px;
+}
+.login-divider::before,
+.login-divider::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: #e2e8f0;
+}
+.login-sso { display: flex; flex-direction: column; gap: 8px; }
+.login-sso-btn {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  padding: 9px 12px;
+  font-size: 13px;
+  color: #0f172a;
+  cursor: pointer;
+  text-decoration: none;
+}
+.login-sso-btn:hover { background: #f1f5f9; }
+.login-sso-kind {
+  font-size: 10px;
+  color: #64748b;
+  background: #e2e8f0;
+  border-radius: 999px;
+  padding: 1px 7px;
+}
+.login-foot { margin-top: 18px; text-align: center; }
+
+.sidebar-user {
+  margin-top: auto;
+  padding: 12px 14px;
+  border-top: 1px solid #1e293b;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.sidebar-user-id {
+  color: #cbd5e1;
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sidebar-user .link-btn { color: #93c5fd; align-self: flex-start; }
+
+.row-actions { display: inline-flex; gap: 10px; }
+
+.modal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 14px;
+}
+
+.grant-mgr { display: flex; flex-direction: column; gap: 12px; }
+.grant-form { flex-wrap: wrap; }
+
+.role-list { display: flex; flex-direction: column; gap: 14px; margin-top: 16px; }
+.role-card {
+  border: 1px solid #e5e7eb;
+  border-radius: 10px;
+  padding: 14px 16px;
+  background: #fff;
+}
+.role-card-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+.perm-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 6px 14px;
+}
+.perm-item {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12px;
+}
+.perm-item code { color: #334155; }
+
+.idp-form { display: flex; flex-direction: column; gap: 12px; margin-bottom: 18px; }
+.idp-config {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 10px;
+}
+.idp-field { display: flex; flex-direction: column; gap: 4px; font-size: 12px; }
+.idp-field input { padding: 6px 8px; }
+
+.settings-card {
+  max-width: 640px;
+  border: 1px solid #e5e7eb;
+  border-radius: 10px;
+  padding: 18px 20px;
+  background: #fff;
+}
+.settings-card h3 { margin: 0 0 12px; }
+.mode-list { display: flex; flex-direction: column; gap: 8px; }
+.mode-item {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  padding: 12px;
+  cursor: pointer;
+}
+.mode-item.selected { border-color: #2563eb; background: #eff6ff; }
+.mode-item input { margin-top: 3px; }

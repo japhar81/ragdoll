@@ -22,10 +22,29 @@ import {
   InvalidCredentialsError,
   TokenInvalidError,
   TokenExpiredError,
+  Authorizer,
+  AccountService,
+  SessionTokenService,
+  PasswordService,
+  OidcProvider,
+  SamlProvider,
+  randomToken,
+  SignupDisabledError,
+  AccountDisabledError,
+  EmailInUseError,
+  type SsoIdentity,
   type Permission,
   type Principal
 } from "../../../packages/auth/src/index.ts";
-import { AuthorizationError } from "../../../packages/authz/src/index.ts";
+import {
+  AuthorizationError,
+  ALL_PERMISSIONS,
+  ALL_ROLES,
+  DEFAULT_ROLE_PERMISSIONS,
+  parseScope,
+  scopeToString,
+  type ScopeInput
+} from "../../../packages/authz/src/index.ts";
 import { ConfigResolver } from "../../../packages/config-resolver/src/index.ts";
 import {
   validatePipelineSpec,
@@ -54,6 +73,22 @@ import {
   InMemoryScheduleRepository,
   InMemoryTenantPipelineRepository,
   InMemoryEnvironmentRepository,
+  InMemoryUserRepository,
+  InMemoryUserIdentityRepository,
+  InMemoryIdentityProviderRepository,
+  InMemoryRbacPolicyRepository,
+  InMemoryAuthSettingsRepository,
+  InMemoryRoleRepository,
+  type UserRepository,
+  type UserIdentityRepository,
+  type IdentityProviderRepository,
+  type RbacPolicyRepository,
+  type AuthSettingsRepository,
+  type RoleRepository,
+  type UserRow,
+  type IdentityProviderRow,
+  type RbacGrantRow,
+  type SignupMode,
   type TenantRepository,
   type EnvironmentRepository,
   type PipelineRepository,
@@ -178,6 +213,24 @@ export interface AppDeps {
   logger: StructuredLogger;
   /** RAGDOLL_ENV; the dev auth fallback is rejected when this is "production". */
   env?: string;
+  /**
+   * Auth / RBAC stores. Optional so legacy harnesses still construct a valid
+   * `AppDeps`; `createApp` falls back to fresh InMemory instances. When
+   * `authorizer` is wired, route-level `enforce(...)` becomes scoped
+   * default-deny RBAC; otherwise the legacy flat role map is used.
+   */
+  users?: UserRepository;
+  userIdentities?: UserIdentityRepository;
+  identityProviders?: IdentityProviderRepository;
+  rbacPolicies?: RbacPolicyRepository;
+  authSettings?: AuthSettingsRepository;
+  roles?: RoleRepository;
+  /** Resolves a principal's scoped grants; attaches the per-request decider. */
+  authorizer?: Authorizer;
+  /** Session signer used for login/SSO; required for the auth routes. */
+  sessions?: SessionTokenService;
+  /** Built from the stores when omitted (needs `sessions`). */
+  accounts?: AccountService;
 }
 
 export interface App {
@@ -308,6 +361,42 @@ export function createApp(deps: AppDeps): App {
     deps.tenantPipelines ?? new InMemoryTenantPipelineRepository();
   const environments: EnvironmentRepository =
     deps.environments ?? new InMemoryEnvironmentRepository();
+
+  // ---- auth / RBAC stores -------------------------------------------------
+  const users: UserRepository =
+    deps.users ?? new InMemoryUserRepository();
+  const userIdentities: UserIdentityRepository =
+    deps.userIdentities ?? new InMemoryUserIdentityRepository();
+  const identityProviders: IdentityProviderRepository =
+    deps.identityProviders ?? new InMemoryIdentityProviderRepository();
+  const rbacPolicies: RbacPolicyRepository =
+    deps.rbacPolicies ?? new InMemoryRbacPolicyRepository();
+  const authSettings: AuthSettingsRepository =
+    deps.authSettings ?? new InMemoryAuthSettingsRepository();
+  const roleCatalog: RoleRepository =
+    deps.roles ?? new InMemoryRoleRepository();
+  // The authorizer is the scoped, default-deny decision point. When omitted
+  // (legacy harnesses) route `enforce(...)` keeps using the flat role map.
+  const authorizer: Authorizer | undefined = deps.authorizer;
+  const accounts: AccountService | undefined =
+    deps.accounts ??
+    (deps.sessions
+      ? new AccountService({
+          users,
+          identities: userIdentities,
+          grants: rbacPolicies,
+          settings: authSettings,
+          sessions: deps.sessions
+        })
+      : undefined);
+  const passwords = new PasswordService();
+  // Pending SSO logins: state -> {slug,nonce,redirectUri}. In-process with a
+  // short TTL; multi-replica SSO needs a shared store (documented in the ADR).
+  const ssoStates = new Map<
+    string,
+    { slug: string; nonce: string; redirectUri: string; at: number }
+  >();
+  const SSO_STATE_TTL_MS = 10 * 60 * 1000;
 
   // ---- audit helper -------------------------------------------------------
   async function audit(
@@ -2048,6 +2137,587 @@ export function createApp(deps: AppDeps): App {
     };
   });
 
+  // ---- auth & access-control ---------------------------------------------
+  //
+  // Authentication entry points (login/signup/sso/providers) are public; every
+  // management route is default-deny via `enforce`. Grant-scoped routes derive
+  // the request scope from the grant itself so an admin can only act within
+  // scopes their own grants cover (a tenant_admin cannot mint platform roles).
+
+  function scopeInputFromBody(body: Record<string, unknown>): ScopeInput {
+    if (typeof body.scope === "string" && body.scope.length > 0) {
+      return parseScope(body.scope);
+    }
+    return {
+      tenantId: typeof body.tenantId === "string" ? body.tenantId : undefined,
+      environment:
+        typeof body.environment === "string" ? body.environment : undefined,
+      pipelineId:
+        typeof body.pipelineId === "string" ? body.pipelineId : undefined
+    };
+  }
+
+  function scopeResource(scope: string): {
+    tenantId?: string;
+    pipelineId?: string;
+    environment?: string;
+  } {
+    const s = parseScope(scope);
+    return {
+      tenantId: s.tenantId ?? undefined,
+      environment: s.environment ?? undefined,
+      pipelineId: s.pipelineId ?? undefined
+    };
+  }
+
+  function defaultPermsFor(role: string): string[] {
+    return (
+      (DEFAULT_ROLE_PERMISSIONS as Record<string, string[]>)[role] ?? []
+    );
+  }
+
+  /**
+   * Effective role -> permission catalog: the DB store if populated, else the
+   * built-in defaults (so a fresh / in-memory deployment works with no seed).
+   */
+  async function effectiveCatalog(): Promise<Map<string, Set<string>>> {
+    const rows = await rbacPolicies.listRolePermissions();
+    const catalog = new Map<string, Set<string>>();
+    const source = rows.length
+      ? rows
+      : ALL_ROLES.flatMap((r) =>
+          defaultPermsFor(r).map((permission) => ({ role: r, permission }))
+        );
+    for (const { role, permission } of source) {
+      let set = catalog.get(role);
+      if (!set) {
+        set = new Set();
+        catalog.set(role, set);
+      }
+      set.add(permission);
+    }
+    return catalog;
+  }
+
+  function publicUser(u: UserRow): Record<string, unknown> {
+    return {
+      id: u.id,
+      email: u.email,
+      displayName: u.displayName ?? null,
+      status: u.status,
+      sso: !u.passwordHash,
+      createdAt: u.createdAt
+    };
+  }
+
+  /** Non-secret view of an IdP (client secrets / SP keys are write-only). */
+  function publicIdp(p: IdentityProviderRow): Record<string, unknown> {
+    const cfg = { ...(p.config as Record<string, unknown>) };
+    for (const k of ["clientSecret", "spPrivateKey", "privateKey"]) {
+      if (k in cfg) cfg[k] = "REDACTED";
+    }
+    return {
+      id: p.id,
+      slug: p.slug,
+      kind: p.kind,
+      displayName: p.displayName,
+      enabled: p.enabled,
+      config: cfg
+    };
+  }
+
+  function buildSsoProvider(
+    row: IdentityProviderRow
+  ): OidcProvider | SamlProvider {
+    const c = row.config as Record<string, unknown>;
+    if (row.kind === "oidc") {
+      return new OidcProvider({
+        issuer: String(c.issuer ?? ""),
+        clientId: String(c.clientId ?? ""),
+        clientSecret: String(c.clientSecret ?? ""),
+        scopes: typeof c.scopes === "string" ? c.scopes : undefined
+      });
+    }
+    return new SamlProvider({
+      entryPoint: String(c.entryPoint ?? ""),
+      issuer: String(c.issuer ?? ""),
+      callbackUrl: String(c.callbackUrl ?? ""),
+      idpCert: String(c.idpCert ?? ""),
+      emailAttribute:
+        typeof c.emailAttribute === "string" ? c.emailAttribute : undefined,
+      nameAttribute:
+        typeof c.nameAttribute === "string" ? c.nameAttribute : undefined
+    });
+  }
+
+  function requestOrigin(req: AppRequest): string {
+    const proto = headerValue(req.headers, "x-forwarded-proto") ?? "http";
+    const host =
+      headerValue(req.headers, "x-forwarded-host") ??
+      headerValue(req.headers, "host") ??
+      "localhost:3001";
+    return `${proto}://${host}`;
+  }
+
+  function webRedirect(token: string): AppResponse {
+    const base = process.env.WEB_BASE_URL ?? "/";
+    const sep = base.includes("#") ? "&" : "#";
+    return {
+      status: 302,
+      body: undefined,
+      headers: { location: `${base}${sep}access_token=${encodeURIComponent(token)}` }
+    };
+  }
+
+  // ---- auth: local + session ----------------------------------------------
+  route("POST", "/api/auth/login", async (ctx) => {
+    if (!accounts) return error(501, "auth_not_configured");
+    const body = ctx.request.body;
+    if (!isObject(body) || typeof body.email !== "string" || typeof body.password !== "string") {
+      return error(422, "validation_failed", { issues: [{ message: "email and password are required" }] });
+    }
+    try {
+      const out = await accounts.loginLocal(body.email, body.password);
+      return ok({ token: out.token, user: publicUser(out.user as UserRow) });
+    } catch (e) {
+      if (e instanceof InvalidCredentialsError) return error(401, "invalid_credentials");
+      if (e instanceof AccountDisabledError) return error(403, "account_disabled");
+      throw e;
+    }
+  });
+
+  route("POST", "/api/auth/signup", async (ctx) => {
+    if (!accounts) return error(501, "auth_not_configured");
+    const body = ctx.request.body;
+    if (!isObject(body) || typeof body.email !== "string" || typeof body.password !== "string") {
+      return error(422, "validation_failed", { issues: [{ message: "email and password are required" }] });
+    }
+    try {
+      const out = await accounts.signupLocal({
+        email: body.email,
+        password: body.password,
+        displayName: typeof body.displayName === "string" ? body.displayName : undefined
+      });
+      return ok({ token: out.token, user: publicUser(out.user as UserRow) }, 201);
+    } catch (e) {
+      if (e instanceof SignupDisabledError) return error(403, "signup_disabled");
+      if (e instanceof EmailInUseError) return error(409, "email_in_use");
+      if (e instanceof Error && e.name === "WeakPasswordError") {
+        return error(422, "weak_password", { message: e.message });
+      }
+      throw e;
+    }
+  });
+
+  route("POST", "/api/auth/logout", async () => {
+    // Session tokens are stateless and short-lived; the client discards it.
+    return { status: 204, body: undefined, headers: {} };
+  });
+
+  route("GET", "/api/auth/me", async (ctx) => {
+    const p = ctx.principal;
+    const user =
+      p.type === "user" ? await users.get(p.id) : undefined;
+    let grants: Array<{ role: string; scope: string }>;
+    if (p.type === "user" && (!p.roles || p.roles.length === 0)) {
+      grants = (await rbacPolicies.listGrantsForUser(p.id)).map((g) => ({
+        role: g.role,
+        scope: g.scope
+      }));
+    } else {
+      const scope = p.tenantId ? `t/${p.tenantId}` : "*";
+      grants = (p.roles ?? []).map((role) => ({ role, scope }));
+    }
+    const catalog = await effectiveCatalog();
+    const permissions = [
+      ...new Set(grants.flatMap((g) => [...(catalog.get(g.role) ?? [])]))
+    ];
+    return ok({
+      principal: { id: p.id, type: p.type, tenantId: p.tenantId ?? null },
+      user: user ? publicUser(user) : null,
+      grants,
+      permissions
+    });
+  });
+
+  // ---- auth: SSO ----------------------------------------------------------
+  route("GET", "/api/auth/providers", async () => {
+    const list = await identityProviders.listEnabled();
+    return ok({
+      providers: list.map((p) => ({
+        slug: p.slug,
+        kind: p.kind,
+        displayName: p.displayName
+      }))
+    });
+  });
+
+  route("GET", "/api/auth/sso/:slug/start", async (ctx) => {
+    const row = await identityProviders.findBySlug(ctx.params.slug);
+    if (!row || !row.enabled) return error(404, "provider_not_found");
+    const provider = buildSsoProvider(row);
+    const origin = requestOrigin(ctx.request);
+    const redirectUri =
+      String((row.config as Record<string, unknown>).callbackUrl ?? "") ||
+      `${origin}/api/auth/sso/${row.slug}/callback`;
+    const state = randomToken();
+    const nonce = randomToken();
+    ssoStates.set(state, { slug: row.slug, nonce, redirectUri, at: Date.now() });
+    if (provider instanceof OidcProvider) {
+      const url = await provider.authorizationUrl({ redirectUri, state, nonce });
+      return { status: 302, body: undefined, headers: { location: url } };
+    }
+    const url = await (provider as SamlProvider).loginRedirectUrl(state);
+    return { status: 302, body: undefined, headers: { location: url } };
+  });
+
+  async function completeSso(
+    code: string | undefined,
+    samlBody: { SAMLResponse: string; RelayState?: string } | undefined,
+    stateParam: string | undefined
+  ): Promise<AppResponse> {
+    if (!accounts) return error(501, "auth_not_configured");
+    const state = stateParam ?? samlBody?.RelayState;
+    const pending = state ? ssoStates.get(state) : undefined;
+    if (!state || !pending || Date.now() - pending.at > SSO_STATE_TTL_MS) {
+      return error(400, "sso_state_invalid");
+    }
+    ssoStates.delete(state);
+    const row = await identityProviders.findBySlug(pending.slug);
+    if (!row || !row.enabled) return error(404, "provider_not_found");
+    const provider = buildSsoProvider(row);
+    let identity: SsoIdentity;
+    try {
+      if (provider instanceof OidcProvider) {
+        if (!code) return error(400, "missing_code");
+        identity = await provider.handleCallback({
+          code,
+          redirectUri: pending.redirectUri,
+          expectedNonce: pending.nonce
+        });
+      } else {
+        if (!samlBody?.SAMLResponse) return error(400, "missing_saml_response");
+        identity = await (provider as SamlProvider).validatePostResponse({
+          SAMLResponse: samlBody.SAMLResponse
+        });
+      }
+    } catch (e) {
+      deps.logger.error("sso_validation_failed", {
+        slug: pending.slug,
+        error: e instanceof Error ? e.message : String(e)
+      });
+      return error(401, "sso_failed", { message: e instanceof Error ? e.message : "SSO failed" });
+    }
+    try {
+      const out = await accounts.loginSso(pending.slug, identity);
+      return webRedirect(out.token);
+    } catch (e) {
+      if (e instanceof AccountDisabledError) return error(403, "account_disabled");
+      throw e;
+    }
+  }
+
+  route("GET", "/api/auth/sso/:slug/callback", async (ctx) =>
+    completeSso(ctx.request.query.code, undefined, ctx.request.query.state)
+  );
+
+  route("POST", "/api/auth/sso/:slug/callback", async (ctx) => {
+    const body = isObject(ctx.request.body) ? ctx.request.body : {};
+    return completeSso(
+      typeof body.code === "string" ? body.code : ctx.request.query.code,
+      typeof body.SAMLResponse === "string"
+        ? {
+            SAMLResponse: body.SAMLResponse,
+            RelayState:
+              typeof body.RelayState === "string" ? body.RelayState : undefined
+          }
+        : undefined,
+      ctx.request.query.state
+    );
+  });
+
+  // ---- users --------------------------------------------------------------
+  route("GET", "/api/users", async (ctx) => {
+    enforce(ctx.principal, "user:manage");
+    const all = await users.list();
+    return ok({ users: all.map(publicUser) });
+  });
+
+  route("POST", "/api/users", async (ctx) => {
+    enforce(ctx.principal, "user:manage");
+    const body = ctx.request.body;
+    if (!isObject(body) || typeof body.email !== "string") {
+      return error(422, "validation_failed", { issues: [{ path: "email", message: "email is required" }] });
+    }
+    const email = body.email.trim().toLowerCase();
+    if (await users.findByEmail(email)) {
+      return error(409, "conflict", { message: "email already exists" });
+    }
+    const now = nowIso();
+    const row: UserRow = {
+      id: typeof body.id === "string" ? body.id : randomUUID(),
+      email,
+      displayName: typeof body.displayName === "string" ? body.displayName : null,
+      passwordHash:
+        typeof body.password === "string" && body.password.length > 0
+          ? await passwords.hash(body.password)
+          : null,
+      status: body.status === "disabled" ? "disabled" : "active",
+      createdAt: now,
+      updatedAt: now
+    };
+    const created = await users.create(row);
+    await audit(ctx, "user.create", "user", created.id, undefined, publicUser(created));
+    return ok({ user: publicUser(created) }, 201);
+  });
+
+  route("PATCH", "/api/users/:id", async (ctx) => {
+    enforce(ctx.principal, "user:manage");
+    const before = await users.get(ctx.params.id);
+    if (!before) return error(404, "not_found");
+    const body = ctx.request.body;
+    if (!isObject(body)) return error(422, "validation_failed", { issues: [] });
+    const patch: Partial<UserRow> = { updatedAt: nowIso() };
+    if (typeof body.displayName === "string" || body.displayName === null) {
+      patch.displayName = body.displayName as string | null;
+    }
+    if (body.status === "active" || body.status === "disabled") {
+      patch.status = body.status;
+    }
+    if (typeof body.password === "string" && body.password.length > 0) {
+      patch.passwordHash = await passwords.hash(body.password);
+    }
+    const updated = await users.update(ctx.params.id, patch);
+    await audit(ctx, "user.update", "user", updated.id, publicUser(before), publicUser(updated));
+    return ok({ user: publicUser(updated) });
+  });
+
+  route("DELETE", "/api/users/:id", async (ctx) => {
+    enforce(ctx.principal, "user:manage");
+    const before = await users.get(ctx.params.id);
+    if (!before) return error(404, "not_found");
+    await users.delete(ctx.params.id);
+    if (authorizer) authorizer.invalidate(ctx.params.id);
+    await audit(ctx, "user.delete", "user", ctx.params.id, publicUser(before), undefined);
+    return { status: 204, body: undefined, headers: {} };
+  });
+
+  route("GET", "/api/users/:id/grants", async (ctx) => {
+    enforce(ctx.principal, "user:manage");
+    const user = await users.get(ctx.params.id);
+    if (!user) return error(404, "not_found");
+    const grants = await rbacPolicies.listGrantsForUser(ctx.params.id);
+    return ok({
+      grants: grants.map((g) => ({
+        id: g.id,
+        role: g.role,
+        scope: g.scope,
+        ...parseScope(g.scope)
+      }))
+    });
+  });
+
+  route("POST", "/api/users/:id/grants", async (ctx) => {
+    const user = await users.get(ctx.params.id);
+    if (!user) return error(404, "not_found");
+    const body = ctx.request.body;
+    if (!isObject(body) || typeof body.role !== "string") {
+      return error(422, "validation_failed", { issues: [{ path: "role", message: "role is required" }] });
+    }
+    const scope = scopeToString(scopeInputFromBody(body));
+    // The acting admin must hold user:manage over the *target scope*.
+    enforce(ctx.principal, "user:manage", scopeResource(scope));
+    const row: RbacGrantRow = {
+      id: randomUUID(),
+      userId: ctx.params.id,
+      role: body.role,
+      scope,
+      createdAt: nowIso()
+    };
+    const created = await rbacPolicies.addGrant(row);
+    if (authorizer) authorizer.invalidate(ctx.params.id);
+    await audit(ctx, "user.grant", "user", ctx.params.id, undefined, { role: created.role, scope: created.scope });
+    return ok({ grant: { id: created.id, role: created.role, scope: created.scope, ...parseScope(created.scope) } }, 201);
+  });
+
+  route("DELETE", "/api/users/:id/grants/:grantId", async (ctx) => {
+    const user = await users.get(ctx.params.id);
+    if (!user) return error(404, "not_found");
+    const grants = await rbacPolicies.listGrantsForUser(ctx.params.id);
+    const target = grants.find((g) => g.id === ctx.params.grantId);
+    if (!target) return error(404, "not_found", { message: "grant not found" });
+    enforce(ctx.principal, "user:manage", scopeResource(target.scope));
+    await rbacPolicies.removeGrant(ctx.params.grantId);
+    if (authorizer) authorizer.invalidate(ctx.params.id);
+    await audit(ctx, "user.revoke", "user", ctx.params.id, { role: target.role, scope: target.scope }, undefined);
+    return { status: 204, body: undefined, headers: {} };
+  });
+
+  // ---- roles & permissions ------------------------------------------------
+  route("GET", "/api/roles", async (ctx) => {
+    enforce(ctx.principal, "role:manage");
+    const rows = await rbacPolicies.listRolePermissions();
+    const byRole = new Map<string, string[]>();
+    for (const { role, permission } of rows) {
+      byRole.set(role, [...(byRole.get(role) ?? []), permission]);
+    }
+    const custom = await roleCatalog.list();
+    const names = new Set<string>([
+      ...ALL_ROLES,
+      ...byRole.keys(),
+      ...custom.map((r) => r.name)
+    ]);
+    const roles = [...names].map((name) => ({
+      name,
+      builtin: (ALL_ROLES as string[]).includes(name),
+      description: custom.find((r) => r.name === name)?.description ?? null,
+      permissions: byRole.get(name) ?? defaultPermsFor(name)
+    }));
+    return ok({ roles, allPermissions: ALL_PERMISSIONS });
+  });
+
+  route("POST", "/api/roles", async (ctx) => {
+    enforce(ctx.principal, "role:manage");
+    const body = ctx.request.body;
+    if (!isObject(body) || typeof body.name !== "string" || !body.name.trim()) {
+      return error(422, "validation_failed", { issues: [{ path: "name", message: "name is required" }] });
+    }
+    if (await roleCatalog.findByName(body.name)) {
+      return error(409, "conflict", { message: "role already exists" });
+    }
+    const created = await roleCatalog.create({
+      id: randomUUID(),
+      name: body.name.trim(),
+      description: typeof body.description === "string" ? body.description : null
+    });
+    await audit(ctx, "role.create", "role", created.id, undefined, created);
+    return ok({ role: created }, 201);
+  });
+
+  route("PUT", "/api/roles/:name/permissions", async (ctx) => {
+    enforce(ctx.principal, "role:manage");
+    const body = ctx.request.body;
+    if (!isObject(body) || !Array.isArray(body.permissions)) {
+      return error(422, "validation_failed", { issues: [{ path: "permissions", message: "permissions[] required" }] });
+    }
+    const perms = (body.permissions as unknown[]).filter(
+      (p): p is string => typeof p === "string"
+    );
+    await rbacPolicies.setRolePermissions(ctx.params.name, perms);
+    if (authorizer) authorizer.invalidate();
+    await audit(ctx, "role.set_permissions", "role", ctx.params.name, undefined, { permissions: perms });
+    return ok({ role: ctx.params.name, permissions: perms });
+  });
+
+  route("DELETE", "/api/roles/:name", async (ctx) => {
+    enforce(ctx.principal, "role:manage");
+    if ((ALL_ROLES as string[]).includes(ctx.params.name)) {
+      return error(409, "conflict", { message: "cannot delete a built-in role" });
+    }
+    await rbacPolicies.setRolePermissions(ctx.params.name, []);
+    const existing = await roleCatalog.findByName(ctx.params.name);
+    if (existing) await roleCatalog.delete(existing.id);
+    if (authorizer) authorizer.invalidate();
+    await audit(ctx, "role.delete", "role", ctx.params.name, undefined, undefined);
+    return { status: 204, body: undefined, headers: {} };
+  });
+
+  // ---- identity providers -------------------------------------------------
+  route("GET", "/api/identity-providers", async (ctx) => {
+    enforce(ctx.principal, "idp:manage");
+    const list = await identityProviders.list();
+    return ok({ providers: list.map(publicIdp) });
+  });
+
+  route("POST", "/api/identity-providers", async (ctx) => {
+    enforce(ctx.principal, "idp:manage");
+    const body = ctx.request.body;
+    if (
+      !isObject(body) ||
+      typeof body.slug !== "string" ||
+      (body.kind !== "oidc" && body.kind !== "saml") ||
+      typeof body.displayName !== "string"
+    ) {
+      return error(422, "validation_failed", {
+        issues: [{ message: "slug, kind ('oidc'|'saml') and displayName are required" }]
+      });
+    }
+    if (await identityProviders.findBySlug(body.slug)) {
+      return error(409, "conflict", { message: "slug already exists" });
+    }
+    const now = nowIso();
+    const row: IdentityProviderRow = {
+      id: typeof body.id === "string" ? body.id : randomUUID(),
+      slug: body.slug,
+      kind: body.kind,
+      displayName: body.displayName,
+      enabled: body.enabled !== false,
+      config: isObject(body.config) ? body.config : {},
+      createdAt: now,
+      updatedAt: now
+    };
+    const created = await identityProviders.create(row);
+    await audit(ctx, "idp.create", "identity_provider", created.id, undefined, publicIdp(created));
+    return ok({ provider: publicIdp(created) }, 201);
+  });
+
+  route("PUT", "/api/identity-providers/:id", async (ctx) => {
+    enforce(ctx.principal, "idp:manage");
+    const before = await identityProviders.get(ctx.params.id);
+    if (!before) return error(404, "not_found");
+    const body = ctx.request.body;
+    if (!isObject(body)) return error(422, "validation_failed", { issues: [] });
+    const patch: Partial<IdentityProviderRow> = { updatedAt: nowIso() };
+    if (typeof body.displayName === "string") patch.displayName = body.displayName;
+    if (typeof body.enabled === "boolean") patch.enabled = body.enabled;
+    if (isObject(body.config)) {
+      // Merge so a redacted secret left untouched by the UI is preserved.
+      const merged = { ...(before.config as Record<string, unknown>) };
+      for (const [k, v] of Object.entries(body.config)) {
+        if (v === "REDACTED") continue;
+        merged[k] = v;
+      }
+      patch.config = merged;
+    }
+    const updated = await identityProviders.update(ctx.params.id, patch);
+    await audit(ctx, "idp.update", "identity_provider", updated.id, publicIdp(before), publicIdp(updated));
+    return ok({ provider: publicIdp(updated) });
+  });
+
+  route("DELETE", "/api/identity-providers/:id", async (ctx) => {
+    enforce(ctx.principal, "idp:manage");
+    const before = await identityProviders.get(ctx.params.id);
+    if (!before) return error(404, "not_found");
+    await identityProviders.delete(ctx.params.id);
+    await audit(ctx, "idp.delete", "identity_provider", ctx.params.id, publicIdp(before), undefined);
+    return { status: 204, body: undefined, headers: {} };
+  });
+
+  // ---- auth settings ------------------------------------------------------
+  route("GET", "/api/auth/settings", async (ctx) => {
+    enforce(ctx.principal, "auth:settings");
+    return ok({ settings: await authSettings.get() });
+  });
+
+  route("PUT", "/api/auth/settings", async (ctx) => {
+    enforce(ctx.principal, "auth:settings");
+    const body = ctx.request.body;
+    const modes: SignupMode[] = ["admin_only", "open_default_role", "open_no_access"];
+    if (!isObject(body) || !modes.includes(body.signupMode as SignupMode)) {
+      return error(422, "validation_failed", {
+        issues: [{ path: "signupMode", message: `signupMode must be one of ${modes.join(", ")}` }]
+      });
+    }
+    const saved = await authSettings.set({
+      signupMode: body.signupMode as SignupMode,
+      defaultRole:
+        typeof body.defaultRole === "string" ? body.defaultRole : null,
+      updatedAt: nowIso()
+    });
+    await audit(ctx, "auth.settings.update", "auth_settings", "singleton", undefined, saved);
+    return ok({ settings: saved });
+  });
+
   // ---- router -------------------------------------------------------------
   async function handle(request: AppRequest): Promise<AppResponse> {
     const pathSegments = compile(request.path);
@@ -2071,7 +2741,17 @@ export function createApp(deps: AppDeps): App {
       return error(pathExists ? 405 : 404, pathExists ? "method_not_allowed" : "not_found");
     }
 
-    const isPublic = request.path === "/healthz" || request.path === "/readyz";
+    // Public = no credentials required. Besides health probes these are the
+    // unauthenticated entry points to authentication itself: local login,
+    // self-service signup, the enabled-provider list the login page renders,
+    // and the SSO start/callback legs. Everything else is default-deny.
+    const isPublic =
+      request.path === "/healthz" ||
+      request.path === "/readyz" ||
+      request.path === "/api/auth/login" ||
+      request.path === "/api/auth/signup" ||
+      request.path === "/api/auth/providers" ||
+      request.path.startsWith("/api/auth/sso/");
 
     let principal: Principal = { id: "anonymous", type: "service", roles: [] };
     if (!isPublic) {
@@ -2097,6 +2777,30 @@ export function createApp(deps: AppDeps): App {
         return error(401, "unauthorized", {
           message: "dev auth fallback disabled in production"
         });
+      }
+
+      // Attach the per-request scoped decision closure. The request's tenant
+      // context (selected `x-tenant-id`, else the principal's tenant) is the
+      // default scope so the existing `enforce(...)` call sites stay correct
+      // while gaining hierarchy + default-deny. Without an authorizer wired
+      // (legacy harnesses) `enforce` keeps using the flat role map.
+      if (authorizer) {
+        const headerTenant = headerValue(request.headers, "x-tenant-id");
+        const defaultTenantId =
+          headerTenant && UUID_RE.test(headerTenant)
+            ? headerTenant
+            : principal.tenantId;
+        try {
+          principal.authorize = await authorizer.authorizeClosure(
+            { id: principal.id, type: principal.type, tenantId: principal.tenantId, roles: principal.roles },
+            { defaultTenantId }
+          );
+        } catch (e) {
+          deps.logger.error("authorizer_failed", {
+            error: e instanceof Error ? e.message : String(e)
+          });
+          return error(500, "internal_error", { message: "authorization unavailable" });
+        }
       }
     }
 

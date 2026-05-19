@@ -55,6 +55,15 @@ import type {
   UserRoleRepository,
   UserRoleRow,
   UserRow,
+  UserIdentityRepository,
+  UserIdentityRow,
+  IdentityProviderRepository,
+  IdentityProviderRow,
+  RbacPolicyRepository,
+  RbacRolePermissionRow,
+  RbacGrantRow,
+  AuthSettingsRepository,
+  AuthSettingsRow,
   VectorCollectionRepository,
   VectorCollectionRow
 } from "./types.ts";
@@ -811,5 +820,134 @@ export class InMemoryExecutionStore implements ExecutionStore {
     return this.nodes
       .filter((n) => n.executionId === executionId)
       .map((n) => structuredClone(n));
+  }
+}
+
+// --- Auth / RBAC -----------------------------------------------------------
+
+export class InMemoryUserIdentityRepository
+  implements UserIdentityRepository
+{
+  private rows: UserIdentityRow[] = [];
+
+  async create(row: UserIdentityRow): Promise<UserIdentityRow> {
+    if (
+      this.rows.some(
+        (r) => r.provider === row.provider && r.subject === row.subject
+      )
+    ) {
+      throw new ConflictError("user_identity", `${row.provider}:${row.subject}`);
+    }
+    this.rows.push({ ...row });
+    return { ...row };
+  }
+
+  async findBySubject(
+    provider: string,
+    subject: string
+  ): Promise<UserIdentityRow | undefined> {
+    const found = this.rows.find(
+      (r) => r.provider === provider && r.subject === subject
+    );
+    return found ? { ...found } : undefined;
+  }
+
+  async listForUser(userId: UUID): Promise<UserIdentityRow[]> {
+    return this.rows.filter((r) => r.userId === userId).map((r) => ({ ...r }));
+  }
+
+  async delete(id: UUID): Promise<void> {
+    this.rows = this.rows.filter((r) => r.id !== id);
+  }
+}
+
+export class InMemoryIdentityProviderRepository
+  extends InMemoryCrudRepository<IdentityProviderRow>
+  implements IdentityProviderRepository
+{
+  constructor() {
+    super("identity_provider");
+  }
+  async findBySlug(slug: string): Promise<IdentityProviderRow | undefined> {
+    return (await this.list()).find((row) => row.slug === slug);
+  }
+  async listEnabled(): Promise<IdentityProviderRow[]> {
+    return (await this.list()).filter((row) => row.enabled);
+  }
+}
+
+export class InMemoryRbacPolicyRepository implements RbacPolicyRepository {
+  private rolePerms: RbacRolePermissionRow[] = [];
+  private grants: RbacGrantRow[] = [];
+
+  async listRolePermissions(): Promise<RbacRolePermissionRow[]> {
+    return this.rolePerms.map((r) => ({ ...r }));
+  }
+
+  async addRolePermission(row: RbacRolePermissionRow): Promise<void> {
+    if (
+      !this.rolePerms.some(
+        (r) => r.role === row.role && r.permission === row.permission
+      )
+    ) {
+      this.rolePerms.push({ ...row });
+    }
+  }
+
+  async removeRolePermission(row: RbacRolePermissionRow): Promise<void> {
+    this.rolePerms = this.rolePerms.filter(
+      (r) => !(r.role === row.role && r.permission === row.permission)
+    );
+  }
+
+  async setRolePermissions(
+    role: string,
+    permissions: string[]
+  ): Promise<void> {
+    this.rolePerms = this.rolePerms.filter((r) => r.role !== role);
+    for (const permission of new Set(permissions)) {
+      this.rolePerms.push({ role, permission });
+    }
+  }
+
+  async listGrants(): Promise<RbacGrantRow[]> {
+    return this.grants.map((g) => ({ ...g }));
+  }
+
+  async listGrantsForUser(userId: UUID): Promise<RbacGrantRow[]> {
+    return this.grants.filter((g) => g.userId === userId).map((g) => ({ ...g }));
+  }
+
+  async addGrant(row: RbacGrantRow): Promise<RbacGrantRow> {
+    const dup = this.grants.find(
+      (g) =>
+        g.userId === row.userId && g.role === row.role && g.scope === row.scope
+    );
+    if (dup) return { ...dup };
+    this.grants.push({ ...row });
+    return { ...row };
+  }
+
+  async removeGrant(id: UUID): Promise<void> {
+    this.grants = this.grants.filter((g) => g.id !== id);
+  }
+}
+
+export class InMemoryAuthSettingsRepository
+  implements AuthSettingsRepository
+{
+  private row: AuthSettingsRow = {
+    signupMode: "admin_only",
+    defaultRole: "viewer",
+    updatedAt: new Date(0).toISOString()
+  };
+
+  async get(): Promise<AuthSettingsRow> {
+    return { ...this.row };
+  }
+
+  async set(row: AuthSettingsRow): Promise<AuthSettingsRow> {
+    this.row = { ...row, updatedAt: new Date().toISOString() };
+    return { ...this.row };
   }
 }

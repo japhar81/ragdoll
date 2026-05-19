@@ -13,8 +13,16 @@ import {
   AuthResolver,
   DevAuthProvider,
   ApiKeyService,
-  SessionTokenService
+  SessionTokenService,
+  Authorizer,
+  BuiltinPolicyEngine,
+  createCasbinEngine,
+  PasswordService,
+  type PolicyEngine
 } from "../../../packages/auth/src/index.ts";
+import {
+  defaultCatalogRows
+} from "../../../packages/authz/src/index.ts";
 import {
   createPool,
   runMigrations,
@@ -38,6 +46,20 @@ import {
   PostgresAuditLogRepository,
   PostgresUsageRecordRepository,
   PostgresApiKeyRepository,
+  PostgresUserRepository,
+  PostgresUserIdentityRepository,
+  PostgresIdentityProviderRepository,
+  PostgresRbacPolicyRepository,
+  PostgresAuthSettingsRepository,
+  PostgresRoleRepository,
+  InMemoryUserRepository,
+  InMemoryUserIdentityRepository,
+  InMemoryIdentityProviderRepository,
+  InMemoryRbacPolicyRepository,
+  InMemoryAuthSettingsRepository,
+  InMemoryRoleRepository,
+  type RbacPolicyRepository,
+  type UserRepository,
   InMemoryTenantRepository,
   InMemoryEnvironmentRepository,
   InMemoryPipelineRepository,
@@ -68,6 +90,49 @@ import {
 import { getLogger } from "../../../packages/observability/src/index.ts";
 import { InMemoryQueue, type QueuePort } from "../../../apps/worker/src/index.ts";
 
+/**
+ * Idempotent first-run setup: seed the role->permission catalog from the
+ * built-in defaults when the store is empty (so the admin UI starts from a
+ * sane, editable baseline), and provision the first platform admin from
+ * BOOTSTRAP_ADMIN_EMAIL / BOOTSTRAP_ADMIN_PASSWORD when there is no usable
+ * account yet. Safe to run on every boot.
+ */
+async function bootstrapAccessControl(
+  rbac: RbacPolicyRepository,
+  users: UserRepository,
+  logger: ReturnType<typeof getLogger>
+): Promise<void> {
+  const existing = await rbac.listRolePermissions();
+  if (existing.length === 0) {
+    const rows = defaultCatalogRows();
+    for (const row of rows) await rbac.addRolePermission(row);
+    logger.info("rbac_catalog_seeded", { rows: rows.length });
+  }
+
+  const email = process.env.BOOTSTRAP_ADMIN_EMAIL?.trim().toLowerCase();
+  const password = process.env.BOOTSTRAP_ADMIN_PASSWORD;
+  if (!email || !password) return;
+  if (await users.findByEmail(email)) return;
+  const now = new Date().toISOString();
+  const user = await users.create({
+    id: randomUUID(),
+    email,
+    displayName: "Bootstrap Admin",
+    passwordHash: await new PasswordService().hash(password),
+    status: "active",
+    createdAt: now,
+    updatedAt: now
+  });
+  await rbac.addGrant({
+    id: randomUUID(),
+    userId: user.id,
+    role: "platform_admin",
+    scope: "*",
+    createdAt: now
+  });
+  logger.info("bootstrap_admin_created", { email });
+}
+
 async function buildDeps(): Promise<{ deps: AppDeps; pool?: PoolLike }> {
   const logger = getLogger();
   const env = process.env.RAGDOLL_ENV ?? "development";
@@ -92,15 +157,30 @@ async function buildDeps(): Promise<{ deps: AppDeps; pool?: PoolLike }> {
     queue = new InMemoryQueue();
   }
 
-  // Auth: dev provider only outside production; session/API-key always wired.
+  // Auth: session/API-key always wired. The insecure header-trusting dev
+  // provider is now OFF by default (strict default-deny) — it is only honoured
+  // outside production AND when RAGDOLL_DEV_AUTH=1 is explicitly set, so local
+  // `make refresh` testing can opt back in without weakening real deploys.
   const sessionSecret = process.env.SESSION_SECRET ?? "dev-insecure-session-secret";
   const sessions = new SessionTokenService(sessionSecret);
+  const devAuthEnabled =
+    env !== "production" && process.env.RAGDOLL_DEV_AUTH === "1";
+  const devProvider = devAuthEnabled ? new DevAuthProvider() : undefined;
+  if (devAuthEnabled) {
+    logger.info("dev_auth_enabled", {
+      warning: "RAGDOLL_DEV_AUTH=1 trusts x-roles/x-actor-id headers verbatim"
+    });
+  }
   const keyEncryptionSecret =
     process.env.SECRET_ENCRYPTION_KEY ?? "dev-insecure-secret-encryption-key";
 
   let pool: PoolLike | undefined;
   let secretRepository: SecretRepository;
   let deps: AppDeps;
+  // Captured from whichever persistence branch runs, for the post-step that
+  // builds the authorizer and bootstraps the catalog / first admin.
+  let rbacForAuthz: RbacPolicyRepository;
+  let usersForBootstrap: UserRepository;
 
   if (databaseUrl) {
     pool = await createPool({ connectionString: databaseUrl });
@@ -113,13 +193,17 @@ async function buildDeps(): Promise<{ deps: AppDeps; pool?: PoolLike }> {
     secretRepository = new PostgresSecretRepository(pool);
     const apiKeyRepo = new PostgresApiKeyRepository(pool);
     const apiKeys = new ApiKeyService(apiKeyRepo);
-    const auth = new AuthResolver({
-      sessions,
-      apiKeys,
-      dev: env === "production" ? undefined : new DevAuthProvider()
-    });
+    const auth = new AuthResolver({ sessions, apiKeys, dev: devProvider });
+    const rbacPolicies = new PostgresRbacPolicyRepository(pool);
+    const users = new PostgresUserRepository(pool);
     deps = {
       tenants: new PostgresTenantRepository(pool),
+      users,
+      userIdentities: new PostgresUserIdentityRepository(pool),
+      identityProviders: new PostgresIdentityProviderRepository(pool),
+      rbacPolicies,
+      authSettings: new PostgresAuthSettingsRepository(pool),
+      roles: new PostgresRoleRepository(pool),
       environments: new PostgresEnvironmentRepository(pool),
       pipelines: new PostgresPipelineRepository(pool),
       pipelineVersions: new PostgresPipelineVersionRepository(pool),
@@ -146,6 +230,7 @@ async function buildDeps(): Promise<{ deps: AppDeps; pool?: PoolLike }> {
       // /api/executions/:id reflects worker runs.
       executionStore,
       auth,
+      sessions,
       queue,
       secretProvider: new DatabaseEncryptedSecretProvider(
         secretRepository,
@@ -156,19 +241,25 @@ async function buildDeps(): Promise<{ deps: AppDeps; pool?: PoolLike }> {
       logger,
       env
     };
+    rbacForAuthz = rbacPolicies;
+    usersForBootstrap = users;
   } else {
     secretRepository = new InMemorySecretRepository();
     const { InMemoryApiKeyRepository } = await import(
       "../../../packages/db/src/index.ts"
     );
     const apiKeys = new ApiKeyService(new InMemoryApiKeyRepository());
-    const auth = new AuthResolver({
-      sessions,
-      apiKeys,
-      dev: env === "production" ? undefined : new DevAuthProvider()
-    });
+    const auth = new AuthResolver({ sessions, apiKeys, dev: devProvider });
+    const rbacPolicies = new InMemoryRbacPolicyRepository();
+    const users = new InMemoryUserRepository();
     deps = {
       tenants: new InMemoryTenantRepository(),
+      users,
+      userIdentities: new InMemoryUserIdentityRepository(),
+      identityProviders: new InMemoryIdentityProviderRepository(),
+      rbacPolicies,
+      authSettings: new InMemoryAuthSettingsRepository(),
+      roles: new InMemoryRoleRepository(),
       environments: new InMemoryEnvironmentRepository(),
       pipelines: new InMemoryPipelineRepository(),
       pipelineVersions: new InMemoryPipelineVersionRepository(),
@@ -187,6 +278,7 @@ async function buildDeps(): Promise<{ deps: AppDeps; pool?: PoolLike }> {
       vectorCollections: new InMemoryVectorCollectionRepository(),
       executionStore: new InMemoryExecutionStore(),
       auth,
+      sessions,
       queue,
       secretProvider: new DatabaseEncryptedSecretProvider(
         secretRepository,
@@ -197,7 +289,27 @@ async function buildDeps(): Promise<{ deps: AppDeps; pool?: PoolLike }> {
       logger,
       env
     };
+    rbacForAuthz = rbacPolicies;
+    usersForBootstrap = users;
   }
+
+  // --- Authorizer: real Casbin when importable, else the equivalent
+  // dependency-free engine. Bound to the live policy store so role/grant
+  // edits (and revocations) take effect on the next request.
+  let engine: PolicyEngine;
+  try {
+    engine = await createCasbinEngine();
+    logger.info("authz_engine", { engine: "casbin" });
+  } catch (e) {
+    engine = new BuiltinPolicyEngine();
+    logger.info("authz_engine", {
+      engine: "builtin",
+      reason: e instanceof Error ? e.message : String(e)
+    });
+  }
+  deps.authorizer = new Authorizer({ engine, store: rbacForAuthz });
+
+  await bootstrapAccessControl(rbacForAuthz, usersForBootstrap, logger);
 
   return { deps, pool };
 }

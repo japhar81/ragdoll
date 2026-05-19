@@ -2,13 +2,19 @@ import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypt
 import {
   authorize,
   requirePermission,
+  AuthorizationError,
+  Authorizer,
+  BuiltinPolicyEngine,
   type Permission,
   type Resource,
-  type Role
+  type Role,
+  type PolicyStore,
+  type PolicyEngine
 } from "../../authz/src/index.ts";
 
-export type { Permission, Role };
-export { authorize, requirePermission };
+export type { Permission, Role, Resource, PolicyStore, PolicyEngine };
+export { authorize, requirePermission, Authorizer, BuiltinPolicyEngine };
+export { CasbinPolicyEngine, createCasbinEngine } from "../../authz/src/casbin.ts";
 
 // ---------------------------------------------------------------------------
 // Principal
@@ -21,6 +27,14 @@ export interface Principal {
   type: PrincipalType;
   tenantId?: string;
   roles: Role[];
+  /**
+   * Per-request synchronous decision closure, attached by the API after the
+   * principal is resolved (see `Authorizer.authorizeClosure`). When present it
+   * is the authoritative RBAC check (Casbin / scoped grants); when absent
+   * `enforce` falls back to the legacy flat role->permission map so existing
+   * callers and offline harnesses keep working unchanged.
+   */
+  authorize?: (permission: Permission, resource?: Resource) => boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -401,18 +415,39 @@ export class AuthResolver {
 // ---------------------------------------------------------------------------
 
 /**
- * Thin wrapper over the authz `requirePermission`. The principal's tenant is
- * merged into the resource so cross-tenant access is always denied unless the
- * principal is a platform admin (enforced inside authz).
+ * Authorize `principal` for `permission` on `resource`, throwing
+ * {@link AuthorizationError} (mapped to HTTP 403 by the API) when denied.
+ *
+ * When the API has attached a scoped decision closure (`principal.authorize`),
+ * that is authoritative: the resource's tenant/environment/pipeline define the
+ * request scope and a grant must cover it (default-deny). Otherwise we fall
+ * back to the legacy flat role map, merging the principal's own tenant into the
+ * resource so cross-tenant access stays denied — this keeps offline harnesses
+ * and any non-API caller behaving exactly as before.
  */
 export function enforce(
   principal: Principal,
   permission: Permission,
   resource: Resource = {}
 ): void {
+  if (principal.authorize) {
+    if (!principal.authorize(permission, resource)) {
+      throw new AuthorizationError(permission);
+    }
+    return;
+  }
   requirePermission(
     { id: principal.id, tenantId: principal.tenantId, roles: principal.roles },
     permission,
     { ...resource, tenantId: resource.tenantId ?? principal.tenantId }
   );
 }
+
+// ---------------------------------------------------------------------------
+// Local password, SSO, and account orchestration
+// ---------------------------------------------------------------------------
+
+export * from "./password.ts";
+export * from "./oidc.ts";
+export * from "./saml.ts";
+export * from "./accounts.ts";
