@@ -76,6 +76,12 @@ export class CasbinPolicyEngine implements PolicyEngine {
       lines.push(`g, ${SUB}, ${csv(g.role)}, ${csv(g.scope)}`);
     }
 
+    // With no catalog AND no grants there is nothing that could ever match —
+    // that is exactly default-deny. Casbin's StringAdapter also rejects an
+    // empty policy document ("cannot be false-y"), so short-circuit instead of
+    // constructing an enforcer over an empty string.
+    if (lines.length === 0) return () => false;
+
     const adapter = new casbin.StringAdapter(lines.join("\n"));
     const enforcer = await casbin.newEnforcer(model, adapter);
     // The domain-matching function makes `g(sub, role, requestScope)` true when
@@ -96,7 +102,18 @@ export class CasbinPolicyEngine implements PolicyEngine {
 /** Factory used by the server; resolves only if `casbin` is importable. */
 export async function createCasbinEngine(): Promise<CasbinPolicyEngine> {
   const engine = new CasbinPolicyEngine();
-  // Fail fast at bootstrap rather than on the first request.
-  await engine.prepare([], new Map());
+  // Fail fast at bootstrap rather than on the first request. Probe with a
+  // real (non-empty) policy so this genuinely validates that `casbin` loads,
+  // the model compiles, the domain matcher binds, and enforceSync works.
+  const probeCatalog: RoleCatalog = new Map([
+    ["__probe__", new Set(["__probe__"])]
+  ]);
+  const decide = await engine.prepare(
+    [{ role: "__probe__", scope: "*" }],
+    probeCatalog
+  );
+  if (decide("__probe__", "*") !== true) {
+    throw new Error("casbin probe failed: unexpected decision");
+  }
   return engine;
 }
