@@ -116,6 +116,32 @@ duck-typing each export as an `InProcessPlugin` (a `manifest` with a string
 is picked up automatically with no loader edits. Plugins are keyed by
 `category:id:version`.
 
+## Per-node narrative docs (Builder Docs tab)
+
+The Builder's right inspector has a **Docs** tab that renders, per selected
+node:
+
+- The manifest header (name, category, version, capabilities, mode).
+- A narrative description from `docs/plugins/<id>.md` covering inputs,
+  outputs, gotchas, and the node's typical position in a DAG.
+- Required-config / required-secret lists derived live from the manifest.
+- A field table for `configSchema` / `secretsSchema` with types, defaults,
+  and per-field notes from the schema's `description`.
+- A copy-paste sample JSON config built from each field's `default` (or
+  the first `enum` value when no default is set).
+
+The schema-derived sections read the manifest directly, so updating a
+config option's `description` or `default` propagates to the Docs tab on
+the next build with no markdown edit. Keep the markdown narrative-only:
+the things a reader can't infer from the schema (what the node consumes,
+what it emits, surprises, recommended placement). See ADR 0013.
+
+When you add a new built-in plugin, drop a sibling `docs/plugins/<id>.md`
+with the standard sections (`## Inputs`, `## Outputs`, `## Gotchas`,
+`## Typical position`). Missing docs degrade gracefully — the tab shows a
+"no narrative bundled" hint — but the index in `docs/plugins/README.md`
+should be updated for human discoverability.
+
 ## Built-in RAG plugins
 
 `plugins/builtin-rag` ships an end-to-end RAG toolkit:
