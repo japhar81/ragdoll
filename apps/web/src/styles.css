@@ -1441,3 +1441,330 @@ table.grid th {
 
 .cell-stack { display: flex; flex-direction: column; gap: 2px; }
 .sched-grid-table td { vertical-align: top; }
+
+/* ===== Embedded help (Layers 1-3) ======================================= */
+
+/* ---- Radix tooltip (L1) -------------------------------------------------- */
+.tip {
+  background: #0f172a;
+  color: #f8fafc;
+  padding: 5px 9px;
+  border-radius: 6px;
+  font-size: 12px;
+  max-width: 260px;
+  z-index: 60;
+  box-shadow: 0 6px 20px rgba(15, 23, 42, 0.25);
+}
+.tip-arrow { fill: #0f172a; }
+
+/* ---- Field-level "?" popover (L1) --------------------------------------- */
+.field-help-btn {
+  width: 16px;
+  height: 16px;
+  line-height: 14px;
+  padding: 0;
+  margin-left: 6px;
+  border-radius: 50%;
+  border: 1px solid #cbd5e1;
+  background: #f8fafc;
+  color: #475569;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: help;
+  display: inline-grid;
+  place-items: center;
+  vertical-align: middle;
+}
+.field-help-btn:hover { background: #e2e8f0; color: #0f172a; }
+.field-help-pop {
+  max-width: 320px;
+  background: white;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  padding: 10px 12px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: #0f172a;
+  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.12);
+  z-index: 60;
+}
+.field-help-pop p { margin: 0; }
+.field-help-arrow { fill: white; stroke: #e5e7eb; }
+
+/* ---- Empty state (L1) --------------------------------------------------- */
+.empty-state {
+  text-align: center;
+  padding: 36px 16px;
+  border: 1px dashed #cbd5e1;
+  border-radius: 12px;
+  background: #f8fafc;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  margin: 12px 0;
+}
+.empty-state-icon { font-size: 28px; opacity: 0.8; }
+.empty-state-title { font-weight: 600; color: #0f172a; }
+.empty-state-body {
+  max-width: 460px;
+  color: #475569;
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+/* ---- Radix dialogs (Shortcuts, palette, drawer) ------------------------- */
+.dlg-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.5);
+  z-index: 70;
+}
+.dlg {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  background: white;
+  border-radius: 12px;
+  padding: 20px 22px;
+  width: min(560px, calc(100% - 40px));
+  max-height: calc(100vh - 80px);
+  overflow: auto;
+  z-index: 80;
+  box-shadow: 0 24px 60px rgba(15, 23, 42, 0.35);
+}
+.dlg-title { margin: 0 0 4px; font-size: 16px; }
+
+/* Shortcuts overlay specifics */
+.shortcuts-dlg .shortcut-group { margin-top: 18px; }
+.shortcuts-dlg h4 {
+  margin: 0 0 8px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #64748b;
+  font-weight: 600;
+}
+.shortcut-list {
+  margin: 0;
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 6px 14px;
+  align-items: center;
+}
+.shortcut-list dt { display: flex; gap: 4px; align-items: center; }
+.shortcut-list dd { margin: 0; color: #334155; font-size: 13px; }
+kbd {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  padding: 2px 6px;
+  background: #f1f5f9;
+  border: 1px solid #cbd5e1;
+  border-bottom-width: 2px;
+  border-radius: 5px;
+  color: #0f172a;
+  line-height: 1;
+}
+.kbd-sep { color: #94a3b8; font-size: 11px; }
+.sr-only {
+  position: absolute;
+  width: 1px; height: 1px;
+  padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0, 0, 0, 0);
+  white-space: nowrap; border: 0;
+}
+
+/* ---- Cmd-K palette (L2) ------------------------------------------------- */
+.cmdk-dlg {
+  position: fixed;
+  top: 20vh;
+  left: 50%;
+  transform: translateX(-50%);
+  background: white;
+  border-radius: 12px;
+  width: min(640px, calc(100% - 40px));
+  max-height: 60vh;
+  overflow: hidden;
+  z-index: 80;
+  box-shadow: 0 24px 60px rgba(15, 23, 42, 0.35);
+  display: flex;
+  flex-direction: column;
+}
+.cmdk-input {
+  width: 100%;
+  border: none;
+  border-bottom: 1px solid #e5e7eb;
+  outline: none;
+  padding: 14px 18px;
+  font-size: 14px;
+  font-family: inherit;
+}
+.cmdk-list {
+  overflow: auto;
+  padding: 6px;
+  flex: 1;
+}
+.cmdk-empty {
+  padding: 18px;
+  color: #64748b;
+  text-align: center;
+  font-size: 13px;
+}
+[cmdk-group-heading] {
+  padding: 8px 10px 4px;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: #94a3b8;
+  font-weight: 600;
+}
+[cmdk-item] {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 7px 10px;
+  border-radius: 7px;
+  cursor: pointer;
+  color: #0f172a;
+  font-size: 13px;
+}
+[cmdk-item][data-selected="true"] {
+  background: #eff6ff;
+  color: #1d4ed8;
+}
+.cmdk-label { flex: 1; }
+.cmdk-hint {
+  color: #94a3b8;
+  font-size: 12px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+/* ---- Help drawer (L3) --------------------------------------------------- */
+.help-drawer {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: min(820px, 95vw);
+  background: white;
+  box-shadow: -20px 0 60px rgba(15, 23, 42, 0.25);
+  z-index: 80;
+  display: flex;
+  flex-direction: column;
+  outline: none;
+}
+.help-drawer-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 18px;
+  border-bottom: 1px solid #e5e7eb;
+}
+.help-drawer-title { margin: 0; font-size: 15px; }
+.help-drawer-body {
+  flex: 1;
+  display: grid;
+  grid-template-columns: 220px 1fr;
+  overflow: hidden;
+}
+.help-drawer-nav {
+  border-right: 1px solid #e5e7eb;
+  background: #f8fafc;
+  padding: 10px 6px;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.help-drawer-nav-item {
+  text-align: left;
+  border: none;
+  background: transparent;
+  padding: 8px 10px;
+  border-radius: 6px;
+  color: #334155;
+  font-size: 12px;
+  cursor: pointer;
+}
+.help-drawer-nav-item:hover { background: #e2e8f0; color: #0f172a; }
+.help-drawer-nav-item.active {
+  background: #2563eb;
+  color: white;
+}
+.help-drawer-md {
+  padding: 18px 28px;
+  overflow: auto;
+  font-size: 14px;
+  line-height: 1.55;
+  color: #1e293b;
+}
+.help-drawer-md h1 { font-size: 22px; margin-top: 0; }
+.help-drawer-md h2 { margin-top: 24px; font-size: 17px; }
+.help-drawer-md h3 { margin-top: 18px; font-size: 14px; }
+.help-drawer-md a { color: #2563eb; }
+.help-drawer-md code:not(pre code) {
+  background: #f1f5f9;
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-size: 12px;
+  border: 1px solid #e5e7eb;
+}
+.help-drawer-md pre {
+  background: #0f172a;
+  color: #e2e8f0;
+  padding: 12px 14px;
+  border-radius: 8px;
+  overflow: auto;
+  font-size: 12px;
+}
+.help-drawer-md pre code.hljs { background: transparent; padding: 0; color: inherit; }
+.help-drawer-md table {
+  border-collapse: collapse;
+  font-size: 12px;
+  margin: 10px 0;
+}
+.help-drawer-md table th,
+.help-drawer-md table td {
+  border: 1px solid #e5e7eb;
+  padding: 5px 9px;
+  text-align: left;
+}
+.help-drawer-md table th { background: #f1f5f9; }
+.help-drawer-md blockquote {
+  border-left: 3px solid #cbd5e1;
+  padding: 4px 12px;
+  color: #475569;
+  margin: 10px 0;
+}
+
+/* ---- Sidebar Help row + Cmd-K hint chip --------------------------------- */
+.sidebar-help {
+  padding: 10px 14px 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border-top: 1px solid #1e293b;
+}
+.sidebar-cmdk-btn {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  background: #1e293b;
+  border: 1px solid #334155;
+  color: #cbd5e1;
+  border-radius: 6px;
+  padding: 5px 9px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.sidebar-cmdk-btn:hover { background: #334155; color: white; }
+.sidebar-cmdk-btn kbd {
+  background: #0f172a;
+  color: #cbd5e1;
+  border-color: #475569;
+  font-size: 10px;
+}
+.sidebar-help .link-btn { color: #93c5fd; align-self: flex-start; }

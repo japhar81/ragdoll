@@ -1,4 +1,4 @@
-import React, { useMemo } from "react";
+import React, { useMemo, useState } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
   BrowserRouter,
@@ -6,9 +6,16 @@ import {
   NavLink,
   Route,
   Routes,
+  useLocation,
   useNavigate,
   useParams
 } from "react-router-dom";
+import { TooltipProvider, Tooltip } from "./components/help/Tooltip.tsx";
+import { CommandPalette } from "./components/help/CommandPalette.tsx";
+import { ShortcutsOverlay } from "./components/help/ShortcutsOverlay.tsx";
+import { HelpDrawer } from "./components/help/HelpDrawer.tsx";
+import { useGlobalHelpKeys } from "./components/help/useGlobalHelpKeys.ts";
+import { routeToDoc, type HelpDocSlug } from "./lib/help.ts";
 import { PipelineBuilder } from "./components/PipelineBuilder.tsx";
 import { PipelinesScreen } from "./components/PipelinesScreen.tsx";
 import { SchedulerScreen } from "./components/SchedulerScreen.tsx";
@@ -138,6 +145,8 @@ function PipelinesRoute() {
 
 function Shell() {
   const auth = useAuth();
+  const navigate = useNavigate();
+  const loc = useLocation();
 
   // Only show nav items the user can act on. The server still enforces; this
   // is just cosmetic. Used both for sidebar rendering and to pick the default
@@ -154,6 +163,20 @@ function Shell() {
   );
 
   const defaultPath = groups[0]?.items[0]?.path ?? null;
+
+  // ---- embedded help wiring -------------------------------------------
+  // Help drawer state: opened by the sidebar button or via a Cmd-K
+  // "Docs · …" entry. We pre-tune `helpSlug` to the current route's most
+  // relevant doc; the drawer's left nav still lets the user navigate freely.
+  const [helpOpen, setHelpOpen] = useState(false);
+  const [helpSlug, setHelpSlug] = useState<HelpDocSlug | null>(null);
+  const keys = useGlobalHelpKeys({
+    onGoTo: (target) => navigate(`/${target}`)
+  });
+  function openHelp(slug?: HelpDocSlug | null) {
+    setHelpSlug(slug ?? routeToDoc(loc.pathname));
+    setHelpOpen(true);
+  }
 
   return (
     <main className="app-shell">
@@ -176,6 +199,27 @@ function Shell() {
             </React.Fragment>
           ))}
         </nav>
+        <div className="sidebar-help">
+          <Tooltip label="Search commands &amp; docs (⌘K)" side="right">
+            <button
+              type="button"
+              className="sidebar-cmdk-btn"
+              onClick={() => keys.setPaletteOpen(true)}
+            >
+              <span>Search</span>
+              <kbd>⌘K</kbd>
+            </button>
+          </Tooltip>
+          <Tooltip label="Open the docs for this page" side="right">
+            <button
+              type="button"
+              className="link-btn"
+              onClick={() => openHelp()}
+            >
+              Help
+            </button>
+          </Tooltip>
+        </div>
         <div className="sidebar-user">
           <div className="sidebar-user-id" title={auth.user?.email ?? ""}>
             {auth.user?.displayName || auth.user?.email || "signed in"}
@@ -228,6 +272,26 @@ function Shell() {
           }
         />
       </Routes>
+
+      <CommandPalette
+        open={keys.paletteOpen}
+        onOpenChange={keys.setPaletteOpen}
+        can={auth.can}
+        onRun={(action) => {
+          if (action.kind.type === "navigate") {
+            navigate(action.kind.to);
+          } else if (action.kind.type === "openDoc") {
+            openHelp(action.kind.doc);
+          } else if (action.kind.type === "openShortcuts") {
+            keys.setShortcutsOpen(true);
+          }
+        }}
+      />
+      <ShortcutsOverlay
+        open={keys.shortcutsOpen}
+        onOpenChange={keys.setShortcutsOpen}
+      />
+      <HelpDrawer open={helpOpen} onOpenChange={setHelpOpen} slug={helpSlug} />
     </main>
   );
 }
@@ -254,9 +318,11 @@ export default function App() {
   return (
     <BrowserRouter>
       <QueryClientProvider client={queryClient}>
-        <AuthProvider>
-          <Gate />
-        </AuthProvider>
+        <TooltipProvider>
+          <AuthProvider>
+            <Gate />
+          </AuthProvider>
+        </TooltipProvider>
       </QueryClientProvider>
     </BrowserRouter>
   );
