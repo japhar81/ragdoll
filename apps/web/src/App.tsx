@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useMemo, useState } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
   BrowserRouter,
@@ -42,8 +42,6 @@ type NavItem = {
   /** Path under the SPA, e.g. `/users`. */
   path: string;
   label: string;
-  /** Bootstrap-Icons class name (e.g. "bi-diagram-3"). */
-  icon: string;
   /** Sidebar visibility (any-of). Empty = visible to any authenticated user. */
   perms: string[];
 };
@@ -55,19 +53,16 @@ const NAV_GROUPS: Array<{ group: string; items: NavItem[] }> = [
       {
         path: "/pipelines",
         label: "Pipelines",
-        icon: "bi-diagram-3",
         perms: ["execution:view_logs", "pipeline:create", "pipeline:update"]
       },
       {
         path: "/builder",
         label: "Builder",
-        icon: "bi-grid-3x3-gap",
         perms: ["pipeline:create", "pipeline:update"]
       },
       {
         path: "/scheduler",
         label: "Scheduler",
-        icon: "bi-clock-history",
         perms: ["pipeline:run", "config:edit_tenant"]
       }
     ]
@@ -75,36 +70,34 @@ const NAV_GROUPS: Array<{ group: string; items: NavItem[] }> = [
   {
     group: "Operate",
     items: [
-      { path: "/executions", label: "Executions", icon: "bi-play-circle", perms: ["execution:view_logs"] },
-      { path: "/usage", label: "Usage", icon: "bi-graph-up", perms: ["execution:view_logs"] },
-      { path: "/audit", label: "Audit", icon: "bi-journal-text", perms: ["audit:view"] }
+      { path: "/executions", label: "Executions", perms: ["execution:view_logs"] },
+      { path: "/usage", label: "Usage", perms: ["execution:view_logs"] },
+      { path: "/audit", label: "Audit", perms: ["audit:view"] }
     ]
   },
   {
     group: "Govern",
     items: [
-      { path: "/tenants", label: "Tenants", icon: "bi-building", perms: ["config:edit_global"] },
+      { path: "/tenants", label: "Tenants", perms: ["config:edit_global"] },
       {
         path: "/config",
         label: "Config",
-        icon: "bi-sliders",
         perms: ["config:edit_global", "config:edit_tenant", "config:edit_pipeline"]
       },
-      { path: "/secrets", label: "Secrets", icon: "bi-key", perms: ["secret:manage_tenant"] }
+      { path: "/secrets", label: "Secrets", perms: ["secret:manage_tenant"] }
     ]
   },
   {
     group: "Access",
     items: [
-      { path: "/users", label: "Users", icon: "bi-people", perms: ["user:manage"] },
-      { path: "/roles", label: "Roles & Permissions", icon: "bi-shield-lock", perms: ["role:manage"] },
+      { path: "/users", label: "Users", perms: ["user:manage"] },
+      { path: "/roles", label: "Roles & Permissions", perms: ["role:manage"] },
       {
         path: "/identity-providers",
         label: "Identity Providers",
-        icon: "bi-fingerprint",
         perms: ["idp:manage"]
       },
-      { path: "/auth-settings", label: "Auth Settings", icon: "bi-gear", perms: ["auth:settings"] }
+      { path: "/auth-settings", label: "Auth Settings", perms: ["auth:settings"] }
     ]
   }
 ];
@@ -117,7 +110,8 @@ export interface EditingPipeline {
 /**
  * URL-driven Builder mount: `/builder` (blank canvas) and `/builder/:pipelineId`
  * (load that pipeline). Memoising `editing` on the id keeps the Builder's
- * `loadedFor` guard happy across re-renders.
+ * `loadedFor` guard happy across re-renders. `onClearEditing` navigates back
+ * to the blank Builder URL, so a back-button press lands where you expect.
  */
 function BuilderRoute() {
   const { pipelineId } = useParams<{ pipelineId: string }>();
@@ -134,6 +128,10 @@ function BuilderRoute() {
   );
 }
 
+/**
+ * URL-driven Pipelines list: clicking "Edit" navigates to the Builder route
+ * for that pipeline so the back button returns to this list.
+ */
 function PipelinesRoute() {
   const navigate = useNavigate();
   return (
@@ -145,35 +143,10 @@ function PipelinesRoute() {
   );
 }
 
-/** Persisted dark-mode toggle (Bootstrap 5.3's `data-bs-theme` attribute). */
-function useTheme() {
-  const [theme, setTheme] = useState<"light" | "dark">(() => {
-    if (typeof localStorage === "undefined") return "light";
-    const stored = localStorage.getItem("ragdoll.theme");
-    if (stored === "dark" || stored === "light") return stored;
-    return window.matchMedia?.("(prefers-color-scheme: dark)").matches
-      ? "dark"
-      : "light";
-  });
-  useEffect(() => {
-    document.documentElement.setAttribute("data-bs-theme", theme);
-    try {
-      localStorage.setItem("ragdoll.theme", theme);
-    } catch {
-      /* ignore */
-    }
-  }, [theme]);
-  return {
-    theme,
-    toggle: () => setTheme((t) => (t === "dark" ? "light" : "dark"))
-  };
-}
-
 function Shell() {
   const auth = useAuth();
   const navigate = useNavigate();
   const loc = useLocation();
-  const { theme, toggle } = useTheme();
 
   // Only show nav items the user can act on. The server still enforces; this
   // is just cosmetic. Used both for sidebar rendering and to pick the default
@@ -191,6 +164,10 @@ function Shell() {
 
   const defaultPath = groups[0]?.items[0]?.path ?? null;
 
+  // ---- embedded help wiring -------------------------------------------
+  // Help drawer state: opened by the sidebar button or via a Cmd-K
+  // "Docs · …" entry. We pre-tune `helpSlug` to the current route's most
+  // relevant doc; the drawer's left nav still lets the user navigate freely.
   const [helpOpen, setHelpOpen] = useState(false);
   const [helpSlug, setHelpSlug] = useState<HelpDocSlug | null>(null);
   const keys = useGlobalHelpKeys({
@@ -201,165 +178,100 @@ function Shell() {
     setHelpOpen(true);
   }
 
-  // The Builder owns its full canvas, so its route shouldn't get the standard
-  // page padding from .admin-main.with-pad.
-  const isBuilder = loc.pathname.startsWith("/builder");
-  const mainClass = isBuilder ? "admin-main no-pad" : "admin-main with-pad";
-
   return (
-    <div className="admin-shell">
-      <header className="admin-header">
-        <a
-          href="#/"
-          className="brand"
-          onClick={(e) => {
-            e.preventDefault();
-            if (defaultPath) navigate(defaultPath);
-          }}
-        >
-          <span className="brand-mark">
-            <i className="bi bi-stars" />
-          </span>
-          RAGdoll
-        </a>
-
-        <span className="header-spacer" />
-
-        <Tooltip label="Search commands & docs (⌘K)">
-          <button
-            type="button"
-            className="header-search"
-            onClick={() => keys.setPaletteOpen(true)}
-          >
-            <i className="bi bi-search" /> Search
-            <kbd>⌘K</kbd>
-          </button>
-        </Tooltip>
-
-        <Tooltip label={theme === "dark" ? "Switch to light theme" : "Switch to dark theme"}>
-          <button
-            type="button"
-            className="header-action"
-            aria-label="Toggle theme"
-            onClick={toggle}
-          >
-            <i className={theme === "dark" ? "bi bi-sun" : "bi bi-moon"} />
-          </button>
-        </Tooltip>
-
-        <Tooltip label="Open docs for this page">
-          <button
-            type="button"
-            className="header-action"
-            aria-label="Help"
-            onClick={() => openHelp()}
-          >
-            <i className="bi bi-question-circle" />
-          </button>
-        </Tooltip>
-
-        <div className="dropdown">
-          <button
-            className="header-action"
-            type="button"
-            data-bs-toggle="dropdown"
-            aria-expanded="false"
-            aria-label="Account"
-            title={auth.user?.email ?? ""}
-          >
-            <i className="bi bi-person-circle" />
-          </button>
-          <ul className="dropdown-menu dropdown-menu-end">
-            <li>
-              <span className="dropdown-item-text small text-muted">
-                {auth.user?.displayName || auth.user?.email || "signed in"}
-              </span>
-            </li>
-            <li><hr className="dropdown-divider" /></li>
-            <li>
-              <button
-                className="dropdown-item"
-                type="button"
-                onClick={() => auth.logout()}
-              >
-                <i className="bi bi-box-arrow-right me-2" /> Sign out
-              </button>
-            </li>
-          </ul>
-        </div>
-      </header>
-
-      <aside className="admin-sidebar">
-        <nav className="sidebar-nav">
-          {groups.map((g, gi) => (
+    <main className="app-shell">
+      <aside className="sidebar">
+        <h1>RAGdoll</h1>
+        <nav>
+          {groups.map((g) => (
             <React.Fragment key={g.group}>
-              <span className={"sidebar-section" + (gi === 0 ? " first" : "")}>
-                {g.group}
-              </span>
+              <span className="nav-group">{g.group}</span>
               {g.items.map((item) => (
                 <NavLink
                   key={item.path}
                   to={item.path}
-                  className={({ isActive }) =>
-                    "nav-link" + (isActive ? " active" : "")
-                  }
+                  className={({ isActive }) => (isActive ? "active" : undefined)}
                   end={item.path === "/pipelines"}
                 >
-                  <i className={`bi ${item.icon}`} aria-hidden="true" />
-                  <span>{item.label}</span>
+                  {item.label}
                 </NavLink>
               ))}
             </React.Fragment>
           ))}
         </nav>
+        <div className="sidebar-help">
+          <Tooltip label="Search commands &amp; docs (⌘K)" side="right">
+            <button
+              type="button"
+              className="sidebar-cmdk-btn"
+              onClick={() => keys.setPaletteOpen(true)}
+            >
+              <span>Search</span>
+              <kbd>⌘K</kbd>
+            </button>
+          </Tooltip>
+          <Tooltip label="Open the docs for this page" side="right">
+            <button
+              type="button"
+              className="link-btn"
+              onClick={() => openHelp()}
+            >
+              Help
+            </button>
+          </Tooltip>
+        </div>
+        <div className="sidebar-user">
+          <div className="sidebar-user-id" title={auth.user?.email ?? ""}>
+            {auth.user?.displayName || auth.user?.email || "signed in"}
+          </div>
+          <button className="link-btn" onClick={() => auth.logout()}>
+            Sign out
+          </button>
+        </div>
       </aside>
 
-      <main className={mainClass}>
-        <Routes>
-          <Route
-            path="/"
-            element={
-              defaultPath ? (
-                <Navigate to={defaultPath} replace />
-              ) : (
-                <div className="empty-state">
-                  <div className="empty-state-icon">
-                    <i className="bi bi-shield-exclamation" />
-                  </div>
-                  <div className="empty-state-title">No access yet</div>
-                  <div className="empty-state-body">
-                    Your account has no role grants. Ask an administrator to
-                    grant you a role.
-                  </div>
-                </div>
-              )
-            }
-          />
-          <Route path="/pipelines" element={<PipelinesRoute />} />
-          <Route path="/builder" element={<BuilderRoute />} />
-          <Route path="/builder/:pipelineId" element={<BuilderRoute />} />
-          <Route path="/scheduler" element={<SchedulerScreen />} />
-          <Route path="/tenants" element={<TenantsScreen />} />
-          <Route path="/config" element={<ConfigScreen />} />
-          <Route path="/secrets" element={<SecretsScreen />} />
-          <Route path="/executions" element={<ExecutionsScreen />} />
-          <Route path="/audit" element={<AuditScreen />} />
-          <Route path="/usage" element={<UsageScreen />} />
-          <Route path="/users" element={<UsersScreen />} />
-          <Route path="/roles" element={<RolesScreen />} />
-          <Route
-            path="/identity-providers"
-            element={<IdentityProvidersScreen />}
-          />
-          <Route path="/auth-settings" element={<AuthSettingsScreen />} />
-          <Route
-            path="*"
-            element={
-              defaultPath ? <Navigate to={defaultPath} replace /> : null
-            }
-          />
-        </Routes>
-      </main>
+      <Routes>
+        <Route
+          path="/"
+          element={
+            defaultPath ? (
+              <Navigate to={defaultPath} replace />
+            ) : (
+              <div className="screen-body">
+                <p className="muted">
+                  Your account has no access yet. Ask an administrator to grant
+                  you a role.
+                </p>
+              </div>
+            )
+          }
+        />
+        <Route path="/pipelines" element={<PipelinesRoute />} />
+        <Route path="/builder" element={<BuilderRoute />} />
+        <Route path="/builder/:pipelineId" element={<BuilderRoute />} />
+        <Route path="/scheduler" element={<SchedulerScreen />} />
+        <Route path="/tenants" element={<TenantsScreen />} />
+        <Route path="/config" element={<ConfigScreen />} />
+        <Route path="/secrets" element={<SecretsScreen />} />
+        <Route path="/executions" element={<ExecutionsScreen />} />
+        <Route path="/audit" element={<AuditScreen />} />
+        <Route path="/usage" element={<UsageScreen />} />
+        <Route path="/users" element={<UsersScreen />} />
+        <Route path="/roles" element={<RolesScreen />} />
+        <Route
+          path="/identity-providers"
+          element={<IdentityProvidersScreen />}
+        />
+        <Route path="/auth-settings" element={<AuthSettingsScreen />} />
+        {/* Unknown routes: fall back to whichever view the user can see, so a
+            stale bookmark or a typo doesn't 404 the SPA. */}
+        <Route
+          path="*"
+          element={
+            defaultPath ? <Navigate to={defaultPath} replace /> : null
+          }
+        />
+      </Routes>
 
       <CommandPalette
         open={keys.paletteOpen}
@@ -380,7 +292,7 @@ function Shell() {
         onOpenChange={keys.setShortcutsOpen}
       />
       <HelpDrawer open={helpOpen} onOpenChange={setHelpOpen} slug={helpSlug} />
-    </div>
+    </main>
   );
 }
 

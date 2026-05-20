@@ -59,9 +59,7 @@ export function LoginScreen() {
     <div className="login-shell">
       <div className="login-card">
         <div className="login-brand">
-          <span className="login-logo">
-            <i className="bi bi-stars" />
-          </span>
+          <span className="login-logo">◆</span>
           <h1>RAGdoll</h1>
         </div>
         <p className="login-sub">
