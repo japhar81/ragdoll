@@ -110,6 +110,27 @@ export interface AuthSettingsRow {
   updatedAt: string;
 }
 
+/**
+ * A public webhook URL bound to a tenant/pipeline/env (+optional activation
+ * label). Only the hash + prefix are stored; the plaintext is shown once at
+ * create time and POSTed by external systems to start a run.
+ */
+export interface WebhookTriggerRow {
+  id: UUID;
+  tenantId: UUID;
+  pipelineId: UUID;
+  environment: string;
+  activationLabel?: string | null;
+  name: string;
+  prefix: string;
+  hash: string;
+  enabled: boolean;
+  createdBy?: UUID | null;
+  createdAt: string;
+  lastTriggeredAt?: string | null;
+  revokedAt?: string | null;
+}
+
 export interface PipelineRow {
   id: UUID;
   slug: string;
@@ -407,6 +428,19 @@ export interface RbacPolicyRepository {
 export interface AuthSettingsRepository {
   get(): Promise<AuthSettingsRow>;
   set(row: AuthSettingsRow): Promise<AuthSettingsRow>;
+}
+
+export interface WebhookTriggerRepository {
+  create(row: WebhookTriggerRow): Promise<WebhookTriggerRow>;
+  get(id: UUID): Promise<WebhookTriggerRow | undefined>;
+  findByPrefix(prefix: string): Promise<WebhookTriggerRow | undefined>;
+  /** Triggers for a given tenant + pipeline (all envs). */
+  listForPipeline(
+    tenantId: UUID,
+    pipelineId: UUID
+  ): Promise<WebhookTriggerRow[]>;
+  touch(id: UUID, at?: string): Promise<void>;
+  delete(id: UUID): Promise<void>;
 }
 
 export interface PipelineRepository extends CrudRepository<PipelineRow> {

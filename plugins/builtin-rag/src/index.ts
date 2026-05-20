@@ -1680,3 +1680,161 @@ export const openSearchHybridRetrieverPlugin: InProcessPlugin = {
     return { outputs: { documents }, ...(usage ? { usage } : {}) };
   }
 };
+
+/**
+ * Webhook trigger source: emits the run's input payload as its output, so a
+ * pipeline started by `POST /api/triggers/webhook/<token>` flows the request
+ * body straight into the DAG. The trigger token is minted out-of-band
+ * (`POST /api/pipelines/:id/triggers`); this plugin only declares the intent
+ * on the canvas so authors can see / wire which node a webhook drives.
+ */
+export const webhookTriggerPlugin: InProcessPlugin = {
+  manifest: {
+    id: "webhook_trigger",
+    name: "Webhook Trigger",
+    version: "1.0.0",
+    category: "datasource",
+    description:
+      "Starts the pipeline when an external system POSTs to its webhook URL. " +
+      "Mint a URL with POST /api/pipelines/:id/triggers; the POST body becomes the input.",
+    configSchema: {
+      type: "object",
+      properties: {
+        description: {
+          type: "string",
+          description: "Free-text notes about what this webhook accepts."
+        }
+      },
+      additionalProperties: false
+    },
+    inputSchema: { type: "object" },
+    outputSchema: { type: "object" },
+    capabilities: ["query", "ingestion"],
+    ui: {
+      icon: "webhook",
+      paletteGroup: "Sources",
+      formHints: { description: { widget: "textarea" } }
+    }
+  },
+  async execute({ inputs }) {
+    return { outputs: inputs };
+  }
+};
+
+/**
+ * Webhook output sink: POSTs the node's inputs (typically the pipeline's
+ * final answer) to a configured URL when the DAG reaches it. The optional
+ * authorization header is templated from a secret reference so credentials
+ * never live in the pipeline spec; non-2xx responses fail the node so the
+ * execution is marked failed and retried per the pipeline's policy.
+ */
+export const webhookOutputPlugin: InProcessPlugin = {
+  manifest: {
+    id: "webhook_output",
+    name: "Webhook Output",
+    version: "1.0.0",
+    category: "sink",
+    description:
+      "POSTs the pipeline result to a configured URL when this node runs.",
+    configSchema: {
+      type: "object",
+      required: ["url"],
+      properties: {
+        url: {
+          type: "string",
+          description: "Absolute URL to POST the JSON result to."
+        },
+        method: {
+          type: "string",
+          enum: ["POST", "PUT", "PATCH"],
+          default: "POST"
+        },
+        headers: {
+          type: "object",
+          description:
+            "Extra static headers (e.g. `{ \"x-source\": \"ragdoll\" }`).",
+          additionalProperties: { type: "string" }
+        },
+        timeoutMs: {
+          type: "integer",
+          default: 10000,
+          description: "Request timeout in milliseconds."
+        }
+      },
+      additionalProperties: false
+    },
+    secretsSchema: {
+      type: "object",
+      properties: {
+        authorization: {
+          type: "string",
+          description:
+            "Optional `Authorization` header value (e.g. `Bearer <secret>`)."
+        }
+      },
+      additionalProperties: false
+    },
+    capabilities: ["query", "ingestion"],
+    ui: {
+      icon: "send",
+      paletteGroup: "Sinks",
+      formHints: {
+        url: { widget: "text" },
+        method: { widget: "select" },
+        headers: { widget: "json" }
+      }
+    }
+  },
+  async execute({ inputs, config, secrets }) {
+    const url = String(config.url ?? "");
+    if (!url) throw new Error("webhook_output: `url` is required");
+    const method = String(config.method ?? "POST").toUpperCase();
+    const timeoutMs = Number(config.timeoutMs ?? 10000);
+    const headers: Record<string, string> = {
+      "content-type": "application/json"
+    };
+    const extra = (config.headers ?? {}) as Record<string, unknown>;
+    for (const [k, v] of Object.entries(extra)) {
+      if (typeof v === "string") headers[k] = v;
+    }
+    if (secrets.authorization) headers.authorization = secrets.authorization;
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    let response: Response;
+    try {
+      response = await fetch(url, {
+        method,
+        headers,
+        body: JSON.stringify(inputs),
+        signal: controller.signal
+      });
+    } finally {
+      clearTimeout(timer);
+    }
+    if (!response.ok) {
+      const text = await response.text().catch(() => "");
+      throw new Error(
+        `webhook_output: ${method} ${url} -> ${response.status} ${text.slice(0, 200)}`
+      );
+    }
+    let responseBody: unknown = undefined;
+    const ct = response.headers.get("content-type") ?? "";
+    const text = await response.text();
+    if (text && ct.includes("application/json")) {
+      try {
+        responseBody = JSON.parse(text);
+      } catch {
+        responseBody = text;
+      }
+    } else if (text) {
+      responseBody = text;
+    }
+    return {
+      outputs: {
+        delivered: { url, status: response.status, response: responseBody },
+        ...inputs
+      }
+    };
+  }
+};

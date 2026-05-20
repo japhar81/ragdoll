@@ -1476,3 +1476,63 @@ paths:
       responses:
         "204": { description: Deleted }
         "403": { $ref: "#/components/responses/Forbidden" }
+  /api/pipelines/{id}/triggers:
+    get:
+      summary: List webhook triggers for a pipeline (pipeline:run @ scope).
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        "200": { description: "{ triggers }" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      summary: >-
+        Mint a public webhook trigger for the pipeline. Returns the bound
+        trigger metadata + plaintext token (shown ONCE) + the full URL.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [environment, name]
+              properties:
+                environment: { type: string }
+                name: { type: string, description: operator-facing label }
+                activationLabel: { type: string }
+                enabled: { type: boolean, default: true }
+      responses:
+        "201":
+          description: "{ trigger, token, url }"
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /api/triggers/{id}:
+    delete:
+      summary: Revoke a webhook trigger (pipeline:run @ that trigger's scope).
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        "204": { description: Revoked }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /api/triggers/webhook/{token}:
+    post:
+      summary: >-
+        Public webhook trigger: anyone holding the path token can POST to
+        start a run. Body becomes the run's `input`.
+      security: []
+      parameters:
+        - { name: token, in: path, required: true, schema: { type: string } }
+      responses:
+        "202": { description: "{ executionId, pipelineId, version, status }" }
+        "401": { description: Invalid / revoked / disabled token }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /mcp:
+    post:
+      summary: >-
+        MCP (Model Context Protocol) endpoint — Streamable HTTP transport. An
+        LLM client connects and discovers tools/resources that mirror the
+        REST API surface; tool calls re-enter the same RBAC path as direct
+        HTTP. Stateless (one server + transport per request).
+      responses:
+        "200": { description: MCP response (JSON-RPC / SSE-style) }

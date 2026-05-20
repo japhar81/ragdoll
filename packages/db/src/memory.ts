@@ -64,6 +64,8 @@ import type {
   RbacGrantRow,
   AuthSettingsRepository,
   AuthSettingsRow,
+  WebhookTriggerRepository,
+  WebhookTriggerRow,
   VectorCollectionRepository,
   VectorCollectionRow
 } from "./types.ts";
@@ -949,5 +951,47 @@ export class InMemoryAuthSettingsRepository
   async set(row: AuthSettingsRow): Promise<AuthSettingsRow> {
     this.row = { ...row, updatedAt: new Date().toISOString() };
     return { ...this.row };
+  }
+}
+
+export class InMemoryWebhookTriggerRepository
+  implements WebhookTriggerRepository
+{
+  private rows: WebhookTriggerRow[] = [];
+
+  async create(row: WebhookTriggerRow): Promise<WebhookTriggerRow> {
+    if (this.rows.some((r) => r.prefix === row.prefix)) {
+      throw new ConflictError("webhook_trigger", `prefix exists: ${row.prefix}`);
+    }
+    this.rows.push({ ...row });
+    return { ...row };
+  }
+
+  async get(id: string): Promise<WebhookTriggerRow | undefined> {
+    const found = this.rows.find((r) => r.id === id);
+    return found ? { ...found } : undefined;
+  }
+
+  async findByPrefix(prefix: string): Promise<WebhookTriggerRow | undefined> {
+    const found = this.rows.find((r) => r.prefix === prefix);
+    return found ? { ...found } : undefined;
+  }
+
+  async listForPipeline(
+    tenantId: string,
+    pipelineId: string
+  ): Promise<WebhookTriggerRow[]> {
+    return this.rows
+      .filter((r) => r.tenantId === tenantId && r.pipelineId === pipelineId)
+      .map((r) => ({ ...r }));
+  }
+
+  async touch(id: string, at: string = new Date().toISOString()): Promise<void> {
+    const row = this.rows.find((r) => r.id === id);
+    if (row) row.lastTriggeredAt = at;
+  }
+
+  async delete(id: string): Promise<void> {
+    this.rows = this.rows.filter((r) => r.id !== id);
   }
 }

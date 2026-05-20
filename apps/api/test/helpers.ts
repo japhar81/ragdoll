@@ -35,7 +35,8 @@ import {
   InMemoryIdentityProviderRepository,
   InMemoryRbacPolicyRepository,
   InMemoryAuthSettingsRepository,
-  InMemoryRoleRepository
+  InMemoryRoleRepository,
+  InMemoryWebhookTriggerRepository
 } from "../../../packages/db/src/index.ts";
 import {
   DatabaseEncryptedSecretProvider,
@@ -151,6 +152,7 @@ export function buildHarness(options: BuildOptions = {}): Harness {
         rbacPolicies,
         authSettings: new InMemoryAuthSettingsRepository(),
         roles: new InMemoryRoleRepository(),
+        webhookTriggers: new InMemoryWebhookTriggerRepository(),
         authorizer: new Authorizer({ store: rbacPolicies }),
         sessions
       }

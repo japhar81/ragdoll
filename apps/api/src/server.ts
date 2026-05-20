@@ -9,6 +9,7 @@
 import { randomUUID } from "node:crypto";
 import Fastify from "fastify";
 import { createApp, type AppDeps } from "./app.ts";
+import { handleMcpRequest } from "./mcp.ts";
 import {
   AuthResolver,
   DevAuthProvider,
@@ -52,12 +53,14 @@ import {
   PostgresRbacPolicyRepository,
   PostgresAuthSettingsRepository,
   PostgresRoleRepository,
+  PostgresWebhookTriggerRepository,
   InMemoryUserRepository,
   InMemoryUserIdentityRepository,
   InMemoryIdentityProviderRepository,
   InMemoryRbacPolicyRepository,
   InMemoryAuthSettingsRepository,
   InMemoryRoleRepository,
+  InMemoryWebhookTriggerRepository,
   type RbacPolicyRepository,
   type UserRepository,
   InMemoryTenantRepository,
@@ -204,6 +207,7 @@ async function buildDeps(): Promise<{ deps: AppDeps; pool?: PoolLike }> {
       rbacPolicies,
       authSettings: new PostgresAuthSettingsRepository(pool),
       roles: new PostgresRoleRepository(pool),
+      webhookTriggers: new PostgresWebhookTriggerRepository(pool),
       environments: new PostgresEnvironmentRepository(pool),
       pipelines: new PostgresPipelineRepository(pool),
       pipelineVersions: new PostgresPipelineVersionRepository(pool),
@@ -260,6 +264,7 @@ async function buildDeps(): Promise<{ deps: AppDeps; pool?: PoolLike }> {
       rbacPolicies,
       authSettings: new InMemoryAuthSettingsRepository(),
       roles: new InMemoryRoleRepository(),
+      webhookTriggers: new InMemoryWebhookTriggerRepository(),
       environments: new InMemoryEnvironmentRepository(),
       pipelines: new InMemoryPipelineRepository(),
       pipelineVersions: new InMemoryPipelineVersionRepository(),
@@ -327,6 +332,37 @@ async function main(): Promise<void> {
     { parseAs: "string" },
     (_request: any, body: any, done: any) => done(null, body)
   );
+
+  // MCP transport needs raw req/res (Streamable HTTP, SSE-style), so we
+  // register it BEFORE the framework-agnostic catch-all and bypass app.handle.
+  // Auth is still resolved by the MCP tools, which invoke app.handle in-process
+  // with the original Authorization header attached (so RBAC stays in force).
+  fastify.all("/mcp", async (request: any, reply: any) => {
+    let parsedBody: unknown;
+    const raw = request.body;
+    if (typeof raw === "string" && raw.length > 0) {
+      try {
+        parsedBody = JSON.parse(raw);
+      } catch {
+        parsedBody = raw;
+      }
+    } else {
+      parsedBody = raw;
+    }
+    // hijack so fastify doesn't try to send a response after the SDK writes one
+    reply.hijack();
+    try {
+      await handleMcpRequest(app, request.raw, reply.raw, parsedBody);
+    } catch (e) {
+      logger.error("mcp_request_failed", {
+        error: e instanceof Error ? e.message : String(e)
+      });
+      if (!reply.raw.headersSent) {
+        reply.raw.statusCode = 500;
+        reply.raw.end(JSON.stringify({ error: "mcp_failed" }));
+      }
+    }
+  });
 
   fastify.all("/*", async (request: any, reply: any) => {
     const requestId =
