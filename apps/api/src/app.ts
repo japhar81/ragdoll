@@ -32,6 +32,8 @@ import {
   SignupDisabledError,
   AccountDisabledError,
   EmailInUseError,
+  WebhookTokenService,
+  InvalidWebhookTokenError,
   type SsoIdentity,
   type Permission,
   type Principal
@@ -80,6 +82,9 @@ import {
   InMemoryRbacPolicyRepository,
   InMemoryAuthSettingsRepository,
   InMemoryRoleRepository,
+  InMemoryWebhookTriggerRepository,
+  type WebhookTriggerRepository,
+  type WebhookTriggerRow,
   type UserRepository,
   type UserIdentityRepository,
   type IdentityProviderRepository,
@@ -226,6 +231,7 @@ export interface AppDeps {
   rbacPolicies?: RbacPolicyRepository;
   authSettings?: AuthSettingsRepository;
   roles?: RoleRepository;
+  webhookTriggers?: WebhookTriggerRepository;
   /** Resolves a principal's scoped grants; attaches the per-request decider. */
   authorizer?: Authorizer;
   /** Session signer used for login/SSO; required for the auth routes. */
@@ -376,6 +382,8 @@ export function createApp(deps: AppDeps): App {
     deps.authSettings ?? new InMemoryAuthSettingsRepository();
   const roleCatalog: RoleRepository =
     deps.roles ?? new InMemoryRoleRepository();
+  const webhookTriggers: WebhookTriggerRepository =
+    deps.webhookTriggers ?? new InMemoryWebhookTriggerRepository();
   // The authorizer is the scoped, default-deny decision point. When omitted
   // (legacy harnesses) route `enforce(...)` keeps using the flat role map.
   const authorizer: Authorizer | undefined = deps.authorizer;
@@ -480,6 +488,156 @@ export function createApp(deps: AppDeps): App {
       typeof (v as AppResponse).status === "number" &&
       "headers" in (v as AppResponse)
     );
+  }
+
+  /**
+   * Shared "resolve a runnable version → enqueue → seed execution" pipeline,
+   * called from both the auth'd `POST /api/pipelines/:id/run` and the public
+   * `POST /api/triggers/webhook/:token`. Returns an {@link AppResponse} on
+   * resolution failure so the caller can return it directly.
+   */
+  async function enqueuePipelineRun(args: {
+    tenantId: string;
+    pipeline: PipelineRow;
+    environment: string;
+    activationLabel?: string;
+    input: unknown;
+  }): Promise<
+    | {
+        ok: true;
+        executionId: string;
+        jobId: string;
+        versionId: string;
+        version: string;
+        resolvedVia: "activation" | "deployment";
+        activationLabel?: string;
+      }
+    | { ok: false; response: AppResponse }
+  > {
+    const { tenantId, pipeline, environment, activationLabel, input } = args;
+    const pipelineId = pipeline.id;
+    let resolved: PipelineVersionRow | undefined;
+    let resolvedVia: "activation" | "deployment" = "deployment";
+    let resolvedLabel: string | undefined;
+
+    const activations = await pipelineActivations.listByTenantPipelineEnv(
+      tenantId,
+      pipelineId,
+      environment
+    );
+    if (activations.length > 0) {
+      resolvedVia = "activation";
+      let chosen: PipelineActivationRow;
+      try {
+        chosen = resolveActivation(activations, activationLabel);
+      } catch (e) {
+        if (e instanceof ActivationResolutionError) {
+          return {
+            ok: false,
+            response: error(409, "activation_unresolved", { message: e.message })
+          };
+        }
+        throw e;
+      }
+      let versionId: string;
+      try {
+        versionId = effectiveVersionId(
+          {
+            trackLatest: chosen.trackLatest,
+            pipelineVersionId: chosen.pipelineVersionId ?? null
+          },
+          pipeline.latestVersionId ?? null
+        );
+      } catch (e) {
+        if (e instanceof ActivationResolutionError) {
+          return {
+            ok: false,
+            response: error(409, "activation_unresolved", { message: e.message })
+          };
+        }
+        throw e;
+      }
+      resolvedLabel = chosen.label;
+      resolved = await deps.pipelineVersions.get(versionId);
+      if (!resolved) {
+        return {
+          ok: false,
+          response: error(409, "activation_unresolved", {
+            message: `activation "${chosen.label}" resolves to unknown version ${versionId}`
+          })
+        };
+      }
+    } else {
+      resolved = await resolveDeployedVersion(
+        deps,
+        pipelineId,
+        environment,
+        tenantId
+      );
+      if (!resolved) {
+        return {
+          ok: false,
+          response: error(409, "no_active_deployment", {
+            message: `no active deployment for pipeline ${pipelineId} in ${environment}`
+          })
+        };
+      }
+    }
+
+    const validation = validatePipelineSpec(
+      resolved.spec as PipelineSpec,
+      deps.pluginRegistry
+    );
+    if (!validation.valid) {
+      return {
+        ok: false,
+        response: error(422, "validation_failed", { issues: validation.errors })
+      };
+    }
+
+    const executionId = randomUUID();
+    const jobId = randomUUID();
+    const job: ApiQueueJob<{
+      tenantId: string;
+      pipelineId: string;
+      pipelineVersionId: string;
+      environment: string;
+      executionId: string;
+      input: unknown;
+      activationLabel?: string;
+    }> = {
+      id: jobId,
+      type: "run_pipeline",
+      payload: {
+        tenantId,
+        pipelineId,
+        pipelineVersionId: resolved.id,
+        environment,
+        executionId,
+        input,
+        ...(resolvedLabel !== undefined ? { activationLabel: resolvedLabel } : {})
+      }
+    };
+    await deps.queue.enqueue(job as unknown as QueueJob);
+    await deps.executionStore.start({
+      executionId,
+      tenantId,
+      pipelineId,
+      pipelineVersionId: resolved.id,
+      status: "running",
+      startedAt: nowIso(),
+      input: redactValue(input)
+    });
+
+    return {
+      ok: true,
+      executionId,
+      jobId,
+      versionId: resolved.id,
+      version: resolved.version,
+      resolvedVia,
+      ...(resolvedLabel !== undefined ? { activationLabel: resolvedLabel } : {})
+    };
   }
 
   // ---- health -------------------------------------------------------------
@@ -1903,10 +2061,9 @@ export function createApp(deps: AppDeps): App {
   route("POST", "/api/pipelines/:id/run", async (ctx) => {
     const pipeline = await resolvePipelineRef(ctx.params.id);
     if (isAppResponse(pipeline)) return pipeline;
-    const pipelineId = pipeline.id;
     enforce(ctx.principal, "pipeline:run", {
       tenantId: ctx.principal.tenantId,
-      pipelineId
+      pipelineId: pipeline.id
     });
     const body = isObject(ctx.request.body) ? ctx.request.body : {};
     const tenantId = tenantScope(ctx);
@@ -1922,126 +2079,229 @@ export function createApp(deps: AppDeps): App {
     const activationLabel =
       typeof body.activation === "string" ? body.activation : undefined;
 
-    // Resolution precedence:
-    //  1. If the tenant has ANY activation for (tenant,pipeline,env), resolve
-    //     through it: resolveActivation(label?) -> effectiveVersionId. This
-    //     supports multiple concurrent activations (pinned + track-latest).
-    //  2. Otherwise fall back to the existing deployment path (so the
-    //     local-demo seed + current e2e keep passing unchanged).
-    let resolved: PipelineVersionRow | undefined;
-    let resolvedVia: "activation" | "deployment" = "deployment";
-    let resolvedLabel: string | undefined;
-
-    const activations = await pipelineActivations.listByTenantPipelineEnv(
+    const outcome = await enqueuePipelineRun({
       tenantId,
-      pipelineId,
-      environment
-    );
-    if (activations.length > 0) {
-      resolvedVia = "activation";
-      let chosen: PipelineActivationRow;
-      try {
-        chosen = resolveActivation(activations, activationLabel);
-      } catch (e) {
-        if (e instanceof ActivationResolutionError) {
-          return error(409, "activation_unresolved", { message: e.message });
-        }
-        throw e;
-      }
-      let versionId: string;
-      try {
-        versionId = effectiveVersionId(
-          {
-            trackLatest: chosen.trackLatest,
-            pipelineVersionId: chosen.pipelineVersionId ?? null
-          },
-          pipeline.latestVersionId ?? null
-        );
-      } catch (e) {
-        if (e instanceof ActivationResolutionError) {
-          return error(409, "activation_unresolved", { message: e.message });
-        }
-        throw e;
-      }
-      resolvedLabel = chosen.label;
-      resolved = await deps.pipelineVersions.get(versionId);
-      if (!resolved) {
-        return error(409, "activation_unresolved", {
-          message: `activation "${chosen.label}" resolves to unknown version ${versionId}`
-        });
-      }
-    } else {
-      resolved = await resolveDeployedVersion(
-        deps,
-        pipelineId,
-        environment,
-        tenantId
-      );
-      if (!resolved) {
-        return error(409, "no_active_deployment", {
-          message: `no active deployment for pipeline ${pipelineId} in ${environment}`
-        });
-      }
-    }
-
-    const validation = validatePipelineSpec(
-      resolved.spec as PipelineSpec,
-      deps.pluginRegistry
-    );
-    if (!validation.valid) {
-      return error(422, "validation_failed", { issues: validation.errors });
-    }
-
-    const executionId = randomUUID();
-    const jobId = randomUUID();
-    const job: ApiQueueJob<{
-      tenantId: string;
-      pipelineId: string;
-      pipelineVersionId: string;
-      environment: string;
-      executionId: string;
-      input: unknown;
-      activationLabel?: string;
-    }> = {
-      id: jobId,
-      type: "run_pipeline",
-      payload: {
-        tenantId,
-        pipelineId,
-        pipelineVersionId: resolved.id,
-        environment,
-        executionId,
-        input: body.input,
-        ...(resolvedLabel !== undefined ? { activationLabel: resolvedLabel } : {})
-      }
-    };
-    await deps.queue.enqueue(job as unknown as QueueJob);
-    // Seed a queued execution record so GET /executions reflects the request.
-    await deps.executionStore.start({
-      executionId,
-      tenantId,
-      pipelineId,
-      pipelineVersionId: resolved.id,
-      status: "running",
-      startedAt: nowIso(),
-      input: redactValue(body.input)
+      pipeline,
+      environment,
+      activationLabel,
+      input: body.input
     });
-    await audit(ctx, "pipeline.run", "execution", executionId, undefined, {
-      pipelineId,
-      version: resolved.version,
-      resolvedVia,
-      activationLabel: resolvedLabel ?? null,
+    if (!outcome.ok) return outcome.response;
+    await audit(ctx, "pipeline.run", "execution", outcome.executionId, undefined, {
+      pipelineId: pipeline.id,
+      version: outcome.version,
+      resolvedVia: outcome.resolvedVia,
+      activationLabel: outcome.activationLabel ?? null,
       input: redactValue(body.input)
     });
     return ok(
       {
-        executionId,
-        jobId,
-        pipelineId,
-        pipelineVersionId: resolved.id,
-        version: resolved.version,
-        resolvedVia,
-        ...(resolvedLabel !== undefined ? { activationLabel: resolvedLabel } : {}),
+        executionId: outcome.executionId,
+        jobId: outcome.jobId,
+        pipelineId: pipeline.id,
+        pipelineVersionId: outcome.versionId,
+        version: outcome.version,
+        resolvedVia: outcome.resolvedVia,
+        ...(outcome.activationLabel !== undefined
+          ? { activationLabel: outcome.activationLabel }
+          : {}),
+        status: "accepted"
+      },
+      202
+    );
+  });
+
+  // ---- webhook triggers ---------------------------------------------------
+  // Lifecycle of a webhook trigger:
+  //   1. POST /api/pipelines/:id/triggers  (auth'd, scoped) -> mints a token
+  //      bound to (tenant, pipeline, env, activation?); plaintext is shown
+  //      once and a sha256 hash + 12-char prefix are persisted.
+  //   2. The external system POSTs the body to /api/triggers/webhook/<token>;
+  //      that endpoint is PUBLIC (the token IS the auth) and enqueues a
+  //      run_pipeline job exactly like the API run route.
+  //   3. DELETE /api/triggers/:id revokes (row delete).
+
+  route("POST", "/api/pipelines/:id/triggers", async (ctx) => {
+    const pipeline = await resolvePipelineRef(ctx.params.id);
+    if (isAppResponse(pipeline)) return pipeline;
+    const tenantId = tenantScope(ctx);
+    if (!tenantId) {
+      return error(422, "validation_failed", {
+        issues: [{ message: "tenant context required" }]
+      });
+    }
+    enforce(ctx.principal, "pipeline:run", {
+      tenantId,
+      pipelineId: pipeline.id
+    });
+    const body = isObject(ctx.request.body) ? ctx.request.body : {};
+    if (typeof body.environment !== "string" || typeof body.name !== "string") {
+      return error(422, "validation_failed", {
+        issues: [{ message: "environment and name are required" }]
+      });
+    }
+    const id = randomUUID();
+    const issued = WebhookTokenService.issue(id);
+    const row: WebhookTriggerRow = {
+      id,
+      tenantId,
+      pipelineId: pipeline.id,
+      environment: body.environment,
+      activationLabel:
+        typeof body.activationLabel === "string" ? body.activationLabel : null,
+      name: body.name,
+      prefix: issued.prefix,
+      hash: issued.hash,
+      enabled: body.enabled !== false,
+      createdBy: ctx.principal.id,
+      createdAt: nowIso()
+    };
+    const created = await webhookTriggers.create(row);
+    await audit(
+      ctx,
+      "webhook_trigger.create",
+      "webhook_trigger",
+      created.id,
+      undefined,
+      { name: created.name, environment: created.environment, prefix: created.prefix }
+    );
+    return ok(
+      {
+        trigger: {
+          id: created.id,
+          name: created.name,
+          environment: created.environment,
+          activationLabel: created.activationLabel,
+          prefix: created.prefix,
+          enabled: created.enabled,
+          createdAt: created.createdAt
+        },
+        // The plaintext is returned ONCE; the server only persists the hash.
+        token: issued.plaintext,
+        url: `${requestOrigin(ctx.request)}/api/triggers/webhook/${issued.plaintext}`
+      },
+      201
+    );
+  });
+
+  route("GET", "/api/pipelines/:id/triggers", async (ctx) => {
+    const pipeline = await resolvePipelineRef(ctx.params.id);
+    if (isAppResponse(pipeline)) return pipeline;
+    const tenantId = tenantScope(ctx);
+    if (!tenantId) {
+      return error(422, "validation_failed", {
+        issues: [{ message: "tenant context required" }]
+      });
+    }
+    enforce(ctx.principal, "pipeline:run", {
+      tenantId,
+      pipelineId: pipeline.id
+    });
+    const rows = await webhookTriggers.listForPipeline(tenantId, pipeline.id);
+    return ok({
+      triggers: rows.map((r) => ({
+        id: r.id,
+        name: r.name,
+        environment: r.environment,
+        activationLabel: r.activationLabel,
+        prefix: r.prefix,
+        enabled: r.enabled,
+        createdAt: r.createdAt,
+        lastTriggeredAt: r.lastTriggeredAt ?? null
+      }))
+    });
+  });
+
+  route("DELETE", "/api/triggers/:id", async (ctx) => {
+    const row = await webhookTriggers.get(ctx.params.id);
+    if (!row) return error(404, "not_found");
+    enforce(ctx.principal, "pipeline:run", {
+      tenantId: row.tenantId,
+      pipelineId: row.pipelineId
+    });
+    await webhookTriggers.delete(row.id);
+    await audit(
+      ctx,
+      "webhook_trigger.delete",
+      "webhook_trigger",
+      row.id,
+      { name: row.name, environment: row.environment },
+      undefined
+    );
+    return { status: 204, body: undefined, headers: {} };
+  });
+
+  /**
+   * Public webhook trigger. The path token is the bearer; no other auth runs.
+   * Body is forwarded verbatim as the run's `input`. We touch the trigger so
+   * an admin can see "last fired at" in the UI.
+   */
+  route("POST", "/api/triggers/webhook/:token", async (ctx) => {
+    let record;
+    try {
+      record = await WebhookTokenService.verify(ctx.params.token, {
+        findByPrefix: async (prefix) => {
+          const row = await webhookTriggers.findByPrefix(prefix);
+          if (!row) return undefined;
+          return {
+            id: row.id,
+            prefix: row.prefix,
+            hash: row.hash,
+            enabled: row.enabled,
+            revokedAt: row.revokedAt
+          };
+        }
+      });
+    } catch (e) {
+      if (e instanceof InvalidWebhookTokenError) {
+        return error(401, "invalid_webhook_token", { message: e.message });
+      }
+      throw e;
+    }
+    const trigger = await webhookTriggers.get(record.id);
+    if (!trigger) return error(404, "not_found");
+    const pipeline = await deps.pipelines.get(trigger.pipelineId);
+    if (!pipeline) {
+      return error(404, "not_found", { message: "pipeline no longer exists" });
+    }
+    const outcome = await enqueuePipelineRun({
+      tenantId: trigger.tenantId,
+      pipeline,
+      environment: trigger.environment,
+      activationLabel: trigger.activationLabel ?? undefined,
+      input: ctx.request.body
+    });
+    if (!outcome.ok) return outcome.response;
+    await webhookTriggers.touch(trigger.id);
+    await deps.auditLogs.append({
+      actorId: null,
+      tenantId: trigger.tenantId,
+      pipelineId: trigger.pipelineId,
+      action: "pipeline.run",
+      targetType: "execution",
+      targetId: outcome.executionId,
+      beforeRedacted: undefined,
+      afterRedacted: {
+        source: "webhook",
+        triggerId: trigger.id,
+        version: outcome.version,
+        resolvedVia: outcome.resolvedVia,
+        input: redactValue(ctx.request.body)
+      },
+      requestId: headerValue(ctx.request.headers, "x-request-id") ?? null,
+      sourceIp: headerValue(ctx.request.headers, "x-forwarded-for") ?? null,
+      userAgent: headerValue(ctx.request.headers, "user-agent") ?? null,
+      createdAt: nowIso()
+    });
+    return ok(
+      {
+        executionId: outcome.executionId,
+        pipelineId: pipeline.id,
+        version: outcome.version,
+        resolvedVia: outcome.resolvedVia,
+        ...(outcome.activationLabel !== undefined
+          ? { activationLabel: outcome.activationLabel }
+          : {}),
         status: "accepted"
       },
       202
@@ -2763,7 +3023,9 @@ export function createApp(deps: AppDeps): App {
       request.path === "/api/auth/login" ||
       request.path === "/api/auth/signup" ||
       request.path === "/api/auth/providers" ||
-      request.path.startsWith("/api/auth/sso/");
+      request.path.startsWith("/api/auth/sso/") ||
+      // Webhook triggers carry their own bearer-in-URL: the token IS the auth.
+      request.path.startsWith("/api/triggers/webhook/");
 
     let principal: Principal = { id: "anonymous", type: "service", roles: [] };
     if (!isPublic) {

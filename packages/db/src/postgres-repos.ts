@@ -53,6 +53,8 @@ import type {
   RbacGrantRow,
   AuthSettingsRepository,
   AuthSettingsRow,
+  WebhookTriggerRepository,
+  WebhookTriggerRow,
   VectorCollectionRepository,
   VectorCollectionRow
 } from "./types.ts";
@@ -1374,5 +1376,90 @@ export class PostgresAuthSettingsRepository
       [row.signupMode, row.defaultRole ?? null]
     );
     return rowFromDb<AuthSettingsRow>(r.rows[0]);
+  }
+}
+
+// --- Webhook triggers ------------------------------------------------------
+
+export class PostgresWebhookTriggerRepository
+  implements WebhookTriggerRepository
+{
+  private pool: PoolLike;
+  constructor(pool: PoolLike) {
+    this.pool = pool;
+  }
+
+  async create(row: WebhookTriggerRow): Promise<WebhookTriggerRow> {
+    try {
+      const r = await this.pool.query<Record<string, unknown>>(
+        `INSERT INTO webhook_triggers (
+           id, tenant_id, pipeline_id, environment, activation_label,
+           name, prefix, hash, enabled, created_by
+         )
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+         RETURNING *`,
+        [
+          row.id,
+          row.tenantId,
+          row.pipelineId,
+          row.environment,
+          row.activationLabel ?? null,
+          row.name,
+          row.prefix,
+          row.hash,
+          row.enabled,
+          toUuidOrNull(row.createdBy)
+        ]
+      );
+      return rowFromDb<WebhookTriggerRow>(r.rows[0]);
+    } catch (e) {
+      if (
+        e instanceof Error &&
+        /duplicate key|unique constraint/i.test(e.message)
+      ) {
+        throw new ConflictError("webhook_trigger", e.message);
+      }
+      throw e;
+    }
+  }
+
+  async get(id: string): Promise<WebhookTriggerRow | undefined> {
+    const r = await this.pool.query<Record<string, unknown>>(
+      `SELECT * FROM webhook_triggers WHERE id = $1`,
+      [id]
+    );
+    return r.rows[0] ? rowFromDb<WebhookTriggerRow>(r.rows[0]) : undefined;
+  }
+
+  async findByPrefix(prefix: string): Promise<WebhookTriggerRow | undefined> {
+    const r = await this.pool.query<Record<string, unknown>>(
+      `SELECT * FROM webhook_triggers WHERE prefix = $1`,
+      [prefix]
+    );
+    return r.rows[0] ? rowFromDb<WebhookTriggerRow>(r.rows[0]) : undefined;
+  }
+
+  async listForPipeline(
+    tenantId: string,
+    pipelineId: string
+  ): Promise<WebhookTriggerRow[]> {
+    const r = await this.pool.query<Record<string, unknown>>(
+      `SELECT * FROM webhook_triggers
+       WHERE tenant_id = $1 AND pipeline_id = $2
+       ORDER BY created_at DESC`,
+      [tenantId, pipelineId]
+    );
+    return r.rows.map((row) => rowFromDb<WebhookTriggerRow>(row));
+  }
+
+  async touch(id: string, at: string = new Date().toISOString()): Promise<void> {
+    await this.pool.query(
+      `UPDATE webhook_triggers SET last_triggered_at = $2 WHERE id = $1`,
+      [id, at]
+    );
+  }
+
+  async delete(id: string): Promise<void> {
+    await this.pool.query(`DELETE FROM webhook_triggers WHERE id = $1`, [id]);
   }
 }

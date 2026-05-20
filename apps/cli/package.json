@@ -1,0 +1,16 @@
+{
+  "name": "@ragdoll/cli",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Command-line client for the RAGdoll control plane.",
+  "bin": {
+    "ragdoll": "src/index.ts"
+  },
+  "scripts": {
+    "ragdoll": "node --experimental-strip-types src/index.ts"
+  },
+  "dependencies": {
+    "commander": "^12.1.0"
+  }
+}
