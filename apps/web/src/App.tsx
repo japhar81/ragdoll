@@ -1,5 +1,14 @@
-import React, { useMemo, useState } from "react";
+import React, { useMemo } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import {
+  BrowserRouter,
+  Navigate,
+  NavLink,
+  Route,
+  Routes,
+  useNavigate,
+  useParams
+} from "react-router-dom";
 import { PipelineBuilder } from "./components/PipelineBuilder.tsx";
 import { PipelinesScreen } from "./components/PipelinesScreen.tsx";
 import { SchedulerScreen } from "./components/SchedulerScreen.tsx";
@@ -21,58 +30,67 @@ const queryClient = new QueryClient({
   defaultOptions: { queries: { retry: false, refetchOnWindowFocus: false } }
 });
 
-type View =
-  | "pipelines"
-  | "builder"
-  | "scheduler"
-  | "tenants"
-  | "config"
-  | "secrets"
-  | "executions"
-  | "audit"
-  | "usage"
-  | "users"
-  | "roles"
-  | "identity-providers"
-  | "auth-settings";
+/** A view's URL path; kept here so adding a route is one edit. */
+type NavItem = {
+  /** Path under the SPA, e.g. `/users`. */
+  path: string;
+  label: string;
+  /** Sidebar visibility (any-of). Empty = visible to any authenticated user. */
+  perms: string[];
+};
 
-/** Each item lists the permissions that make it visible (any-of). An empty
- * list means always visible to any authenticated user. */
-const NAV_GROUPS: Array<{
-  group: string;
-  items: Array<{ id: View; label: string; perms: string[] }>;
-}> = [
+const NAV_GROUPS: Array<{ group: string; items: NavItem[] }> = [
   {
     group: "Build",
     items: [
-      { id: "pipelines", label: "Pipelines", perms: ["execution:view_logs", "pipeline:create", "pipeline:update"] },
-      { id: "builder", label: "Builder", perms: ["pipeline:create", "pipeline:update"] },
-      { id: "scheduler", label: "Scheduler", perms: ["pipeline:run", "config:edit_tenant"] }
+      {
+        path: "/pipelines",
+        label: "Pipelines",
+        perms: ["execution:view_logs", "pipeline:create", "pipeline:update"]
+      },
+      {
+        path: "/builder",
+        label: "Builder",
+        perms: ["pipeline:create", "pipeline:update"]
+      },
+      {
+        path: "/scheduler",
+        label: "Scheduler",
+        perms: ["pipeline:run", "config:edit_tenant"]
+      }
     ]
   },
   {
     group: "Operate",
     items: [
-      { id: "executions", label: "Executions", perms: ["execution:view_logs"] },
-      { id: "usage", label: "Usage", perms: ["execution:view_logs"] },
-      { id: "audit", label: "Audit", perms: ["audit:view"] }
+      { path: "/executions", label: "Executions", perms: ["execution:view_logs"] },
+      { path: "/usage", label: "Usage", perms: ["execution:view_logs"] },
+      { path: "/audit", label: "Audit", perms: ["audit:view"] }
     ]
   },
   {
     group: "Govern",
     items: [
-      { id: "tenants", label: "Tenants", perms: ["config:edit_global"] },
-      { id: "config", label: "Config", perms: ["config:edit_global", "config:edit_tenant", "config:edit_pipeline"] },
-      { id: "secrets", label: "Secrets", perms: ["secret:manage_tenant"] }
+      { path: "/tenants", label: "Tenants", perms: ["config:edit_global"] },
+      {
+        path: "/config",
+        label: "Config",
+        perms: ["config:edit_global", "config:edit_tenant", "config:edit_pipeline"]
+      },
+      { path: "/secrets", label: "Secrets", perms: ["secret:manage_tenant"] }
     ]
   },
   {
     group: "Access",
     items: [
-      { id: "users", label: "Users", perms: ["user:manage"] },
-      { id: "roles", label: "Roles & Permissions", perms: ["role:manage"] },
-      { id: "identity-providers", label: "Identity Providers", perms: ["idp:manage"] },
-      { id: "auth-settings", label: "Auth Settings", perms: ["auth:settings"] }
+      { path: "/users", label: "Users", perms: ["user:manage"] },
+      { path: "/roles", label: "Roles & Permissions", perms: ["role:manage"] },
+      {
+        path: "/identity-providers",
+        label: "Identity Providers",
+        perms: ["idp:manage"]
+      },
+      { path: "/auth-settings", label: "Auth Settings", perms: ["auth:settings"] }
     ]
   }
 ];
@@ -82,11 +100,48 @@ export interface EditingPipeline {
   name: string;
 }
 
+/**
+ * URL-driven Builder mount: `/builder` (blank canvas) and `/builder/:pipelineId`
+ * (load that pipeline). Memoising `editing` on the id keeps the Builder's
+ * `loadedFor` guard happy across re-renders. `onClearEditing` navigates back
+ * to the blank Builder URL, so a back-button press lands where you expect.
+ */
+function BuilderRoute() {
+  const { pipelineId } = useParams<{ pipelineId: string }>();
+  const navigate = useNavigate();
+  const editing = useMemo<EditingPipeline | undefined>(
+    () => (pipelineId ? { id: pipelineId, name: "" } : undefined),
+    [pipelineId]
+  );
+  return (
+    <PipelineBuilder
+      editing={editing}
+      onClearEditing={() => navigate("/builder")}
+    />
+  );
+}
+
+/**
+ * URL-driven Pipelines list: clicking "Edit" navigates to the Builder route
+ * for that pipeline so the back button returns to this list.
+ */
+function PipelinesRoute() {
+  const navigate = useNavigate();
+  return (
+    <PipelinesScreen
+      onEditPipeline={(p) =>
+        navigate(`/builder/${encodeURIComponent(p.id)}`)
+      }
+    />
+  );
+}
+
 function Shell() {
   const auth = useAuth();
-  const [editing, setEditing] = useState<EditingPipeline | undefined>();
 
-  // Only show nav items the user can act on (the server still enforces).
+  // Only show nav items the user can act on. The server still enforces; this
+  // is just cosmetic. Used both for sidebar rendering and to pick the default
+  // landing route for `/`.
   const groups = useMemo(
     () =>
       NAV_GROUPS.map((g) => ({
@@ -98,17 +153,7 @@ function Shell() {
     [auth]
   );
 
-  const firstView = groups[0]?.items[0]?.id;
-  const [view, setView] = useState<View | undefined>(firstView);
-  const current =
-    view && groups.some((g) => g.items.some((i) => i.id === view))
-      ? view
-      : firstView;
-
-  function openInBuilder(pipeline: EditingPipeline): void {
-    setEditing(pipeline);
-    setView("builder");
-  }
+  const defaultPath = groups[0]?.items[0]?.path ?? null;
 
   return (
     <main className="app-shell">
@@ -119,13 +164,14 @@ function Shell() {
             <React.Fragment key={g.group}>
               <span className="nav-group">{g.group}</span>
               {g.items.map((item) => (
-                <a
-                  key={item.id}
-                  className={current === item.id ? "active" : undefined}
-                  onClick={() => setView(item.id)}
+                <NavLink
+                  key={item.path}
+                  to={item.path}
+                  className={({ isActive }) => (isActive ? "active" : undefined)}
+                  end={item.path === "/pipelines"}
                 >
                   {item.label}
-                </a>
+                </NavLink>
               ))}
             </React.Fragment>
           ))}
@@ -140,38 +186,57 @@ function Shell() {
         </div>
       </aside>
 
-      {!current && (
-        <div className="screen-body">
-          <p className="muted">
-            Your account has no access yet. Ask an administrator to grant you a
-            role.
-          </p>
-        </div>
-      )}
-      {current === "pipelines" && (
-        <PipelinesScreen onEditPipeline={openInBuilder} />
-      )}
-      {current === "builder" && (
-        <PipelineBuilder
-          editing={editing}
-          onClearEditing={() => setEditing(undefined)}
+      <Routes>
+        <Route
+          path="/"
+          element={
+            defaultPath ? (
+              <Navigate to={defaultPath} replace />
+            ) : (
+              <div className="screen-body">
+                <p className="muted">
+                  Your account has no access yet. Ask an administrator to grant
+                  you a role.
+                </p>
+              </div>
+            )
+          }
         />
-      )}
-      {current === "scheduler" && <SchedulerScreen />}
-      {current === "tenants" && <TenantsScreen />}
-      {current === "config" && <ConfigScreen />}
-      {current === "secrets" && <SecretsScreen />}
-      {current === "executions" && <ExecutionsScreen />}
-      {current === "audit" && <AuditScreen />}
-      {current === "usage" && <UsageScreen />}
-      {current === "users" && <UsersScreen />}
-      {current === "roles" && <RolesScreen />}
-      {current === "identity-providers" && <IdentityProvidersScreen />}
-      {current === "auth-settings" && <AuthSettingsScreen />}
+        <Route path="/pipelines" element={<PipelinesRoute />} />
+        <Route path="/builder" element={<BuilderRoute />} />
+        <Route path="/builder/:pipelineId" element={<BuilderRoute />} />
+        <Route path="/scheduler" element={<SchedulerScreen />} />
+        <Route path="/tenants" element={<TenantsScreen />} />
+        <Route path="/config" element={<ConfigScreen />} />
+        <Route path="/secrets" element={<SecretsScreen />} />
+        <Route path="/executions" element={<ExecutionsScreen />} />
+        <Route path="/audit" element={<AuditScreen />} />
+        <Route path="/usage" element={<UsageScreen />} />
+        <Route path="/users" element={<UsersScreen />} />
+        <Route path="/roles" element={<RolesScreen />} />
+        <Route
+          path="/identity-providers"
+          element={<IdentityProvidersScreen />}
+        />
+        <Route path="/auth-settings" element={<AuthSettingsScreen />} />
+        {/* Unknown routes: fall back to whichever view the user can see, so a
+            stale bookmark or a typo doesn't 404 the SPA. */}
+        <Route
+          path="*"
+          element={
+            defaultPath ? <Navigate to={defaultPath} replace /> : null
+          }
+        />
+      </Routes>
     </main>
   );
 }
 
+/**
+ * Auth gate. While anonymous we render the login screen at WHATEVER URL the
+ * user is on — refreshing or deep-linking to `/users` while logged out shows
+ * the login screen there, and after sign-in the Shell renders that exact URL.
+ */
 function Gate() {
   const auth = useAuth();
   if (auth.status === "loading") {
@@ -187,10 +252,12 @@ function Gate() {
 
 export default function App() {
   return (
-    <QueryClientProvider client={queryClient}>
-      <AuthProvider>
-        <Gate />
-      </AuthProvider>
-    </QueryClientProvider>
+    <BrowserRouter>
+      <QueryClientProvider client={queryClient}>
+        <AuthProvider>
+          <Gate />
+        </AuthProvider>
+      </QueryClientProvider>
+    </BrowserRouter>
   );
 }

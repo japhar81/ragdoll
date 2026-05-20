@@ -182,12 +182,14 @@ headers):
   back to the legacy deployment if no activations exist.
 - **Scheduling.** `GET/POST /api/schedules`, `PUT/PATCH/DELETE
   /api/schedules/:id`. The `cron` is a 5-field expression validated on
-  create/change (`422` on bad cron); `nextRunAt` is computed then.
-  Locally the scheduler runs **inside the single worker process**, ticks
-  ~every 60s, and is **UTC-only** — the `timezone` field is stored for
-  display, not evaluation. It enqueues onto the same queue this worker
-  consumes, so a scheduled run executes end to end locally with no extra
-  setup.
+  create/change (`422` on bad cron or timezone); `nextRunAt` is computed
+  then. Cron parsing and the next-fire computation go through
+  [`croner`](https://github.com/Hexagon/croner) — `@ragdoll/cron` is a tiny
+  wrapper preserving the `parseCron` / `nextAfter` / `nextRuns` surface used
+  by the API, worker, and web preview. The `timezone` field IS honoured
+  (DST included). Locally the scheduler runs **inside the single worker
+  process** and ticks ~every 60s; it enqueues onto the same queue this
+  worker consumes, so a scheduled run executes end to end locally.
 
 After changing any of this code, `make refresh` (rebuild + restart
 api/worker/web; DB and pulled models kept) and reload the browser;
