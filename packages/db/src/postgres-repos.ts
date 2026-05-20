@@ -521,6 +521,44 @@ export class PostgresPipelineDeploymentRepository
       [pipelineId]
     );
   }
+  /**
+   * Atomic upsert keyed on `(pipeline_id, environment, tenant_id)` — the
+   * same triple the unique index protects. Re-deploying the same pipeline
+   * to the same env/tenant swaps the active version in place; first deploy
+   * inserts. Status is forced back to `active` so a previously-paused row
+   * comes alive on redeploy. `deployed_by` is coerced through `toUuidOrNull`
+   * so a dev principal id ("dev-user") becomes NULL instead of raising an
+   * "invalid input syntax for type uuid" error.
+   */
+  async upsertActive(
+    row: PipelineDeploymentRow
+  ): Promise<PipelineDeploymentRow> {
+    const deployedBy = toUuidOrNull(row.deployedBy);
+    const result = await this.pool.query<Record<string, unknown>>(
+      `INSERT INTO pipeline_deployments
+         (id, pipeline_id, pipeline_version_id, environment, tenant_id,
+          status, deployed_by, deployed_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+       ON CONFLICT (pipeline_id, environment, tenant_id)
+       DO UPDATE SET
+         pipeline_version_id = EXCLUDED.pipeline_version_id,
+         status = 'active',
+         deployed_by = EXCLUDED.deployed_by,
+         deployed_at = EXCLUDED.deployed_at
+       RETURNING *`,
+      [
+        row.id,
+        row.pipelineId,
+        row.pipelineVersionId,
+        row.environment,
+        row.tenantId ?? null,
+        row.status ?? "active",
+        deployedBy,
+        row.deployedAt
+      ]
+    );
+    return rowFromDb<PipelineDeploymentRow>(result.rows[0]);
+  }
 }
 
 /**

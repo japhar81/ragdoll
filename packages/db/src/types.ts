@@ -493,6 +493,17 @@ export interface PipelineDeploymentRepository extends CrudRepository<PipelineDep
     tenantId?: UUID | null
   ): Promise<PipelineDeploymentRow | undefined>;
   listByPipeline(pipelineId: UUID): Promise<PipelineDeploymentRow[]>;
+  /**
+   * Atomically promote `row` to be the active deployment for its
+   * `(pipelineId, environment, tenantId)` triple. Re-deploying to the same
+   * triple swaps the active row in place — without it, the unique constraint
+   * on (pipeline_id, environment, tenant_id) rejects every redeploy as a
+   * duplicate-key conflict.
+   *
+   * Returns the resulting row (the freshly-inserted row on first deploy, the
+   * updated row on every subsequent deploy).
+   */
+  upsertActive(row: PipelineDeploymentRow): Promise<PipelineDeploymentRow>;
 }
 
 export interface TenantPipelineKey {

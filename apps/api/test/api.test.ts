@@ -219,6 +219,75 @@ test("run with no active deployment -> 409", async () => {
   assert.equal(run.body.error, "no_active_deployment");
 });
 
+// Regression: deploying a new version to a pipeline that already has an
+// active deployment for the same (pipeline, environment, tenant) triple
+// used to 409 with a unique-constraint duplicate-key error. The handler
+// now upserts: redeploy swaps the active version in place.
+test("redeploying to the same env/tenant swaps the active version in place", async () => {
+  const { request, deps } = buildHarness();
+  const admin = { "x-actor-id": "admin", "x-roles": "platform_admin" };
+
+  // Create the pipeline.
+  const created = await request({
+    method: "POST",
+    path: "/api/pipelines",
+    headers: admin,
+    body: { slug: "redeploy", name: "Redeploy" }
+  });
+  assert.equal(created.status, 201);
+  const pipelineId = created.body.pipeline.id;
+
+  // Publish v1 and v2.
+  for (const version of ["1.0.0", "2.0.0"]) {
+    const res = await request({
+      method: "POST",
+      path: `/api/pipelines/${pipelineId}/versions`,
+      headers: admin,
+      body: { version, publish: true, spec: echoSpec() }
+    });
+    assert.equal(res.status, 201, `publish ${version}`);
+  }
+
+  // Deploy v1 — first deploy, creates the row.
+  const deployV1 = await request({
+    method: "POST",
+    path: `/api/pipelines/${pipelineId}/deployments`,
+    headers: admin,
+    body: { version: "1.0.0", environment: "dev" }
+  });
+  assert.equal(deployV1.status, 201);
+  const v1Id = deployV1.body.deployment.id;
+  assert.equal(deployV1.body.deployment.status, "active");
+
+  // Deploy v2 to the SAME env/tenant — must NOT 409, must update in place.
+  const deployV2 = await request({
+    method: "POST",
+    path: `/api/pipelines/${pipelineId}/deployments`,
+    headers: admin,
+    body: { version: "2.0.0", environment: "dev" }
+  });
+  assert.equal(deployV2.status, 201);
+
+  // Same row id (upsert in place), pointing at the new version.
+  assert.equal(deployV2.body.deployment.id, v1Id);
+  assert.notEqual(
+    deployV2.body.deployment.pipelineVersionId,
+    deployV1.body.deployment.pipelineVersionId
+  );
+
+  // Only one deployment row exists for this (pipeline, env, tenant).
+  const all = await deps.deployments.listByPipeline(pipelineId);
+  assert.equal(all.length, 1);
+  assert.equal(all[0].pipelineVersionId, deployV2.body.deployment.pipelineVersionId);
+
+  // Both deploys produced audit entries.
+  const audit = await request({ method: "GET", path: "/api/audit", headers: admin });
+  const deployActions = audit.body.logs.filter(
+    (l: { action: string }) => l.action === "pipeline.deploy"
+  );
+  assert.equal(deployActions.length, 2);
+});
+
 test("draft save is mutable; publishing then drafting same version is blocked", async () => {
   const { request } = buildHarness();
   const admin = { "x-actor-id": "admin", "x-roles": "platform_admin" };
