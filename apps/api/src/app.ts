@@ -1403,14 +1403,22 @@ export function createApp(deps: AppDeps): App {
   );
 
   // ---- schedules ----------------------------------------------------------
-  function scheduleNextRun(cron: string): { ok: true; next: string } | { ok: false } {
+  function scheduleNextRun(
+    cron: string,
+    timezone?: string
+  ): { ok: true; next: string } | { ok: false; message: string } {
     try {
-      parseCron(cron);
+      parseCron(cron, timezone);
     } catch (e) {
-      if (e instanceof CronParseError) return { ok: false };
+      if (e instanceof CronParseError) {
+        return { ok: false, message: e.message };
+      }
       throw e;
     }
-    return { ok: true, next: nextAfter(cron, new Date()).toISOString() };
+    return {
+      ok: true,
+      next: nextAfter(cron, new Date(), timezone).toISOString()
+    };
   }
 
   route("GET", "/api/schedules", async (ctx) => {
@@ -1445,10 +1453,11 @@ export function createApp(deps: AppDeps): App {
       });
     }
     enforce(ctx.principal, "config:edit_tenant", { tenantId: body.tenantId });
-    const next = scheduleNextRun(body.cron);
+    const tz = typeof body.timezone === "string" ? body.timezone : "UTC";
+    const next = scheduleNextRun(body.cron, tz);
     if (!next.ok) {
       return error(422, "validation_failed", {
-        issues: [{ path: "cron", message: `invalid cron expression: ${body.cron}` }]
+        issues: [{ path: "cron", message: next.message }]
       });
     }
     const row: ScheduleRow = {
@@ -1459,7 +1468,7 @@ export function createApp(deps: AppDeps): App {
       activationLabel:
         typeof body.activationLabel === "string" ? body.activationLabel : null,
       cron: body.cron,
-      timezone: typeof body.timezone === "string" ? body.timezone : "UTC",
+      timezone: tz,
       input: isObject(body.input) ? body.input : {},
       enabled: body.enabled !== false,
       lastRunAt: null,
@@ -1487,10 +1496,12 @@ export function createApp(deps: AppDeps): App {
     if (isObject(body.input)) patch.input = body.input;
     if (typeof body.enabled === "boolean") patch.enabled = body.enabled;
     if (typeof body.cron === "string") {
-      const next = scheduleNextRun(body.cron);
+      // Honour the (possibly updated) timezone when recomputing nextRunAt.
+      const tz = patch.timezone ?? before.timezone;
+      const next = scheduleNextRun(body.cron, tz);
       if (!next.ok) {
         return error(422, "validation_failed", {
-          issues: [{ path: "cron", message: `invalid cron expression: ${body.cron}` }]
+          issues: [{ path: "cron", message: next.message }]
         });
       }
       patch.cron = body.cron;

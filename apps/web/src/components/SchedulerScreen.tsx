@@ -6,6 +6,7 @@ import {
   composeCron,
   describeCron,
   parseCron,
+  previewNextRuns,
   validateCron,
   type CronParts
 } from "../lib/cron.ts";
@@ -25,11 +26,36 @@ function errText(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }
 
+/** Compact UUID for the table: first 8 chars + ellipsis, full id on hover. */
+function shortId(id: string | undefined | null): string {
+  if (!id) return "—";
+  return id.length > 12 ? `${id.slice(0, 8)}…` : id;
+}
+
+/** "in 3m", "in 2h 14m", "in 6d", "just now", "5m ago" — readable next-run. */
+function relativeTime(iso: string | null | undefined, now = Date.now()): string {
+  if (!iso) return "—";
+  const t = Date.parse(iso);
+  if (Number.isNaN(t)) return iso;
+  const delta = t - now;
+  const abs = Math.abs(delta);
+  const sec = Math.round(abs / 1000);
+  const min = Math.round(sec / 60);
+  const hr = Math.floor(min / 60);
+  const rem = min % 60;
+  let body: string;
+  if (sec < 30) body = "just now";
+  else if (min < 60) body = `${min}m`;
+  else if (hr < 48) body = rem > 0 ? `${hr}h ${rem}m` : `${hr}h`;
+  else body = `${Math.round(hr / 24)}d`;
+  if (body === "just now") return body;
+  return delta > 0 ? `in ${body}` : `${body} ago`;
+}
+
 /**
- * Scheduler: lists schedules (filterable by tenant/pipeline), creates new
- * ones with a small visual cron builder (5 field inputs + raw string + a few
- * presets), and supports enable/disable/delete. Server 422 cron errors are
- * surfaced inline.
+ * Scheduler: a two-column layout — the create form on the left, a live
+ * next-runs preview on the right (powered by croner so it matches what the
+ * server will compute), and a clean schedules table below.
  */
 export function SchedulerScreen() {
   const qc = useQueryClient();
@@ -52,6 +78,7 @@ export function SchedulerScreen() {
   const [timezone, setTimezone] = useState("UTC");
   const [inputJson, setInputJson] = useState("{}");
   const [enabled, setEnabled] = useState(true);
+  const [showAdvanced, setShowAdvanced] = useState(false);
   const [formError, setFormError] = useState<string | undefined>();
 
   const tenants = useTenants();
@@ -70,6 +97,13 @@ export function SchedulerScreen() {
   });
 
   const cronCheck = useMemo(() => validateCron(rawCron), [rawCron]);
+  const upcoming = useMemo(
+    () =>
+      cronCheck.valid
+        ? previewNextRuns(rawCron, 5, timezone || "UTC")
+        : undefined,
+    [rawCron, timezone, cronCheck.valid]
+  );
 
   function setPart(field: keyof CronParts, value: string) {
     const next = { ...parts, [field]: value };
@@ -141,185 +175,284 @@ export function SchedulerScreen() {
       isLoading={schedules.isLoading}
       error={schedules.error}
     >
-      <h2>Create schedule</h2>
-      <form className="inline-form" onSubmit={submit}>
-        <select
-          value={tenantId}
-          onChange={(e) => {
-            setTenantId(e.target.value);
-            // Scope POST /api/schedules to the chosen tenant.
-            api.setTenant(e.target.value || undefined);
-          }}
-          required
-        >
-          <option value="">tenant…</option>
-          {(tenants.data?.tenants ?? []).map((t) => (
-            <option key={t.id} value={t.id}>
-              {t.slug ? `${t.slug} — ${t.name}` : t.name}
-            </option>
-          ))}
-        </select>
-        <select
-          value={pipelineId}
-          onChange={(e) => setPipelineId(e.target.value)}
-          required
-        >
-          <option value="">pipeline…</option>
-          {(pipelines.data?.pipelines ?? []).map((p) => (
-            <option key={p.id} value={p.id}>
-              {p.name}
-            </option>
-          ))}
-        </select>
-        <EnvironmentSelect
-          environments={envs.environments}
-          value={environment}
-          onChange={setEnvironment}
-          isLoading={envs.isLoading}
-        />
-        <input
-          placeholder="activation label (optional)"
-          value={activationLabel}
-          onChange={(e) => setActivationLabel(e.target.value)}
-          style={{ width: 160 }}
-        />
-        <input
-          placeholder="timezone"
-          value={timezone}
-          onChange={(e) => setTimezone(e.target.value)}
-          style={{ width: 90 }}
-        />
-        <label>
-          enabled
-          <input
-            type="checkbox"
-            checked={enabled}
-            onChange={(e) => setEnabled(e.target.checked)}
-          />
-        </label>
+      <form className="sched-create" onSubmit={submit}>
+        <div className="sched-grid">
+          <section className="card">
+            <header className="card-head">
+              <strong>Target</strong>
+              <span className="muted">where this schedule fires</span>
+            </header>
+            <div className="field">
+              <label>Tenant</label>
+              <select
+                value={tenantId}
+                onChange={(e) => {
+                  setTenantId(e.target.value);
+                  // Scope POST /api/schedules to the chosen tenant.
+                  api.setTenant(e.target.value || undefined);
+                }}
+                required
+              >
+                <option value="">Select a tenant…</option>
+                {(tenants.data?.tenants ?? []).map((t) => (
+                  <option key={t.id} value={t.id}>
+                    {t.slug ? `${t.slug} — ${t.name}` : t.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div className="field">
+              <label>Pipeline</label>
+              <select
+                value={pipelineId}
+                onChange={(e) => setPipelineId(e.target.value)}
+                required
+              >
+                <option value="">Select a pipeline…</option>
+                {(pipelines.data?.pipelines ?? []).map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div className="field-row">
+              <div className="field">
+                <label>Environment</label>
+                <EnvironmentSelect
+                  environments={envs.environments}
+                  value={environment}
+                  onChange={setEnvironment}
+                  isLoading={envs.isLoading}
+                />
+              </div>
+              <div className="field">
+                <label>Activation label</label>
+                <input
+                  placeholder="optional"
+                  value={activationLabel}
+                  onChange={(e) => setActivationLabel(e.target.value)}
+                />
+              </div>
+            </div>
+          </section>
+
+          <section className="card">
+            <header className="card-head">
+              <strong>Schedule</strong>
+              <span className="muted">{describeCron(rawCron)}</span>
+            </header>
+            <div className="field">
+              <label>Cron expression</label>
+              <input
+                value={rawCron}
+                onChange={(e) => setRaw(e.target.value)}
+                className="cron-input"
+                spellCheck={false}
+                aria-invalid={!cronCheck.valid}
+              />
+              {!cronCheck.valid && (
+                <div className="error small">{cronCheck.errors.join(" ")}</div>
+              )}
+            </div>
+            <div className="preset-chips">
+              {CRON_PRESETS.map((p) => (
+                <button
+                  key={p.cron}
+                  type="button"
+                  className={
+                    "chip" + (rawCron === p.cron ? " chip-selected" : "")
+                  }
+                  onClick={() => applyPreset(p.cron)}
+                  title={p.cron}
+                >
+                  {p.label}
+                </button>
+              ))}
+            </div>
+            <div className="field-row">
+              <div className="field">
+                <label>Timezone (IANA)</label>
+                <input
+                  value={timezone}
+                  onChange={(e) => setTimezone(e.target.value)}
+                  placeholder="UTC"
+                />
+              </div>
+              <div className="field check-field">
+                <label>
+                  <input
+                    type="checkbox"
+                    checked={enabled}
+                    onChange={(e) => setEnabled(e.target.checked)}
+                  />
+                  Enabled on create
+                </label>
+              </div>
+            </div>
+            <button
+              type="button"
+              className="link-btn"
+              onClick={() => setShowAdvanced((s) => !s)}
+            >
+              {showAdvanced ? "Hide field-by-field editor" : "Advanced: edit fields"}
+            </button>
+            {showAdvanced && (
+              <div className="cron-fields">
+                {(["minute", "hour", "dom", "month", "dow"] as const).map((f) => (
+                  <label key={f}>
+                    <span>{f}</span>
+                    <input
+                      value={parts[f]}
+                      onChange={(e) => setPart(f, e.target.value)}
+                    />
+                  </label>
+                ))}
+              </div>
+            )}
+          </section>
+
+          <section className="card preview-card">
+            <header className="card-head">
+              <strong>Next runs</strong>
+              <span className="muted">{timezone || "UTC"}</span>
+            </header>
+            {upcoming && upcoming.length > 0 ? (
+              <ol className="preview-list">
+                {upcoming.map((d) => (
+                  <li key={d.toISOString()}>
+                    <code>{d.toISOString().replace(/\.\d+Z$/, "Z")}</code>
+                    <span className="muted small">
+                      {relativeTime(d.toISOString())}
+                    </span>
+                  </li>
+                ))}
+              </ol>
+            ) : (
+              <p className="muted">
+                {cronCheck.valid
+                  ? "No upcoming runs match this expression."
+                  : "Fix the cron expression to see a preview."}
+              </p>
+            )}
+          </section>
+
+          <section className="card">
+            <header className="card-head">
+              <strong>Input</strong>
+              <span className="muted">JSON passed to every run</span>
+            </header>
+            <textarea
+              value={inputJson}
+              onChange={(e) => setInputJson(e.target.value)}
+              className="json-input"
+              spellCheck={false}
+            />
+          </section>
+        </div>
+
+        <div className="sched-actions">
+          <button
+            type="submit"
+            className="primary"
+            disabled={
+              create.isPending || !tenantId || !pipelineId || !cronCheck.valid
+            }
+          >
+            {create.isPending ? "Creating…" : "Create schedule"}
+          </button>
+          {formError && <span className="error">{formError}</span>}
+        </div>
       </form>
 
-      <div className="cron-builder">
-        {(["minute", "hour", "dom", "month", "dow"] as const).map((f) => (
-          <label key={f}>
-            {f}
-            <input
-              value={parts[f]}
-              onChange={(e) => setPart(f, e.target.value)}
-              style={{ width: 64 }}
-            />
-          </label>
-        ))}
-        <label>
-          raw cron
+      <header className="section-head">
+        <h2>Schedules</h2>
+        <div className="filters">
           <input
-            value={rawCron}
-            onChange={(e) => setRaw(e.target.value)}
-            style={{ width: 160, fontFamily: "ui-monospace, Menlo, monospace" }}
+            placeholder="filter by tenant id"
+            value={filterTenant}
+            onChange={(e) => setFilterTenant(e.target.value)}
           />
-        </label>
-        <span className={cronCheck.valid ? "muted" : "error"}>
-          {cronCheck.valid ? describeCron(rawCron) : cronCheck.errors.join(" ")}
-        </span>
-      </div>
-      <div className="inline-form">
-        {CRON_PRESETS.map((p) => (
-          <button
-            key={p.cron}
-            type="button"
-            onClick={() => applyPreset(p.cron)}
-          >
-            {p.label}
-          </button>
-        ))}
-      </div>
-      <div className="inline-form">
-        <label style={{ flexDirection: "column", alignItems: "flex-start" }}>
-          input JSON
-          <textarea
-            value={inputJson}
-            onChange={(e) => setInputJson(e.target.value)}
-            style={{ minHeight: 60, width: 320 }}
+          <input
+            placeholder="filter by pipeline id"
+            value={filterPipeline}
+            onChange={(e) => setFilterPipeline(e.target.value)}
           />
-        </label>
-        <button
-          type="button"
-          disabled={create.isPending || !tenantId || !pipelineId}
-          onClick={submit}
-        >
-          Create schedule
-        </button>
-      </div>
-      {formError && <p className="error">{formError}</p>}
+        </div>
+      </header>
 
-      <h2>Schedules</h2>
-      <div className="inline-form">
-        <input
-          placeholder="filter tenant id"
-          value={filterTenant}
-          onChange={(e) => setFilterTenant(e.target.value)}
-        />
-        <input
-          placeholder="filter pipeline id"
-          value={filterPipeline}
-          onChange={(e) => setFilterPipeline(e.target.value)}
-        />
-      </div>
-      <table className="grid">
+      <table className="grid sched-grid-table">
         <thead>
           <tr>
-            <th>Tenant</th>
             <th>Pipeline</th>
             <th>Env</th>
-            <th>Activation</th>
             <th>Cron</th>
             <th>TZ</th>
-            <th>Enabled</th>
             <th>Next run</th>
             <th>Last run</th>
+            <th>Status</th>
             <th />
           </tr>
         </thead>
         <tbody>
           {rows.length === 0 && (
             <tr>
-              <td colSpan={10} className="muted">
-                No schedules.
+              <td colSpan={8} className="muted">
+                No schedules yet.
               </td>
             </tr>
           )}
           {rows.map((s) => (
             <tr key={s.id}>
-              <td>{s.tenantId}</td>
-              <td>{s.pipelineId}</td>
+              <td>
+                <div className="cell-stack">
+                  <code title={s.pipelineId}>{shortId(s.pipelineId)}</code>
+                  <span className="muted small" title={s.tenantId}>
+                    tenant {shortId(s.tenantId)}
+                  </span>
+                </div>
+              </td>
               <td>{s.environment}</td>
-              <td>{s.activationLabel ?? "-"}</td>
-              <td style={{ fontFamily: "ui-monospace, Menlo, monospace" }}>
-                {s.cron}
+              <td>
+                <code className="mono">{s.cron}</code>
+                {s.activationLabel && (
+                  <div className="muted small">@{s.activationLabel}</div>
+                )}
               </td>
               <td>{s.timezone}</td>
-              <td>{s.enabled ? "yes" : "no"}</td>
-              <td className="muted">{s.nextRunAt ?? "-"}</td>
-              <td className="muted">{s.lastRunAt ?? "-"}</td>
+              <td title={s.nextRunAt ?? ""}>{relativeTime(s.nextRunAt)}</td>
+              <td title={s.lastRunAt ?? ""}>{relativeTime(s.lastRunAt)}</td>
               <td>
-                <button
-                  className="link-btn"
-                  onClick={() =>
-                    toggle.mutate({ id: s.id, enabled: !s.enabled })
+                <span
+                  className={
+                    "status " +
+                    (s.enabled ? "status-succeeded" : "status-cancelled")
                   }
                 >
-                  {s.enabled ? "Disable" : "Enable"}
-                </button>{" "}
-                <button
-                  className="link-btn"
-                  onClick={() => {
-                    if (window.confirm("Delete this schedule?")) {
-                      remove.mutate(s.id);
+                  {s.enabled ? "enabled" : "paused"}
+                </span>
+              </td>
+              <td>
+                <div className="row-actions">
+                  <button
+                    className="link-btn"
+                    onClick={() =>
+                      toggle.mutate({ id: s.id, enabled: !s.enabled })
                     }
-                  }}
-                >
-                  Delete
-                </button>
+                  >
+                    {s.enabled ? "Pause" : "Enable"}
+                  </button>
+                  <button
+                    className="link-btn danger"
+                    onClick={() => {
+                      if (window.confirm("Delete this schedule?")) {
+                        remove.mutate(s.id);
+                      }
+                    }}
+                  >
+                    Delete
+                  </button>
+                </div>
               </td>
             </tr>
           ))}

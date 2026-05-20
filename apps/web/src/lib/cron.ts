@@ -1,15 +1,14 @@
 /**
- * Pure, DOM-free helpers for the Scheduler's small visual cron builder.
+ * Pure, DOM-free helpers for the Scheduler's small visual cron builder, plus
+ * a `previewNextRuns` powered by croner so the form shows real schedule
+ * predictions (matching what the server will compute).
  *
  * We model a standard 5-field Vixie/POSIX cron (minute hour dom month dow).
  * The builder edits each field as a free string (star, "0", step, list) and
- * these helpers compose/parse the joined expression plus do a light
- * client-side sanity check so obvious mistakes are caught before the server's
- * authoritative parseCron 422.
- *
- * No React/DOM imports so this is unit-testable with `node --test`, zero
- * install.
+ * the compose/parse/validate helpers stay free of croner so they're unit-
+ * testable. croner is bundled by the web build.
  */
+import { Cron } from "croner";
 
 /** The five cron positions, in order. */
 export const CRON_FIELDS = ["minute", "hour", "dom", "month", "dow"] as const;
@@ -122,6 +121,41 @@ export const CRON_PRESETS: Array<{ label: string; cron: string }> = [
   { label: "Weekly (Mon 00:00)", cron: "0 0 * * 1" },
   { label: "Monthly (1st 00:00)", cron: "0 0 1 * *" }
 ];
+
+/**
+ * Real next-runs preview via croner (matches what the server schedules).
+ * Returns `undefined` when croner rejects the input or the timezone is bogus,
+ * so the UI can render a "—" placeholder instead of a misleading prediction.
+ */
+export function previewNextRuns(
+  cron: string,
+  count: number,
+  timezone?: string,
+  from: Date = new Date()
+): Date[] | undefined {
+  if (!validateCron(cron).valid) return undefined;
+  if (timezone) {
+    try {
+      new Intl.DateTimeFormat("en-US", { timeZone: timezone });
+    } catch {
+      return undefined;
+    }
+  }
+  try {
+    const c = new Cron(cron, timezone ? { timezone } : undefined);
+    const out: Date[] = [];
+    let cursor: Date | null = from;
+    for (let i = 0; i < count; i += 1) {
+      const next: Date | null = c.nextRun(cursor ?? undefined);
+      if (!next) break;
+      out.push(next);
+      cursor = next;
+    }
+    return out;
+  } catch {
+    return undefined;
+  }
+}
 
 /** Very rough English gloss of a cron string for the form preview. */
 export function describeCron(cron: string): string {

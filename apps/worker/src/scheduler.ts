@@ -88,7 +88,7 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
       }
       let nextIso: string;
       try {
-        nextIso = nextAfter(schedule.cron, now()).toISOString();
+        nextIso = nextAfter(schedule.cron, now(), schedule.timezone).toISOString();
       } catch (error) {
         logger?.warn("scheduler: skipping schedule with invalid cron during prime", {
           scheduleId: schedule.id,
@@ -124,7 +124,7 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
       // not crash the whole tick (skip just this schedule).
       let nextIso: string | null;
       try {
-        nextIso = nextAfter(schedule.cron, at).toISOString();
+        nextIso = nextAfter(schedule.cron, at, schedule.timezone).toISOString();
       } catch (error) {
         logger?.warn("scheduler: skipping due schedule with invalid cron", {
           scheduleId: schedule.id,

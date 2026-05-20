@@ -88,6 +88,17 @@ and clears from the address bar.
 | `RAGDOLL_DEV_AUTH=1` | re-enable the insecure `x-roles` dev provider (non-prod only) |
 | `SESSION_SECRET` | HMAC key for session tokens (set a strong value) |
 
+## URLs and deep links
+
+The web app is a React Router SPA on real paths — `/pipelines`, `/users`,
+`/builder/<pipelineId>`, etc. Browser **back / forward** and **refresh** work
+on every screen, and any URL is a shareable bookmark. Deep-linking while
+signed out shows the login page at that URL; after sign-in you land back on
+the requested view (no redirect dance needed — the URL is never touched on
+the login screen). Nginx (`infra/docker/nginx.conf`) already does the SPA
+`try_files` fallback so unknown paths serve `index.html` and the router
+resolves them.
+
 ## Operational notes
 
 - Sessions are stateless; "sign out" discards the client token. Disabling or
