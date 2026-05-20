@@ -13,6 +13,8 @@ import {
 import { useTenants } from "./useTenants.tsx";
 import { useEnvironments, EnvironmentSelect } from "./useEnvironments.tsx";
 import { Screen } from "./Screen.tsx";
+import { EmptyState } from "./help/EmptyState.tsx";
+import { FieldHelp } from "./help/FieldHelp.tsx";
 
 function errText(e: unknown): string {
   if (e instanceof ApiError) {
@@ -243,7 +245,18 @@ export function SchedulerScreen() {
               <span className="muted">{describeCron(rawCron)}</span>
             </header>
             <div className="field">
-              <label>Cron expression</label>
+              <label>
+                Cron expression
+                <FieldHelp ariaLabel="About cron expressions">
+                  <p>
+                    Five-field crontab: <code>minute hour dom month dow</code>.
+                    Server-side parsing uses{" "}
+                    <code>croner</code> so a 6-field "seconds" expression also
+                    works. Pair it with the Timezone field below for DST-safe
+                    schedules.
+                  </p>
+                </FieldHelp>
+              </label>
               <input
                 value={rawCron}
                 onChange={(e) => setRaw(e.target.value)}
@@ -381,27 +394,43 @@ export function SchedulerScreen() {
         </div>
       </header>
 
-      <table className="grid sched-grid-table">
-        <thead>
-          <tr>
-            <th>Pipeline</th>
-            <th>Env</th>
-            <th>Cron</th>
-            <th>TZ</th>
-            <th>Next run</th>
-            <th>Last run</th>
-            <th>Status</th>
-            <th />
-          </tr>
-        </thead>
-        <tbody>
-          {rows.length === 0 && (
+      {rows.length === 0 ? (
+        <EmptyState
+          icon="⏰"
+          title="No schedules yet"
+          body={
+            <>
+              Schedules fire a pipeline on a cron expression — useful for
+              recurring ingestion or warm-up jobs. Pick a tenant, pipeline,
+              and environment above, then choose a preset (or write your own
+              cron) and click <strong>Create schedule</strong>.
+            </>
+          }
+          action={{
+            label: "Create your first schedule",
+            onClick: () => {
+              const el = document.querySelector<HTMLSelectElement>(
+                ".sched-create select"
+              );
+              el?.focus();
+            }
+          }}
+        />
+      ) : (
+        <table className="grid sched-grid-table">
+          <thead>
             <tr>
-              <td colSpan={8} className="muted">
-                No schedules yet.
-              </td>
+              <th>Pipeline</th>
+              <th>Env</th>
+              <th>Cron</th>
+              <th>TZ</th>
+              <th>Next run</th>
+              <th>Last run</th>
+              <th>Status</th>
+              <th />
             </tr>
-          )}
+          </thead>
+          <tbody>
           {rows.map((s) => (
             <tr key={s.id}>
               <td>
@@ -456,8 +485,9 @@ export function SchedulerScreen() {
               </td>
             </tr>
           ))}
-        </tbody>
-      </table>
+          </tbody>
+        </table>
+      )}
     </Screen>
   );
 }
