@@ -1302,9 +1302,13 @@ export function createApp(deps: AppDeps): App {
       deployedBy: ctx.principal.id,
       deployedAt: nowIso()
     };
-    const created = await deps.deployments.create(deploymentRow);
-    await audit(ctx, "pipeline.deploy", "pipeline_deployment", created.id, undefined, created);
-    return ok({ deployment: created }, 201);
+    // Upsert keyed on (pipeline_id, environment, tenant_id) — the unique
+    // index. Re-deploying the same pipeline to the same env/tenant must
+    // swap the active version in place; a plain INSERT here would always
+    // 409 on the second deploy.
+    const saved = await deps.deployments.upsertActive(deploymentRow);
+    await audit(ctx, "pipeline.deploy", "pipeline_deployment", saved.id, undefined, saved);
+    return ok({ deployment: saved }, 201);
   });
 
   // ---- tenant <-> pipeline associations + activations ---------------------

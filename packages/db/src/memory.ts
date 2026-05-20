@@ -271,6 +271,31 @@ export class InMemoryPipelineDeploymentRepository
   async listByPipeline(pipelineId: UUID): Promise<PipelineDeploymentRow[]> {
     return (await this.list()).filter((row) => row.pipelineId === pipelineId);
   }
+  /**
+   * Mirror of the Postgres unique-key UPSERT. Finds an existing row with the
+   * same `(pipelineId, environment, tenantId)` triple and overwrites its
+   * version / actor / timestamp in place (keeping the original `id` so audit
+   * log references stay valid). Inserts a new row when nothing matches.
+   */
+  async upsertActive(
+    row: PipelineDeploymentRow
+  ): Promise<PipelineDeploymentRow> {
+    const existing = (await this.list()).find(
+      (candidate) =>
+        candidate.pipelineId === row.pipelineId &&
+        candidate.environment === row.environment &&
+        (candidate.tenantId ?? null) === (row.tenantId ?? null)
+    );
+    if (existing) {
+      return this.update(existing.id, {
+        pipelineVersionId: row.pipelineVersionId,
+        status: "active",
+        deployedBy: row.deployedBy,
+        deployedAt: row.deployedAt
+      });
+    }
+    return this.create(row);
+  }
 }
 
 export class InMemoryPipelineFolderRepository
