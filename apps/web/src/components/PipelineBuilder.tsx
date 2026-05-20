@@ -41,6 +41,7 @@ import { PalettePanel } from "./PalettePanel.tsx";
 import { FlowNodeCard } from "./FlowNodeCard.tsx";
 import { PluginEditorSlot } from "./PluginEditorSlot.tsx";
 import { SecretsEditor } from "./SecretsEditor.tsx";
+import { NodeDocsTab } from "./builder/NodeDocsTab.tsx";
 import { BuilderConsole, useConsoleLog } from "./BuilderConsole.tsx";
 import { TenantSelect, useSelectedTenant } from "./useTenants.tsx";
 import { useEnvironments, EnvironmentSelect } from "./useEnvironments.tsx";
@@ -178,6 +179,11 @@ export function PipelineBuilder(props: {
   const [openedViaTree, setOpenedViaTree] = useState(false);
   const clog = useConsoleLog();
   const [inspectorWidth, setInspectorWidth] = useState(360);
+  // Inspector tab selection. Sticky inside the session — selecting a new node
+  // keeps the previously-active tab so a "compare configs across nodes" flow
+  // doesn't drop the user back on Config every time.
+  const [inspectorTab, setInspectorTab] =
+    useState<"config" | "resolved" | "docs">("config");
   // The pipeline id we last loaded a spec for, so the editing-load effect
   // only fires once per "Edit" hand-off from the Pipelines tree.
   const loadedFor = useRef<string | undefined>(undefined);
@@ -1091,25 +1097,83 @@ export function PipelineBuilder(props: {
         />
         <aside className="inspector">
           <h2>Inspector</h2>
-          {!selectedNode && <p className="muted">Select a node to edit its plugin ref, config and secrets.</p>}
+          {!selectedNode && (
+            <p className="muted">
+              Select a node to edit its plugin ref, config and secrets.
+            </p>
+          )}
           {selectedNode && (
-            <>
-              <p>
-                Node <strong>{selectedNode.id}</strong>{" "}
-                {selectedNode.type ? `(${selectedNode.type})` : ""}
-              </p>
+            <p>
+              Node <strong>{selectedNode.id}</strong>{" "}
+              {selectedNode.type ? `(${selectedNode.type})` : ""}
               {selectedNode.plugin && (
-                <p className="muted">
-                  {selectedNode.plugin.category} / {selectedNode.plugin.id} @{" "}
-                  {selectedNode.plugin.version}
-                </p>
+                <>
+                  <br />
+                  <span className="muted">
+                    {selectedNode.plugin.category} / {selectedNode.plugin.id} @{" "}
+                    {selectedNode.plugin.version}
+                  </span>
+                </>
               )}
-              {!selectedNode.type && (
+            </p>
+          )}
+
+          {/* Three tabs: Config (default — edit), Resolved (preview the
+              merged config/spec/test input), Docs (per-plugin reference). */}
+          <div
+            className="inspector-tabs"
+            role="tablist"
+            aria-label="Inspector sections"
+          >
+            <button
+              role="tab"
+              type="button"
+              aria-selected={inspectorTab === "config"}
+              className={
+                "inspector-tab" +
+                (inspectorTab === "config" ? " active" : "")
+              }
+              onClick={() => setInspectorTab("config")}
+            >
+              Config
+            </button>
+            <button
+              role="tab"
+              type="button"
+              aria-selected={inspectorTab === "resolved"}
+              className={
+                "inspector-tab" +
+                (inspectorTab === "resolved" ? " active" : "")
+              }
+              onClick={() => setInspectorTab("resolved")}
+            >
+              Resolved
+            </button>
+            <button
+              role="tab"
+              type="button"
+              aria-selected={inspectorTab === "docs"}
+              className={
+                "inspector-tab" + (inspectorTab === "docs" ? " active" : "")
+              }
+              onClick={() => setInspectorTab("docs")}
+            >
+              Docs
+            </button>
+          </div>
+
+          {inspectorTab === "config" && (
+            <div className="inspector-tab-panel" role="tabpanel">
+              {selectedNode && !selectedNode.type && (
                 <>
                   <label>Plugin ref (JSON)</label>
                   <textarea
                     key={`plugin-${selectedNode.id}`}
-                    defaultValue={JSON.stringify(selectedNode.plugin ?? {}, null, 2)}
+                    defaultValue={JSON.stringify(
+                      selectedNode.plugin ?? {},
+                      null,
+                      2
+                    )}
                     onBlur={(e) => {
                       try {
                         const plugin = JSON.parse(e.target.value);
@@ -1144,38 +1208,70 @@ export function PipelineBuilder(props: {
                   />
                 </>
               )}
-              <button onClick={deleteSelected}>Delete node</button>
-            </>
+              {selectedNode && (
+                <button onClick={deleteSelected}>Delete node</button>
+              )}
+              {!selectedNode && (
+                <p className="muted">
+                  Click a node on the canvas to edit it.
+                </p>
+              )}
+            </div>
           )}
-          <h2>Required config</h2>
-          <pre>{requiredConfig.join("\n") || "(none)"}</pre>
-          <h2>Required secrets</h2>
-          <pre>{requiredSecrets.join("\n") || "(none)"}</pre>
-          <h2>
-            Resolved Config{" "}
-            <button
-              type="button"
-              className="link-btn"
-              onClick={refreshResolved}
-              title="Re-resolve config and log the result to the Console"
-            >
-              refresh
-            </button>
-          </h2>
-          {resolved.isError && (
-            <p className="muted">
-              Unable to resolve (
-              {resolved.error instanceof ApiError
-                ? `HTTP ${resolved.error.status}`
-                : "API unavailable"}
-              ).
-            </p>
+
+          {inspectorTab === "resolved" && (
+            <div className="inspector-tab-panel" role="tabpanel">
+              <h3>Required config</h3>
+              <pre>{requiredConfig.join("\n") || "(none)"}</pre>
+              <h3>Required secrets</h3>
+              <pre>{requiredSecrets.join("\n") || "(none)"}</pre>
+              <h3>
+                Resolved Config{" "}
+                <button
+                  type="button"
+                  className="link-btn"
+                  onClick={refreshResolved}
+                  title="Re-resolve config and log the result to the Console"
+                >
+                  refresh
+                </button>
+              </h3>
+              {resolved.isError && (
+                <p className="muted">
+                  Unable to resolve (
+                  {resolved.error instanceof ApiError
+                    ? `HTTP ${resolved.error.status}`
+                    : "API unavailable"}
+                  ).
+                </p>
+              )}
+              <pre>{JSON.stringify(resolved.data?.values ?? {}, null, 2)}</pre>
+              <h3>Resolved spec preview</h3>
+              <pre>{JSON.stringify(resolvedSpec.spec.nodes, null, 2)}</pre>
+              <h3>Test Input (JSON)</h3>
+              <textarea
+                value={testInput}
+                onChange={(e) => setTestInput(e.target.value)}
+              />
+            </div>
           )}
-          <pre>{JSON.stringify(resolved.data?.values ?? {}, null, 2)}</pre>
-          <h2>Resolved spec preview</h2>
-          <pre>{JSON.stringify(resolvedSpec.spec.nodes, null, 2)}</pre>
-          <h2>Test Input (JSON)</h2>
-          <textarea value={testInput} onChange={(e) => setTestInput(e.target.value)} />
+
+          {inspectorTab === "docs" && (
+            <div className="inspector-tab-panel" role="tabpanel">
+              {selectedNode?.plugin ? (
+                <NodeDocsTab
+                  plugin={selectedPlugin.data}
+                  loading={selectedPlugin.isLoading}
+                  error={selectedPlugin.isError}
+                />
+              ) : (
+                <p className="muted">
+                  Select a plugin-backed node to see its docs. System nodes
+                  (input/output) have no plugin manifest.
+                </p>
+              )}
+            </div>
+          )}
         </aside>
       </div>
       <BuilderConsole log={clog} />

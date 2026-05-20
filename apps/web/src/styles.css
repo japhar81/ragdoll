@@ -1768,3 +1768,139 @@ kbd {
   font-size: 10px;
 }
 .sidebar-help .link-btn { color: #93c5fd; align-self: flex-start; }
+
+/* ---- Builder inspector tabs --------------------------------------------- */
+/* Three-tab layout (Config / Resolved / Docs) inside the inspector aside.
+   Pinned just under the inspector title so the content scrolls but the tab
+   row stays visible. */
+.inspector-tabs {
+  display: flex;
+  gap: 2px;
+  border-bottom: 1px solid #e5e7eb;
+  margin: 8px 0 12px;
+  position: sticky;
+  top: 0;
+  background: #fff;
+  z-index: 1;
+}
+.inspector-tab {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  padding: 8px 12px;
+  margin-bottom: -1px; /* overlap parent border so .active sits flush */
+  cursor: pointer;
+  color: #64748b;
+  font-size: 13px;
+  font-weight: 500;
+  border-bottom: 2px solid transparent;
+  border-radius: 6px 6px 0 0;
+}
+.inspector-tab:hover { color: #1e293b; background: #f8fafc; }
+.inspector-tab.active {
+  color: #1e293b;
+  border-bottom-color: #2563eb;
+  background: #fff;
+}
+.inspector-tab[aria-selected="true"] { font-weight: 600; }
+.inspector-tab-panel { display: flex; flex-direction: column; gap: 6px; }
+
+/* ---- Node docs tab (Builder inspector "Docs") --------------------------- */
+.node-docs {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  font-size: 13px;
+}
+.node-docs-head { display: flex; flex-direction: column; gap: 4px; }
+.node-docs-title { margin: 0; font-size: 14px; }
+.node-docs-title .muted { font-weight: 400; font-size: 12px; }
+.node-docs-caps {
+  margin: 2px 0 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.node-docs-chip {
+  background: #eff6ff;
+  color: #1d4ed8;
+  border: 1px solid #bfdbfe;
+  border-radius: 999px;
+  padding: 1px 8px;
+  font-size: 11px;
+  font-weight: 500;
+}
+.node-docs-desc { margin: 0; color: #334155; }
+.node-docs-section { display: flex; flex-direction: column; gap: 6px; }
+.node-docs-section h4 {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #475569;
+}
+.node-docs-required {
+  margin: 0;
+  padding-left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.node-docs-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+.node-docs-table th,
+.node-docs-table td {
+  text-align: left;
+  vertical-align: top;
+  padding: 6px 8px;
+  border-bottom: 1px solid #f1f5f9;
+}
+.node-docs-table th {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #64748b;
+  font-weight: 600;
+}
+.node-docs-table code { font-size: 11px; }
+.node-docs-required-tag {
+  display: inline-block;
+  margin-left: 6px;
+  font-size: 10px;
+  background: #fef3c7;
+  color: #92400e;
+  border-radius: 999px;
+  padding: 1px 6px;
+}
+.node-docs-sample {
+  background: #0f172a;
+  color: #e2e8f0;
+  padding: 10px 12px;
+  border-radius: 6px;
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.node-docs-md { font-size: 13px; line-height: 1.5; color: #1f2937; }
+.node-docs-md p { margin: 0 0 8px; }
+.node-docs-md h1,
+.node-docs-md h2,
+.node-docs-md h3 {
+  font-size: 13px;
+  margin: 10px 0 4px;
+}
+.node-docs-md ul { margin: 0 0 8px 18px; padding: 0; }
+.node-docs-md code { background: #f1f5f9; padding: 1px 4px; border-radius: 3px; }
+.node-docs-md pre code { background: transparent; padding: 0; }
+.node-docs-md pre {
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 4px;
+  padding: 8px 10px;
+  overflow: auto;
+  font-size: 12px;
+}

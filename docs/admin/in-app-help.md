@@ -30,6 +30,25 @@ The app has three discovery layers, each with a different commitment:
   it pre-tuned to the page you're on. Use the navigator on the left to jump
   between topics.
 
+## In the Builder: per-node Docs tab
+
+The pipeline Builder's right-hand inspector has three tabs:
+
+- **Config** (default) — the schema-driven config and secrets editors plus
+  the raw plugin-ref textarea, exactly as before.
+- **Resolved** — required config keys, required secrets, the live resolved
+  config object, the resolved spec, and the test-input editor used by the
+  Run button. Open this when something runs unexpectedly to see what the
+  control plane actually substituted in.
+- **Docs** — per-plugin reference for the selected node: a narrative
+  description (from `docs/plugins/<plugin_id>.md`), required-config and
+  required-secret lists derived from the manifest, every field with its
+  type/default/notes, and a copy-paste sample config built from the
+  schema defaults.
+
+System nodes (input/output) have no plugin manifest, so the Docs tab is
+empty for those.
+
 ## Keyboard shortcuts
 
 Press **`?`** anywhere outside a text field for the full list. The most
