@@ -18,6 +18,12 @@ export const sampleUppercaseTransformer: InProcessPlugin = {
       },
       additionalProperties: false
     },
+    inputPorts: [
+      { name: "text", description: "Default field uppercased. Override with `config.field` to target a different key." }
+    ],
+    outputPorts: [
+      { name: "text", description: "The configured field, uppercased." }
+    ],
     capabilities: ["query"],
     ui: {
       icon: "type",

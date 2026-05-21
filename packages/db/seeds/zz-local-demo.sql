@@ -24,8 +24,8 @@ INSERT INTO pipeline_versions (id, pipeline_id, version, status, spec, checksum,
     '00000000-0000-0000-0000-0000000d3010',
     '1.0.0',
     'published',
-    '{"apiVersion":"rag-platform/v1","kind":"Pipeline","metadata":{"name":"local-demo"},"spec":{"nodes":[{"id":"input","type":"input"},{"id":"prompt","plugin":{"category":"prompt_template","id":"basic_rag_prompt","version":"1.0.0"}},{"id":"llm","plugin":{"category":"llm","id":"provider_chat","version":"1.0.0"},"config":{"provider":"${config.llm.provider}","model":"${config.llm.model}","baseUrl":"${config.llm.base_url}"}},{"id":"output","type":"output"}],"edges":[{"from":"input","to":"prompt"},{"from":"prompt","to":"llm"},{"from":"llm","to":"output"}]}}'::jsonb,
-    '1ce895ad',
+    '{"apiVersion":"rag-platform/v1","kind":"Pipeline","metadata":{"name":"local-demo"},"spec":{"nodes":[{"id":"input","type":"input"},{"id":"prompt","plugin":{"category":"prompt_template","id":"basic_rag_prompt","version":"1.0.0"}},{"id":"llm","plugin":{"category":"llm","id":"provider_chat","version":"1.0.0"},"config":{"provider":"${config.llm.provider}","model":"${config.llm.model}","baseUrl":"${config.llm.base_url}"}},{"id":"output","type":"output"}],"edges":[{"from":"input","to":"prompt","fromPort":"question","toPort":"question"},{"from":"prompt","to":"llm","fromPort":"messages","toPort":"messages"},{"from":"llm","to":"output"}]}}'::jsonb,
+    '66fd87ed',
     now()
   )
 ON CONFLICT (pipeline_id, version) DO NOTHING;

@@ -339,49 +339,43 @@ button.palette-item:active {
   background: #f59e0b;
 }
 
+/* Cards with declared ports grow to give the body a clear column between
+ * the left/right label gutters. Without this, port names overlap the title
+ * and version rows. */
 .rf-node.has-ports {
-  min-height: 72px;
   position: relative;
+  min-width: 280px;
+  max-width: 360px;
+  min-height: 88px;
+  padding-left: 60px;
+  padding-right: 60px;
 }
 
-/* Port labels live OUTSIDE the card edge so they never collide with the
- * title/version body. The wrapper anchors to the card edge via right:100% /
- * left:100% and inherits the card height; each label is absolutely
- * positioned at its handle's vertical offset and hugs the card edge. */
 .rf-port-labels {
   position: absolute;
   top: 0;
   height: 100%;
+  width: 52px;
   pointer-events: none;
   font-size: 9px;
   color: #475569;
   line-height: 1;
-  width: max-content;
-  max-width: 110px;
 }
 .rf-port-labels-left {
-  right: 100%;
-  padding-right: 6px;
-  text-align: right;
+  left: 6px;
+  text-align: left;
 }
 .rf-port-labels-right {
-  left: 100%;
-  padding-left: 6px;
-  text-align: left;
+  right: 6px;
+  text-align: right;
 }
 .rf-port-label {
   position: absolute;
+  width: 100%;
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
   transform: translateY(-50%);
-  background: rgba(255, 255, 255, 0.85);
-  padding: 1px 3px;
-  border-radius: 3px;
-}
-.rf-port-labels-left .rf-port-label {
-  right: 6px;
-}
-.rf-port-labels-right .rf-port-label {
-  left: 6px;
 }
 
 textarea, pre {

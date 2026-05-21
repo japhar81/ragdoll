@@ -109,6 +109,9 @@ const CRAWL4AI_MANIFEST: PluginManifest = {
     properties: {},
     additionalProperties: false
   },
+  outputPorts: [
+    { name: "documents", description: "Array of crawled documents with markdown/text content + source URL." }
+  ],
   capabilities: ["ingestion"],
   ui: {
     icon: "spider",
@@ -176,6 +179,9 @@ const SCRAPY_MANIFEST: PluginManifest = {
     properties: {},
     additionalProperties: false
   },
+  outputPorts: [
+    { name: "documents", description: "Array of crawled documents with extracted content + source URL." }
+  ],
   capabilities: ["ingestion"],
   ui: {
     icon: "bug",

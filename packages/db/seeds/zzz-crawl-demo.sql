@@ -33,8 +33,8 @@ INSERT INTO pipeline_versions (id, pipeline_id, version, status, spec, checksum,
     '00000000-0000-0000-0000-0000000d3020',
     '1.0.0',
     'published',
-    '{"apiVersion":"rag-platform/v1","kind":"Pipeline","metadata":{"name":"web-crawl-demo"},"spec":{"nodes":[{"id":"input","type":"input"},{"id":"crawl","plugin":{"category":"datasource","id":"crawl4ai_crawler","version":"1.0.0"},"config":{"url":"https://www.cnn.com","maxPages":5,"maxDepth":1,"sameDomainOnly":true,"extract":"markdown","timeoutMs":60000}},{"id":"output","type":"output"}],"edges":[{"from":"input","to":"crawl"},{"from":"crawl","to":"output"}]}}'::jsonb,
-    'ea256ca9',
+    '{"apiVersion":"rag-platform/v1","kind":"Pipeline","metadata":{"name":"web-crawl-demo"},"spec":{"nodes":[{"id":"input","type":"input"},{"id":"crawl","plugin":{"category":"datasource","id":"crawl4ai_crawler","version":"1.0.0"},"config":{"url":"https://www.cnn.com","maxPages":5,"maxDepth":1,"sameDomainOnly":true,"extract":"markdown","timeoutMs":60000}},{"id":"output","type":"output"}],"edges":[{"from":"input","to":"crawl"},{"from":"crawl","to":"output","fromPort":"documents","toPort":"documents"}]}}'::jsonb,
+    '6064eec4',
     now()
   )
 ON CONFLICT (pipeline_id, version) DO NOTHING;
@@ -54,11 +54,12 @@ ON CONFLICT (pipeline_id, environment, tenant_id) DO NOTHING;
 
 -- -------------------------- crawl-summarize-demo --------------------------
 -- input -> retrieve (crawl4ai_crawler) -> prompt (basic_rag_prompt) ->
--- llm (provider_chat) -> output. The crawl node is deliberately id
--- "retrieve" so basic_rag_prompt reads `inputs.retrieve?.documents` (crawled
--- pages become the prompt context); the question comes from the input node
--- (`inputs.input?.question`). Reuses tenant-local's seeded Ollama config from
--- zz-local-demo.sql exactly like local-demo (no new config_values needed).
+-- llm (provider_chat) -> output. Explicit port wiring:
+--   input.question -> prompt.question (user question fans into the template)
+--   retrieve.documents -> prompt.documents (crawled pages become context)
+--   prompt.messages -> llm.messages (chat-style prompt for the model)
+-- Reuses tenant-local's seeded Ollama config from zz-local-demo.sql (no new
+-- config_values needed).
 
 INSERT INTO pipelines (id, slug, name, description) VALUES
   (
@@ -75,8 +76,8 @@ INSERT INTO pipeline_versions (id, pipeline_id, version, status, spec, checksum,
     '00000000-0000-0000-0000-0000000d3030',
     '1.0.0',
     'published',
-    '{"apiVersion":"rag-platform/v1","kind":"Pipeline","metadata":{"name":"crawl-summarize-demo"},"spec":{"nodes":[{"id":"input","type":"input"},{"id":"retrieve","plugin":{"category":"datasource","id":"crawl4ai_crawler","version":"1.0.0"},"config":{"url":"https://www.cnn.com","maxPages":5,"maxDepth":1,"sameDomainOnly":true,"extract":"markdown","timeoutMs":60000}},{"id":"prompt","plugin":{"category":"prompt_template","id":"basic_rag_prompt","version":"1.0.0"}},{"id":"llm","plugin":{"category":"llm","id":"provider_chat","version":"1.0.0"},"config":{"provider":"${config.llm.provider}","model":"${config.llm.model}","baseUrl":"${config.llm.base_url}"}},{"id":"output","type":"output"}],"edges":[{"from":"input","to":"retrieve"},{"from":"retrieve","to":"prompt"},{"from":"prompt","to":"llm"},{"from":"llm","to":"output"}]}}'::jsonb,
-    '3c21d7e0',
+    '{"apiVersion":"rag-platform/v1","kind":"Pipeline","metadata":{"name":"crawl-summarize-demo"},"spec":{"nodes":[{"id":"input","type":"input"},{"id":"retrieve","plugin":{"category":"datasource","id":"crawl4ai_crawler","version":"1.0.0"},"config":{"url":"https://www.cnn.com","maxPages":5,"maxDepth":1,"sameDomainOnly":true,"extract":"markdown","timeoutMs":60000}},{"id":"prompt","plugin":{"category":"prompt_template","id":"basic_rag_prompt","version":"1.0.0"}},{"id":"llm","plugin":{"category":"llm","id":"provider_chat","version":"1.0.0"},"config":{"provider":"${config.llm.provider}","model":"${config.llm.model}","baseUrl":"${config.llm.base_url}"}},{"id":"output","type":"output"}],"edges":[{"from":"input","to":"prompt","fromPort":"question","toPort":"question"},{"from":"input","to":"retrieve"},{"from":"retrieve","to":"prompt","fromPort":"documents","toPort":"documents"},{"from":"prompt","to":"llm","fromPort":"messages","toPort":"messages"},{"from":"llm","to":"output"}]}}'::jsonb,
+    'afa24a54',
     now()
   )
 ON CONFLICT (pipeline_id, version) DO NOTHING;

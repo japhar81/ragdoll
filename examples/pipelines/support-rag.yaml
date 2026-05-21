@@ -60,13 +60,27 @@ spec:
     - id: output
       type: output
   edges:
+    # Question fans out: retriever uses it to embed + query; prompt uses it
+    # to fill the template. Documents flow only from retriever into prompt.
     - from: input
       to: retrieve
+      fromPort: question
+      toPort: question
+    - from: input
+      to: prompt
+      fromPort: question
+      toPort: question
     - from: retrieve
       to: prompt
+      fromPort: documents
+      toPort: documents
     - from: prompt
       to: guardrail
+      fromPort: messages
+      toPort: messages
     - from: guardrail
       to: llm
+      fromPort: messages
+      toPort: messages
     - from: llm
       to: output

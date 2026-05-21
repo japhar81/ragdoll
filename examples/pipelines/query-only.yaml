@@ -33,9 +33,15 @@ spec:
   edges:
     - from: input
       to: prompt
+      fromPort: question
+      toPort: question
     - from: prompt
       to: llm
+      fromPort: messages
+      toPort: messages
     - from: llm
       to: parse
+      fromPort: text
+      toPort: text
     - from: parse
       to: output

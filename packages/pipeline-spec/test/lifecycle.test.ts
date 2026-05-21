@@ -50,7 +50,8 @@ test("support-rag.yaml parses to expected structure", () => {
   assert.equal(spec.metadata.name, "support-rag");
   assert.equal(spec.metadata.labels?.domain, "support");
   assert.equal(spec.spec.nodes.length, 6);
-  assert.equal(spec.spec.edges.length, 5);
+  // Port migration adds a parallel input → prompt edge for the question.
+  assert.equal(spec.spec.edges.length, 6);
 
   const params = spec.spec.parameters ?? [];
   assert.equal(params.length, 2);
@@ -70,10 +71,13 @@ test("support-rag.yaml parses to expected structure", () => {
   assert.deepEqual(guardrail?.config?.blockedKeywords, ["ignore previous instructions"]);
 });
 
-test("support-ingestion.yaml has 6 nodes and integer overlap scalar", () => {
+test("support-ingestion.yaml has 6 nodes, 6 edges, and integer overlap scalar", () => {
   const spec = loadPipelineSpecFromYaml(readExample(pipelinesDir, "support-ingestion.yaml"));
   assert.equal(spec.metadata.name, "support-ingestion");
   assert.equal(spec.spec.nodes.length, 6);
+  // Port migration adds a parallel chunk → write edge for chunks (write
+  // needs chunks AND vectors).
+  assert.equal(spec.spec.edges.length, 6);
   assert.equal(spec.metadata.labels?.mode, "ingestion");
   const chunk = spec.spec.nodes.find((n) => n.id === "chunk");
   assert.equal(chunk?.config?.overlap, 100);
