@@ -38,6 +38,28 @@ services:
       timeout: 3s
       retries: 20
 
+  # Prometheus exporter for Postgres. Scraped by the bundled OTel collector
+  # at postgres-exporter:9187; surfaces pg_stat_database / pg_locks / etc.
+  postgres-exporter:
+    image: quay.io/prometheuscommunity/postgres-exporter:v0.16.0
+    environment:
+      DATA_SOURCE_NAME: "postgresql://ragdoll:ragdoll@postgres:5432/ragdoll?sslmode=disable"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # Prometheus exporter for Redis. Scraped at redis-exporter:9121; surfaces
+  # redis_ops_per_sec / redis_memory_used_bytes / redis_connected_clients.
+  redis-exporter:
+    image: oliver006/redis_exporter:v1.62.0
+    environment:
+      REDIS_ADDR: redis://redis:6379
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
   qdrant:
     image: qdrant/qdrant:v1.13.4
     ports:
@@ -122,6 +144,11 @@ services:
       # Skip the bundled welcome dashboards; we ship our own.
       ENABLE_LOGS_GRAFANA: "true"
       ENABLE_LOGS_OTELCOL: "true"
+    # The bundled collector reads `docker_stats` from the host socket and
+    # tails every container's JSON log file via the `filelog` receiver. Both
+    # need to run as root inside the container, which is the default for
+    # this image — no `user:` override needed.
+    user: root
     ports:
       - "3300:3000"   # Grafana UI -> http://localhost:3300
       - "4317:4317"   # OTLP gRPC
@@ -130,6 +157,17 @@ services:
       - lgtm-data:/data
       - ../grafana/provisioning:/otel-lgtm/grafana/conf/provisioning:ro
       - ../grafana/dashboards:/etc/grafana/dashboards:ro
+      # Override the bundled OTel Collector config so we ingest container
+      # logs (filelog), container resource metrics (docker_stats), and
+      # the postgres / redis exporters (prometheus scrape). See
+      # infra/otel/otelcol-config.yaml for the full pipeline definition.
+      - ../otel/otelcol-config.yaml:/otel-lgtm/otelcol-config.yaml:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      # The collector's `container` filelog operator only recognizes the
+      # canonical /var/lib/docker/containers path layout — mount at the
+      # SAME path inside the container so it can derive container_id /
+      # container_name without a regex shim.
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
     healthcheck:
       # Grafana's /api/health returns {"database":"ok"} once everything inside
       # the LGTM container is up — the collector starts well before this. The

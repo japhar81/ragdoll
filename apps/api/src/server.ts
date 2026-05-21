@@ -446,14 +446,29 @@ async function main(): Promise<void> {
     requestCounter.add(1, metricLabels);
     requestDuration.record(durationMs, metricLabels);
 
-    logger.info("request", {
+    // Severity scales with outcome: 4xx is a warn, 5xx an error, slow but
+    // successful requests are warn'd separately so dashboards can alert on
+    // a slow-but-ok rate. Default-deny 401/403 are common during dev so
+    // they stay info; everything else 4xx escalates.
+    const status = response.status;
+    const slow = durationMs > 1000;
+    const fields = {
       method: request.method,
       path: url.pathname,
       route,
-      status: response.status,
+      status,
       duration_ms: Math.round(durationMs),
       requestId
-    });
+    };
+    if (status >= 500) {
+      logger.error("request_failed", fields);
+    } else if (status >= 400 && status !== 401 && status !== 403) {
+      logger.warn("request_client_error", fields);
+    } else if (slow) {
+      logger.warn("slow_request", { ...fields, threshold_ms: 1000 });
+    } else {
+      logger.info("request", fields);
+    }
 
     if (response.body === undefined) return reply.send();
     if (typeof response.body === "string") return reply.send(response.body);

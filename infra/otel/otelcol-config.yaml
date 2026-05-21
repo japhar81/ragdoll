@@ -1,0 +1,158 @@
+# Override of the bundled grafana/otel-lgtm OpenTelemetry Collector config.
+# Mounted at /otel-lgtm/otelcol-config.yaml so the container's run-otelcol.sh
+# uses this instead of the upstream default.
+#
+# What this adds over the bundled default:
+#
+#   * `filelog` receiver tailing every Docker container's JSON log file
+#     (mounted at /host-docker-logs). Parses the {"log":"…","stream":"…"}
+#     wrapper and stamps a `container_name` resource attribute so Loki can
+#     stream-select by service. This is how postgres/redis/opensearch/ollama
+#     /python-plugins logs reach Loki.
+#
+#   * `prometheus` receiver scraping the side-car exporters wired in
+#     docker-compose.yml — postgres-exporter:9187 (pg_*) and
+#     redis-exporter:9121 (redis_*).
+#
+# The OTLP push pipelines for the api/worker SDK exporters are kept untouched.
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+        cors:
+          allowed_origins:
+            - http://*
+
+  # Self-monitoring of the collector itself. Kept from the bundled default.
+  prometheus/collector:
+    config:
+      scrape_configs:
+        - job_name: "opentelemetry-collector"
+          scrape_interval: 5s
+          static_configs:
+            - targets: ["127.0.0.1:8888"]
+
+  # Tail every Docker container's JSON log file. The path glob matches the
+  # default JSON file-log driver layout (`/var/lib/docker/containers/<id>/<id>-json.log`).
+  # We mount /var/lib/docker/containers read-only into the collector
+  # container at /host-docker-logs in docker-compose.yml. Each line is
+  # `{"log":"...", "stream":"stdout|stderr", "time":"..."}`; we lift the
+  # message body and stash the rest as attributes.
+  filelog:
+    # Tail every Docker container's JSON log file on the host. The bundled
+    # `container` operator's path-validation is too strict for our mount
+    # layout (we hit "failed to detect a valid log path" in 0.134), so we
+    # parse the JSON wrapper ourselves and stamp `container_id` as a
+    # resource attribute. The Loki dashboard then maps id -> friendly name
+    # via a label_values variable (see ragdoll-infrastructure.json).
+    include:
+      - /var/lib/docker/containers/*/*-json.log
+    start_at: end
+    include_file_path: true
+    include_file_name: false
+    operators:
+      - type: regex_parser
+        parse_from: attributes["log.file.path"]
+        regex: '^/var/lib/docker/containers/(?P<container_id>[a-f0-9]{12,64})/'
+      - type: json_parser
+        timestamp:
+          parse_from: attributes.time
+          layout: "%Y-%m-%dT%H:%M:%S.%LZ"
+      - type: move
+        from: attributes.log
+        to: body
+      - type: move
+        from: attributes.stream
+        to: attributes["log.iostream"]
+      - type: remove
+        field: attributes.time
+      # Promote container_id to a resource attribute so Loki streams can
+      # filter on it without parsing the body. Keeps cardinality bounded
+      # (one stream per container).
+      - type: move
+        from: attributes.container_id
+        to: resource["container.id"]
+
+  # `docker_stats` enriches with CPU / memory / I/O per container, plus
+  # gives us the `container.name` attribute we can correlate logs against.
+  docker_stats:
+    endpoint: unix:///var/run/docker.sock
+    collection_interval: 30s
+    timeout: 10s
+    container_labels_to_metric_labels:
+      com.docker.compose.service: compose_service
+
+  # Side-car exporter scrape: pg_* and redis_* series for the dashboards.
+  prometheus/exporters:
+    config:
+      scrape_configs:
+        - job_name: "postgres-exporter"
+          scrape_interval: 15s
+          static_configs:
+            - targets: ["postgres-exporter:9187"]
+        - job_name: "redis-exporter"
+          scrape_interval: 15s
+          static_configs:
+            - targets: ["redis-exporter:9121"]
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+    path: "/ready"
+
+processors:
+  batch:
+
+  # Container-id → readable container name for filelog/docker_stats. The
+  # docker_observer is not strictly needed here because docker_stats already
+  # emits `container.name` as a resource attribute, but filelog only has
+  # `container_id` from the file path — we surface both so Loki streams stay
+  # keyable by container_name regardless of source receiver.
+  resource/container:
+    attributes:
+      - key: service.namespace
+        action: insert
+        value: ragdoll
+
+exporters:
+  otlphttp/metrics:
+    endpoint: http://127.0.0.1:9090/api/v1/otlp
+    tls:
+      insecure: true
+  otlphttp/traces:
+    endpoint: http://127.0.0.1:4418
+    tls:
+      insecure: true
+  otlphttp/logs:
+    endpoint: http://127.0.0.1:3100/otlp
+    tls:
+      insecure: true
+  otlp/profiles:
+    endpoint: http://127.0.0.1:4040
+    tls:
+      insecure: true
+
+service:
+  extensions: [health_check]
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlphttp/traces]
+    metrics:
+      receivers: [otlp, prometheus/collector, prometheus/exporters, docker_stats]
+      processors: [resource/container, batch]
+      exporters: [otlphttp/metrics]
+    logs:
+      # OTLP path (api/worker SDK log exporters) + filelog (every docker
+      # container's stdout/stderr).
+      receivers: [otlp, filelog]
+      processors: [resource/container, batch]
+      exporters: [otlphttp/logs]
+    profiles:
+      receivers: [otlp]
+      exporters: [otlp/profiles]

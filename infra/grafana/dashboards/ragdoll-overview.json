@@ -208,22 +208,56 @@
     },
     {
       "type": "logs",
-      "title": "Recent logs (ragdoll-*)",
+      "title": "Recent logs (api / worker SDK + every container)",
+      "description": "Structured OTLP records from the api/worker SDKs (service_name=ragdoll-*) PLUS every container's stdout/stderr (container_id label). Both selectors live under the same service_namespace.",
       "id": 9,
       "gridPos": { "h": 12, "w": 24, "x": 0, "y": 20 },
       "datasource": { "type": "loki", "uid": "loki" },
       "targets": [
         {
-          "expr": "{service_name=~\"ragdoll-.*\"} |= ``",
+          "expr": "{service_namespace=\"ragdoll\"}",
           "refId": "A"
         }
       ],
       "options": {
         "showTime": true,
+        "showLabels": false,
+        "showCommonLabels": false,
         "sortOrder": "Descending",
         "wrapLogMessage": true,
-        "enableLogDetails": true
+        "enableLogDetails": true,
+        "dedupStrategy": "none"
       }
+    },
+    {
+      "type": "barchart",
+      "title": "Log volume by service (5m)",
+      "id": 10,
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 32 },
+      "datasource": { "type": "loki", "uid": "loki" },
+      "targets": [
+        {
+          "expr": "sum by (service_name) (count_over_time({service_name=~\"ragdoll-.*\"}[5m]))",
+          "legendFormat": "{{service_name}}",
+          "refId": "A"
+        }
+      ],
+      "options": { "legend": { "displayMode": "list", "placement": "right" } }
+    },
+    {
+      "type": "barchart",
+      "title": "Error / warn rate by service (5m)",
+      "id": 11,
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 32 },
+      "datasource": { "type": "loki", "uid": "loki" },
+      "targets": [
+        {
+          "expr": "sum by (service_name, severity_text) (count_over_time({service_name=~\"ragdoll-.*\", severity_text=~\"WARN|ERROR\"}[5m]))",
+          "legendFormat": "{{service_name}} {{severity_text}}",
+          "refId": "A"
+        }
+      ],
+      "options": { "legend": { "displayMode": "table", "placement": "right" } }
     }
   ],
   "refresh": "10s",
