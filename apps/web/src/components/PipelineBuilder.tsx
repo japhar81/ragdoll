@@ -29,6 +29,7 @@ import {
 import {
   DND_MIME,
   clampInspectorWidth,
+  clampPaletteWidth,
   nodeKind,
   validateConnection
 } from "../lib/graph.ts";
@@ -179,6 +180,7 @@ export function PipelineBuilder(props: {
   const [openedViaTree, setOpenedViaTree] = useState(false);
   const clog = useConsoleLog();
   const [inspectorWidth, setInspectorWidth] = useState(360);
+  const [paletteWidth, setPaletteWidth] = useState(220);
   // Inspector tab selection. Sticky inside the session — selecting a new node
   // keeps the previously-active tab so a "compare configs across nodes" flow
   // doesn't drop the user back on Config every time.
@@ -610,21 +612,47 @@ export function PipelineBuilder(props: {
     [addNode]
   );
 
-  const startResize = useCallback((event: React.MouseEvent) => {
-    event.preventDefault();
-    const move = (ev: MouseEvent) =>
-      setInspectorWidth(clampInspectorWidth(window.innerWidth - ev.clientX, window.innerWidth));
-    const up = () => {
-      window.removeEventListener("mousemove", move);
-      window.removeEventListener("mouseup", up);
-      document.body.style.cursor = "";
-      document.body.style.userSelect = "";
-    };
-    window.addEventListener("mousemove", move);
-    window.addEventListener("mouseup", up);
-    document.body.style.cursor = "col-resize";
-    document.body.style.userSelect = "none";
-  }, []);
+  // Side-panel resizers. Inspector is anchored to the right edge so its
+  // width grows as the cursor moves LEFT (viewport - clientX); palette is
+  // anchored to the left edge so its width grows as the cursor moves RIGHT
+  // (clientX). Both share the same body-cursor / no-select / cleanup
+  // boilerplate via a tiny driver below.
+  const driveResize = useCallback(
+    (compute: (clientX: number) => void): ((event: React.MouseEvent) => void) =>
+      (event) => {
+        event.preventDefault();
+        const move = (ev: MouseEvent) => compute(ev.clientX);
+        const up = () => {
+          window.removeEventListener("mousemove", move);
+          window.removeEventListener("mouseup", up);
+          document.body.style.cursor = "";
+          document.body.style.userSelect = "";
+        };
+        window.addEventListener("mousemove", move);
+        window.addEventListener("mouseup", up);
+        document.body.style.cursor = "col-resize";
+        document.body.style.userSelect = "none";
+      },
+    []
+  );
+
+  const startResize = useMemo(
+    () =>
+      driveResize((clientX) =>
+        setInspectorWidth(
+          clampInspectorWidth(window.innerWidth - clientX, window.innerWidth)
+        )
+      ),
+    [driveResize]
+  );
+
+  const startPaletteResize = useMemo(
+    () =>
+      driveResize((clientX) =>
+        setPaletteWidth(clampPaletteWidth(clientX, window.innerWidth))
+      ),
+    [driveResize]
+  );
 
   function updateSelectedNode(mutate: (node: PipelineNode) => PipelineNode) {
     if (!selectedId) return;
@@ -1051,7 +1079,7 @@ export function PipelineBuilder(props: {
       <div
         className="builder-grid"
         style={{
-          gridTemplateColumns: `220px minmax(0, 1fr) 6px ${inspectorWidth}px`
+          gridTemplateColumns: `${paletteWidth}px 6px minmax(0, 1fr) 6px ${inspectorWidth}px`
         }}
       >
         <PalettePanel
@@ -1059,6 +1087,13 @@ export function PipelineBuilder(props: {
           isLoading={plugins.isLoading}
           isError={plugins.isError}
           onAdd={(item) => addNode(item)}
+        />
+        <div
+          className="col-resizer"
+          onMouseDown={startPaletteResize}
+          role="separator"
+          aria-orientation="vertical"
+          title="Drag to resize the node palette"
         />
         <div
           className="canvas"

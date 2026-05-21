@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   DND_MIME,
   clampInspectorWidth,
+  clampPaletteWidth,
   nodeKind,
   nodeTheme,
   styleKeyFor,
@@ -89,4 +90,12 @@ test("clampInspectorWidth keeps a sane range", () => {
   assert.equal(clampInspectorWidth(400, 1440), 400); // passthrough
   // tiny viewport: max collapses toward the floor, never below it
   assert.equal(clampInspectorWidth(400, 500), 280);
+});
+
+test("clampPaletteWidth keeps a sane range", () => {
+  assert.equal(clampPaletteWidth(50, 1440), 160); // floor
+  assert.equal(clampPaletteWidth(5000, 1440), 480); // ceiling
+  assert.equal(clampPaletteWidth(300, 1440), 300); // passthrough
+  // tiny viewport: max collapses toward the floor, never below it
+  assert.equal(clampPaletteWidth(300, 500), 160);
 });

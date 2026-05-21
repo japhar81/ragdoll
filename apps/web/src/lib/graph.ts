@@ -101,3 +101,16 @@ export function clampInspectorWidth(px: number, viewportWidth: number): number {
   const max = Math.max(min, Math.min(760, viewportWidth - 420));
   return Math.round(Math.min(max, Math.max(min, px)));
 }
+
+/**
+ * Clamp the draggable palette width to a sane range. The palette holds
+ * compact plugin chips so it can be narrower than the inspector; the
+ * ceiling stays below half a typical viewport so the canvas always has
+ * room. `viewportWidth` is the host window's `innerWidth`, used only to
+ * cap on very small displays.
+ */
+export function clampPaletteWidth(px: number, viewportWidth: number): number {
+  const min = 160;
+  const max = Math.max(min, Math.min(480, viewportWidth - 480));
+  return Math.round(Math.min(max, Math.max(min, px)));
+}
