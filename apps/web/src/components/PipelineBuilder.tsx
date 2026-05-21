@@ -39,7 +39,12 @@ import {
   type PaletteDragItem
 } from "../lib/palette.ts";
 import { PalettePanel } from "./PalettePanel.tsx";
-import { FlowNodeCard, PluginManifestContext } from "./FlowNodeCard.tsx";
+import {
+  FlowNodeCard,
+  PluginManifestContext,
+  NodeValidationContext,
+  type NodeValidationBuckets
+} from "./FlowNodeCard.tsx";
 import { PluginEditorSlot } from "./PluginEditorSlot.tsx";
 import { SecretsEditor } from "./SecretsEditor.tsx";
 import { NodeDocsTab } from "./builder/NodeDocsTab.tsx";
@@ -48,6 +53,10 @@ import { TenantSelect, useSelectedTenant } from "./useTenants.tsx";
 import { useEnvironments, EnvironmentSelect } from "./useEnvironments.tsx";
 import { ToolbarMenu } from "./ToolbarMenu.tsx";
 import { applyLayout, type LayoutKind } from "../lib/layouts.ts";
+import {
+  validatePipelineSpec,
+  type ValidationIssue
+} from "../../../../packages/pipeline-spec/src/index.ts";
 import { hasRealPipeline } from "../lib/consoleLog.ts";
 import {
   diffNodeEvents,
@@ -376,6 +385,7 @@ export function PipelineBuilder(props: {
     [nodes, edges, pipelineName, pipelineDescription]
   );
 
+
   /**
    * The spec to persist/export: the graph-derived `spec` plus the *current*
    * React Flow viewport (pan + zoom) baked into `metadata.annotations` via
@@ -436,6 +446,60 @@ export function PipelineBuilder(props: {
     }
     return map;
   }, [pluginList]);
+
+  // Real-time validation: run validatePipelineSpec on every spec change,
+  // bucket the issues by nodeId so FlowNodeCard can render a corner
+  // badge. The validator's plugin-aware checks (missing_plugin_ref,
+  // unknown_output_port, etc.) need a registry; we duck-type one from
+  // the API's pluginList so the client catches the same errors save will.
+  const clientPluginRegistry = useMemo(() => {
+    const byKey = new Map<string, { manifest: PluginInfo }>();
+    for (const info of pluginList) {
+      byKey.set(`${info.category}:${info.id}:${info.version}`, { manifest: info });
+    }
+    // The validator only calls `registry.get(ref)` so a duck-typed
+    // object is sufficient — we don't have to drag a real PluginRegistry
+    // into the web bundle.
+    return {
+      get: (ref: { category: string; id: string; version: string }) =>
+        byKey.get(`${ref.category}:${ref.id}:${ref.version}`)
+    };
+  }, [pluginList]);
+
+  const validationByNode = useMemo(() => {
+    // Skip validation while the plugin list is still loading — otherwise
+    // every plugin ref looks "missing" for the first render.
+    if (pluginList.length === 0) {
+      return new Map<string, NodeValidationBuckets>();
+    }
+    const result = validatePipelineSpec(
+      spec as unknown as Parameters<typeof validatePipelineSpec>[0],
+      clientPluginRegistry as unknown as Parameters<typeof validatePipelineSpec>[1]
+    );
+    const byNode = new Map<string, NodeValidationBuckets>();
+    const push = (issue: ValidationIssue, ids: string[]) => {
+      for (const id of ids) {
+        if (!byNode.has(id)) byNode.set(id, { errors: [], warnings: [] });
+        const bucket = byNode.get(id)!;
+        (issue.level === "error" ? bucket.errors : bucket.warnings).push({
+          code: issue.code,
+          message: issue.message
+        });
+      }
+    };
+    for (const issue of [...result.errors, ...result.warnings]) {
+      const ids: string[] = [];
+      if (issue.nodeId) ids.push(issue.nodeId);
+      // Edge-level issues attach to BOTH endpoints so the badge appears
+      // wherever the user looks.
+      if (issue.edge) {
+        if (issue.edge.from) ids.push(issue.edge.from);
+        if (issue.edge.to) ids.push(issue.edge.to);
+      }
+      if (ids.length > 0) push(issue, ids);
+    }
+    return byNode;
+  }, [spec, clientPluginRegistry, pluginList.length]);
 
   const resolved = useQuery({
     queryKey: ["resolved-config", pipelineId, tenantId, environment],
@@ -1200,6 +1264,7 @@ export function PipelineBuilder(props: {
           onDragOver={onDragOver}
         >
           <PluginManifestContext.Provider value={pluginManifestMap}>
+            <NodeValidationContext.Provider value={validationByNode}>
             <ReactFlow
               nodes={nodes}
               edges={edges}
@@ -1222,6 +1287,7 @@ export function PipelineBuilder(props: {
               <Background />
               <LayoutMenu onApply={applyLayoutKind} />
             </ReactFlow>
+            </NodeValidationContext.Provider>
           </PluginManifestContext.Provider>
         </div>
         <div

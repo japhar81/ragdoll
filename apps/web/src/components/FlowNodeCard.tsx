@@ -17,6 +17,18 @@ export interface RagNodeData {
  */
 export const PluginManifestContext = createContext<Map<string, PluginInfo>>(new Map());
 
+/**
+ * Per-node validation buckets sourced from the builder's real-time
+ * validatePipelineSpec run. Cards consult this to overlay a yellow ⚠ or
+ * red ✕ corner badge with the relevant messages on hover. Empty map = no
+ * validation surface (loading, or spec is clean).
+ */
+export interface NodeValidationBuckets {
+  errors: Array<{ code: string; message: string }>;
+  warnings: Array<{ code: string; message: string }>;
+}
+export const NodeValidationContext = createContext<Map<string, NodeValidationBuckets>>(new Map());
+
 function manifestKey(plugin: { category: string; id: string; version: string }): string {
   return `${plugin.category}:${plugin.id}:${plugin.version}`;
 }
@@ -101,6 +113,17 @@ function FlowNodeCardImpl({ data, selected }: NodeProps<RagNodeData>) {
   const theme = nodeTheme(styleKeyFor(node));
   const manifests = useContext(PluginManifestContext);
   const manifest = node.plugin ? manifests.get(manifestKey(node.plugin)) : undefined;
+  const validation = useContext(NodeValidationContext).get(node.id);
+  // Errors win over warnings — a node with both shows the red ✕ and lists
+  // every issue in the tooltip.
+  const badgeSeverity: "error" | "warning" | undefined = validation?.errors.length
+    ? "error"
+    : validation?.warnings.length
+    ? "warning"
+    : undefined;
+  const badgeTooltip = validation
+    ? [...validation.errors, ...validation.warnings].map((i) => `• ${i.message}`).join("\n")
+    : undefined;
 
   // Resolve effective ports for THIS node, layered:
   //   1. Framework `type: input` / `output` nodes get their canonical single
@@ -152,6 +175,15 @@ function FlowNodeCardImpl({ data, selected }: NodeProps<RagNodeData>) {
       </div>
       {outputPorts.length > 0 && <PortHandles type="source" ports={outputPorts} position={Position.Right} />}
       {outputPorts.length > 0 && <PortLabels ports={outputPorts} side="right" />}
+      {badgeSeverity && (
+        <span
+          className={`rf-validation-badge rf-validation-${badgeSeverity}`}
+          title={badgeTooltip}
+          aria-label={`${badgeSeverity}: ${validation?.errors.length ?? 0} error(s), ${validation?.warnings.length ?? 0} warning(s)`}
+        >
+          {badgeSeverity === "error" ? "✕" : "⚠"}
+        </span>
+      )}
     </div>
   );
 }

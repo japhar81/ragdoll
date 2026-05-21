@@ -456,6 +456,35 @@ button.palette-item:active {
   transform: translateY(-50%);
 }
 
+/* Real-time validation badge in the upper-right corner of every card
+ * with issues. Red ✕ for errors, yellow ⚠ for warnings. The native
+ * tooltip (title attribute) reveals the full message list on hover. */
+.rf-validation-badge {
+  position: absolute;
+  top: -8px;
+  right: -8px;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+  font-weight: 700;
+  color: #ffffff;
+  border: 2px solid #ffffff;
+  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.2);
+  cursor: help;
+  z-index: 2;
+}
+.rf-validation-error {
+  background: #dc2626;
+}
+.rf-validation-warning {
+  background: #f59e0b;
+  color: #78350f;
+}
+
 textarea, pre {
   width: 100%;
   min-height: 120px;
