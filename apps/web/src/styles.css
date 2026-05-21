@@ -343,17 +343,31 @@ button.palette-item:active {
 }
 
 /* Cards with declared ports grow to give the body a clear column between
- * the left/right label gutters. Without this, port names overlap the title
- * and version rows. Each gutter holds the 56px label band plus an ~8px
- * standoff from the pin. */
+ * the left/right label gutters. Only the sides that actually have ports
+ * get the gutter padding — input/output framework nodes (single side) and
+ * datasources/sinks (one-sided) stay compact instead of wearing a wide
+ * gutter on the empty side.
+ *
+ * Each gutter holds the 56px label band plus an ~8px standoff from the
+ * pin. Height is set inline per-node from the per-side port count, so a
+ * single-port card doesn't pay for three rows of vertical space. */
 .rf-node.has-ports {
   position: relative;
   box-sizing: border-box;
-  min-width: 300px;
   max-width: 380px;
-  min-height: 88px;
+}
+.rf-node.has-left-ports {
   padding-left: 78px;
+}
+.rf-node.has-right-ports {
   padding-right: 78px;
+}
+.rf-node.has-left-ports.has-right-ports {
+  min-width: 300px;
+}
+.rf-node.has-left-ports:not(.has-right-ports),
+.rf-node.has-right-ports:not(.has-left-ports) {
+  min-width: 220px;
 }
 
 /* Port label wrappers sit in the left/right gutters of the card, never

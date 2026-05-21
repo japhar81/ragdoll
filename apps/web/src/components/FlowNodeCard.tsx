@@ -118,10 +118,22 @@ function FlowNodeCardImpl({ data, selected }: NodeProps<RagNodeData>) {
     outputPorts = manifest?.outputPorts && manifest.outputPorts.length > 0 ? manifest.outputPorts : [FALLBACK_OUT];
   }
 
+  // Scale the card height with the per-side port count so a single-port node
+  // (like the framework input/output cards) doesn't get the same vertical
+  // padding as a three-port node. 24px per port + 24px chrome, floor 48px.
+  const maxPorts = Math.max(inputPorts.length, outputPorts.length);
+  const minHeight = Math.max(48, maxPorts * 24 + 24);
+  const sideClasses = [
+    inputPorts.length > 0 ? "has-left-ports" : "",
+    outputPorts.length > 0 ? "has-right-ports" : ""
+  ]
+    .filter(Boolean)
+    .join(" ");
+
   return (
     <div
-      className={`rf-node has-ports${selected ? " selected" : ""}`}
-      style={{ borderColor: theme.color }}
+      className={`rf-node has-ports${selected ? " selected" : ""}${sideClasses ? ` ${sideClasses}` : ""}`}
+      style={{ borderColor: theme.color, minHeight }}
     >
       {inputPorts.length > 0 && <PortHandles type="target" ports={inputPorts} position={Position.Left} />}
       {inputPorts.length > 0 && <PortLabels ports={inputPorts} side="left" />}
