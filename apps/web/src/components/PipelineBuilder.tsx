@@ -612,16 +612,21 @@ export function PipelineBuilder(props: {
     [addNode]
   );
 
-  // Side-panel resizers. Inspector is anchored to the right edge so its
-  // width grows as the cursor moves LEFT (viewport - clientX); palette is
-  // anchored to the left edge so its width grows as the cursor moves RIGHT
-  // (clientX). Both share the same body-cursor / no-select / cleanup
-  // boilerplate via a tiny driver below.
+  // Side-panel resizers. The builder grid lives INSIDE the app shell, which
+  // has a fixed 220px sidebar to the left, so `clientX` is viewport-relative
+  // but the palette's left edge is offset by the sidebar width. Compute new
+  // widths relative to the grid's bounding rect — that way both resizers
+  // work regardless of how the shell is laid out around the builder.
+  const gridRef = useRef<HTMLDivElement | null>(null);
   const driveResize = useCallback(
-    (compute: (clientX: number) => void): ((event: React.MouseEvent) => void) =>
+    (
+      compute: (clientX: number, rect: DOMRect) => void
+    ): ((event: React.MouseEvent) => void) =>
       (event) => {
         event.preventDefault();
-        const move = (ev: MouseEvent) => compute(ev.clientX);
+        const rect = gridRef.current?.getBoundingClientRect();
+        if (!rect) return;
+        const move = (ev: MouseEvent) => compute(ev.clientX, rect);
         const up = () => {
           window.removeEventListener("mousemove", move);
           window.removeEventListener("mouseup", up);
@@ -638,9 +643,9 @@ export function PipelineBuilder(props: {
 
   const startResize = useMemo(
     () =>
-      driveResize((clientX) =>
+      driveResize((clientX, rect) =>
         setInspectorWidth(
-          clampInspectorWidth(window.innerWidth - clientX, window.innerWidth)
+          clampInspectorWidth(rect.right - clientX, rect.width)
         )
       ),
     [driveResize]
@@ -648,8 +653,8 @@ export function PipelineBuilder(props: {
 
   const startPaletteResize = useMemo(
     () =>
-      driveResize((clientX) =>
-        setPaletteWidth(clampPaletteWidth(clientX, window.innerWidth))
+      driveResize((clientX, rect) =>
+        setPaletteWidth(clampPaletteWidth(clientX - rect.left, rect.width))
       ),
     [driveResize]
   );
@@ -1077,6 +1082,7 @@ export function PipelineBuilder(props: {
       </header>
       <div className="builder-main">
       <div
+        ref={gridRef}
         className="builder-grid"
         style={{
           gridTemplateColumns: `${paletteWidth}px 6px minmax(0, 1fr) 6px ${inspectorWidth}px`
