@@ -371,6 +371,90 @@ test("associate + 2 concurrent activations (pinned + track_latest) + run targeti
 });
 
 /* -------------------------------------------------------------------------- */
+/* Regression: same pipeline associated to same tenant under multiple envs   */
+/* -------------------------------------------------------------------------- */
+
+// Previously the GET /api/tenants/:id/pipelines list collapsed every
+// (pipelineId, *) association down to a single row via Array.find(), so a
+// second associate POST against a different environment looked like a no-op
+// to the UI even though the DB row was inserted correctly.
+test("a pipeline can be associated to one tenant under multiple environments", async () => {
+  const { request } = buildHarness();
+  const tenantId = "tenant-multienv";
+  await request({
+    method: "POST",
+    path: "/api/tenants",
+    headers: ADMIN,
+    body: { slug: tenantId, name: "Multi-env Tenant" }
+  });
+  const created = await request({
+    method: "POST",
+    path: "/api/pipelines",
+    headers: ADMIN,
+    body: { slug: "multi-env-pipe", name: "Multi-env Pipe" }
+  });
+  const pid = created.body.pipeline.id;
+
+  // Associate to dev — first row.
+  const devAssoc = await request({
+    method: "POST",
+    path: `/api/tenants/${tenantId}/pipelines`,
+    headers: ADMIN,
+    body: { pipelineId: pid, environment: "dev" }
+  });
+  assert.equal(devAssoc.status, 201);
+
+  // Associate the SAME pipeline to prod — second row (must not silently
+  // overwrite the dev row, must not 409).
+  const prodAssoc = await request({
+    method: "POST",
+    path: `/api/tenants/${tenantId}/pipelines`,
+    headers: ADMIN,
+    body: { pipelineId: pid, environment: "prod" }
+  });
+  assert.equal(prodAssoc.status, 201);
+
+  // GET must return BOTH rows, each carrying its own environment.
+  const list = await request({
+    method: "GET",
+    path: `/api/tenants/${tenantId}/pipelines`,
+    headers: ADMIN
+  });
+  assert.equal(list.status, 200);
+  const rows = list.body.pipelines.filter(
+    (p: { pipelineId: string }) => p.pipelineId === pid
+  );
+  assert.equal(rows.length, 2, "expected one row per (pipeline, environment)");
+  const envs = rows.map((r: { environment: string }) => r.environment).sort();
+  assert.deepEqual(envs, ["dev", "prod"]);
+  // Per-env enabled flag is independent across rows.
+  for (const row of rows) {
+    assert.equal(row.enabled, true);
+    assert.ok(Array.isArray(row.activations));
+  }
+
+  // Disabling dev must not flip prod.
+  const patch = await request({
+    method: "PATCH",
+    path: `/api/tenants/${tenantId}/pipelines/${pid}`,
+    headers: ADMIN,
+    body: { enabled: false, environment: "dev" }
+  });
+  assert.equal(patch.status, 200);
+  const list2 = await request({
+    method: "GET",
+    path: `/api/tenants/${tenantId}/pipelines`,
+    headers: ADMIN
+  });
+  const byEnv = Object.fromEntries(
+    list2.body.pipelines
+      .filter((p: { pipelineId: string }) => p.pipelineId === pid)
+      .map((r: { environment: string; enabled: boolean }) => [r.environment, r.enabled])
+  );
+  assert.deepEqual(byEnv, { dev: false, prod: true });
+});
+
+/* -------------------------------------------------------------------------- */
 /* Back-compat: run with NO activations resolves via the deployment path      */
 /* -------------------------------------------------------------------------- */
 

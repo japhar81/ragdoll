@@ -692,6 +692,13 @@ export interface ActivationRow {
 
 export interface TenantPipelineRow {
   pipelineId: string;
+  /**
+   * Environment the association targets. The (tenantId, pipelineId,
+   * environment) triple is the row's identity — a single pipeline can be
+   * associated to the same tenant under multiple environments and each
+   * row carries its own `enabled`/`activations`.
+   */
+  environment: string;
   enabled: boolean;
   activations: ActivationRow[];
 }

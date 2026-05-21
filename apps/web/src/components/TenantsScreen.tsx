@@ -280,8 +280,11 @@ function TenantPipelines(props: { tenantId: string }) {
     onError: (e) => setBanner(errText(e))
   });
   const setEnabled = useMutation({
-    mutationFn: (v: { pipelineId: string; enabled: boolean }) =>
-      api.updateTenantPipeline(tenantId, v.pipelineId, { enabled: v.enabled }),
+    mutationFn: (v: { pipelineId: string; environment: string; enabled: boolean }) =>
+      api.updateTenantPipeline(tenantId, v.pipelineId, {
+        enabled: v.enabled,
+        environment: v.environment
+      }),
     onSuccess: () => invalidate(),
     onError: (e) => setBanner(errText(e))
   });
@@ -326,9 +329,10 @@ function TenantPipelines(props: { tenantId: string }) {
         <p className="muted">No associated pipelines.</p>
       )}
       {(assoc.data?.pipelines ?? []).map((tp) => (
-        <div key={tp.pipelineId} className="assoc-card">
+        <div key={`${tp.pipelineId}:${tp.environment}`} className="assoc-card">
           <div className="assoc-head">
             <strong>{pipeName(tp.pipelineId)}</strong>
+            <span className="status">{tp.environment}</span>
             <span className="muted">{tp.pipelineId}</span>
             <label className="tree-tools">
               <input
@@ -337,6 +341,7 @@ function TenantPipelines(props: { tenantId: string }) {
                 onChange={(e) =>
                   setEnabled.mutate({
                     pipelineId: tp.pipelineId,
+                    environment: tp.environment,
                     enabled: e.target.checked
                   })
                 }
