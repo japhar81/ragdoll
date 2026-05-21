@@ -185,27 +185,56 @@ export class ConsoleJsonLogger implements StructuredLogger {
   }
 
   info(message: string, fields: Record<string, unknown> = {}): void {
-    console.log(JSON.stringify({ level: "info", message, ...fields, timestamp: new Date().toISOString() }));
-    this.sink?.("info", message, fields);
+    const enriched = { ...fields, ...readActiveTraceContext() };
+    console.log(JSON.stringify({ level: "info", message, ...enriched, timestamp: new Date().toISOString() }));
+    this.sink?.("info", message, enriched);
   }
 
   warn(message: string, fields: Record<string, unknown> = {}): void {
-    console.warn(JSON.stringify({ level: "warn", message, ...fields, timestamp: new Date().toISOString() }));
-    this.sink?.("warn", message, fields);
+    const enriched = { ...fields, ...readActiveTraceContext() };
+    console.warn(JSON.stringify({ level: "warn", message, ...enriched, timestamp: new Date().toISOString() }));
+    this.sink?.("warn", message, enriched);
   }
 
   error(message: string, fields: Record<string, unknown> = {}): void {
-    console.error(JSON.stringify({ level: "error", message, ...fields, timestamp: new Date().toISOString() }));
-    this.sink?.("error", message, fields);
+    const enriched = { ...fields, ...readActiveTraceContext() };
+    console.error(JSON.stringify({ level: "error", message, ...enriched, timestamp: new Date().toISOString() }));
+    this.sink?.("error", message, enriched);
   }
 }
 
 let sharedLogger: ConsoleJsonLogger | undefined;
+let traceContextSource: (() => { traceId?: string; spanId?: string } | undefined) | undefined;
 
 /** Returns a shared {@link ConsoleJsonLogger} instance. */
 export function getLogger(): StructuredLogger {
   if (!sharedLogger) sharedLogger = new ConsoleJsonLogger();
   return sharedLogger;
+}
+
+/**
+ * Installed once at boot by `wireOtelTraces`; reads the currently-active
+ * span context from `@opentelemetry/api` so log records can be stamped
+ * with `trace_id`/`span_id`. The lookup is sync; if no span is active the
+ * function returns `undefined`.
+ */
+export function setActiveSpanReader(
+  fn: (() => { traceId?: string; spanId?: string } | undefined) | undefined
+): void {
+  traceContextSource = fn;
+}
+
+function readActiveTraceContext(): Record<string, string> {
+  if (!traceContextSource) return {};
+  try {
+    const ctx = traceContextSource();
+    if (!ctx?.traceId) return {};
+    return ctx.spanId
+      ? { trace_id: ctx.traceId, span_id: ctx.spanId }
+      : { trace_id: ctx.traceId };
+  } catch {
+    return {};
+  }
 }
 
 /**
@@ -367,7 +396,30 @@ export async function wireOtelTraces(
       new baseSdk.BatchSpanProcessor(new exporterMod.OTLPTraceExporter())
     );
     provider.register();
+    // Install a reader so the structured logger can stamp trace_id /
+    // span_id on every JSON line emitted inside a span. Loki's
+    // derivedFields rule matches `"trace_id":"…"` and deep-links the
+    // span in Tempo, so app logs (not just framework logs) participate
+    // in trace<->log correlation.
+    try {
+      const api = (await import("@opentelemetry/api")) as unknown as {
+        trace: {
+          getActiveSpan(): {
+            spanContext(): { traceId: string; spanId: string };
+          } | undefined;
+        };
+      };
+      setActiveSpanReader(() => {
+        const span = api.trace.getActiveSpan();
+        if (!span) return undefined;
+        const ctx = span.spanContext();
+        return ctx ? { traceId: ctx.traceId, spanId: ctx.spanId } : undefined;
+      });
+    } catch {
+      /* leave the no-op reader; trace_id won't be stamped but logs still work */
+    }
     return async () => {
+      setActiveSpanReader(undefined);
       await provider.shutdown?.();
     };
   } catch {
