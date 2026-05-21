@@ -78,9 +78,22 @@ function PortLabels({ ports, side }: { ports: PortInfo[]; side: "left" | "right"
 }
 
 /**
- * Colored, icon-bearing custom React Flow node. Input/output framework nodes
- * keep their single-handle layout; plugins that declare inputPorts/outputPorts
- * render labelled handles down the corresponding edge of the card.
+ * Synthetic "fallback" ports we render when a node has no declared
+ * inputPorts/outputPorts. Framework `type: input`/`output` nodes get a
+ * single labeled port too — "data" / "result" — so the canvas never has an
+ * unlabelled handle. Datasources (which produce but don't consume) and sinks
+ * (which consume but don't produce) get a default name on their missing side
+ * so authors always see what they're wiring to.
+ */
+const FALLBACK_IN: PortInfo = { name: "in", description: "Default input — receives the upstream payload." };
+const FALLBACK_OUT: PortInfo = { name: "out", description: "Default output — forwards the plugin's output bag." };
+const FRAMEWORK_INPUT_OUT: PortInfo = { name: "data", description: "Pipeline runtime input forwarded into the DAG." };
+const FRAMEWORK_OUTPUT_IN: PortInfo = { name: "result", description: "Final value delivered to the pipeline caller." };
+
+/**
+ * Colored, icon-bearing custom React Flow node. Resolves the effective input
+ * and output port lists for the node (declared manifest ports first, falling
+ * back to synthetic single-pin labels) so every visible handle has a name.
  */
 function FlowNodeCardImpl({ data, selected }: NodeProps<RagNodeData>) {
   const node = data.node;
@@ -88,20 +101,30 @@ function FlowNodeCardImpl({ data, selected }: NodeProps<RagNodeData>) {
   const theme = nodeTheme(styleKeyFor(node));
   const manifests = useContext(PluginManifestContext);
   const manifest = node.plugin ? manifests.get(manifestKey(node.plugin)) : undefined;
-  const inputPorts = manifest?.inputPorts ?? [];
-  const outputPorts = manifest?.outputPorts ?? [];
-  const hasInputPorts = inputPorts.length > 0;
-  const hasOutputPorts = outputPorts.length > 0;
+
+  // Resolve effective ports for THIS node, layered:
+  //   1. Framework `type: input` / `output` nodes get their canonical single
+  //      synthetic port (no inputs for input, no outputs for output).
+  //   2. Declared manifest ports win.
+  //   3. Otherwise a synthetic "in"/"out" label fills the default handle.
+  let inputPorts: PortInfo[] = [];
+  let outputPorts: PortInfo[] = [];
+  if (kind === "input") {
+    outputPorts = [FRAMEWORK_INPUT_OUT];
+  } else if (kind === "output") {
+    inputPorts = [FRAMEWORK_OUTPUT_IN];
+  } else {
+    inputPorts = manifest?.inputPorts && manifest.inputPorts.length > 0 ? manifest.inputPorts : [FALLBACK_IN];
+    outputPorts = manifest?.outputPorts && manifest.outputPorts.length > 0 ? manifest.outputPorts : [FALLBACK_OUT];
+  }
+
   return (
     <div
-      className={`rf-node${selected ? " selected" : ""}${hasInputPorts || hasOutputPorts ? " has-ports" : ""}`}
+      className={`rf-node has-ports${selected ? " selected" : ""}`}
       style={{ borderColor: theme.color }}
     >
-      {kind !== "input" && !hasInputPorts && (
-        <Handle type="target" position={Position.Left} className="rf-handle" />
-      )}
-      {hasInputPorts && <PortHandles type="target" ports={inputPorts} position={Position.Left} />}
-      {hasInputPorts && <PortLabels ports={inputPorts} side="left" />}
+      {inputPorts.length > 0 && <PortHandles type="target" ports={inputPorts} position={Position.Left} />}
+      {inputPorts.length > 0 && <PortLabels ports={inputPorts} side="left" />}
       <span className="rf-ico" style={{ background: theme.color }}>
         {theme.icon}
       </span>
@@ -114,11 +137,8 @@ function FlowNodeCardImpl({ data, selected }: NodeProps<RagNodeData>) {
         )}
         {node.type && <div className="rf-sub">{node.type}</div>}
       </div>
-      {kind !== "output" && !hasOutputPorts && (
-        <Handle type="source" position={Position.Right} className="rf-handle" />
-      )}
-      {hasOutputPorts && <PortHandles type="source" ports={outputPorts} position={Position.Right} />}
-      {hasOutputPorts && <PortLabels ports={outputPorts} side="right" />}
+      {outputPorts.length > 0 && <PortHandles type="source" ports={outputPorts} position={Position.Right} />}
+      {outputPorts.length > 0 && <PortLabels ports={outputPorts} side="right" />}
     </div>
   );
 }
