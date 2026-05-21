@@ -162,6 +162,59 @@ test("force: provided positions seed the simulation (don't get re-randomised)", 
 // applyLayout dispatcher
 // ---------------------------------------------------------------------------
 
+test("applyLayout never produces overlapping nodes (~440x140 card box)", () => {
+  // A small graph in each layout shape: linear chain, fan-out, fan-in.
+  // Each must come back with no bounding-box overlaps.
+  const cases: Array<{ name: string; nodes: { id: string }[]; edges: { from: string; to: string }[] }> = [
+    {
+      name: "linear",
+      nodes: [{ id: "a" }, { id: "b" }, { id: "c" }],
+      edges: [
+        { from: "a", to: "b" },
+        { from: "b", to: "c" }
+      ]
+    },
+    {
+      name: "fan-out",
+      nodes: [{ id: "root" }, { id: "left" }, { id: "right" }],
+      edges: [
+        { from: "root", to: "left" },
+        { from: "root", to: "right" }
+      ]
+    },
+    {
+      name: "fan-in",
+      nodes: [{ id: "a" }, { id: "b" }, { id: "sink" }],
+      edges: [
+        { from: "a", to: "sink" },
+        { from: "b", to: "sink" }
+      ]
+    }
+  ];
+  for (const layout of ["layered-TB", "layered-LR", "force"] as const) {
+    for (const c of cases) {
+      const positions = applyLayout(layout, c.nodes, c.edges);
+      const ids = [...positions.keys()];
+      for (let i = 0; i < ids.length; i += 1) {
+        for (let j = i + 1; j < ids.length; j += 1) {
+          const a = positions.get(ids[i])!;
+          const b = positions.get(ids[j])!;
+          const dx = Math.abs(a.x - b.x);
+          const dy = Math.abs(a.y - b.y);
+          // resolveOverlaps uses 440 + 20 padding wide and 140 + 20 tall —
+          // so EITHER axis must be at least that far apart.
+          const horizontallySeparated = dx >= 440 + 20;
+          const verticallySeparated = dy >= 140 + 20;
+          assert.ok(
+            horizontallySeparated || verticallySeparated,
+            `${layout}/${c.name}: ${ids[i]} (${a.x.toFixed(0)},${a.y.toFixed(0)}) and ${ids[j]} (${b.x.toFixed(0)},${b.y.toFixed(0)}) overlap`
+          );
+        }
+      }
+    }
+  }
+});
+
 test("applyLayout dispatches to the right algorithm per kind", () => {
   const nodes = [{ id: "a" }, { id: "b" }];
   const edges = [{ from: "a", to: "b" }];

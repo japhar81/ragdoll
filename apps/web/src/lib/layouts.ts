@@ -39,11 +39,24 @@ export interface LayoutNode {
 
 export type LayoutDirection = "TB" | "BT" | "LR" | "RL";
 
+/**
+ * Cardinal card-size estimate used by every layout to keep nodes from
+ * overlapping. Has to be wider than `.rf-node.has-ports`'s 380px max-width
+ * (CSS) plus the per-side label gutter, plus a visible gap for the
+ * connection line. ~440 leaves ~60px of breathing room either side.
+ */
+const CARD_W = 440;
+/** Tallest a card with three stacked ports gets is about 96px today; pad
+ *  for headroom and so multi-rank stacks aren't claustrophobic. */
+const CARD_H = 140;
+
 export interface LayeredOptions {
   direction?: LayoutDirection;
-  /** Pixels between successive ranks along the primary axis. */
+  /** Pixels between successive ranks along the primary axis. Defaults are
+   *  direction-aware: TB uses the card-height stride, LR the card-width. */
   rankSpacing?: number;
-  /** Pixels between nodes within a rank along the cross axis. */
+  /** Pixels between nodes within a rank along the cross axis. Defaults are
+   *  direction-aware: TB uses the card-width stride, LR the card-height. */
   nodeSpacing?: number;
   /** Top-left margin so the first rank doesn't hug the canvas edge. */
   margin?: number;
@@ -81,8 +94,14 @@ export function layeredLayout(
   options: LayeredOptions = {}
 ): Map<string, NodePosition> {
   const direction: LayoutDirection = options.direction ?? "TB";
-  const rankSpacing = options.rankSpacing ?? 140;
-  const nodeSpacing = options.nodeSpacing ?? 220;
+  const horizontalLayout = direction === "LR" || direction === "RL";
+  // Stride along the primary axis is the long side of the card when the
+  // layout flows along that axis: in LR/RL each rank advances by the
+  // card WIDTH; in TB/BT each rank advances by the card HEIGHT.
+  const rankSpacing = options.rankSpacing ?? (horizontalLayout ? CARD_W : CARD_H);
+  // Cross-axis stride is the OTHER dimension of the card so siblings at
+  // the same rank don't overlap regardless of direction.
+  const nodeSpacing = options.nodeSpacing ?? (horizontalLayout ? CARD_H : CARD_W);
   const margin = options.margin ?? 40;
 
   const nodeIds = nodes.map((n) => n.id);
@@ -164,7 +183,7 @@ export function layeredLayout(
 
   // 5. Translate (rank, indexInRank) → (x, y) per direction.
   const positions = new Map<string, NodePosition>();
-  const horizontal = direction === "LR" || direction === "RL";
+  const horizontal = horizontalLayout;
   const primarySign = direction === "BT" || direction === "RL" ? -1 : 1;
   const widestRank = Math.max(0, ...ranks.map((r) => buckets.get(r)!.length));
   const crossExtent = Math.max(1, widestRank) * nodeSpacing;
@@ -225,7 +244,10 @@ export function forceLayout(
   options: ForceOptions = {}
 ): Map<string, NodePosition> {
   const iterations = options.iterations ?? 150;
-  const nodeSize = options.nodeSize ?? 220;
+  // nodeSize drives the optimal edge length. Cards are ~440px wide in
+  // CSS, so anchoring k there keeps connected nodes roughly one
+  // card-width apart at rest — the connection line stays visible.
+  const nodeSize = options.nodeSize ?? CARD_W;
   const k = nodeSize; // optimal edge length
   const repulsion = options.repulsion ?? 1;
   const attraction = options.attraction ?? 1;
@@ -329,15 +351,68 @@ export function forceLayout(
   return positions;
 }
 
+/**
+ * Final safety net: walk every pair of nodes and, if their bounding boxes
+ * overlap (treating each node as a `cardW × cardH` rectangle centered on
+ * its position), nudge them apart along the shorter axis until they
+ * don't. Cheap O(n² · k) where k is the number of overlap-resolution
+ * passes; we cap k at 6 because by then nothing should still be
+ * overlapping unless the input is degenerate.
+ */
+function resolveOverlaps(
+  positions: Map<string, NodePosition>,
+  cardW = CARD_W,
+  cardH = CARD_H
+): Map<string, NodePosition> {
+  const ids = [...positions.keys()];
+  const padX = 20;
+  const padY = 20;
+  for (let pass = 0; pass < 6; pass += 1) {
+    let moved = false;
+    for (let i = 0; i < ids.length; i += 1) {
+      for (let j = i + 1; j < ids.length; j += 1) {
+        const a = positions.get(ids[i])!;
+        const b = positions.get(ids[j])!;
+        const dx = b.x - a.x;
+        const dy = b.y - a.y;
+        const overlapX = cardW + padX - Math.abs(dx);
+        const overlapY = cardH + padY - Math.abs(dy);
+        if (overlapX > 0 && overlapY > 0) {
+          // Push apart along whichever axis has the SMALLER overlap —
+          // that's the cheapest fix and tends to preserve overall layout
+          // intent (e.g. a TB layered placement keeps its column).
+          if (overlapX < overlapY) {
+            const push = (dx >= 0 ? 1 : -1) * (overlapX / 2 + 1);
+            a.x -= push;
+            b.x += push;
+          } else {
+            const push = (dy >= 0 ? 1 : -1) * (overlapY / 2 + 1);
+            a.y -= push;
+            b.y += push;
+          }
+          moved = true;
+        }
+      }
+    }
+    if (!moved) break;
+  }
+  return positions;
+}
+
 export type LayoutKind = "layered-TB" | "layered-LR" | "force";
 
-/** Dispatcher used by the builder: pick a layout kind and apply it. */
+/** Dispatcher used by the builder: pick a layout kind and apply it.
+ *  Every layout flows through `resolveOverlaps` before returning so a
+ *  caller can never get back overlapping positions, regardless of which
+ *  algorithm settled them. */
 export function applyLayout(
   kind: LayoutKind,
   nodes: LayoutNode[],
   edges: LayoutEdge[]
 ): Map<string, NodePosition> {
-  if (kind === "force") return forceLayout(nodes, edges);
-  if (kind === "layered-LR") return layeredLayout(nodes, edges, { direction: "LR" });
-  return layeredLayout(nodes, edges, { direction: "TB" });
+  let positions: Map<string, NodePosition>;
+  if (kind === "force") positions = forceLayout(nodes, edges);
+  else if (kind === "layered-LR") positions = layeredLayout(nodes, edges, { direction: "LR" });
+  else positions = layeredLayout(nodes, edges, { direction: "TB" });
+  return resolveOverlaps(positions);
 }
