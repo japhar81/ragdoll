@@ -359,9 +359,12 @@ async function main(): Promise<void> {
     description: "Total HTTP requests handled by the API.",
     unit: "{request}"
   });
+  // No `unit: "ms"` here — the OTLP→Prometheus bridge auto-suffixes the
+  // exported metric with the unit name, which would produce
+  // `..._duration_ms_milliseconds_bucket`. The `_ms` in the metric name
+  // already conveys the unit, so the unit hint is intentionally omitted.
   const requestDuration = meter.histogram("ragdoll_api_request_duration_ms", {
-    description: "API request duration in milliseconds.",
-    unit: "ms"
+    description: "API request duration in milliseconds."
   });
   const { deps, pool } = await buildDeps();
   const app = createApp(deps);

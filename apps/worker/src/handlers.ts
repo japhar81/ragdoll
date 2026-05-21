@@ -456,9 +456,10 @@ export function createWorker(deps: WorkerDeps): Worker {
     description: "Pipeline executions handled by the worker.",
     unit: "{execution}"
   });
+  // See the API-side comment for the rationale: omit `unit: "ms"` so the
+  // OTLP→Prometheus bridge doesn't double-suffix the exported series.
   const executionDuration = meter.histogram("ragdoll_worker_execution_duration_ms", {
-    description: "End-to-end pipeline execution duration.",
-    unit: "ms"
+    description: "End-to-end pipeline execution duration."
   });
   const now = deps.now ?? (() => new Date());
   const runtimeStore: ExecutionStore = deps.mirrorUsageToRepository
