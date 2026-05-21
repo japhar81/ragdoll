@@ -39,8 +39,8 @@ import {
 } from "../../../packages/pipeline-spec/src/index.ts";
 import type { PipelineDeployment } from "../../../packages/pipeline-spec/src/index.ts";
 import type { VectorStore } from "../../../packages/vector/src/index.ts";
-import type { Tracer } from "../../../packages/observability/src/index.ts";
-import { NoopTracer } from "../../../packages/observability/src/index.ts";
+import type { Tracer, Meter } from "../../../packages/observability/src/index.ts";
+import { NoopTracer, NoopMeter } from "../../../packages/observability/src/index.ts";
 import type { StructuredLogger } from "../../../packages/observability/src/index.ts";
 import type {
   PipelineVersionRepository,
@@ -105,6 +105,8 @@ export interface WorkerDeps {
   repositories: WorkerRepositories;
   /** Optional tracer; defaults to a no-op. */
   tracer?: Tracer;
+  /** Optional metric meter; defaults to a no-op. */
+  meter?: Meter;
   /** Optional structured logger. */
   logger?: StructuredLogger;
   /** Max node retries handed to the DagExecutor (default 1). */
@@ -445,6 +447,19 @@ export async function resolveRunVersion(
 
 export function createWorker(deps: WorkerDeps): Worker {
   const tracer = deps.tracer ?? new NoopTracer();
+  const meter = deps.meter ?? new NoopMeter();
+  // Worker-side metrics. Cardinality is bounded: pipeline_id is a tenant
+  // ref but the universe per tenant is finite; status is two values; node
+  // plugin_id is a registered set. Avoid putting execution_id / tenant_id
+  // here — those belong on traces, not metrics.
+  const executionCounter = meter.counter("ragdoll_worker_executions_total", {
+    description: "Pipeline executions handled by the worker.",
+    unit: "{execution}"
+  });
+  const executionDuration = meter.histogram("ragdoll_worker_execution_duration_ms", {
+    description: "End-to-end pipeline execution duration.",
+    unit: "ms"
+  });
   const now = deps.now ?? (() => new Date());
   const runtimeStore: ExecutionStore = deps.mirrorUsageToRepository
     ? new UsageMirroringExecutionStore(deps.store, deps.repositories.usageRecords)
@@ -635,22 +650,38 @@ export function createWorker(deps: WorkerDeps): Worker {
       deadlineMs: payload.deadlineMs,
       signal
     });
-    const output = await executor().execute({
-      spec,
-      context,
-      input: payload.input ?? {}
-    });
-    deps.logger?.info("run_pipeline completed", {
-      executionId,
-      pipelineId: payload.pipelineId,
-      tenantId: payload.tenantId
-    });
-    return {
-      executionId,
-      pipelineVersionId: versionRow.id,
-      status: "succeeded",
-      output
-    };
+    const startNs = process.hrtime.bigint();
+    let metricStatus: "succeeded" | "failed" = "succeeded";
+    try {
+      const output = await executor().execute({
+        spec,
+        context,
+        input: payload.input ?? {}
+      });
+      deps.logger?.info("run_pipeline completed", {
+        executionId,
+        pipelineId: payload.pipelineId,
+        tenantId: payload.tenantId
+      });
+      return {
+        executionId,
+        pipelineVersionId: versionRow.id,
+        status: "succeeded",
+        output
+      };
+    } catch (e) {
+      metricStatus = "failed";
+      throw e;
+    } finally {
+      const durationMs = Number(process.hrtime.bigint() - startNs) / 1_000_000;
+      const labels = {
+        pipeline_id: payload.pipelineId,
+        environment: payload.environment,
+        status: metricStatus
+      };
+      executionCounter.add(1, labels);
+      executionDuration.record(durationMs, labels);
+    }
   }
 
   /* -------------------------- ingest_datasource -------------------------- */

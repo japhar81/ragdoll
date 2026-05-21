@@ -1,0 +1,44 @@
+# Grafana datasource provisioning for the LGTM all-in-one bundle.
+# The bundled Loki, Prometheus, and Tempo all listen on localhost INSIDE the
+# container — these URLs are relative to Grafana's process namespace, not the
+# Docker host.
+apiVersion: 1
+datasources:
+  - name: Prometheus
+    type: prometheus
+    uid: prometheus
+    access: proxy
+    url: http://localhost:9090
+    isDefault: true
+    jsonData:
+      timeInterval: 15s
+      httpMethod: POST
+  - name: Loki
+    type: loki
+    uid: loki
+    access: proxy
+    url: http://localhost:3100
+    jsonData:
+      # Trace -> log correlation: clicking a span in Tempo deep-links to logs
+      # filtered by trace_id, since the OTel log exporter stamps trace_id on
+      # every log record emitted inside a span.
+      derivedFields:
+        - name: traceID
+          matcherRegex: '"trace_id":"(\w+)"'
+          url: '$${__value.raw}'
+          datasourceUid: tempo
+  - name: Tempo
+    type: tempo
+    uid: tempo
+    access: proxy
+    url: http://localhost:3200
+    jsonData:
+      tracesToLogsV2:
+        datasourceUid: loki
+        spanStartTimeShift: '-1m'
+        spanEndTimeShift: '1m'
+        filterByTraceID: true
+      tracesToMetrics:
+        datasourceUid: prometheus
+      serviceMap:
+        datasourceUid: prometheus

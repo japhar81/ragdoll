@@ -90,7 +90,13 @@ import {
   StaticKeyProvider,
   type SecretRepository
 } from "../../../packages/secrets/src/index.ts";
-import { getLogger } from "../../../packages/observability/src/index.ts";
+import {
+  getLogger,
+  getMeter,
+  wireOtelLogs,
+  wireOtelMetrics,
+  wireOtelTraces
+} from "../../../packages/observability/src/index.ts";
 import { InMemoryQueue, type QueuePort } from "../../../apps/worker/src/index.ts";
 
 /**
@@ -319,8 +325,40 @@ async function buildDeps(): Promise<{ deps: AppDeps; pool?: PoolLike }> {
   return { deps, pool };
 }
 
+/**
+ * Collapses high-cardinality path segments to stable templates so the
+ * `route` metric label doesn't explode. Replaces UUIDs and 16+ hex/base32
+ * tokens with `:id`. Anything that doesn't match is kept verbatim, so
+ * `/api/pipelines/:id/run` and `/api/audit` both stay readable.
+ */
+function normalizeRoute(path: string): string {
+  const segs = path.split("/").map((s) => {
+    if (
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s)
+    ) return ":id";
+    if (/^[0-9a-zA-Z_-]{16,}$/.test(s) && /\d/.test(s)) return ":id";
+    return s;
+  });
+  return segs.join("/") || "/";
+}
+
 async function main(): Promise<void> {
+  // Wire OTLP log + metric exporters BEFORE we ask for the logger so the
+  // very first startup line ships into Loki/Prometheus. Both calls return
+  // a shutdown closure that flushes the batch processors on SIGTERM.
+  const stopTraces = await wireOtelTraces({ instrumentationName: "ragdoll-api" });
+  const stopLogs = await wireOtelLogs({ instrumentationName: "ragdoll-api" });
+  const stopMetrics = await wireOtelMetrics({ instrumentationName: "ragdoll-api" });
   const logger = getLogger();
+  const meter = getMeter();
+  const requestCounter = meter.counter("ragdoll_api_requests_total", {
+    description: "Total HTTP requests handled by the API.",
+    unit: "{request}"
+  });
+  const requestDuration = meter.histogram("ragdoll_api_request_duration_ms", {
+    description: "API request duration in milliseconds.",
+    unit: "ms"
+  });
   const { deps, pool } = await buildDeps();
   const app = createApp(deps);
 
@@ -383,6 +421,7 @@ async function main(): Promise<void> {
     const query: Record<string, string | undefined> = {};
     for (const [k, v] of url.searchParams.entries()) query[k] = v;
 
+    const startNs = process.hrtime.bigint();
     const response = await app.handle({
       method: request.method,
       path: url.pathname,
@@ -390,15 +429,29 @@ async function main(): Promise<void> {
       headers: { ...request.headers, "x-request-id": requestId },
       body: parsedBody
     });
+    const durationMs = Number(process.hrtime.bigint() - startNs) / 1_000_000;
 
     reply.header("x-request-id", requestId);
     for (const [k, v] of Object.entries(response.headers)) reply.header(k, v);
     reply.code(response.status);
 
+    // Per-request metrics: counter + histogram, both keyed by a normalized
+    // route so high-cardinality ids don't blow up Prometheus labels.
+    const route = normalizeRoute(url.pathname);
+    const metricLabels = {
+      method: request.method as string,
+      route,
+      status: String(response.status)
+    };
+    requestCounter.add(1, metricLabels);
+    requestDuration.record(durationMs, metricLabels);
+
     logger.info("request", {
       method: request.method,
       path: url.pathname,
+      route,
       status: response.status,
+      duration_ms: Math.round(durationMs),
       requestId
     });
 
@@ -414,6 +467,11 @@ async function main(): Promise<void> {
     logger.info("shutting_down", {});
     await fastify.close().catch(() => undefined);
     if (pool) await pool.end().catch(() => undefined);
+    // Flush metric + log + trace batches before the process dies so the last
+    // few seconds of telemetry actually reach the collector.
+    await stopMetrics().catch(() => undefined);
+    await stopLogs().catch(() => undefined);
+    await stopTraces().catch(() => undefined);
     process.exit(0);
   };
   process.on("SIGTERM", shutdown);
