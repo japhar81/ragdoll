@@ -1354,24 +1354,48 @@ export function createApp(deps: AppDeps): App {
     }
     const associations = await tenantPipelines.listByTenant(ctx.params.id);
     const activations = await pipelineActivations.listByTenant(ctx.params.id);
-    const byPipeline = new Map<string, PipelineActivationRow[]>();
+    // Activations are bucketed by (pipelineId, environment) so a row that
+    // represents the "dev" association only carries the dev activations,
+    // not every activation across every env for that pipeline. The
+    // composite key matches the tenant_pipelines composite PK.
+    const byPipelineEnv = new Map<string, PipelineActivationRow[]>();
+    const envKey = (pipelineId: string, environment: string): string =>
+      `${pipelineId}::${environment}`;
     for (const act of activations) {
-      const bucket = byPipeline.get(act.pipelineId) ?? [];
+      const k = envKey(act.pipelineId, act.environment);
+      const bucket = byPipelineEnv.get(k) ?? [];
       bucket.push(act);
-      byPipeline.set(act.pipelineId, bucket);
+      byPipelineEnv.set(k, bucket);
     }
-    const pipelineIds = new Set<string>([
-      ...associations.map((a) => a.pipelineId),
-      ...activations.map((a) => a.pipelineId)
-    ]);
+    // Build the union of (pipelineId, environment) pairs across both
+    // associations and activations so an activation-only env still surfaces.
+    const seen = new Set<string>();
+    const pairs: Array<{ pipelineId: string; environment: string }> = [];
+    for (const a of associations) {
+      const k = envKey(a.pipelineId, a.environment);
+      if (!seen.has(k)) {
+        seen.add(k);
+        pairs.push({ pipelineId: a.pipelineId, environment: a.environment });
+      }
+    }
+    for (const a of activations) {
+      const k = envKey(a.pipelineId, a.environment);
+      if (!seen.has(k)) {
+        seen.add(k);
+        pairs.push({ pipelineId: a.pipelineId, environment: a.environment });
+      }
+    }
     const out: Array<Record<string, unknown>> = [];
-    for (const pipelineId of pipelineIds) {
+    for (const { pipelineId, environment } of pairs) {
       const pipeline = await deps.pipelines.get(pipelineId);
-      const assoc = associations.find((a) => a.pipelineId === pipelineId);
+      const assoc = associations.find(
+        (a) => a.pipelineId === pipelineId && a.environment === environment
+      );
       out.push({
         pipelineId,
+        environment,
         enabled: assoc ? assoc.enabled : false,
-        activations: (byPipeline.get(pipelineId) ?? []).map((row) =>
+        activations: (byPipelineEnv.get(envKey(pipelineId, environment)) ?? []).map((row) =>
           projectActivation(row, pipeline?.latestVersionId ?? null)
         )
       });
