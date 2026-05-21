@@ -59,7 +59,7 @@ spec:
 
     - id: write
       plugin:
-        category: sink
+        category: vector_store
         id: qdrant_vector_store
         version: "1.0.0"
       config:
