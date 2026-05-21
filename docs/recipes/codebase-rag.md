@@ -36,8 +36,48 @@ because it's the easier mental model.
 - [`codebase-ingest-code.yaml`](../../examples/pipelines/codebase-ingest-code.yaml)
 - [`codebase-ingest-docs.yaml`](../../examples/pipelines/codebase-ingest-docs.yaml)
 
-Both assume the worker can read `/workspace` (mount your repo there in
-the docker compose stack).
+Both are seeded into the database for `tenant-local` / `dev` (see
+`packages/db/seeds/zzzz-codebase-ingest.sql`) so they show up in the
+Pipelines view out of the box. **Two requirements before they run
+cleanly** — neither is wired automatically:
+
+### 1. Mount your codebase at `/workspace`
+
+Both pipelines walk `rootPath: /workspace`. The worker container doesn't
+mount your repo there by default. Add a volume under the `worker` service
+in `infra/docker/docker-compose.yml` (read-only is fine):
+
+```yaml
+services:
+  worker:
+    volumes:
+      - /Users/you/path/to/your-codebase:/workspace:ro
+```
+
+Without this the pipeline fails at the `fs` node with an empty document
+list (or ENOENT, depending on the host path).
+
+### 2. Seed the secret refs
+
+Both YAMLs reference these per-tenant secret refs:
+
+| Secret key            | Used by                                      |
+|-----------------------|----------------------------------------------|
+| `embedding.api_key`   | `provider_embeddings`                        |
+| `qdrant.api_key`      | `qdrant_vector_store` + `qdrant_delete`      |
+| `opensearch.username` | `opensearch_output` + `opensearch_delete`    |
+| `opensearch.password` | `opensearch_output` + `opensearch_delete`    |
+
+For the **in-stack defaults** (Ollama embedder + dev Qdrant/OpenSearch with
+no auth) the values are unused at runtime, but secret **resolution** still
+fires before the plugin runs and will fail when a ref points at a missing
+secret. Two options:
+
+- **Set placeholders** via `PUT /api/secrets` (or the Secrets screen) for
+  each of the four keys above. Any non-empty string works.
+- **Edit the spec in the builder** and drop the `secrets:` blocks
+  entirely. The plugins handle empty secrets fine when the upstream
+  endpoints don't need them.
 
 ## Steady-state runs
 
