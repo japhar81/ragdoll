@@ -14,6 +14,39 @@ export interface TenantRow {
   name: string;
   status: string;
   metadata: Record<string, unknown>;
+  /**
+   * 'db' (default) keeps pipelines/configs/secrets in Postgres only.
+   * 'git' mirrors the same state to a Git repo via @ragdoll/git-storage —
+   * the repo is system of record, the DB is a cache kept fresh by polling.
+   * Optional on the create payload; the DB column defaults to 'db' and
+   * the persisted row always carries one of the two values back.
+   */
+  storageMode?: "db" | "git";
+  createdAt: string;
+  updatedAt: string;
+}
+
+/**
+ * Side-table for `storage_mode='git'` tenants: where the repo lives,
+ * how to authenticate, and the wrapped data-encryption key the secrets
+ * bundle is encrypted with. See migration 007.
+ */
+export interface TenantGitConfigRow {
+  tenantId: UUID;
+  remoteUrl: string;
+  branch: string;
+  /** Folder prefix inside the repo; the layout below is
+   *  `{pathPrefix}/{tenantSlug}/{envSlug}/...`. Empty string = repo root. */
+  pathPrefix: string;
+  authMethod: "https" | "ssh";
+  /** UUID of a SecretRecord holding either an HTTPS PAT or an SSH key. */
+  authSecretId: UUID;
+  /** AES-256-GCM DEK, wrapped by the instance KEK. */
+  dekWrapped: string;
+  pollIntervalSec: number;
+  lastSyncedSha?: string | null;
+  lastSyncedAt?: string | null;
+  lastSyncError?: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -373,6 +406,19 @@ export interface CrudRepository<T, K = string> {
 
 export interface TenantRepository extends CrudRepository<TenantRow> {
   findBySlug(slug: string): Promise<TenantRow | undefined>;
+}
+
+export interface TenantGitConfigRepository {
+  get(tenantId: UUID): Promise<TenantGitConfigRow | undefined>;
+  upsert(row: TenantGitConfigRow): Promise<TenantGitConfigRow>;
+  delete(tenantId: UUID): Promise<void>;
+  /** Tenants in git mode whose `last_synced_at` is older than `nowIso - poll_interval_sec`. */
+  listDue(nowIso: string): Promise<TenantGitConfigRow[]>;
+  /** Stamps last_synced_sha / last_synced_at / last_sync_error after a poll. */
+  recordSync(
+    tenantId: UUID,
+    result: { sha?: string | null; syncedAt: string; error?: string | null }
+  ): Promise<void>;
 }
 
 export interface EnvironmentRepository

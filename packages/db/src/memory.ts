@@ -44,6 +44,8 @@ import type {
   ProviderRow,
   RoleRepository,
   RoleRow,
+  TenantGitConfigRepository,
+  TenantGitConfigRow,
   TenantPipelineKey,
   TenantPipelineRepository,
   TenantPipelineRow,
@@ -126,6 +128,61 @@ export class InMemoryTenantRepository
   }
   async findBySlug(slug: string): Promise<TenantRow | undefined> {
     return (await this.list()).find((row) => row.slug === slug);
+  }
+}
+
+/**
+ * In-memory mirror of the per-tenant Git-storage side table. Keyed by
+ * tenantId (one git config per tenant). `listDue` honours the
+ * `pollIntervalSec` heuristic the Postgres impl uses.
+ */
+export class InMemoryTenantGitConfigRepository
+  implements TenantGitConfigRepository
+{
+  private rows = new Map<string, TenantGitConfigRow>();
+
+  async get(tenantId: string): Promise<TenantGitConfigRow | undefined> {
+    const row = this.rows.get(tenantId);
+    return row ? structuredClone(row) : undefined;
+  }
+
+  async upsert(row: TenantGitConfigRow): Promise<TenantGitConfigRow> {
+    const existing = this.rows.get(row.tenantId);
+    const next: TenantGitConfigRow = {
+      ...row,
+      createdAt: existing?.createdAt ?? row.createdAt ?? new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    };
+    this.rows.set(row.tenantId, structuredClone(next));
+    return structuredClone(next);
+  }
+
+  async delete(tenantId: string): Promise<void> {
+    this.rows.delete(tenantId);
+  }
+
+  async listDue(nowIso: string): Promise<TenantGitConfigRow[]> {
+    const now = Date.parse(nowIso);
+    return [...this.rows.values()]
+      .filter((row) => {
+        if (!row.lastSyncedAt) return true;
+        const due = Date.parse(row.lastSyncedAt) + row.pollIntervalSec * 1000;
+        return due <= now;
+      })
+      .map((row) => structuredClone(row));
+  }
+
+  async recordSync(
+    tenantId: string,
+    result: { sha?: string | null; syncedAt: string; error?: string | null }
+  ): Promise<void> {
+    const row = this.rows.get(tenantId);
+    if (!row) return;
+    row.lastSyncedSha = result.sha ?? row.lastSyncedSha;
+    row.lastSyncedAt = result.syncedAt;
+    row.lastSyncError = result.error ?? null;
+    row.updatedAt = new Date().toISOString();
+    this.rows.set(tenantId, row);
   }
 }
 

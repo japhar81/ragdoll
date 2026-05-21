@@ -103,6 +103,7 @@ import {
   type PipelineFolderRepository,
   type PipelineActivationRepository,
   type ScheduleRepository,
+  type TenantGitConfigRepository,
   type TenantPipelineRepository,
   type ConfigDefinitionRepository,
   type ConfigValueRepository,
@@ -232,6 +233,11 @@ export interface AppDeps {
   authSettings?: AuthSettingsRepository;
   roles?: RoleRepository;
   webhookTriggers?: WebhookTriggerRepository;
+  /**
+   * Per-tenant Git storage config (migration 007). Optional so legacy
+   * harnesses keep working; the storage routes 404 when omitted.
+   */
+  tenantGitConfigs?: TenantGitConfigRepository;
   /** Resolves a principal's scoped grants; attaches the per-request decider. */
   authorizer?: Authorizer;
   /** Session signer used for login/SSO; required for the auth routes. */
@@ -701,10 +707,159 @@ export function createApp(deps: AppDeps): App {
     if (typeof body.name === "string") patch.name = body.name;
     if (typeof body.status === "string") patch.status = body.status;
     if (isObject(body.metadata)) patch.metadata = body.metadata;
+    if (body.storageMode === "db" || body.storageMode === "git") {
+      patch.storageMode = body.storageMode;
+    }
     const updated = await deps.tenants.update(ctx.params.id, patch);
     await audit(ctx, "tenant.update", "tenant", updated.id, before, updated);
     return ok({ tenant: updated });
   });
+
+  // ---- per-tenant Git storage --------------------------------------------
+  // CRUD over `tenant_git_configs` (migration 007) + an explicit /sync
+  // trigger that the UI's "Sync now" button calls. The reconcile itself
+  // lives in apps/api/src/git-mirror.ts and is shared with the worker's
+  // polling loop.
+  if (deps.tenantGitConfigs) {
+    const tenantGitConfigs = deps.tenantGitConfigs;
+
+    route("GET", "/api/tenants/:id/storage", async (ctx) => {
+      enforce(ctx.principal, "config:edit_tenant", { tenantId: ctx.params.id });
+      const tenant = await deps.tenants.get(ctx.params.id);
+      if (!tenant) return error(404, "not_found");
+      const cfg = await tenantGitConfigs.get(ctx.params.id);
+      // Never return the wrapped DEK over the wire — the operator can't
+      // use it, and exposing wrapped key material is a needless risk.
+      const safe = cfg
+        ? {
+            tenantId: cfg.tenantId,
+            remoteUrl: cfg.remoteUrl,
+            branch: cfg.branch,
+            pathPrefix: cfg.pathPrefix,
+            authMethod: cfg.authMethod,
+            authSecretId: cfg.authSecretId,
+            pollIntervalSec: cfg.pollIntervalSec,
+            lastSyncedSha: cfg.lastSyncedSha ?? null,
+            lastSyncedAt: cfg.lastSyncedAt ?? null,
+            lastSyncError: cfg.lastSyncError ?? null,
+            createdAt: cfg.createdAt,
+            updatedAt: cfg.updatedAt
+          }
+        : null;
+      return ok({
+        storageMode: tenant.storageMode ?? "db",
+        git: safe
+      });
+    });
+
+    route("PUT", "/api/tenants/:id/storage", async (ctx) => {
+      enforce(ctx.principal, "config:edit_tenant", { tenantId: ctx.params.id });
+      const body = ctx.request.body;
+      if (
+        !isObject(body) ||
+        typeof body.remoteUrl !== "string" ||
+        typeof body.branch !== "string" ||
+        typeof body.pathPrefix !== "string" ||
+        (body.authMethod !== "https" && body.authMethod !== "ssh") ||
+        typeof body.authSecretId !== "string"
+      ) {
+        return error(422, "validation_failed", {
+          issues: [
+            { message: "remoteUrl, branch, pathPrefix, authMethod, authSecretId required" }
+          ]
+        });
+      }
+      const tenant = await deps.tenants.get(ctx.params.id);
+      if (!tenant) return error(404, "not_found");
+      // Reuse the existing DEK on edits; mint a fresh one on first config.
+      const existing = await tenantGitConfigs.get(ctx.params.id);
+      const kek = process.env.SECRET_ENCRYPTION_KEY ?? "dev-secret";
+      const { generateDek, wrapDek } = await import(
+        "../../../packages/git-storage/src/index.ts"
+      );
+      const dekWrapped = existing
+        ? existing.dekWrapped
+        : wrapDek(generateDek(), kek);
+      const now = nowIso();
+      const row = await tenantGitConfigs.upsert({
+        tenantId: ctx.params.id,
+        remoteUrl: body.remoteUrl,
+        branch: body.branch,
+        pathPrefix: body.pathPrefix,
+        authMethod: body.authMethod,
+        authSecretId: body.authSecretId,
+        dekWrapped,
+        pollIntervalSec:
+          typeof body.pollIntervalSec === "number" ? body.pollIntervalSec : 60,
+        lastSyncedSha: existing?.lastSyncedSha ?? null,
+        lastSyncedAt: existing?.lastSyncedAt ?? null,
+        lastSyncError: existing?.lastSyncError ?? null,
+        createdAt: existing?.createdAt ?? now,
+        updatedAt: now
+      });
+      // Flip storageMode unconditionally — configuring git implies git mode.
+      await deps.tenants.update(ctx.params.id, {
+        storageMode: "git",
+        updatedAt: now
+      });
+      await audit(
+        ctx,
+        "tenant_git.upsert",
+        "tenant_git_config",
+        ctx.params.id,
+        existing,
+        { ...row, dekWrapped: "[REDACTED]" }
+      );
+      return ok({
+        storageMode: "git",
+        git: { ...row, dekWrapped: "[REDACTED]" }
+      });
+    });
+
+    route("DELETE", "/api/tenants/:id/storage", async (ctx) => {
+      enforce(ctx.principal, "config:edit_tenant", { tenantId: ctx.params.id });
+      const before = await tenantGitConfigs.get(ctx.params.id);
+      if (!before) return error(404, "not_found");
+      await tenantGitConfigs.delete(ctx.params.id);
+      await deps.tenants.update(ctx.params.id, {
+        storageMode: "db",
+        updatedAt: nowIso()
+      });
+      await audit(
+        ctx,
+        "tenant_git.delete",
+        "tenant_git_config",
+        ctx.params.id,
+        { ...before, dekWrapped: "[REDACTED]" },
+        undefined
+      );
+      return { status: 204, body: undefined, headers: {} };
+    });
+
+    route("POST", "/api/tenants/:id/storage/sync", async (ctx) => {
+      enforce(ctx.principal, "config:edit_tenant", { tenantId: ctx.params.id });
+      const cfg = await tenantGitConfigs.get(ctx.params.id);
+      if (!cfg) return error(404, "not_found", { message: "no git config" });
+      // The reconcile path is heavy (clone + push); it's wired into the
+      // worker's poller in production. The "Sync now" endpoint just
+      // schedules an immediate tick by clearing `last_synced_at` so the
+      // next poller tick picks it up. Returns 202 to make the async-ness
+      // explicit.
+      await tenantGitConfigs.recordSync(ctx.params.id, {
+        syncedAt: new Date(0).toISOString(),
+        error: null
+      });
+      await audit(
+        ctx,
+        "tenant_git.sync_requested",
+        "tenant_git_config",
+        ctx.params.id,
+        undefined,
+        undefined
+      );
+      return { status: 202, body: { status: "queued" }, headers: {} };
+    });
+  }
 
   route("DELETE", "/api/tenants/:id", async (ctx) => {
     enforce(ctx.principal, "config:edit_global");

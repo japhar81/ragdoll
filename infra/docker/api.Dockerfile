@@ -1,6 +1,10 @@
 # syntax=docker/dockerfile:1.7-labs
 FROM node:22-alpine
 WORKDIR /app
+# git + openssh-client are required by @ragdoll/git-storage (it shells out
+# to `git` so HTTPS-with-PAT and SSH-with-key both work without a JS git
+# client). Pure-JS deps in this image otherwise — no compiler toolchain.
+RUN apk add --no-cache git openssh-client
 # Copy only the workspace manifests first (structure preserved via --parents)
 # so `npm install` is cached and only re-runs when a package.json changes,
 # not on every source edit.
