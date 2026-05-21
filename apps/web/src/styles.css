@@ -344,20 +344,25 @@ button.palette-item:active {
 
 /* Cards with declared ports grow to give the body a clear column between
  * the left/right label gutters. Without this, port names overlap the title
- * and version rows. */
+ * and version rows. Each gutter is sized to hold the 56px label band plus
+ * the 25px breathing space requested between the pin and its label. */
 .rf-node.has-ports {
   position: relative;
   box-sizing: border-box;
-  min-width: 300px;
-  max-width: 380px;
+  min-width: 360px;
+  max-width: 420px;
   min-height: 88px;
-  padding-left: 64px;
-  padding-right: 64px;
+  padding-left: 95px;
+  padding-right: 95px;
 }
 
 /* Port label wrappers sit in the left/right gutters of the card, never
  * overflowing the border. Both axes use box-sizing: border-box so the
- * width:56px is the rendered width, not content width. */
+ * width:56px is the rendered width, not content width.
+ *
+ * Pin sits centered on the card border (half-out / half-in), so its inside
+ * edge is ~4px in. Label band starts 25px past that inside edge → left/right
+ * offset of 4 + 25 = 29px. */
 .rf-port-labels {
   position: absolute;
   top: 0;
@@ -370,11 +375,11 @@ button.palette-item:active {
   line-height: 1;
 }
 .rf-port-labels-left {
-  left: 4px;
+  left: 29px;
   text-align: left;
 }
 .rf-port-labels-right {
-  right: 4px;
+  right: 29px;
   text-align: right;
 }
 .rf-port-label {
