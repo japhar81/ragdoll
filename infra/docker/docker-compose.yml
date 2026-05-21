@@ -132,11 +132,13 @@ services:
       - ../grafana/dashboards:/etc/grafana/dashboards:ro
     healthcheck:
       # Grafana's /api/health returns {"database":"ok"} once everything inside
-      # the LGTM container is up — the collector starts well before this.
+      # the LGTM container is up — the collector starts well before this. The
+      # image doesn't ship wget / curl, so probe with `bash /dev/tcp/...` which
+      # is always available in the bundled bash.
       test:
         [
           "CMD-SHELL",
-          "wget -qO- http://127.0.0.1:3000/api/health | grep -q '\"database\":\"ok\"' || exit 1"
+          "bash -c '</dev/tcp/127.0.0.1/3000' >/dev/null 2>&1 || exit 1"
         ]
       interval: 10s
       timeout: 5s
