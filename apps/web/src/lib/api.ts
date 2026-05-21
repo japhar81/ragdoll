@@ -272,6 +272,52 @@ export const api = {
       input
     ),
 
+  // ---- per-tenant Git storage (migration 007) ---------------------------
+  getTenantStorage: (tenantId: string) =>
+    request<{
+      storageMode: "db" | "git";
+      git: null | {
+        tenantId: string;
+        remoteUrl: string;
+        branch: string;
+        pathPrefix: string;
+        authMethod: "https" | "ssh";
+        authSecretId: string;
+        pollIntervalSec: number;
+        lastSyncedSha: string | null;
+        lastSyncedAt: string | null;
+        lastSyncError: string | null;
+        createdAt: string;
+        updatedAt: string;
+      };
+    }>("GET", `/api/tenants/${encodeURIComponent(tenantId)}/storage`),
+  putTenantStorage: (
+    tenantId: string,
+    input: {
+      remoteUrl: string;
+      branch: string;
+      pathPrefix: string;
+      authMethod: "https" | "ssh";
+      authSecretId: string;
+      pollIntervalSec: number;
+    }
+  ) =>
+    request<{ storageMode: "git"; git: unknown }>(
+      "PUT",
+      `/api/tenants/${encodeURIComponent(tenantId)}/storage`,
+      input
+    ),
+  deleteTenantStorage: (tenantId: string) =>
+    request<undefined>(
+      "DELETE",
+      `/api/tenants/${encodeURIComponent(tenantId)}/storage`
+    ),
+  syncTenantStorage: (tenantId: string) =>
+    request<{ status: "queued" }>(
+      "POST",
+      `/api/tenants/${encodeURIComponent(tenantId)}/storage/sync`
+    ),
+
   // ---- tenant <-> pipeline associations + activations -------------------
   listTenantPipelines: (tenantId: string) =>
     request<{ pipelines: TenantPipelineRow[] }>(

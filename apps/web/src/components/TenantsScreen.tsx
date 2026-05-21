@@ -113,10 +113,165 @@ export function TenantsScreen() {
       {selected && (
         <>
           <TenantEnvironments tenantId={selected} />
+          <TenantStorage tenantId={selected} />
           <TenantPipelines tenantId={selected} />
         </>
       )}
     </Screen>
+  );
+}
+
+/**
+ * Per-tenant storage backend. Default "db" stores pipelines / configs /
+ * secrets in Postgres only. "git" mirrors all of them to a tenant Git
+ * repo (see docs/admin/git-backed-tenants.md). The form here writes the
+ * git config; the worker's poller does the heavy reconcile in the
+ * background. "Sync now" flips `last_synced_at` to the epoch so the
+ * next poller tick treats this tenant as immediately due.
+ */
+function TenantStorage(props: { tenantId: string }) {
+  const qc = useQueryClient();
+  const { tenantId } = props;
+  const cfg = useQuery({
+    queryKey: ["tenant-storage", tenantId],
+    queryFn: () => api.getTenantStorage(tenantId)
+  });
+  const [remoteUrl, setRemoteUrl] = useState("");
+  const [branch, setBranch] = useState("main");
+  const [pathPrefix, setPathPrefix] = useState("");
+  const [authMethod, setAuthMethod] = useState<"https" | "ssh">("https");
+  const [authSecretId, setAuthSecretId] = useState("");
+  const [pollIntervalSec, setPollIntervalSec] = useState(60);
+  const [banner, setBanner] = useState<string | undefined>();
+
+  // Seed the form from the persisted config so an operator opening the
+  // section sees what's actually in place.
+  React.useEffect(() => {
+    if (cfg.data?.git) {
+      setRemoteUrl(cfg.data.git.remoteUrl);
+      setBranch(cfg.data.git.branch);
+      setPathPrefix(cfg.data.git.pathPrefix);
+      setAuthMethod(cfg.data.git.authMethod);
+      setAuthSecretId(cfg.data.git.authSecretId);
+      setPollIntervalSec(cfg.data.git.pollIntervalSec);
+    }
+  }, [cfg.data?.git?.tenantId]);
+
+  const save = useMutation({
+    mutationFn: () =>
+      api.putTenantStorage(tenantId, {
+        remoteUrl,
+        branch,
+        pathPrefix,
+        authMethod,
+        authSecretId,
+        pollIntervalSec
+      }),
+    onSuccess: () => {
+      setBanner(undefined);
+      qc.invalidateQueries({ queryKey: ["tenant-storage", tenantId] });
+    },
+    onError: (e) => setBanner(errText(e))
+  });
+  const disable = useMutation({
+    mutationFn: () => api.deleteTenantStorage(tenantId),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["tenant-storage", tenantId] })
+  });
+  const syncNow = useMutation({
+    mutationFn: () => api.syncTenantStorage(tenantId),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["tenant-storage", tenantId] })
+  });
+
+  const mode = cfg.data?.storageMode ?? "db";
+
+  return (
+    <>
+      <h2>Storage for {tenantId}</h2>
+      {banner && <p className="error">{banner}</p>}
+      <p className="muted">
+        Current mode: <strong>{mode}</strong>
+        {mode === "git" && cfg.data?.git && (
+          <>
+            {" "}
+            · last sync{" "}
+            {cfg.data.git.lastSyncedAt ? cfg.data.git.lastSyncedAt : "never"}
+            {cfg.data.git.lastSyncError ? (
+              <span className="error"> ({cfg.data.git.lastSyncError})</span>
+            ) : null}
+          </>
+        )}
+      </p>
+      <div className="inline-form">
+        <input
+          placeholder="git@github.com:org/repo.git OR https://github.com/org/repo.git"
+          value={remoteUrl}
+          onChange={(e) => setRemoteUrl(e.target.value)}
+          style={{ width: 360 }}
+        />
+        <input
+          placeholder="branch"
+          value={branch}
+          onChange={(e) => setBranch(e.target.value)}
+          style={{ width: 100 }}
+        />
+        <input
+          placeholder="path prefix (optional)"
+          value={pathPrefix}
+          onChange={(e) => setPathPrefix(e.target.value)}
+          style={{ width: 160 }}
+        />
+        <select
+          value={authMethod}
+          onChange={(e) => setAuthMethod(e.target.value as "https" | "ssh")}
+        >
+          <option value="https">HTTPS (PAT)</option>
+          <option value="ssh">SSH (key)</option>
+        </select>
+        <input
+          placeholder="auth secret UUID"
+          value={authSecretId}
+          onChange={(e) => setAuthSecretId(e.target.value)}
+          style={{ width: 240 }}
+        />
+        <input
+          type="number"
+          min={10}
+          max={3600}
+          value={pollIntervalSec}
+          onChange={(e) => setPollIntervalSec(Number(e.target.value))}
+          style={{ width: 80 }}
+          title="poll interval (seconds)"
+        />
+        <button
+          className="primary"
+          disabled={save.isPending || !remoteUrl || !authSecretId}
+          onClick={() => save.mutate()}
+        >
+          {mode === "git" ? "Save" : "Enable git mode"}
+        </button>
+        {mode === "git" && (
+          <>
+            <button
+              disabled={syncNow.isPending}
+              onClick={() => syncNow.mutate()}
+            >
+              Sync now
+            </button>
+            <button
+              className="link-btn danger"
+              disabled={disable.isPending}
+              onClick={() => {
+                if (window.confirm("Revert this tenant to DB-only storage?")) {
+                  disable.mutate();
+                }
+              }}
+            >
+              Disable git mode
+            </button>
+          </>
+        )}
+      </div>
+    </>
   );
 }
 
