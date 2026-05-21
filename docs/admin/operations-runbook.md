@@ -64,9 +64,21 @@ on change, so coordinate with a re-login window.
 
 - Logs are single-line JSON (`ConsoleJsonLogger`) with `level`, `message`,
   `timestamp`, and a `requestId` on API requests; correlate with the
-  `x-request-id` response header.
+  `x-request-id` response header. In the local compose, the same lines
+  are also OTLP-exported to **Loki** inside the bundled
+  `grafana/otel-lgtm` container — searchable at **Grafana → Explore →
+  Loki**, pre-tuned by the "RAGdoll · Overview" dashboard.
+- Metrics: every API request emits `ragdoll_api_requests_total` and
+  `ragdoll_api_request_duration_ms`; every worker pipeline run emits
+  `ragdoll_worker_executions_total` and
+  `ragdoll_worker_execution_duration_ms`. Open Grafana on
+  **http://localhost:3300** for the dashboard or query Prometheus
+  directly inside the container. See `docs/admin/observability.md` for
+  the full metric reference and common queries.
 - Traces: spans are emitted per execution and per node when OpenTelemetry is
-  installed and `OTEL_ENABLED` is not `false`.
+  installed and `OTEL_ENABLED` is not `false`. They land in **Tempo**
+  in the LGTM container; clicking a span deep-links to the matching
+  log lines in Loki.
 - Auth failures return 401 (`unauthorized`); permission failures return 403
   (`forbidden`) — check the principal's roles and tenant.
 - Suspected secret exposure: audit diffs and secret values are redacted before

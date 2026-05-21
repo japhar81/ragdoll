@@ -1,4 +1,4 @@
-.PHONY: up down refresh smoke test crawl-up
+.PHONY: up down refresh smoke test crawl-up obs
 
 # Bring up the full local stack (build + start everything). First run pulls
 # CPU Ollama models and builds images.
@@ -27,3 +27,10 @@ test:
 # build — rebuild it explicitly, not on every code-refresh.
 crawl-up:
 	docker compose -f infra/docker/docker-compose.yml up -d --build python-plugins
+
+# Print (and on macOS open) the local Grafana URL. The all-in-one LGTM
+# container (otel-collector service) hosts Grafana on :3300; logs / metrics
+# / traces all land there. See docs/admin/observability.md.
+obs:
+	@echo "Grafana → http://localhost:3300  (dashboard: RAGdoll → Overview)"
+	@command -v open >/dev/null 2>&1 && open http://localhost:3300 || true

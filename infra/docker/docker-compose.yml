@@ -103,14 +103,45 @@ services:
         echo "models pulled"
     restart: "no"
 
+  # Grafana LGTM all-in-one (Loki + Grafana + Tempo + Mimir + OTel Collector).
+  # The bundled collector listens on the same OTLP ports (4317/4318) as the
+  # previous standalone otel-collector, so the api/worker env vars don't
+  # change. We keep the service NAME `otel-collector` for the same reason —
+  # `OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318` keeps working.
+  #
+  # Auto-provisioned Grafana datasources (Loki/Tempo/Prom) and the RAGdoll
+  # overview dashboard live in ../grafana/* and are mounted read-only.
+  # Grafana UI is on host port 3300 (3000 is too commonly used).
   otel-collector:
-    image: otel/opentelemetry-collector-contrib:0.119.0
-    command: ["--config=/etc/otelcol/config.yaml"]
-    volumes:
-      - ../otel/otel-collector.yaml:/etc/otelcol/config.yaml:ro
+    image: grafana/otel-lgtm:0.11.10
+    environment:
+      # Default Grafana admin login (only matters if you turn auth back on —
+      # local dev runs with anonymous viewer access via the provisioning files).
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      # Skip the bundled welcome dashboards; we ship our own.
+      ENABLE_LOGS_GRAFANA: "true"
+      ENABLE_LOGS_OTELCOL: "true"
     ports:
-      - "4317:4317"
-      - "4318:4318"
+      - "3300:3000"   # Grafana UI -> http://localhost:3300
+      - "4317:4317"   # OTLP gRPC
+      - "4318:4318"   # OTLP HTTP
+    volumes:
+      - lgtm-data:/data
+      - ../grafana/provisioning:/otel-lgtm/grafana/conf/provisioning:ro
+      - ../grafana/dashboards:/etc/grafana/dashboards:ro
+    healthcheck:
+      # Grafana's /api/health returns {"database":"ok"} once everything inside
+      # the LGTM container is up — the collector starts well before this.
+      test:
+        [
+          "CMD-SHELL",
+          "wget -qO- http://127.0.0.1:3000/api/health | grep -q '\"database\":\"ok\"' || exit 1"
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
 
   # Python-only crawler plugins (crawl4ai + scrapy) over HTTP. Internal
   # service — the api/worker reach it via the compose network at
@@ -180,6 +211,8 @@ services:
       QDRANT_URL: http://qdrant:6333
       OPENSEARCH_URL: http://opensearch:9200
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+      OTEL_SERVICE_NAME: ragdoll-api
+      OTEL_RESOURCE_ATTRIBUTES: "service.namespace=ragdoll,deployment.environment=local"
       # Setting this makes the plugin-loader auto-register the external
       # crawl4ai_crawler / scrapy_spider plugins so they appear in the
       # builder palette. api only lists/validates them — it does not need
@@ -218,6 +251,8 @@ services:
       QDRANT_URL: http://qdrant:6333
       OPENSEARCH_URL: http://opensearch:9200
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+      OTEL_SERVICE_NAME: ragdoll-worker
+      OTEL_RESOURCE_ATTRIBUTES: "service.namespace=ragdoll,deployment.environment=local"
       # The worker executes crawl jobs against the Python plugin service, so
       # it waits for python-plugins to be healthy (Chromium ready) before
       # starting.
@@ -252,3 +287,4 @@ volumes:
   qdrant-data:
   opensearch-data:
   ollama-data:
+  lgtm-data:

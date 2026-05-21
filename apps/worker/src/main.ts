@@ -20,7 +20,14 @@ import { createWorker, type WorkerDeps, type WorkerRepositories } from "./handle
 import { createScheduler } from "./scheduler.ts";
 import { loadRegistries } from "../../../packages/plugin-loader/src/index.ts";
 import { createVectorStore } from "../../../packages/vector/src/index.ts";
-import { getLogger, createTracer } from "../../../packages/observability/src/index.ts";
+import {
+  createTracer,
+  getLogger,
+  getMeter,
+  wireOtelLogs,
+  wireOtelMetrics,
+  wireOtelTraces
+} from "../../../packages/observability/src/index.ts";
 import {
   DatabaseEncryptedSecretProvider,
   InMemorySecretRepository,
@@ -57,6 +64,7 @@ async function buildDeps(): Promise<BuiltDeps> {
   const logger = getLogger();
   const { plugins, providers } = loadRegistries();
   const tracer = await createTracer({ enabled: process.env.OTEL_ENABLED !== "false" });
+  const meter = getMeter();
   const vectorStore = createVectorStore({
     url: process.env.QDRANT_URL,
     apiKey: process.env.QDRANT_API_KEY
@@ -138,6 +146,7 @@ async function buildDeps(): Promise<BuiltDeps> {
       vectorStore,
       repositories,
       tracer,
+      meter,
       logger,
       maxRetries: Number(process.env.WORKER_MAX_RETRIES ?? 1),
       mirrorUsageToRepository
@@ -147,6 +156,11 @@ async function buildDeps(): Promise<BuiltDeps> {
 }
 
 export async function main(): Promise<void> {
+  // Wire OTLP log + metric exporters BEFORE we ask for the logger so the
+  // very first startup line ships into Loki/Prometheus.
+  const stopTraces = await wireOtelTraces({ instrumentationName: "ragdoll-worker" });
+  const stopLogs = await wireOtelLogs({ instrumentationName: "ragdoll-worker" });
+  const stopMetrics = await wireOtelMetrics({ instrumentationName: "ragdoll-worker" });
   const logger = getLogger();
   const { deps, schedules } = await buildDeps();
   const worker = createWorker(deps);
@@ -181,6 +195,11 @@ export async function main(): Promise<void> {
       logger.info("worker shutting down");
       stopScheduler?.();
       await consumer.close();
+      // Flush metric + log batches before the process dies so the last
+      // few seconds of telemetry actually reach the collector.
+      await stopMetrics().catch(() => undefined);
+      await stopLogs().catch(() => undefined);
+      await stopTraces().catch(() => undefined);
       process.exit(0);
     };
     process.on("SIGINT", shutdown);
