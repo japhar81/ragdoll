@@ -344,34 +344,40 @@ button.palette-item:active {
  * and version rows. */
 .rf-node.has-ports {
   position: relative;
-  min-width: 280px;
-  max-width: 360px;
+  box-sizing: border-box;
+  min-width: 300px;
+  max-width: 380px;
   min-height: 88px;
-  padding-left: 60px;
-  padding-right: 60px;
+  padding-left: 64px;
+  padding-right: 64px;
 }
 
+/* Port label wrappers sit in the left/right gutters of the card, never
+ * overflowing the border. Both axes use box-sizing: border-box so the
+ * width:56px is the rendered width, not content width. */
 .rf-port-labels {
   position: absolute;
   top: 0;
   height: 100%;
-  width: 52px;
+  width: 56px;
+  box-sizing: border-box;
   pointer-events: none;
   font-size: 9px;
   color: #475569;
   line-height: 1;
 }
 .rf-port-labels-left {
-  left: 6px;
+  left: 4px;
   text-align: left;
 }
 .rf-port-labels-right {
-  right: 6px;
+  right: 4px;
   text-align: right;
 }
 .rf-port-label {
   position: absolute;
-  width: 100%;
+  left: 0;
+  right: 0;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
