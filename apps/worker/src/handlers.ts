@@ -19,7 +19,8 @@ import type {
 import { sanitizeSlug, stableHash } from "../../../packages/core/src/index.ts";
 import {
   DagExecutor,
-  type ExecutionStore
+  type ExecutionStore,
+  type IngestStateRepository
 } from "../../../packages/runtime/src/index.ts";
 import type {
   ExecutionRecord,
@@ -115,6 +116,10 @@ export interface WorkerDeps {
   deployments?: PipelineDeployment[];
   /** Clock injection for deterministic tests. */
   now?: () => Date;
+  /** Optional ingest-state repository used by delta-aware plugins
+   *  (`delta_filter`). When unset, plugins fall back to an empty state on
+   *  every run, effectively treating every document as new. */
+  ingestStateRepository?: IngestStateRepository;
   /**
    * When `true`, every usage record written by the DagExecutor (via the
    * runtime ExecutionStore) is ALSO mirrored into
@@ -471,6 +476,7 @@ export function createWorker(deps: WorkerDeps): Worker {
       pluginRegistry: deps.plugins,
       secretProvider: deps.secretProvider,
       store: runtimeStore,
+      ingestStateRepository: deps.ingestStateRepository,
       maxRetries: deps.maxRetries ?? 1,
       tracer
     });

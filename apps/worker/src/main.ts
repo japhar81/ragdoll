@@ -49,7 +49,7 @@ import {
   InMemoryScheduleRepository
 } from "../../../packages/db/src/index.ts";
 import type { ScheduleRepository } from "../../../packages/db/src/index.ts";
-import type { ExecutionStore } from "../../../packages/runtime/src/index.ts";
+import type { ExecutionStore, IngestStateRepository } from "../../../packages/runtime/src/index.ts";
 
 interface BuiltDeps {
   deps: WorkerDeps;
@@ -77,6 +77,7 @@ async function buildDeps(): Promise<BuiltDeps> {
   let secretProvider: SecretProvider;
   let store: ExecutionStore;
   let schedules: ScheduleRepository;
+  let ingestStateRepository: IngestStateRepository | undefined;
   // Mirror runtime usage into the control-plane UsageRecordRepository ONLY in
   // the in-memory wiring. PostgresExecutionStore.recordUsage already writes
   // the shared usage_records table that a Postgres UsageRecordRepository
@@ -92,6 +93,7 @@ async function buildDeps(): Promise<BuiltDeps> {
       connectionString: process.env.DATABASE_URL
     });
     store = new db.PostgresExecutionStore(pool);
+    ingestStateRepository = new db.PostgresIngestStateRepository(pool);
     repositories = {
       pipelineVersions: new db.PostgresPipelineVersionRepository(pool),
       configDefinitions: new db.PostgresConfigDefinitionRepository(pool),
@@ -149,7 +151,8 @@ async function buildDeps(): Promise<BuiltDeps> {
       meter,
       logger,
       maxRetries: Number(process.env.WORKER_MAX_RETRIES ?? 1),
-      mirrorUsageToRepository
+      mirrorUsageToRepository,
+      ingestStateRepository
     },
     schedules
   };
