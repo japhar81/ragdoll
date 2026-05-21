@@ -107,6 +107,61 @@ it may only emit secret references. Custom editors are untrusted code: hosts
 load them admin-only/registered and sandboxed, defaulting to the schema-driven
 form otherwise. This is a typed contract seam only; see ADR 0008.
 
+## Declaring input / output ports
+
+Ports give your plugin **named, independently-wireable** inputs and outputs.
+Without declared ports, the runtime falls back to legacy wiring (flat-merge
+upstream outputs into the downstream `inputs` bag plus a per-source-node
+wrapper). With declared ports:
+
+- The builder draws one handle per port on the corresponding edge of the
+  node card, labelled with the port name.
+- Edges carry `fromPort` / `toPort`, and the runtime delivers
+  `upstream.outputs[fromPort]` directly to `inputs[toPort]`.
+- An output port your plugin doesn't emit on (i.e. the key is absent from
+  the returned `outputs` map) is a **dead branch** — downstream nodes wired
+  to it are recorded as `skipped` and don't run.
+
+Use ports whenever your plugin has multiple distinct outputs that should be
+wireable to different downstream nodes, or when its inputs come from
+specific named slots rather than a free-form payload bag.
+
+```ts
+manifest: {
+  // ...
+  inputPorts: [
+    { name: "documents", required: true, description: "Retrieved docs" },
+    { name: "question",  required: true, description: "User question" }
+  ],
+  outputPorts: [
+    { name: "messages", description: "Chat-style messages ready for an LLM" }
+  ]
+}
+```
+
+### Port semantics
+
+- `name` — unique per side (input or output).
+- `required` — when true on an input port, a node lacking a live upstream
+  value on that port is **skipped** (cascades to its descendants).
+- `description` — surfaced in handle tooltips and the Builder Docs tab.
+- `schema` — optional `JsonSchemaLike` describing the payload at the port.
+
+### Branching via output ports
+
+Control-flow plugins (`if_then`, see `docs/plugins/if_then.md`) emit on
+exactly one of multiple output ports. Other ports are absent from the
+`outputs` map, marking those branches dead. The runtime then skips every
+downstream node reachable only through dead branches — this is the
+sanctioned way to fork a DAG along a condition.
+
+### Iteration via subgraphs
+
+Iteration plugins (`for_loop`, `foreach`, `while_loop`) accept a `body`
+pipeline spec in their config and recursively execute it via the
+`runSubgraph` callback the runtime provides on `PluginExecutionInput`. See
+`docs/plugins/foreach.md` etc. for the per-iteration input contract.
+
 ## Auto-discovery
 
 `packages/plugin-loader` builds the registry by scanning `Object.values()` of

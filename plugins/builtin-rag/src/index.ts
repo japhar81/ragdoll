@@ -1,4 +1,5 @@
 import type { InProcessPlugin } from "../../../packages/plugin-sdk/src/index.ts";
+import type { PipelineSpec } from "../../../packages/core/src/index.ts";
 import { OpenAIProvider, AnthropicProvider, OllamaCompatibleProvider, ProviderRegistry } from "../../../packages/providers/src/index.ts";
 import { createVectorStore } from "../../../packages/vector/src/index.ts";
 import type { DistanceMetric, VectorPoint } from "../../../packages/vector/src/index.ts";
@@ -134,6 +135,13 @@ export const basicPromptTemplatePlugin: InProcessPlugin = {
       },
       additionalProperties: false
     },
+    inputPorts: [
+      { name: "question", required: true, description: "User question text the template substitutes into {{question}}." },
+      { name: "documents", description: "Retrieved documents the template stringifies into {{context}}." }
+    ],
+    outputPorts: [
+      { name: "messages", description: "Chat-style message array ready for an LLM plugin." }
+    ],
     capabilities: ["query"],
     ui: {
       icon: "file-text",
@@ -143,7 +151,7 @@ export const basicPromptTemplatePlugin: InProcessPlugin = {
   },
   async execute({ inputs, config }) {
     const question = String((inputs.input as any)?.question ?? inputs.question ?? "");
-    const context = JSON.stringify((inputs.retrieve as any)?.documents ?? inputs.documents ?? []);
+    const context = JSON.stringify(inputs.documents ?? (inputs.retrieve as any)?.documents ?? []);
     const template = String(config.template ?? "Answer using only the context.\n\nContext:\n{{context}}\n\nQuestion: {{question}}");
     return {
       outputs: {
@@ -206,6 +214,14 @@ export const providerChatPlugin: InProcessPlugin = {
       },
       additionalProperties: false
     },
+    inputPorts: [
+      { name: "messages", required: true, description: "Chat messages array from a prompt template." }
+    ],
+    outputPorts: [
+      { name: "text", description: "Generated response text." },
+      { name: "provider", description: "Provider id that handled the call." },
+      { name: "model", description: "Model id that produced the text." }
+    ],
     capabilities: ["query", "streaming"],
     ui: {
       icon: "message-square",
@@ -229,7 +245,7 @@ export const providerChatPlugin: InProcessPlugin = {
     const response = await provider.chat({
       tenantId: context.tenantId,
       model: String(config.model ?? context.resolvedConfig.values["llm.model"]?.value ?? "llama3.1"),
-      messages: ((inputs.prompt as any)?.messages ?? inputs.messages ?? []) as any,
+      messages: (inputs.messages ?? (inputs.prompt as any)?.messages ?? []) as any,
       temperature: Number(config.temperature ?? context.resolvedConfig.values["llm.temperature"]?.value ?? 0.2),
       maxTokens: Number(config.maxTokens ?? context.resolvedConfig.values["llm.max_tokens"]?.value ?? 1024),
       apiKey: secrets.apiKey,
@@ -255,6 +271,13 @@ export const jsonOutputParserPlugin: InProcessPlugin = {
       properties: {},
       additionalProperties: false
     },
+    inputPorts: [
+      { name: "text", required: true, description: "Model text to parse as JSON." }
+    ],
+    outputPorts: [
+      { name: "json", description: "Parsed JSON value, or null when parsing fails." },
+      { name: "raw", description: "Original text string." }
+    ],
     capabilities: ["query"],
     ui: { icon: "braces", paletteGroup: "Parsing" }
   },
@@ -363,6 +386,15 @@ export const providerEmbeddingsPlugin: InProcessPlugin = {
       },
       additionalProperties: false
     },
+    inputPorts: [
+      { name: "texts", description: "Array of strings to embed. Takes priority over `text` and `chunks`." },
+      { name: "text", description: "Single string to embed when `texts` is unset." },
+      { name: "chunks", description: "Array of `{ text }` chunks; their texts are embedded." }
+    ],
+    outputPorts: [
+      { name: "vectors", description: "Embeddings, one per input text." },
+      { name: "dimensions", description: "Vector dimensionality." }
+    ],
     capabilities: ["ingestion", "query"],
     ui: {
       icon: "vector",
@@ -455,6 +487,13 @@ export const qdrantRetrieverPlugin: InProcessPlugin = {
       },
       additionalProperties: false
     },
+    inputPorts: [
+      { name: "question", description: "Natural-language question. Embedded on the fly when no queryVector is supplied." },
+      { name: "queryVector", description: "Pre-computed embedding for the query. Skips on-the-fly embedding when present." }
+    ],
+    outputPorts: [
+      { name: "documents", description: "Top-K nearest documents with score + payload fields." }
+    ],
     capabilities: ["query"],
     ui: {
       icon: "search",
@@ -976,6 +1015,11 @@ export const fieldRouterPlugin: InProcessPlugin = {
       },
       additionalProperties: false
     },
+    outputPorts: [
+      { name: "route", description: "Selected route label (the mapped value or `defaultRoute`)." },
+      { name: "value", description: "Original input field value the route was selected from." },
+      { name: "passthrough", description: "Original inputs object, forwarded unchanged for downstream nodes." }
+    ],
     capabilities: ["query"],
     ui: {
       icon: "git-branch",
@@ -1836,5 +1880,267 @@ export const webhookOutputPlugin: InProcessPlugin = {
         ...inputs
       }
     };
+  }
+};
+
+// ---------------------------------------------------------------------------
+// Control-flow plugins (declared input/output ports + subgraph execution).
+//
+// These plugins rely on the runtime's port-aware wiring (see packages/runtime).
+// `if_then` uses skip-cascading on its unselected branch; `for`/`foreach`/
+// `while` call `input.runSubgraph()` to evaluate a body PipelineSpec stored in
+// their config. Body specs are wrapped to the standard envelope before being
+// handed to the runtime.
+// ---------------------------------------------------------------------------
+
+/**
+ * Coerces a user-supplied body spec into the PipelineSpec envelope the runtime
+ * expects. The builder stores bodies in node.config.body as plain `{ nodes,
+ * edges, parameters? }` so they round-trip nicely; this normaliser fills in
+ * the api/kind/metadata fields so validation passes inside the subgraph run.
+ */
+function normaliseBodySpec(raw: unknown, label: string): PipelineSpec {
+  const body = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
+  const inner = (body.spec && typeof body.spec === "object" ? body.spec : body) as Record<string, unknown>;
+  const nodes = Array.isArray(inner.nodes) ? inner.nodes : [];
+  const edges = Array.isArray(inner.edges) ? inner.edges : [];
+  const parameters = Array.isArray(inner.parameters) ? inner.parameters : undefined;
+  return {
+    apiVersion: "rag-platform/v1",
+    kind: "Pipeline",
+    metadata: { name: label, description: `Iteration body for ${label}` },
+    spec: {
+      nodes: nodes as PipelineSpec["spec"]["nodes"],
+      edges: edges as PipelineSpec["spec"]["edges"],
+      ...(parameters ? { parameters: parameters as PipelineSpec["spec"]["parameters"] } : {})
+    }
+  };
+}
+
+/**
+ * Evaluate an if_then predicate over `inputs.value`. `mode = "truthy"` (the
+ * default) treats any non-empty / non-zero / non-false value as the `then`
+ * branch. `mode = "equals"` compares `inputs.value` to `config.equals` via
+ * `===` (with simple JSON-equality for arrays/objects). `mode = "defined"`
+ * fires `then` when `inputs.value !== undefined`.
+ */
+function evaluateIfPredicate(inputs: Record<string, unknown>, config: Record<string, unknown>): boolean {
+  const mode = String(config.mode ?? "truthy");
+  const value = inputs.value;
+  if (mode === "defined") return value !== undefined && value !== null;
+  if (mode === "equals") {
+    const target = (config as { equals?: unknown }).equals;
+    if (value === target) return true;
+    try {
+      return JSON.stringify(value) === JSON.stringify(target);
+    } catch {
+      return false;
+    }
+  }
+  if (Array.isArray(value)) return value.length > 0;
+  if (value && typeof value === "object") return Object.keys(value).length > 0;
+  return Boolean(value);
+}
+
+export const ifThenPlugin: InProcessPlugin = {
+  manifest: {
+    id: "if_then",
+    name: "If / Then",
+    version: "1.0.0",
+    category: "router",
+    description:
+      "Routes the input payload to either the `then` or `else` output port based on a predicate. Downstream nodes wired to the unselected port are skipped by the runtime.",
+    configSchema: {
+      type: "object",
+      properties: {
+        mode: {
+          type: "string",
+          enum: ["truthy", "equals", "defined"],
+          default: "truthy",
+          description:
+            "Predicate mode. `truthy` (default) tests Boolean(inputs.value); `equals` compares against config.equals; `defined` checks for non-null/undefined."
+        },
+        equals: {
+          description: "When mode = equals, the value to compare inputs.value against."
+        }
+      },
+      additionalProperties: false
+    },
+    inputPorts: [
+      { name: "value", required: true, description: "Value the predicate is evaluated against." },
+      { name: "payload", description: "Optional payload to forward on the selected branch. Defaults to inputs.value." }
+    ],
+    outputPorts: [
+      { name: "then", description: "Live when the predicate is true; carries the payload." },
+      { name: "else", description: "Live when the predicate is false; carries the payload." }
+    ],
+    capabilities: ["query", "ingestion"],
+    ui: {
+      icon: "git-branch",
+      paletteGroup: "Control flow",
+      formHints: {
+        mode: { widget: "select" },
+        equals: { widget: "json" }
+      }
+    }
+  },
+  async execute({ inputs, config }) {
+    const branch = evaluateIfPredicate(inputs, config);
+    const payload = inputs.payload !== undefined ? inputs.payload : inputs.value;
+    return {
+      outputs: branch ? { then: payload } : { else: payload },
+      metadata: { branch: branch ? "then" : "else", mode: String(config.mode ?? "truthy") }
+    };
+  }
+};
+
+export const forLoopPlugin: InProcessPlugin = {
+  manifest: {
+    id: "for_loop",
+    name: "For Loop",
+    version: "1.0.0",
+    category: "router",
+    description:
+      "Runs the configured body subgraph N times. Each iteration receives `{ index, total }` plus the upstream inputs, and the body's terminal output is collected into the `results` port.",
+    configSchema: {
+      type: "object",
+      required: ["body"],
+      properties: {
+        count: {
+          type: "integer",
+          default: 1,
+          description: "Number of iterations. Falls back to `inputs.count` when unset."
+        },
+        body: {
+          type: "object",
+          description: "Pipeline body executed each iteration. Stored as { nodes, edges }."
+        }
+      },
+      additionalProperties: false
+    },
+    inputPorts: [
+      { name: "count", description: "Override iteration count from upstream." }
+    ],
+    outputPorts: [
+      { name: "results", description: "Array of body outputs, one per iteration." },
+      { name: "final", description: "Final iteration's output (same as results[results.length - 1])." }
+    ],
+    capabilities: ["query", "ingestion"],
+    ui: { icon: "repeat", paletteGroup: "Control flow", formHints: { body: { widget: "json" } } }
+  },
+  async execute({ inputs, config, runSubgraph }) {
+    if (!runSubgraph) throw new Error("for_loop: runtime did not provide runSubgraph (external plugin transport not supported)");
+    const total = Number(inputs.count ?? config.count ?? 1) | 0;
+    if (total < 0) throw new Error(`for_loop: count must be >= 0, got ${total}`);
+    const body = normaliseBodySpec(config.body, "for_loop body");
+    const results: unknown[] = [];
+    for (let index = 0; index < total; index += 1) {
+      const result = await runSubgraph(body, { ...inputs, index, total });
+      results.push(result);
+    }
+    return { outputs: { results, final: results.at(-1) } };
+  }
+};
+
+export const forEachPlugin: InProcessPlugin = {
+  manifest: {
+    id: "foreach",
+    name: "ForEach",
+    version: "1.0.0",
+    category: "router",
+    description:
+      "Runs the configured body subgraph once per item in `inputs.items`. Each iteration receives `{ item, index, total }` plus upstream inputs; outputs are gathered into `results`.",
+    configSchema: {
+      type: "object",
+      required: ["body"],
+      properties: {
+        body: {
+          type: "object",
+          description: "Pipeline body executed for each item. Stored as { nodes, edges }."
+        }
+      },
+      additionalProperties: false
+    },
+    inputPorts: [
+      { name: "items", required: true, description: "Array to iterate. Each element becomes the body's `item` input." }
+    ],
+    outputPorts: [
+      { name: "results", description: "Array of body outputs in input order." }
+    ],
+    capabilities: ["query", "ingestion"],
+    ui: { icon: "list", paletteGroup: "Control flow", formHints: { body: { widget: "json" } } }
+  },
+  async execute({ inputs, config, runSubgraph }) {
+    if (!runSubgraph) throw new Error("foreach: runtime did not provide runSubgraph");
+    const items = (inputs.items as unknown[] | undefined) ?? [];
+    if (!Array.isArray(items)) throw new Error(`foreach: inputs.items must be an array, got ${typeof items}`);
+    const body = normaliseBodySpec(config.body, "foreach body");
+    const results: unknown[] = [];
+    for (let index = 0; index < items.length; index += 1) {
+      const result = await runSubgraph(body, { ...inputs, item: items[index], index, total: items.length });
+      results.push(result);
+    }
+    return { outputs: { results } };
+  }
+};
+
+export const whileLoopPlugin: InProcessPlugin = {
+  manifest: {
+    id: "while_loop",
+    name: "While Loop",
+    version: "1.0.0",
+    category: "router",
+    description:
+      "Runs the configured body subgraph until the predicate is false. The body's output is fed back as the next iteration's state under `state`. Bounded by `maxIterations` to prevent runaway loops.",
+    configSchema: {
+      type: "object",
+      required: ["body"],
+      properties: {
+        mode: {
+          type: "string",
+          enum: ["truthy", "defined"],
+          default: "truthy",
+          description: "Predicate mode applied to the body's `continue` output (or `state` when absent)."
+        },
+        maxIterations: {
+          type: "integer",
+          default: 100,
+          description: "Hard ceiling on iterations regardless of predicate."
+        },
+        body: {
+          type: "object",
+          description: "Pipeline body executed each iteration. Should emit `state` and optionally `continue`."
+        }
+      },
+      additionalProperties: false
+    },
+    inputPorts: [
+      { name: "state", description: "Initial state passed to the first iteration as `state`." }
+    ],
+    outputPorts: [
+      { name: "final", description: "Final body output when the predicate ends the loop." },
+      { name: "iterations", description: "Number of body iterations executed." }
+    ],
+    capabilities: ["query", "ingestion"],
+    ui: { icon: "rotate-cw", paletteGroup: "Control flow", formHints: { body: { widget: "json" } } }
+  },
+  async execute({ inputs, config, runSubgraph }) {
+    if (!runSubgraph) throw new Error("while_loop: runtime did not provide runSubgraph");
+    const maxIterations = Number(config.maxIterations ?? 100) | 0;
+    if (maxIterations <= 0) throw new Error("while_loop: maxIterations must be > 0");
+    const mode = String(config.mode ?? "truthy");
+    const body = normaliseBodySpec(config.body, "while_loop body");
+    let state: unknown = inputs.state;
+    let last: Record<string, unknown> = {};
+    let iterations = 0;
+    while (iterations < maxIterations) {
+      last = await runSubgraph(body, { ...inputs, state, iteration: iterations });
+      iterations += 1;
+      const cont = last.continue !== undefined ? last.continue : last.state;
+      const keepGoing = mode === "defined" ? cont !== undefined && cont !== null : Boolean(cont);
+      state = last.state !== undefined ? last.state : last;
+      if (!keepGoing) break;
+    }
+    return { outputs: { final: last, iterations } };
   }
 };

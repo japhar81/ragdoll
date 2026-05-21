@@ -1,5 +1,5 @@
 import { performance } from "node:perf_hooks";
-import type { PipelineNode, PipelineSpec, RuntimeContext, SecretRef, UsageRecord } from "../../core/src/index.ts";
+import type { PipelineEdge, PipelineNode, PipelineSpec, RuntimeContext, SecretRef, UsageRecord } from "../../core/src/index.ts";
 import { redactValue } from "../../core/src/index.ts";
 import type { SecretProvider } from "../../secrets/src/index.ts";
 import {
@@ -8,7 +8,7 @@ import {
   type PluginRegistry
 } from "../../plugin-sdk/src/index.ts";
 import { validatePipelineSpec } from "../../pipeline-spec/src/index.ts";
-import type { SpanHandle, Tracer } from "../../observability/src/index.ts";
+import type { Tracer } from "../../observability/src/index.ts";
 import { NoopTracer, runtimeAttributes } from "../../observability/src/index.ts";
 
 /** Thrown when execution exceeds `context.deadline`. */
@@ -176,46 +176,171 @@ export class DagExecutor {
     }
   }
 
+  /**
+   * Public entrypoint plugins use to recursively execute a body spec
+   * (for/foreach/while). Shares the parent's secret provider, plugin registry,
+   * and observability tracer; allocates a fresh execution id under the same
+   * tenant/pipeline so any sub-execution rows in the store don't collide.
+   */
+  async runSubgraph(args: {
+    spec: PipelineSpec;
+    context: RuntimeContext;
+    input: Record<string, unknown>;
+  }): Promise<Record<string, unknown>> {
+    // No store.start/complete wrapper here — a subgraph is part of its parent
+    // execution, not a separately surfaced run. Node-level records still write
+    // because runDag drives executeNode which calls store.startNode/completeNode.
+    return this.runDag(args.spec, args.context, args.input);
+  }
+
   private async runDag(spec: PipelineSpec, context: RuntimeContext, initialInput: Record<string, unknown>): Promise<Record<string, unknown>> {
     const nodes = new Map(spec.spec.nodes.map((node) => [node.id, node]));
-    const incoming = new Map<string, string[]>();
-    const outgoing = new Map<string, string[]>();
+    const incoming = new Map<string, PipelineEdge[]>();
+    const outgoing = new Map<string, PipelineEdge[]>();
     for (const edge of spec.spec.edges) {
-      incoming.set(edge.to, [...(incoming.get(edge.to) ?? []), edge.from]);
-      outgoing.set(edge.from, [...(outgoing.get(edge.from) ?? []), edge.to]);
+      incoming.set(edge.to, [...(incoming.get(edge.to) ?? []), edge]);
+      outgoing.set(edge.from, [...(outgoing.get(edge.from) ?? []), edge]);
     }
 
     const ready = spec.spec.nodes.filter((node) => (incoming.get(node.id) ?? []).length === 0).map((node) => node.id);
     const completed = new Set<string>();
+    const skipped = new Set<string>();
     const outputs = new Map<string, Record<string, unknown>>();
+    const resolved = (nodeId: string) => completed.has(nodeId) || skipped.has(nodeId);
 
     while (ready.length > 0) {
       const nodeId = ready.shift()!;
       const node = nodes.get(nodeId)!;
-      const nodeInputs = Object.fromEntries((incoming.get(nodeId) ?? []).map((source) => [source, outputs.get(source)]));
-      const effectiveInput = Object.keys(nodeInputs).length === 0 ? initialInput : nodeInputs;
-      this.checkAborted(context);
-      const nodeOutput = await this.executeNode(context, node, effectiveInput);
-      outputs.set(nodeId, nodeOutput.outputs);
-      completed.add(nodeId);
-      for (const next of outgoing.get(nodeId) ?? []) {
-        if ((incoming.get(next) ?? []).every((source) => completed.has(source))) {
-          ready.push(next);
+      const incomingEdges = incoming.get(nodeId) ?? [];
+
+      // Skip decision: a node skips if every upstream source is skipped, OR
+      // every incoming edge with a declared fromPort received undefined on that
+      // port. Root nodes (no incoming) always run.
+      let skip = false;
+      if (incomingEdges.length > 0) {
+        const liveEdges = incomingEdges.filter((edge) => this.isEdgeLive(edge, outputs, skipped));
+        if (liveEdges.length === 0) skip = true;
+      }
+
+      if (skip) {
+        await this.markSkipped(context, node);
+        skipped.add(nodeId);
+      } else {
+        const effectiveInput = this.buildNodeInputs(nodeId, incomingEdges, outputs, initialInput);
+        this.checkAborted(context);
+        const nodeOutput = await this.executeNode(context, node, effectiveInput);
+        outputs.set(nodeId, nodeOutput.outputs);
+        completed.add(nodeId);
+      }
+
+      for (const edge of outgoing.get(nodeId) ?? []) {
+        const next = edge.to;
+        if ((incoming.get(next) ?? []).every((upstream) => resolved(upstream.from))) {
+          if (!ready.includes(next) && !resolved(next)) ready.push(next);
         }
       }
     }
 
-    if (completed.size !== spec.spec.nodes.length) {
-      throw new Error("Pipeline execution did not complete all nodes");
-    }
-
+    // Pick terminal output: explicit `output` node wins; otherwise fall back to
+    // the last declared node. Both paths defer to the sole live upstream when
+    // present, so an `if_then` that picked the `then` branch returns that
+    // branch's terminal payload (the `else` upstream is skipped and ignored).
     const outputNode = spec.spec.nodes.find((node) => node.type === "output");
     if (outputNode) {
-      const source = incoming.get(outputNode.id)?.[0];
-      return source ? outputs.get(source) ?? {} : outputs.get(outputNode.id) ?? {};
+      if (skipped.has(outputNode.id)) return {};
+      const liveIncoming = (incoming.get(outputNode.id) ?? []).filter((edge) => this.isEdgeLive(edge, outputs, skipped));
+      if (liveIncoming.length > 0) return outputs.get(liveIncoming[0].from) ?? {};
+      return outputs.get(outputNode.id) ?? {};
     }
-    const last = spec.spec.nodes.at(-1);
-    return last ? outputs.get(last.id) ?? {} : {};
+    for (let i = spec.spec.nodes.length - 1; i >= 0; i -= 1) {
+      const candidate = spec.spec.nodes[i];
+      if (completed.has(candidate.id)) return outputs.get(candidate.id) ?? {};
+    }
+    return {};
+  }
+
+  /**
+   * An edge is "live" when its source ran (not skipped) AND, if the edge has a
+   * declared `fromPort`, the source actually emitted a value on that port. An
+   * edge without a `fromPort` is live as long as the source ran — that's the
+   * back-compat path for plugins that haven't declared output ports yet.
+   */
+  private isEdgeLive(
+    edge: PipelineEdge,
+    outputs: Map<string, Record<string, unknown>>,
+    skipped: Set<string>
+  ): boolean {
+    if (skipped.has(edge.from)) return false;
+    const sourceOutputs = outputs.get(edge.from);
+    if (!sourceOutputs) return false;
+    if (!edge.fromPort) return true;
+    return sourceOutputs[edge.fromPort] !== undefined;
+  }
+
+  /**
+   * Three-layer input bag:
+   *   1. Flat-merged upstream outputs at root — fixes the historical
+   *      `inputs.documents` footgun where downstream plugins hardcoded the
+   *      upstream node id.
+   *   2. Per-source-node wrapper (`inputs[sourceNodeId]`) — preserves any
+   *      existing reads like `inputs.retrieve.documents`.
+   *   3. Port-wired values (`inputs[toPort]`) — explicit named wiring wins
+   *      over both layers below it.
+   * Root nodes (no incoming edges) receive `initialInput` directly so the
+   * pipeline-level input shape is unchanged.
+   */
+  private buildNodeInputs(
+    _nodeId: string,
+    incomingEdges: PipelineEdge[],
+    outputs: Map<string, Record<string, unknown>>,
+    initialInput: Record<string, unknown>
+  ): Record<string, unknown> {
+    if (incomingEdges.length === 0) return initialInput;
+    const result: Record<string, unknown> = {};
+    for (const edge of incomingEdges) {
+      const sourceOutputs = outputs.get(edge.from);
+      if (!sourceOutputs) continue;
+      // Layer 1: flat merge (skip when the source has a fromPort declared —
+      // that's an explicit slot, not bulk output).
+      if (!edge.fromPort) {
+        for (const [key, value] of Object.entries(sourceOutputs)) {
+          if (value !== undefined) result[key] = value;
+        }
+      }
+      // Layer 2: per-source wrapper.
+      result[edge.from] = sourceOutputs;
+      // Layer 3: port wiring overrides both layers above when explicit.
+      if (edge.fromPort && edge.toPort) {
+        const portValue = sourceOutputs[edge.fromPort];
+        if (portValue !== undefined) result[edge.toPort] = portValue;
+      } else if (edge.fromPort && !edge.toPort) {
+        // Source-side only — surface the named slot at root under its source name.
+        const portValue = sourceOutputs[edge.fromPort];
+        if (portValue !== undefined) result[edge.fromPort] = portValue;
+      } else if (!edge.fromPort && edge.toPort) {
+        // Target-side only — wrap the source's whole output bag under toPort.
+        result[edge.toPort] = sourceOutputs;
+      }
+    }
+    return result;
+  }
+
+  private async markSkipped(context: RuntimeContext, node: PipelineNode): Promise<void> {
+    const ts = new Date().toISOString();
+    await this.options.store.startNode({
+      executionId: context.executionId,
+      nodeId: node.id,
+      status: "skipped",
+      startedAt: ts
+    });
+    await this.options.store.completeNode({
+      executionId: context.executionId,
+      nodeId: node.id,
+      status: "skipped",
+      startedAt: ts,
+      completedAt: ts,
+      latencyMs: 0
+    });
   }
 
   private async executeNode(context: RuntimeContext, node: PipelineNode, inputs: Record<string, unknown>): Promise<PluginExecutionOutput> {
@@ -254,7 +379,9 @@ export class DagExecutor {
               node: { id: node.id, plugin: node.plugin!, config: node.config, secrets: node.secrets },
               inputs,
               config: resolveNodeTemplateValues(node.config ?? {}, context),
-              secrets: await this.resolveNodeSecrets(node.secrets ?? {}, context)
+              secrets: await this.resolveNodeSecrets(node.secrets ?? {}, context),
+              runSubgraph: (subSpec, subInput) =>
+                this.runSubgraph({ spec: subSpec, context, input: subInput })
             });
           },
           this.options.maxRetries ?? 1,

@@ -1,5 +1,6 @@
 import type {
   ConfigDefinition,
+  PipelineSpec,
   PluginCategory,
   PluginRef,
   RuntimeContext,
@@ -33,6 +34,27 @@ export interface JsonSchemaLike {
   format?: string;
 }
 
+/**
+ * Named input or output port on a plugin. Declared ports let edges target a
+ * specific slot (`fromPort` / `toPort`) instead of dumping every upstream
+ * output into the downstream `inputs` bag. A plugin that declares ports also
+ * gets independently-wireable outputs in the builder — wire `if_then.then` and
+ * `if_then.else` to different downstream nodes; runtime treats an
+ * undefined-on-emit port as a dead branch and skips its descendants. Plugins
+ * with no declared ports keep the legacy "merge everything" wiring.
+ */
+export interface PortDef {
+  /** Port name, e.g. "documents", "then", "else". Must be unique per side. */
+  name: string;
+  /** Human-readable description shown in the builder. */
+  description?: string;
+  /** When true, the runtime considers the port mandatory: a node will be
+   *  skipped if a required input port has no live upstream value. */
+  required?: boolean;
+  /** Optional JSON-Schema-like shape describing the payload on this port. */
+  schema?: JsonSchemaLike;
+}
+
 export interface PluginManifest {
   id: string;
   name: string;
@@ -43,6 +65,13 @@ export interface PluginManifest {
   secretsSchema?: JsonSchemaLike;
   inputSchema?: JsonSchemaLike;
   outputSchema?: JsonSchemaLike;
+  /** Named input ports (declared contract). Undeclared plugins keep
+   *  legacy merge wiring; declared plugins receive `inputs[portName]`. */
+  inputPorts?: PortDef[];
+  /** Named output ports (declared contract). The plugin's `outputs` map keys
+   *  should match these names; an absent key on a declared port marks that
+   *  branch dead so downstream nodes wired to it are skipped. */
+  outputPorts?: PortDef[];
   configDefinitions?: ConfigDefinition[];
   capabilities?: string[];
   ui?: {
@@ -98,6 +127,14 @@ export interface PluginExecutionInput {
   inputs: Record<string, unknown>;
   config: Record<string, unknown>;
   secrets: Record<string, string>;
+  /**
+   * Recursively execute a body pipeline spec from inside a plugin. Used by
+   * iteration plugins (for/foreach/while) to evaluate their body N times. Only
+   * provided to in-process plugins — external plugins must implement their own
+   * iteration if they need it. Returns the body's terminal outputs as a plain
+   * object (same shape an outer pipeline returns to its caller).
+   */
+  runSubgraph?: (spec: PipelineSpec, initialInput: Record<string, unknown>) => Promise<Record<string, unknown>>;
 }
 
 export interface PluginExecutionOutput {

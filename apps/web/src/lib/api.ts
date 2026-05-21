@@ -865,6 +865,15 @@ export interface PluginUi {
   module?: string;
 }
 
+/** Declared input or output port on a plugin manifest. Used by the builder
+ *  to render per-port handles instead of one big input/output blob. */
+export interface PortInfo {
+  name: string;
+  description?: string;
+  required?: boolean;
+  schema?: JsonSchemaLike;
+}
+
 export interface PluginInfo {
   id: string;
   name: string;
@@ -875,6 +884,8 @@ export interface PluginInfo {
   capabilities?: string[];
   configSchema?: JsonSchemaLike;
   secretsSchema?: JsonSchemaLike;
+  inputPorts?: PortInfo[];
+  outputPorts?: PortInfo[];
   ui?: PluginUi;
 }
 

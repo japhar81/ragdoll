@@ -3365,6 +3365,8 @@ function projectPlugin(plugin: RegisteredPlugin): {
   capabilities: string[];
   configSchema?: unknown;
   secretsSchema?: unknown;
+  inputPorts?: unknown;
+  outputPorts?: unknown;
   ui?: {
     icon?: string;
     color?: string;
@@ -3393,6 +3395,8 @@ function projectPlugin(plugin: RegisteredPlugin): {
     capabilities: m.capabilities ?? [],
     ...(m.configSchema !== undefined ? { configSchema: m.configSchema } : {}),
     ...(m.secretsSchema !== undefined ? { secretsSchema: m.secretsSchema } : {}),
+    ...(m.inputPorts !== undefined ? { inputPorts: m.inputPorts } : {}),
+    ...(m.outputPorts !== undefined ? { outputPorts: m.outputPorts } : {}),
     ...(ui !== undefined ? { ui } : {})
   };
 }

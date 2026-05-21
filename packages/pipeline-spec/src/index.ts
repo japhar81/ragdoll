@@ -52,10 +52,42 @@ export function validatePipelineSpec(spec: PipelineSpec, registry?: PluginRegist
   }
 
   const adjacency = new Map<string, string[]>();
+  const nodeById = new Map(spec.spec?.nodes?.map((node) => [node.id, node]) ?? []);
   for (const edge of spec.spec?.edges ?? []) {
     if (!nodeIds.has(edge.from)) issues.push({ level: "error", code: "missing_edge_source", message: `edge source ${edge.from} does not exist`, edge });
     if (!nodeIds.has(edge.to)) issues.push({ level: "error", code: "missing_edge_target", message: `edge target ${edge.to} does not exist`, edge });
     adjacency.set(edge.from, [...(adjacency.get(edge.from) ?? []), edge.to]);
+
+    if (registry) {
+      // Soft-validate port names against the upstream/downstream plugin
+      // manifests when both ends have a plugin reference. Unknown ports become
+      // warnings (not errors) so legacy plugins without declared ports keep
+      // validating cleanly and so iteration body specs can edit independently.
+      const fromNode = nodeById.get(edge.from);
+      if (edge.fromPort && fromNode?.plugin) {
+        const manifest = registry.get(fromNode.plugin)?.manifest;
+        if (manifest?.outputPorts && !manifest.outputPorts.some((port) => port.name === edge.fromPort)) {
+          issues.push({
+            level: "warning",
+            code: "unknown_output_port",
+            message: `edge.fromPort "${edge.fromPort}" is not declared by ${manifest.id} v${manifest.version}`,
+            edge
+          });
+        }
+      }
+      const toNode = nodeById.get(edge.to);
+      if (edge.toPort && toNode?.plugin) {
+        const manifest = registry.get(toNode.plugin)?.manifest;
+        if (manifest?.inputPorts && !manifest.inputPorts.some((port) => port.name === edge.toPort)) {
+          issues.push({
+            level: "warning",
+            code: "unknown_input_port",
+            message: `edge.toPort "${edge.toPort}" is not declared by ${manifest.id} v${manifest.version}`,
+            edge
+          });
+        }
+      }
+    }
   }
 
   const cycle = findCycle(adjacency);
