@@ -326,6 +326,52 @@ button.palette-item:active {
   background: #475569;
 }
 
+/* Multi-port handles: smaller, color-coded by required-ness, stacked along
+ * the left/right edge of the card. */
+.rf-handle-port {
+  width: 8px;
+  height: 8px;
+  border: 1.5px solid #ffffff;
+  background: #6366f1;
+  transform: translate(-50%, -50%);
+}
+.rf-handle-port.required {
+  background: #f59e0b;
+}
+
+.rf-node.has-ports {
+  min-height: 64px;
+  position: relative;
+  padding-left: 18px;
+  padding-right: 18px;
+}
+
+.rf-port-labels {
+  position: absolute;
+  top: 0;
+  height: 100%;
+  pointer-events: none;
+  font-size: 9px;
+  color: #475569;
+  line-height: 1;
+}
+.rf-port-labels-left {
+  left: 12px;
+  text-align: left;
+}
+.rf-port-labels-right {
+  right: 12px;
+  text-align: right;
+}
+.rf-port-label {
+  position: absolute;
+  white-space: nowrap;
+  transform: translateY(-50%);
+}
+.rf-port-labels-right .rf-port-label {
+  right: 0;
+}
+
 textarea, pre {
   width: 100%;
   min-height: 120px;

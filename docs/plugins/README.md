@@ -50,6 +50,9 @@ treatment as long as their `id` matches a bundled markdown filename.
 | basic_text_chunker | chunker | [basic_text_chunker.md](basic_text_chunker.md) |
 | buffer_memory | memory | [buffer_memory.md](buffer_memory.md) |
 | field_router | router | [field_router.md](field_router.md) |
+| for_loop | router | [for_loop.md](for_loop.md) |
+| foreach | router | [foreach.md](foreach.md) |
+| if_then | router | [if_then.md](if_then.md) |
 | json_output_parser | output_parser | [json_output_parser.md](json_output_parser.md) |
 | manual_text_input | datasource | [manual_text_input.md](manual_text_input.md) |
 | opensearch_bm25_retriever | retriever | [opensearch_bm25_retriever.md](opensearch_bm25_retriever.md) |
@@ -71,3 +74,4 @@ treatment as long as their `id` matches a bundled markdown filename.
 | vector_upsert | sink | [vector_upsert.md](vector_upsert.md) |
 | webhook_output | sink | [webhook_output.md](webhook_output.md) |
 | webhook_trigger | datasource | [webhook_trigger.md](webhook_trigger.md) |
+| while_loop | router | [while_loop.md](while_loop.md) |

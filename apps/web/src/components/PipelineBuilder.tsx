@@ -39,7 +39,7 @@ import {
   type PaletteDragItem
 } from "../lib/palette.ts";
 import { PalettePanel } from "./PalettePanel.tsx";
-import { FlowNodeCard } from "./FlowNodeCard.tsx";
+import { FlowNodeCard, PluginManifestContext } from "./FlowNodeCard.tsx";
 import { PluginEditorSlot } from "./PluginEditorSlot.tsx";
 import { SecretsEditor } from "./SecretsEditor.tsx";
 import { NodeDocsTab } from "./builder/NodeDocsTab.tsx";
@@ -371,6 +371,13 @@ export function PipelineBuilder(props: {
     () => plugins.data?.plugins ?? [],
     [plugins.data]
   );
+  const pluginManifestMap = useMemo(() => {
+    const map = new Map<string, PluginInfo>();
+    for (const info of pluginList) {
+      map.set(`${info.category}:${info.id}:${info.version}`, info);
+    }
+    return map;
+  }, [pluginList]);
 
   const resolved = useQuery({
     queryKey: ["resolved-config", pipelineId, tenantId, environment],
@@ -1107,27 +1114,29 @@ export function PipelineBuilder(props: {
           onDrop={onDrop}
           onDragOver={onDragOver}
         >
-          <ReactFlow
-            nodes={nodes}
-            edges={edges}
-            nodeTypes={nodeTypes}
-            onInit={(instance) => {
-              rfRef.current = instance;
-            }}
-            onNodesChange={onNodesChange}
-            onEdgesChange={onEdgesChange}
-            onConnect={onConnect}
-            isValidConnection={isValidConnection}
-            defaultEdgeOptions={EDGE_DEFAULTS}
-            onNodeClick={(_, node) => setSelectedId(node.id)}
-            onPaneClick={() => setSelectedId(undefined)}
-            deleteKeyCode={["Backspace", "Delete"]}
-            fitView
-          >
-            <MiniMap pannable zoomable />
-            <Controls />
-            <Background />
-          </ReactFlow>
+          <PluginManifestContext.Provider value={pluginManifestMap}>
+            <ReactFlow
+              nodes={nodes}
+              edges={edges}
+              nodeTypes={nodeTypes}
+              onInit={(instance) => {
+                rfRef.current = instance;
+              }}
+              onNodesChange={onNodesChange}
+              onEdgesChange={onEdgesChange}
+              onConnect={onConnect}
+              isValidConnection={isValidConnection}
+              defaultEdgeOptions={EDGE_DEFAULTS}
+              onNodeClick={(_, node) => setSelectedId(node.id)}
+              onPaneClick={() => setSelectedId(undefined)}
+              deleteKeyCode={["Backspace", "Delete"]}
+              fitView
+            >
+              <MiniMap pannable zoomable />
+              <Controls />
+              <Background />
+            </ReactFlow>
+          </PluginManifestContext.Provider>
         </div>
         <div
           className="col-resizer"
