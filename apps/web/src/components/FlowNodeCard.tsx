@@ -23,12 +23,12 @@ function manifestKey(plugin: { category: string; id: string; version: string }):
 
 /**
  * Vertical handle distribution. With N ports we lay them out evenly inside
- * the [10%, 90%] band so the topmost/bottommost ports don't sit on the rounded
- * corner of the node card.
+ * a 40% band centered on the card — half the original 80% spread so pins
+ * sit closer together rather than spanning corner-to-corner.
  */
 function portTop(index: number, total: number): string {
   if (total <= 1) return "50%";
-  const top = 10 + (index * 80) / (total - 1);
+  const top = 30 + (index * 40) / (total - 1);
   return `${top}%`;
 }
 
@@ -120,9 +120,10 @@ function FlowNodeCardImpl({ data, selected }: NodeProps<RagNodeData>) {
 
   // Scale the card height with the per-side port count so a single-port node
   // (like the framework input/output cards) doesn't get the same vertical
-  // padding as a three-port node. 24px per port + 24px chrome, floor 48px.
+  // padding as a three-port node. 12px per port + 24px chrome, floor 48px —
+  // halved from the original 24px-per-port to tighten the pin stack.
   const maxPorts = Math.max(inputPorts.length, outputPorts.length);
-  const minHeight = Math.max(48, maxPorts * 24 + 24);
+  const minHeight = Math.max(48, maxPorts * 12 + 24);
   const sideClasses = [
     inputPorts.length > 0 ? "has-left-ports" : "",
     outputPorts.length > 0 ? "has-right-ports" : ""
