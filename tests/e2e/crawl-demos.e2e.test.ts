@@ -119,14 +119,16 @@ test("crawl-summarize-demo.yaml is a valid crawl->prompt->llm DAG and matches it
     "output"
   ]);
   assert.deepEqual(edgePairs(spec), [
+    "input->prompt",
     "input->retrieve",
     "retrieve->prompt",
     "prompt->llm",
     "llm->output"
   ]);
 
-  // The crawl node is deliberately id "retrieve" so basic_rag_prompt reads
-  // `inputs.retrieve?.documents`.
+  // Crawl node id "retrieve" feeds `documents` via an explicit port edge into
+  // basic_rag_prompt's `documents` port; the question forks separately from
+  // the framework input node into the prompt's `question` port.
   const retrieve = spec.spec.nodes.find((n) => n.id === "retrieve");
   assert.equal(retrieve?.plugin?.category, "datasource");
   assert.equal(retrieve?.plugin?.id, "crawl4ai_crawler");

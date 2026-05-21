@@ -40,13 +40,28 @@ spec:
     - id: output
       type: output
   edges:
+    # Loader receives the input payload (e.g. text/uri) unported so any
+    # legacy field shape still reaches it via the flatten fallback.
     - from: input
       to: load
+    # Loader emits documents/text; chunker reads text. Leave unported so the
+    # flatten fallback delivers whichever shape the loader produced.
     - from: load
       to: chunk
+    # Explicit chunk → embed (texts derived from chunks).
     - from: chunk
       to: embed
+      fromPort: chunks
+      toPort: chunks
+    # The write node needs BOTH chunks (for payload text) and vectors
+    # (for the embedding). Fan in from both upstreams.
+    - from: chunk
+      to: write
+      fromPort: chunks
+      toPort: chunks
     - from: embed
       to: write
+      fromPort: vectors
+      toPort: vectors
     - from: write
       to: output

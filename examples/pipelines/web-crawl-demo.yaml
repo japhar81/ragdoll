@@ -25,3 +25,5 @@ spec:
       to: crawl
     - from: crawl
       to: output
+      fromPort: documents
+      toPort: documents

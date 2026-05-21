@@ -35,11 +35,22 @@ spec:
     - id: output
       type: output
   edges:
+    # The question lives on the pipeline's runtime input; forward it from the
+    # `input` framework node to the prompt's `question` port. The crawler
+    # ignores `inputs.question` and emits `documents` independently.
+    - from: input
+      to: prompt
+      fromPort: question
+      toPort: question
     - from: input
       to: retrieve
     - from: retrieve
       to: prompt
+      fromPort: documents
+      toPort: documents
     - from: prompt
       to: llm
+      fromPort: messages
+      toPort: messages
     - from: llm
       to: output

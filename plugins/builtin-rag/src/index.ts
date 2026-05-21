@@ -63,11 +63,17 @@ export const manualTextInputPlugin: InProcessPlugin = {
     },
     inputSchema: { type: "object" },
     outputSchema: { type: "object" },
+    outputPorts: [
+      { name: "text", description: "Raw text supplied at execution time." },
+      { name: "question", description: "Question payload, when the runtime input set one." }
+    ],
     capabilities: ["query", "ingestion"],
     ui: { icon: "keyboard", paletteGroup: "Sources" }
   },
   async execute({ inputs }) {
-    return { outputs: inputs };
+    // Emit on named ports AND preserve flat spread so legacy unported edges
+    // (which use the flatten-at-root fallback) keep working unchanged.
+    return { outputs: { ...inputs, text: inputs.text ?? inputs.input, question: inputs.question } };
   }
 };
 
@@ -94,6 +100,12 @@ export const basicTextChunkerPlugin: InProcessPlugin = {
       },
       additionalProperties: false
     },
+    inputPorts: [
+      { name: "text", required: true, description: "Text to chunk. Falls back to `input` for legacy callers." }
+    ],
+    outputPorts: [
+      { name: "chunks", description: "Array of { text, index } chunks." }
+    ],
     capabilities: ["ingestion"],
     ui: {
       icon: "scissors",
@@ -310,6 +322,14 @@ export const keywordGuardrailPlugin: InProcessPlugin = {
       },
       additionalProperties: false
     },
+    inputPorts: [
+      { name: "text", description: "Text or message payload to scan." },
+      { name: "messages", description: "Chat messages to scan (any field is stringified before scanning)." }
+    ],
+    outputPorts: [
+      { name: "messages", description: "Original messages, forwarded when no blocked keyword fires." },
+      { name: "text", description: "Original text, forwarded when no blocked keyword fires." }
+    ],
     capabilities: ["query"],
     ui: {
       icon: "shield",
@@ -321,7 +341,9 @@ export const keywordGuardrailPlugin: InProcessPlugin = {
     const text = JSON.stringify(inputs);
     const blocked = (config.blockedKeywords as string[] | undefined ?? []).find((keyword) => text.toLowerCase().includes(keyword.toLowerCase()));
     if (blocked) throw new Error(`Guardrail blocked keyword: ${blocked}`);
-    return { outputs: inputs };
+    // Emit the spread + named slots so both port-based and flatten-fallback
+    // edges resolve correctly (downstream sees `messages`/`text` at root).
+    return { outputs: { ...inputs } };
   }
 };
 
@@ -338,6 +360,11 @@ export const evaluatorStubPlugin: InProcessPlugin = {
       properties: {},
       additionalProperties: false
     },
+    outputPorts: [
+      { name: "score", description: "Numeric score (placeholder)." },
+      { name: "passed", description: "Boolean pass/fail (placeholder always true)." },
+      { name: "notes", description: "Free-form notes string." }
+    ],
     capabilities: ["evaluation"],
     ui: { icon: "check-circle", paletteGroup: "Evaluation" }
   },
@@ -586,6 +613,13 @@ export const vectorUpsertPlugin: InProcessPlugin = {
       },
       additionalProperties: false
     },
+    inputPorts: [
+      { name: "chunks", required: true, description: "Chunks whose text + metadata is stored alongside each vector." },
+      { name: "vectors", required: true, description: "Embedding vectors aligned with `chunks`." }
+    ],
+    outputPorts: [
+      { name: "upserted", description: "Count of points written to the vector store." }
+    ],
     capabilities: ["ingestion"],
     ui: {
       icon: "database",
@@ -657,6 +691,14 @@ export const textDocumentLoaderPlugin: InProcessPlugin = {
       },
       additionalProperties: false
     },
+    inputPorts: [
+      { name: "documents", description: "Existing documents array to normalize (passed through with cleaning applied)." },
+      { name: "text", description: "Raw text to wrap as a document. Used when `documents` is absent." },
+      { name: "uri", description: "Optional source URI added to document metadata." }
+    ],
+    outputPorts: [
+      { name: "documents", description: "Normalized { text, metadata } array." }
+    ],
     capabilities: ["ingestion"],
     ui: {
       icon: "file-input",
@@ -736,6 +778,14 @@ export const textParserPlugin: InProcessPlugin = {
       },
       additionalProperties: false
     },
+    inputPorts: [
+      { name: "text", description: "Single string to clean." },
+      { name: "documents", description: "Array of { text } documents to concatenate then clean." },
+      { name: "chunks", description: "Array of { text } chunks to concatenate then clean." }
+    ],
+    outputPorts: [
+      { name: "text", description: "Final cleaned string." }
+    ],
     capabilities: ["ingestion", "query"],
     ui: {
       icon: "file-text",
@@ -835,6 +885,14 @@ export const qdrantVectorStorePlugin: InProcessPlugin = {
       },
       additionalProperties: false
     },
+    inputPorts: [
+      { name: "chunks", required: true, description: "Chunks whose text + metadata is stored alongside each vector." },
+      { name: "vectors", required: true, description: "Embedding vectors aligned with `chunks`." }
+    ],
+    outputPorts: [
+      { name: "upserted", description: "Count of points written to the collection." },
+      { name: "collection", description: "Name of the collection the points were written to." }
+    ],
     capabilities: ["ingestion"],
     ui: {
       icon: "database",
@@ -903,6 +961,13 @@ export const scoreRerankerPlugin: InProcessPlugin = {
       },
       additionalProperties: false
     },
+    inputPorts: [
+      { name: "documents", required: true, description: "Documents to rerank, each with optional `score` and `text`." },
+      { name: "question", description: "Used to compute lexical overlap when documents lack numeric scores." }
+    ],
+    outputPorts: [
+      { name: "documents", description: "Reranked, truncated documents array." }
+    ],
     capabilities: ["query"],
     ui: {
       icon: "arrow-up-down",
@@ -972,6 +1037,9 @@ export const staticValueToolPlugin: InProcessPlugin = {
       },
       additionalProperties: false
     },
+    outputPorts: [
+      { name: "result", description: "The configured constant value." }
+    ],
     capabilities: ["query"],
     ui: {
       icon: "box",
@@ -1061,6 +1129,13 @@ export const bufferMemoryPlugin: InProcessPlugin = {
       },
       additionalProperties: false
     },
+    inputPorts: [
+      { name: "history", description: "Existing conversation history array. New entries are appended." },
+      { name: "message", description: "Single new turn to append. Defaults to the inputs object minus `history`." }
+    ],
+    outputPorts: [
+      { name: "history", description: "Updated history array, trimmed to the configured maxMessages." }
+    ],
     capabilities: ["query"],
     ui: {
       icon: "history",
@@ -1239,6 +1314,11 @@ export const openSearchInputPlugin: InProcessPlugin = {
       additionalProperties: false
     },
     secretsSchema: OPENSEARCH_SECRETS_SCHEMA,
+    outputPorts: [
+      { name: "documents", description: "Array of { id, text, metadata } documents read from the index." },
+      { name: "pageCount", description: "Number of documents in this page." },
+      { name: "total", description: "Total hit count reported by OpenSearch." }
+    ],
     capabilities: ["ingestion", "query"],
     ui: {
       icon: "database",
@@ -1318,6 +1398,14 @@ export const openSearchOutputPlugin: InProcessPlugin = {
       additionalProperties: false
     },
     secretsSchema: OPENSEARCH_SECRETS_SCHEMA,
+    inputPorts: [
+      { name: "documents", description: "Pre-shaped documents to bulk-index. Takes priority over chunks/vectors." },
+      { name: "chunks", description: "Chunks to bulk-index when no documents are supplied." },
+      { name: "vectors", description: "Optional embedding vectors written to `vectorField` per row." }
+    ],
+    outputPorts: [
+      { name: "indexed", description: "Number of documents written to the index." }
+    ],
     capabilities: ["ingestion"],
     ui: {
       icon: "database",
@@ -1425,6 +1513,12 @@ export const openSearchBm25RetrieverPlugin: InProcessPlugin = {
       additionalProperties: false
     },
     secretsSchema: OPENSEARCH_SECRETS_SCHEMA,
+    inputPorts: [
+      { name: "question", required: true, description: "Lexical search query." }
+    ],
+    outputPorts: [
+      { name: "documents", description: "Hits with id, score, and source fields." }
+    ],
     capabilities: ["query"],
     ui: {
       icon: "search",
@@ -1517,6 +1611,13 @@ export const openSearchVectorRetrieverPlugin: InProcessPlugin = {
       },
       additionalProperties: false
     },
+    inputPorts: [
+      { name: "question", description: "Natural-language question. Embedded on the fly when no queryVector is supplied." },
+      { name: "queryVector", description: "Pre-computed embedding for the query." }
+    ],
+    outputPorts: [
+      { name: "documents", description: "kNN hits with id, score, and payload fields." }
+    ],
     capabilities: ["query"],
     ui: {
       icon: "search",
@@ -1644,6 +1745,13 @@ export const openSearchHybridRetrieverPlugin: InProcessPlugin = {
       },
       additionalProperties: false
     },
+    inputPorts: [
+      { name: "question", description: "Lexical + embedding query text." },
+      { name: "queryVector", description: "Pre-computed embedding for the kNN arm." }
+    ],
+    outputPorts: [
+      { name: "documents", description: "Fused, ranked documents." }
+    ],
     capabilities: ["query"],
     ui: {
       icon: "search",
@@ -1753,6 +1861,11 @@ export const webhookTriggerPlugin: InProcessPlugin = {
     },
     inputSchema: { type: "object" },
     outputSchema: { type: "object" },
+    outputPorts: [
+      { name: "body", description: "Parsed POST body delivered to the trigger URL." },
+      { name: "headers", description: "Request headers, when forwarded by the trigger endpoint." },
+      { name: "query", description: "Query string parameters, when present on the trigger URL." }
+    ],
     capabilities: ["query", "ingestion"],
     ui: {
       icon: "webhook",
@@ -1761,7 +1874,13 @@ export const webhookTriggerPlugin: InProcessPlugin = {
     }
   },
   async execute({ inputs }) {
-    return { outputs: inputs };
+    // Emit on named output ports while keeping a flat spread of the original
+    // payload so legacy unported edges (which use the flatten-at-root
+    // fallback) keep seeing the same shape they always did.
+    const body = (inputs as Record<string, unknown>).body;
+    const headers = (inputs as Record<string, unknown>).headers;
+    const query = (inputs as Record<string, unknown>).query;
+    return { outputs: { ...inputs, body, headers, query } };
   }
 };
 
@@ -1818,6 +1937,12 @@ export const webhookOutputPlugin: InProcessPlugin = {
       },
       additionalProperties: false
     },
+    inputPorts: [
+      { name: "payload", description: "Object that becomes the JSON body of the outbound request. Defaults to the entire inputs bag." }
+    ],
+    outputPorts: [
+      { name: "delivered", description: "Delivery receipt: { url, status, response }." }
+    ],
     capabilities: ["query", "ingestion"],
     ui: {
       icon: "send",
@@ -1843,6 +1968,10 @@ export const webhookOutputPlugin: InProcessPlugin = {
     }
     if (secrets.authorization) headers.authorization = secrets.authorization;
 
+    // Prefer the named `payload` port when wired explicitly; otherwise fall
+    // back to the full inputs bag (legacy behaviour).
+    const body = inputs.payload !== undefined ? inputs.payload : inputs;
+
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     let response: Response;
@@ -1850,7 +1979,7 @@ export const webhookOutputPlugin: InProcessPlugin = {
       response = await fetch(url, {
         method,
         headers,
-        body: JSON.stringify(inputs),
+        body: JSON.stringify(body),
         signal: controller.signal
       });
     } finally {
