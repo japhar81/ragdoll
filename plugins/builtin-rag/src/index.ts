@@ -113,10 +113,11 @@ export const basicTextChunkerPlugin: InProcessPlugin = {
       additionalProperties: false
     },
     inputPorts: [
-      { name: "text", required: true, description: "Text to chunk. Falls back to `input` for legacy callers." }
+      { name: "documents", description: "Array of { content, path, docId? } documents to chunk individually." },
+      { name: "text", description: "Single string to chunk; used when `documents` is unset (legacy)." }
     ],
     outputPorts: [
-      { name: "chunks", description: "Array of { text, index } chunks." }
+      { name: "chunks", description: "Array of { text, index, docId?, path? } chunks. When `documents` was the input, each chunk carries its source doc's docId/path so a downstream sink can keep provenance." }
     ],
     capabilities: ["ingestion"],
     ui: {
@@ -129,14 +130,49 @@ export const basicTextChunkerPlugin: InProcessPlugin = {
     }
   },
   async execute({ inputs, config }) {
-    const text = String(inputs.text ?? inputs.input ?? "");
     const chunkSize = Number(config.chunkSize ?? 1000);
     const overlap = Number(config.overlap ?? 100);
-    const chunks: Array<{ text: string; index: number }> = [];
-    for (let start = 0; start < text.length; start += Math.max(1, chunkSize - overlap)) {
-      chunks.push({ text: text.slice(start, start + chunkSize), index: chunks.length });
+    const step = Math.max(1, chunkSize - overlap);
+
+    /** Split one text string; tag each chunk with its source ids when given. */
+    const chunkOne = (
+      text: string,
+      meta: { docId?: string; path?: string }
+    ): Array<{ text: string; index: number; docId?: string; path?: string }> => {
+      const out: Array<{ text: string; index: number; docId?: string; path?: string }> = [];
+      for (let start = 0; start < text.length; start += step) {
+        const chunk: { text: string; index: number; docId?: string; path?: string } = {
+          text: text.slice(start, start + chunkSize),
+          index: out.length
+        };
+        if (meta.docId !== undefined) chunk.docId = meta.docId;
+        if (meta.path !== undefined) chunk.path = meta.path;
+        out.push(chunk);
+      }
+      return out;
+    };
+
+    // Prefer the documents array (the `filesystem_source → delta_filter →
+    // basic_text_chunker` path); fall back to a single-string `text` /
+    // `input` for legacy callers.
+    const documents = inputs.documents as
+      | Array<{ content?: unknown; text?: unknown; path?: unknown; docId?: unknown }>
+      | undefined;
+    if (Array.isArray(documents) && documents.length > 0) {
+      const chunks = documents.flatMap((doc) => {
+        const text = String(doc.content ?? doc.text ?? "");
+        const docId = typeof doc.docId === "string" ? doc.docId : typeof doc.path === "string" ? doc.path : undefined;
+        const path = typeof doc.path === "string" ? doc.path : undefined;
+        return chunkOne(text, { docId, path });
+      });
+      // Re-index across the flattened array so downstream nodes get a
+      // single contiguous chunk stream.
+      chunks.forEach((c, i) => (c.index = i));
+      return { outputs: { chunks } };
     }
-    return { outputs: { chunks } };
+
+    const text = String(inputs.text ?? inputs.input ?? "");
+    return { outputs: { chunks: chunkOne(text, {}) } };
   }
 };
 

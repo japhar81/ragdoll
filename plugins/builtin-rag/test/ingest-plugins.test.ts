@@ -265,6 +265,50 @@ test("detectLanguage: extension → language map", () => {
   assert.equal(detectLanguage("a.unknown"), undefined);
 });
 
+test("basic_text_chunker accepts a documents array and tags each chunk with docId/path", async () => {
+  // Mirrors the codebase-ingest-docs wiring: delta_filter emits an array of
+  // documents, basic_text_chunker chunks each, downstream sinks need to
+  // know which source doc each chunk came from.
+  const builtin = await import("../src/index.ts");
+  const result = await builtin.basicTextChunkerPlugin.execute({
+    context: fakeContext(),
+    node: { id: "c", plugin: builtin.basicTextChunkerPlugin.manifest, config: {}, secrets: {} },
+    inputs: {
+      documents: [
+        { docId: "intro.md", path: "docs/intro.md", content: "x".repeat(2500) },
+        { docId: "guide.md", path: "docs/guide.md", content: "y".repeat(1500) }
+      ]
+    },
+    config: { chunkSize: 1000, overlap: 100 },
+    secrets: {}
+  } as unknown as PluginExecutionInput);
+  const chunks = result.outputs.chunks as Array<{ text: string; index: number; docId?: string; path?: string }>;
+  // 2500 char doc → 3 chunks at step=900 (chunkSize 1000 - overlap 100).
+  // 1500 char doc → 2 chunks.
+  assert.equal(chunks.length, 5, "two docs produce 5 chunks total at chunkSize=1000/overlap=100");
+  for (const chunk of chunks) {
+    assert.ok(chunk.docId === "intro.md" || chunk.docId === "guide.md", "every chunk carries its source docId");
+    assert.ok(chunk.path && chunk.path.startsWith("docs/"), "every chunk carries its source path");
+  }
+  // Indexes are flat (0..4) so the downstream array is a single contiguous stream.
+  assert.deepEqual(chunks.map((c) => c.index), [0, 1, 2, 3, 4]);
+});
+
+test("basic_text_chunker single-text path still works (legacy)", async () => {
+  const builtin = await import("../src/index.ts");
+  const result = await builtin.basicTextChunkerPlugin.execute({
+    context: fakeContext(),
+    node: { id: "c", plugin: builtin.basicTextChunkerPlugin.manifest, config: {}, secrets: {} },
+    inputs: { text: "hello world" },
+    config: { chunkSize: 5, overlap: 0 },
+    secrets: {}
+  } as unknown as PluginExecutionInput);
+  const chunks = result.outputs.chunks as Array<{ text: string; docId?: string }>;
+  // 11 chars / 5 step = 3 chunks; legacy single-text path doesn't tag docId.
+  assert.equal(chunks.length, 3);
+  assert.equal(chunks[0].docId, undefined, "single-text path leaves docId unset");
+});
+
 test("chunkCode: typescript splits on top-level functions/classes/interfaces", () => {
   const content = `// header
 import { x } from "y";
