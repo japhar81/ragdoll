@@ -84,8 +84,8 @@ body {
 
 .builder-grid {
   display: grid;
-  /* overridden inline with the draggable inspector width */
-  grid-template-columns: 220px minmax(0, 1fr) 6px 360px;
+  /* overridden inline with the draggable palette + inspector widths */
+  grid-template-columns: 220px 6px minmax(0, 1fr) 6px 360px;
   min-height: 0;
   height: 100%;
   overflow: hidden;
