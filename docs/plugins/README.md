@@ -49,10 +49,14 @@ treatment as long as their `id` matches a bundled markdown filename.
 | basic_rag_prompt | prompt_template | [basic_rag_prompt.md](basic_rag_prompt.md) |
 | basic_text_chunker | chunker | [basic_text_chunker.md](basic_text_chunker.md) |
 | buffer_memory | memory | [buffer_memory.md](buffer_memory.md) |
+| code_chunker | chunker | [code_chunker.md](code_chunker.md) |
+| delta_filter | transformer | [delta_filter.md](delta_filter.md) |
 | field_router | router | [field_router.md](field_router.md) |
+| filesystem_source | datasource | [filesystem_source.md](filesystem_source.md) |
 | for_loop | router | [for_loop.md](for_loop.md) |
 | foreach | router | [foreach.md](foreach.md) |
 | if_then | router | [if_then.md](if_then.md) |
+| opensearch_delete | sink | [opensearch_delete.md](opensearch_delete.md) |
 | json_output_parser | output_parser | [json_output_parser.md](json_output_parser.md) |
 | manual_text_input | datasource | [manual_text_input.md](manual_text_input.md) |
 | opensearch_bm25_retriever | retriever | [opensearch_bm25_retriever.md](opensearch_bm25_retriever.md) |
@@ -60,8 +64,10 @@ treatment as long as their `id` matches a bundled markdown filename.
 | opensearch_input | datasource | [opensearch_input.md](opensearch_input.md) |
 | opensearch_output | sink | [opensearch_output.md](opensearch_output.md) |
 | opensearch_vector_retriever | retriever | [opensearch_vector_retriever.md](opensearch_vector_retriever.md) |
+| path_classifier | router | [path_classifier.md](path_classifier.md) |
 | provider_chat | llm | [provider_chat.md](provider_chat.md) |
 | provider_embeddings | embedder | [provider_embeddings.md](provider_embeddings.md) |
+| qdrant_delete | sink | [qdrant_delete.md](qdrant_delete.md) |
 | qdrant_retriever | retriever | [qdrant_retriever.md](qdrant_retriever.md) |
 | qdrant_vector_store | vector_store | [qdrant_vector_store.md](qdrant_vector_store.md) |
 | sample_uppercase_transformer | transformer | [sample_uppercase_transformer.md](sample_uppercase_transformer.md) |

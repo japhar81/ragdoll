@@ -29,6 +29,9 @@ export interface VectorStore {
   ensureCollection(name: string, config: CollectionConfig): Promise<void>;
   upsert(collection: string, points: VectorPoint[]): Promise<void>;
   query(collection: string, query: VectorQuery): Promise<VectorQueryResult[]>;
+  /** Delete specific points by id. Used by delta_filter / qdrant_delete to
+   *  remove docs whose source has been removed from disk. */
+  deleteByIds(collection: string, ids: string[]): Promise<void>;
   deleteByTenant(collection: string, tenantId: string): Promise<void>;
   deleteCollection(name: string): Promise<void>;
 }
@@ -150,6 +153,12 @@ export class InMemoryVectorStore implements VectorStore {
     return ranked.slice(0, Math.max(0, query.topK));
   }
 
+  async deleteByIds(collection: string, ids: string[]): Promise<void> {
+    if (ids.length === 0) return;
+    const stored = this.requireCollection(collection);
+    for (const id of ids) stored.points.delete(id);
+  }
+
   async deleteByTenant(collection: string, tenantId: string): Promise<void> {
     const stored = this.requireCollection(collection);
     for (const [id, point] of stored.points) {
@@ -256,6 +265,12 @@ export class QdrantVectorStore implements VectorStore {
       score: hit.score,
       payload: hit.payload
     }));
+  }
+
+  async deleteByIds(collection: string, ids: string[]): Promise<void> {
+    if (ids.length === 0) return;
+    const client = await this.client();
+    await client.delete(collection, { wait: true, points: ids });
   }
 
   async deleteByTenant(collection: string, tenantId: string): Promise<void> {

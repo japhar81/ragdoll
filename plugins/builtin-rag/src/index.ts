@@ -1,6 +1,18 @@
 import type { InProcessPlugin } from "../../../packages/plugin-sdk/src/index.ts";
 import type { PipelineSpec } from "../../../packages/core/src/index.ts";
 import { OpenAIProvider, AnthropicProvider, OllamaCompatibleProvider, ProviderRegistry } from "../../../packages/providers/src/index.ts";
+
+// Codebase + docs ingest plugins live in their own module to keep this file
+// from sprawling further. Re-exported so the plugin-loader's namespace scan
+// picks them up alongside everything else.
+export {
+  filesystemSourcePlugin,
+  deltaFilterPlugin,
+  codeChunkerPlugin,
+  qdrantDeletePlugin,
+  opensearchDeletePlugin,
+  pathClassifierPlugin
+} from "./ingest.ts";
 import { createVectorStore } from "../../../packages/vector/src/index.ts";
 import type { DistanceMetric, VectorPoint } from "../../../packages/vector/src/index.ts";
 import {

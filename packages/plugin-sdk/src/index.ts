@@ -135,6 +135,33 @@ export interface PluginExecutionInput {
    * object (same shape an outer pipeline returns to its caller).
    */
   runSubgraph?: (spec: PipelineSpec, initialInput: Record<string, unknown>) => Promise<Record<string, unknown>>;
+  /**
+   * Read/write a small per-pipeline state bucket. Used by `delta_filter` to
+   * persist the set of previously-ingested documents (with mtime/sha256)
+   * across pipeline runs. Auto-scoped to `(tenantId, pipelineId, stateKey)`
+   * by the runtime — plugins only pass the `stateKey`.
+   */
+  ingestStateStore?: IngestStateStore;
+}
+
+/** One persisted entry in the per-pipeline ingest state — typically one row
+ *  per source document the delta_filter has seen. `sha256` and `mtime` are
+ *  both optional so a pipeline can use either (or both) as its delta signal. */
+export interface IngestStateEntry {
+  docId: string;
+  sha256?: string;
+  /** ISO-8601 timestamp string. We store as a string so tests don't need a
+   *  Date round-trip and the wire shape stays JSON-safe. */
+  mtime?: string;
+  lastSeen: string;
+}
+
+export interface IngestStateStore {
+  /** Returns every previously-recorded entry under `stateKey`. */
+  list(args: { stateKey: string }): Promise<IngestStateEntry[]>;
+  /** Wholesale replacement of `stateKey`'s entries. The plugin computes the
+   *  new set in memory (current docs ∩ on-disk) and hands the result here. */
+  replaceAll(args: { stateKey: string; entries: IngestStateEntry[] }): Promise<void>;
 }
 
 export interface PluginExecutionOutput {

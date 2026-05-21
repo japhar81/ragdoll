@@ -84,6 +84,31 @@ test("support-ingestion.yaml has 6 nodes, 6 edges, and integer overlap scalar", 
   assert.equal(typeof chunk?.config?.overlap, "number");
 });
 
+test("codebase-ingest-code.yaml wires the new delta-aware shape end-to-end", () => {
+  const spec = loadPipelineSpecFromYaml(readExample(pipelinesDir, "codebase-ingest-code.yaml"));
+  assert.equal(spec.metadata.name, "codebase-ingest-code");
+  const nodeIds = spec.spec.nodes.map((n) => n.id).sort();
+  assert.deepEqual(nodeIds, ["chunk", "delete", "delta", "embed", "fs", "out", "write"]);
+  // delta_filter has both 'new' and 'modified' fanning into chunk.documents,
+  // plus a separate 'deleted' edge into the delete sink.
+  const fromDelta = spec.spec.edges.filter((e) => e.from === "delta");
+  assert.equal(fromDelta.length, 3);
+  assert.ok(fromDelta.some((e) => e.fromPort === "new" && e.toPort === "documents"));
+  assert.ok(fromDelta.some((e) => e.fromPort === "modified" && e.toPort === "documents"));
+  assert.ok(fromDelta.some((e) => e.fromPort === "deleted" && e.toPort === "deleted"));
+});
+
+test("codebase-ingest-docs.yaml uses basic_text_chunker + opensearch sinks", () => {
+  const spec = loadPipelineSpecFromYaml(readExample(pipelinesDir, "codebase-ingest-docs.yaml"));
+  assert.equal(spec.metadata.name, "codebase-ingest-docs");
+  const chunk = spec.spec.nodes.find((n) => n.id === "chunk");
+  assert.equal(chunk?.plugin?.id, "basic_text_chunker", "docs path uses paragraph chunker");
+  const write = spec.spec.nodes.find((n) => n.id === "write");
+  assert.equal(write?.plugin?.id, "opensearch_output");
+  const del = spec.spec.nodes.find((n) => n.id === "delete");
+  assert.equal(del?.plugin?.id, "opensearch_delete");
+});
+
 test("query-only.yaml has 5 nodes", () => {
   const spec = loadPipelineSpecFromYaml(readExample(pipelinesDir, "query-only.yaml"));
   assert.equal(spec.metadata.name, "query-only");

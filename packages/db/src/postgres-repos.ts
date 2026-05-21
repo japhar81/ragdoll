@@ -1597,3 +1597,72 @@ export class PostgresWebhookTriggerRepository
     await this.pool.query(`DELETE FROM webhook_triggers WHERE id = $1`, [id]);
   }
 }
+
+/**
+ * Postgres-backed `IngestStateRepository`. Each row is one source document
+ * the `delta_filter` plugin has previously ingested for the named
+ * (tenant, pipeline, stateKey) bucket. The plugin computes new/modified/
+ * deleted in memory and hands the full new set to `replaceAll`, which we
+ * apply transactionally so a partial failure can't leave the bucket
+ * half-updated.
+ */
+export class PostgresIngestStateRepository {
+  private pool: PoolLike;
+
+  constructor(pool: PoolLike) {
+    this.pool = pool;
+  }
+
+  async list(args: {
+    tenantId: string;
+    pipelineId: string;
+    stateKey: string;
+  }): Promise<Array<{ docId: string; sha256?: string; mtime?: string; lastSeen: string }>> {
+    const r = await this.pool.query<Record<string, unknown>>(
+      `SELECT doc_id, sha256, mtime, last_seen
+         FROM ingest_state
+        WHERE tenant_id = $1 AND pipeline_id = $2 AND state_key = $3`,
+      [args.tenantId, args.pipelineId, args.stateKey]
+    );
+    return r.rows.map((row) => ({
+      docId: String(row.doc_id),
+      sha256: row.sha256 === null || row.sha256 === undefined ? undefined : String(row.sha256),
+      mtime:
+        row.mtime === null || row.mtime === undefined
+          ? undefined
+          : new Date(row.mtime as string).toISOString(),
+      lastSeen: new Date(row.last_seen as string).toISOString()
+    }));
+  }
+
+  async replaceAll(args: {
+    tenantId: string;
+    pipelineId: string;
+    stateKey: string;
+    entries: Array<{ docId: string; sha256?: string; mtime?: string; lastSeen: string }>;
+  }): Promise<void> {
+    await withTransaction(this.pool, async (tx) => {
+      await tx.query(
+        `DELETE FROM ingest_state
+          WHERE tenant_id = $1 AND pipeline_id = $2 AND state_key = $3`,
+        [args.tenantId, args.pipelineId, args.stateKey]
+      );
+      for (const entry of args.entries) {
+        await tx.query(
+          `INSERT INTO ingest_state
+             (tenant_id, pipeline_id, state_key, doc_id, sha256, mtime, last_seen)
+           VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+          [
+            args.tenantId,
+            args.pipelineId,
+            args.stateKey,
+            entry.docId,
+            entry.sha256 ?? null,
+            entry.mtime ?? null,
+            entry.lastSeen
+          ]
+        );
+      }
+    });
+  }
+}
