@@ -41,80 +41,168 @@ export function TenantsScreen() {
     }
   });
 
+  const selectedTenant = selected
+    ? tenants.data?.tenants.find((t) => t.id === selected)
+    : undefined;
+
   return (
     <Screen title="Tenants" isLoading={tenants.isLoading} error={tenants.error}>
-      <form
-        className="inline-form"
-        onSubmit={(e) => {
-          e.preventDefault();
-          create.mutate();
-        }}
-      >
-        <input
-          placeholder="slug"
-          value={slug}
-          onChange={(e) => setSlug(e.target.value)}
-          required
-        />
-        <input
-          placeholder="name"
-          value={name}
-          onChange={(e) => setName(e.target.value)}
-          required
-        />
-        <button type="submit" disabled={create.isPending}>
-          Create tenant
-        </button>
-        {create.isError && <span className="error">{String(create.error)}</span>}
-      </form>
+      {/* Create-tenant card. */}
+      <section className="panel">
+        <header className="panel-head">
+          <h2>Create a tenant</h2>
+          <span className="panel-sub">
+            Slug is the URL-safe identifier; name is the display label.
+          </span>
+        </header>
+        <div className="panel-body">
+          <form
+            className="inline-form"
+            onSubmit={(e) => {
+              e.preventDefault();
+              create.mutate();
+            }}
+            style={{ marginBottom: 0 }}
+          >
+            <input
+              placeholder="slug"
+              value={slug}
+              onChange={(e) => setSlug(e.target.value)}
+              required
+            />
+            <input
+              placeholder="name"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              required
+            />
+            <button
+              type="submit"
+              className="primary"
+              disabled={create.isPending}
+            >
+              Create tenant
+            </button>
+            {create.isError && (
+              <span className="error">{String(create.error)}</span>
+            )}
+          </form>
+        </div>
+      </section>
 
-      <table className="grid">
-        <thead>
-          <tr>
-            <th>ID</th>
-            <th>Slug</th>
-            <th>Name</th>
-            <th>Status</th>
-            <th />
-          </tr>
-        </thead>
-        <tbody>
-          {(tenants.data?.tenants ?? []).length === 0 && (
-            <tr>
-              <td colSpan={5} className="muted">
-                No tenants.
-              </td>
-            </tr>
+      {/* Tenants grid. */}
+      <section className="panel">
+        <header className="panel-head">
+          <h2>Tenants</h2>
+          <span className="panel-sub">
+            {tenants.data?.tenants.length ?? 0} configured
+          </span>
+        </header>
+        <div className="panel-body">
+          {(tenants.data?.tenants ?? []).length === 0 ? (
+            <p className="muted">No tenants yet — create one above.</p>
+          ) : (
+            <div className="tenant-card-grid">
+              {(tenants.data?.tenants ?? []).map((t) => {
+                const isActive = selected === t.id;
+                const storageMode =
+                  (t as { storageMode?: string }).storageMode ?? "db";
+                return (
+                  <div
+                    key={t.id}
+                    className={"tenant-card" + (isActive ? " active" : "")}
+                  >
+                    <div className="tenant-card-head">
+                      <span className="tenant-card-name">{t.name}</span>
+                      <span
+                        className={
+                          "badge " +
+                          (t.status === "active"
+                            ? "badge-success"
+                            : "badge-warn")
+                        }
+                      >
+                        {t.status}
+                      </span>
+                    </div>
+                    <div className="tenant-card-slug">{t.slug}</div>
+                    <div className="tenant-card-meta">
+                      <span
+                        className={
+                          "badge " +
+                          (storageMode === "git" ? "badge-git" : "badge-db")
+                        }
+                      >
+                        storage: {storageMode}
+                      </span>
+                      <span title={t.id}>id {t.id.slice(0, 8)}…</span>
+                    </div>
+                    <div className="tenant-card-actions">
+                      <button
+                        className="primary"
+                        onClick={() => {
+                          const next = isActive ? undefined : t.id;
+                          setSelected(next);
+                          // Scope subsequent tenant-pipeline/activation requests.
+                          api.setTenant(next);
+                        }}
+                      >
+                        {isActive ? "Hide details" : "Manage"}
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
           )}
-          {(tenants.data?.tenants ?? []).map((t) => (
-            <tr key={t.id}>
-              <td>{t.id}</td>
-              <td>{t.slug}</td>
-              <td>{t.name}</td>
-              <td>{t.status}</td>
-              <td>
-                <button
-                  className="link-btn"
-                  onClick={() => {
-                    const next = selected === t.id ? undefined : t.id;
-                    setSelected(next);
-                    // Scope subsequent tenant-pipeline/activation requests.
-                    api.setTenant(next);
-                  }}
-                >
-                  {selected === t.id ? "Hide" : "Manage"}
-                </button>
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
+        </div>
+      </section>
 
+      {/* Per-tenant detail — three stacked section panels. */}
       {selected && (
         <>
-          <TenantEnvironments tenantId={selected} />
-          <TenantStorage tenantId={selected} />
-          <TenantPipelines tenantId={selected} />
+          <section className="panel">
+            <header className="panel-head">
+              <h2>
+                Environments
+                {selectedTenant ? ` · ${selectedTenant.name}` : ""}
+              </h2>
+              <span className="panel-sub">
+                Names this tenant can deploy / run / schedule against.
+              </span>
+            </header>
+            <div className="panel-body">
+              <TenantEnvironments tenantId={selected} />
+            </div>
+          </section>
+          <section className="panel">
+            <header className="panel-head">
+              <h2>
+                Storage
+                {selectedTenant ? ` · ${selectedTenant.name}` : ""}
+              </h2>
+              <span className="panel-sub">
+                DB-only or git-backed (GitOps mirror — see docs).
+              </span>
+            </header>
+            <div className="panel-body">
+              <TenantStorage tenantId={selected} />
+            </div>
+          </section>
+          <section className="panel">
+            <header className="panel-head">
+              <h2>
+                Pipelines
+                {selectedTenant ? ` · ${selectedTenant.name}` : ""}
+              </h2>
+              <span className="panel-sub">
+                Associations + per-env activations.
+              </span>
+            </header>
+            <div className="panel-body">
+              <TenantPipelines tenantId={selected} />
+            </div>
+          </section>
         </>
       )}
     </Screen>
@@ -135,6 +223,13 @@ function TenantStorage(props: { tenantId: string }) {
   const cfg = useQuery({
     queryKey: ["tenant-storage", tenantId],
     queryFn: () => api.getTenantStorage(tenantId)
+  });
+  // Tenant-scoped secret list (the api client is already pointed at the
+  // selected tenant by the outer Manage button, so listSecrets returns
+  // this tenant's secrets only).
+  const secrets = useQuery({
+    queryKey: ["secrets", tenantId],
+    queryFn: () => api.listSecrets()
   });
   const [remoteUrl, setRemoteUrl] = useState("");
   const [branch, setBranch] = useState("main");
@@ -184,12 +279,28 @@ function TenantStorage(props: { tenantId: string }) {
 
   const mode = cfg.data?.storageMode ?? "db";
 
+  const secretChoices = (secrets.data?.secrets ?? []).map((s) => {
+    const ref = (s.ref ?? {}) as { key?: string; scope?: string };
+    const label = [
+      ref.key || "(no key)",
+      ref.scope ? `· ${ref.scope}` : undefined,
+      s.provider ? `· ${s.provider}` : undefined,
+      `· ${s.id.slice(0, 8)}…`
+    ]
+      .filter(Boolean)
+      .join(" ");
+    return { id: s.id, label };
+  });
+  const selectedSecret = secretChoices.find((c) => c.id === authSecretId);
+
   return (
     <>
-      <h2>Storage for {tenantId}</h2>
       {banner && <p className="error">{banner}</p>}
-      <p className="muted">
-        Current mode: <strong>{mode}</strong>
+      <p className="muted" style={{ marginTop: 0 }}>
+        Current mode:{" "}
+        <span className={"badge " + (mode === "git" ? "badge-git" : "badge-db")}>
+          {mode}
+        </span>
         {mode === "git" && cfg.data?.git && (
           <>
             {" "}
@@ -201,47 +312,83 @@ function TenantStorage(props: { tenantId: string }) {
           </>
         )}
       </p>
-      <div className="inline-form">
+      <div className="form-grid">
+        <label htmlFor="git-remote">Remote URL</label>
         <input
+          id="git-remote"
           placeholder="git@github.com:org/repo.git OR https://github.com/org/repo.git"
           value={remoteUrl}
           onChange={(e) => setRemoteUrl(e.target.value)}
-          style={{ width: 360 }}
         />
+
+        <label htmlFor="git-branch">Branch</label>
         <input
-          placeholder="branch"
+          id="git-branch"
+          placeholder="main"
           value={branch}
           onChange={(e) => setBranch(e.target.value)}
-          style={{ width: 100 }}
         />
+
+        <label htmlFor="git-prefix">Path prefix</label>
         <input
-          placeholder="path prefix (optional)"
+          id="git-prefix"
+          placeholder="(optional — empty = repo root)"
           value={pathPrefix}
           onChange={(e) => setPathPrefix(e.target.value)}
-          style={{ width: 160 }}
         />
+
+        <label htmlFor="git-auth-method">Auth method</label>
         <select
+          id="git-auth-method"
           value={authMethod}
           onChange={(e) => setAuthMethod(e.target.value as "https" | "ssh")}
         >
-          <option value="https">HTTPS (PAT)</option>
-          <option value="ssh">SSH (key)</option>
+          <option value="https">HTTPS (Personal Access Token)</option>
+          <option value="ssh">SSH (private key)</option>
         </select>
-        <input
-          placeholder="auth secret UUID"
+
+        <label htmlFor="git-auth-secret">Auth secret</label>
+        <select
+          id="git-auth-secret"
           value={authSecretId}
           onChange={(e) => setAuthSecretId(e.target.value)}
-          style={{ width: 240 }}
-        />
+        >
+          <option value="">
+            {secrets.isLoading
+              ? "loading secrets…"
+              : secretChoices.length === 0
+                ? "no tenant secrets — create one on the Secrets screen"
+                : "select a secret…"}
+          </option>
+          {/* Keep the persisted id visible even if it isn't in this
+              tenant's secret list (e.g. it's a global secret the
+              redacted /api/secrets call doesn't surface here). */}
+          {authSecretId && !selectedSecret && (
+            <option value={authSecretId}>{authSecretId}</option>
+          )}
+          {secretChoices.map((c) => (
+            <option key={c.id} value={c.id}>
+              {c.label}
+            </option>
+          ))}
+        </select>
+        <span className="form-help">
+          {authMethod === "https"
+            ? "Stored value should be a Personal Access Token with repo scope."
+            : "Stored value should be the PEM-encoded SSH private key (no passphrase)."}
+        </span>
+
+        <label htmlFor="git-poll">Poll interval (sec)</label>
         <input
+          id="git-poll"
           type="number"
           min={10}
           max={3600}
           value={pollIntervalSec}
           onChange={(e) => setPollIntervalSec(Number(e.target.value))}
-          style={{ width: 80 }}
-          title="poll interval (seconds)"
         />
+      </div>
+      <div className="form-row-actions">
         <button
           className="primary"
           disabled={save.isPending || !remoteUrl || !authSecretId}
@@ -317,7 +464,8 @@ function TenantEnvironments(props: { tenantId: string }) {
 
   return (
     <>
-      <h2>Environments for {tenantId}</h2>
+      {/* Header lives on the wrapping `<section className="panel">` in
+          the parent — keep the section body lean. */}
       {banner && <p className="error">{banner}</p>}
       {error && <p className="error">{errText(error)}</p>}
       <form
@@ -449,7 +597,7 @@ function TenantPipelines(props: { tenantId: string }) {
 
   return (
     <>
-      <h2>Pipelines for {tenantId}</h2>
+      {/* Header lives on the wrapping panel — see Pipelines section above. */}
       {banner && <p className="error">{banner}</p>}
       <div className="inline-form">
         <select

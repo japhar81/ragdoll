@@ -839,6 +839,144 @@ table.grid th {
   border-radius: 8px;
 }
 
+/* ---- Tenants screen polish ----
+ * Card grid for the tenants list + section cards for the per-tenant
+ * detail view. Replaces the cramped flat table + back-to-back forms
+ * the screen had before. */
+.panel {
+  border: 1px solid #e5e7eb;
+  border-radius: 10px;
+  background: white;
+  margin: 14px 0;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+}
+.panel-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 16px;
+  border-bottom: 1px solid #e5e7eb;
+  background: #f8fafc;
+  border-top-left-radius: 10px;
+  border-top-right-radius: 10px;
+}
+.panel-head h2,
+.panel-head h3 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+}
+.panel-head .panel-sub {
+  font-size: 12px;
+  color: #64748b;
+}
+.panel-body {
+  padding: 14px 16px;
+}
+.panel-body > h3 {
+  margin: 14px 0 6px;
+  font-size: 13px;
+}
+.panel-body > h3:first-child {
+  margin-top: 0;
+}
+
+.tenant-card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 12px;
+  margin: 8px 0 14px;
+}
+.tenant-card {
+  border: 1px solid #e5e7eb;
+  border-radius: 10px;
+  padding: 12px 14px;
+  background: white;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+}
+.tenant-card.active {
+  border-color: #2563eb;
+  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.15);
+}
+.tenant-card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.tenant-card-name {
+  font-weight: 600;
+  color: #0f172a;
+  font-size: 14px;
+}
+.tenant-card-slug {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  color: #475569;
+}
+.tenant-card-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  font-size: 11px;
+  color: #64748b;
+}
+.tenant-card-actions {
+  margin-top: auto;
+  display: flex;
+  gap: 8px;
+}
+.badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  background: #e2e8f0;
+  color: #475569;
+}
+.badge.badge-success { background: #dcfce7; color: #166534; }
+.badge.badge-warn    { background: #fef3c7; color: #92400e; }
+.badge.badge-git     { background: #ede9fe; color: #5b21b6; }
+.badge.badge-db      { background: #e0e7ff; color: #3730a3; }
+
+/* Vertical form layout used by the Storage section so the long
+ * git-config form doesn't stretch off the right edge. */
+.form-grid {
+  display: grid;
+  grid-template-columns: 140px 1fr;
+  row-gap: 10px;
+  column-gap: 14px;
+  align-items: center;
+}
+.form-grid label {
+  font-size: 13px;
+  color: #475569;
+}
+.form-grid input,
+.form-grid select {
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  padding: 6px 8px;
+  font-size: 13px;
+  width: 100%;
+  box-sizing: border-box;
+}
+.form-grid .form-help {
+  grid-column: 2 / 3;
+  color: #64748b;
+  font-size: 12px;
+}
+.form-row-actions {
+  margin-top: 14px;
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
 /* ---- Builder bottom Console ---- */
 .builder-console {
   display: flex;
