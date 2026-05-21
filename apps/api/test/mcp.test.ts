@@ -124,3 +124,131 @@ test("MCP requires auth: an unauthenticated tool call yields HTTP 401 inside the
   assert.match(c[0].text, /HTTP 401/);
   await client.close();
 });
+
+// ---- Danger annotations + full-control surface --------------------------
+
+test("MCP listTools advertises annotations: readOnlyHint, destructiveHint, idempotentHint", async () => {
+  const h = buildHarness({ withAuth: true });
+  const bearer = await seedAdmin(h);
+  const client = await bootClient({ app: h.app, bearer });
+  const { tools } = await client.listTools();
+  const byName = new Map(tools.map((t) => [t.name, t]));
+
+  // Spot-check: list_* tools are read-only.
+  for (const n of ["list_tenants", "list_pipelines", "list_executions", "list_users", "list_roles"]) {
+    const t = byName.get(n);
+    assert.ok(t, `missing tool: ${n}`);
+    assert.equal(t!.annotations?.readOnlyHint, true, `${n} should be readOnly`);
+    assert.equal(t!.annotations?.destructiveHint, false, `${n} should NOT be destructive`);
+  }
+
+  // Spot-check: destructive tools flag destructiveHint AND prefix the description.
+  for (const n of [
+    "delete_tenant",
+    "delete_pipeline",
+    "deploy_pipeline",
+    "rollback_pipeline",
+    "delete_schedule",
+    "delete_secret",
+    "create_secret",
+    "delete_user",
+    "add_grant",
+    "remove_grant",
+    "set_role_permissions",
+    "delete_role",
+    "delete_identity_provider",
+    "update_auth_settings",
+    "delete_pipeline_trigger",
+    "upsert_config_definition",
+    "delete_config_definition",
+    "delete_environment",
+    "delete_activation",
+    "delete_folder"
+  ]) {
+    const t = byName.get(n);
+    assert.ok(t, `missing tool: ${n}`);
+    assert.equal(t!.annotations?.readOnlyHint, false, `${n} should NOT be readOnly`);
+    assert.equal(t!.annotations?.destructiveHint, true, `${n} should be destructive`);
+    assert.match(
+      String(t!.description),
+      /^⚠ DANGEROUS:/,
+      `${n} description should start with ⚠ DANGEROUS:`
+    );
+  }
+  await client.close();
+});
+
+test("MCP can create and then delete a pipeline end-to-end (full control)", async () => {
+  const h = buildHarness({ withAuth: true });
+  const bearer = await seedAdmin(h);
+  const client = await bootClient({ app: h.app, bearer });
+
+  const slug = `mcp-create-${randomUUID().slice(0, 8)}`;
+  const created = await client.callTool({
+    name: "create_pipeline",
+    arguments: { slug, name: "MCP Created" }
+  });
+  assert.equal(created.isError ?? false, false);
+  const createdBody = JSON.parse(
+    (created.content as Array<{ text: string }>)[0].text
+  );
+  const pipelineId = createdBody.pipeline.id;
+  assert.ok(pipelineId);
+
+  // Verify it shows up in list_pipelines.
+  const list = await client.callTool({ name: "list_pipelines", arguments: {} });
+  const listBody = JSON.parse(
+    (list.content as Array<{ text: string }>)[0].text
+  );
+  assert.ok(
+    listBody.pipelines.some((p: { id: string }) => p.id === pipelineId),
+    "created pipeline should appear in list_pipelines"
+  );
+
+  // Delete (the dangerous tool path) and verify it's gone.
+  const deleted = await client.callTool({
+    name: "delete_pipeline",
+    arguments: { id: pipelineId }
+  });
+  assert.equal(deleted.isError ?? false, false);
+
+  const after = await client.callTool({ name: "list_pipelines", arguments: {} });
+  const afterBody = JSON.parse(
+    (after.content as Array<{ text: string }>)[0].text
+  );
+  assert.ok(
+    !afterBody.pipelines.some((p: { id: string }) => p.id === pipelineId),
+    "deleted pipeline should be gone from list_pipelines"
+  );
+  await client.close();
+});
+
+test("MCP can create a tenant + environment + folder via tools", async () => {
+  const h = buildHarness({ withAuth: true });
+  const bearer = await seedAdmin(h);
+  const client = await bootClient({ app: h.app, bearer });
+
+  const tenantSlug = `mcp-t-${randomUUID().slice(0, 8)}`;
+  const tenant = await client.callTool({
+    name: "create_tenant",
+    arguments: { slug: tenantSlug, name: "MCP Tenant" }
+  });
+  assert.equal(tenant.isError ?? false, false);
+  const tenantBody = JSON.parse(
+    (tenant.content as Array<{ text: string }>)[0].text
+  );
+  const tenantId = tenantBody.tenant.id;
+
+  const env = await client.callTool({
+    name: "create_environment",
+    arguments: { tenant: tenantId, name: "qa", isProduction: false }
+  });
+  assert.equal(env.isError ?? false, false);
+
+  const folder = await client.callTool({
+    name: "create_folder",
+    arguments: { name: "from-mcp" }
+  });
+  assert.equal(folder.isError ?? false, false);
+  await client.close();
+});
