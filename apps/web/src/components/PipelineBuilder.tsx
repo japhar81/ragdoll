@@ -47,6 +47,7 @@ import { BuilderConsole, useConsoleLog } from "./BuilderConsole.tsx";
 import { TenantSelect, useSelectedTenant } from "./useTenants.tsx";
 import { useEnvironments, EnvironmentSelect } from "./useEnvironments.tsx";
 import { ToolbarMenu } from "./ToolbarMenu.tsx";
+import { applyLayout, type LayoutKind } from "../lib/layouts.ts";
 import { hasRealPipeline } from "../lib/consoleLog.ts";
 import {
   diffNodeEvents,
@@ -78,8 +79,11 @@ const nodeTypes = { ragNode: FlowNodeCard };
 const RUN_POLL_INTERVAL_MS = 1000;
 const RUN_POLL_MAX_MS = 3 * 60 * 1000;
 
+// `default` is React Flow's bezier curve — softer than the smoothstep
+// right-angled lines we used previously. Curves read more naturally for
+// data flow where edges fan in/out at varied angles.
 const EDGE_DEFAULTS = {
-  type: "smoothstep",
+  type: "default",
   markerEnd: { type: MarkerType.ArrowClosed }
 } as const;
 
@@ -133,6 +137,60 @@ function toFlowNodes(spec: PipelineSpec): Node[] {
 function toFlowEdges(spec: PipelineSpec): Edge[] {
   return specToGraph(spec).edges.map(
     (e) => ({ ...e, ...EDGE_DEFAULTS }) as unknown as Edge
+  );
+}
+
+/**
+ * Layout dropdown anchored to the canvas upper-left. Lives inside React
+ * Flow so it pans/zooms-with-canvas isn't desired — we use position:
+ * absolute on the wrapper instead. The OSS edition of React Flow doesn't
+ * ship layout algorithms; the three options below all run from our own
+ * `lib/layouts.ts`.
+ */
+function LayoutMenu({ onApply }: { onApply: (kind: LayoutKind) => void }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="rf-layout-menu">
+      <button
+        type="button"
+        className="rf-layout-button"
+        onClick={() => setOpen((o) => !o)}
+        title="Auto-layout"
+      >
+        ⫶ Layout
+      </button>
+      {open && (
+        <div className="rf-layout-options" role="menu">
+          <button
+            type="button"
+            onClick={() => {
+              onApply("layered-TB");
+              setOpen(false);
+            }}
+          >
+            Layered (top → bottom)
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              onApply("layered-LR");
+              setOpen(false);
+            }}
+          >
+            Layered (left → right)
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              onApply("force");
+              setOpen(false);
+            }}
+          >
+            Force-directed
+          </button>
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -695,6 +753,33 @@ export function PipelineBuilder(props: {
     setSelectedId(undefined);
   }
 
+  // Apply a homegrown layout to the current graph. The dropdown in the
+  // upper-left of the canvas wires into this; positions are updated in
+  // place and persisted through graphToSpec on the next save.
+  const applyLayoutKind = useCallback(
+    (kind: LayoutKind) => {
+      const layoutNodes = (nodes as unknown as FlowNode[]).map((n) => ({
+        id: n.id,
+        position: n.position
+      }));
+      const layoutEdges = (edges as unknown as FlowEdge[]).map((e) => ({
+        from: e.source,
+        to: e.target
+      }));
+      const next = applyLayout(kind, layoutNodes, layoutEdges);
+      setNodes((current) =>
+        current.map((n) => {
+          const p = next.get(n.id);
+          return p ? { ...n, position: p } : n;
+        })
+      );
+      // Re-center the viewport so the freshly-laid-out graph is visible.
+      // Defer one tick so React Flow sees the new positions first.
+      setTimeout(() => rfRef.current?.fitView({ duration: 300, padding: 0.15 }), 0);
+    },
+    [nodes, edges, setNodes]
+  );
+
   async function validate() {
     const res = await withLog("Validation passed", "Validate failed", {
       method: "POST",
@@ -1135,6 +1220,7 @@ export function PipelineBuilder(props: {
               <MiniMap pannable zoomable />
               <Controls />
               <Background />
+              <LayoutMenu onApply={applyLayoutKind} />
             </ReactFlow>
           </PluginManifestContext.Provider>
         </div>
