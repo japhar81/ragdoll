@@ -78,7 +78,7 @@
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [
         {
-          "expr": "sum(rate(pg_stat_database_blks_hit{datname=\"ragdoll\"}[5m])) / clamp_min(sum(rate(pg_stat_database_blks_hit{datname=\"ragdoll\"}[5m]) + rate(pg_stat_database_blks_read{datname=\"ragdoll\"}[5m])), 1)",
+          "expr": "sum(rate(pg_stat_database_blks_hit_total{datname=\"ragdoll\"}[5m])) / clamp_min(sum(rate(pg_stat_database_blks_hit_total{datname=\"ragdoll\"}[5m]) + rate(pg_stat_database_blks_read_total{datname=\"ragdoll\"}[5m])), 1)",
           "refId": "A"
         }
       ],
@@ -120,12 +120,12 @@
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [
         {
-          "expr": "sum by (datname) (rate(pg_stat_database_xact_commit[1m]))",
+          "expr": "sum by (datname) (rate(pg_stat_database_xact_commit_total[1m]))",
           "legendFormat": "commit {{datname}}",
           "refId": "A"
         },
         {
-          "expr": "sum by (datname) (rate(pg_stat_database_xact_rollback[1m]))",
+          "expr": "sum by (datname) (rate(pg_stat_database_xact_rollback_total[1m]))",
           "legendFormat": "rollback {{datname}}",
           "refId": "B"
         }
@@ -200,13 +200,13 @@
     {
       "type": "logs",
       "title": "Container logs (every container on the stack)",
-      "description": "Streams keyed by container_id. The container.name resource attribute is exposed by the docker_stats receiver (metrics path) but isn't propagated onto filelog records by 0.134 (`container` operator's path matcher is too strict for our mount). Use the `container_id` field to filter, or correlate with `docker ps --format '{{.ID}} {{.Names}}'` on the host.",
+      "description": "All lines tagged with service_namespace=ragdoll — covers both the api/worker SDK push path AND every container's stdout/stderr tailed by the filelog receiver. container_id is on each log line as structured metadata; expand a row to see the full label set, or correlate with `docker ps --format '{{.ID}} {{.Names}}'` on the host.",
       "id": 13,
       "gridPos": { "h": 12, "w": 24, "x": 0, "y": 28 },
       "datasource": { "type": "loki", "uid": "loki" },
       "targets": [
         {
-          "expr": "{container_id=~\".+\"}",
+          "expr": "{service_namespace=\"ragdoll\"}",
           "refId": "A"
         }
       ],
