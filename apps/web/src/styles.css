@@ -327,13 +327,16 @@ button.palette-item:active {
 }
 
 /* Multi-port handles: smaller, color-coded by required-ness, stacked along
- * the left/right edge of the card. */
+ * the left/right edge of the card. Transform is intentionally left to
+ * React Flow's per-side default (translate(-50%, -50%) for left handles,
+ * translate(50%, -50%) for right handles) so each pin sits centered on the
+ * card border, half-in/half-out — overriding it pushes right handles fully
+ * inside the card on top of the labels. */
 .rf-handle-port {
   width: 8px;
   height: 8px;
   border: 1.5px solid #ffffff;
   background: #6366f1;
-  transform: translate(-50%, -50%);
 }
 .rf-handle-port.required {
   background: #f59e0b;
