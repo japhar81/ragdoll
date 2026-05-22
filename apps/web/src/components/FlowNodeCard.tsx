@@ -103,6 +103,34 @@ const FRAMEWORK_INPUT_OUT: PortInfo = { name: "data", description: "Pipeline run
 const FRAMEWORK_OUTPUT_IN: PortInfo = { name: "result", description: "Final value delivered to the pipeline caller." };
 
 /**
+ * Resolves config-driven ports for a plugin whose manifest declares
+ * `dynamicPorts` (e.g. `transform`). Input port names come from a config key
+ * holding a `string[]`; output port names are the keys of a config object.
+ * Missing/empty config falls back to a single synthetic handle so a
+ * freshly-dropped node still has something to wire. Re-runs whenever the
+ * node's config changes, so renaming a port in the inspector re-draws handles.
+ */
+function dynamicPortsFor(
+  dyn: NonNullable<PluginInfo["dynamicPorts"]>,
+  config: Record<string, unknown> | undefined
+): { inputPorts: PortInfo[]; outputPorts: PortInfo[] } {
+  const cfg = config ?? {};
+  const inRaw = dyn.inputsFrom ? cfg[dyn.inputsFrom] : undefined;
+  const inNames = Array.isArray(inRaw)
+    ? inRaw.filter((name): name is string => typeof name === "string" && name.length > 0)
+    : [];
+  const outRaw = dyn.outputsFrom ? cfg[dyn.outputsFrom] : undefined;
+  const outNames =
+    outRaw && typeof outRaw === "object" && !Array.isArray(outRaw)
+      ? Object.keys(outRaw as Record<string, unknown>)
+      : [];
+  return {
+    inputPorts: inNames.length > 0 ? inNames.map((name) => ({ name })) : [FALLBACK_IN],
+    outputPorts: outNames.length > 0 ? outNames.map((name) => ({ name })) : [FALLBACK_OUT]
+  };
+}
+
+/**
  * Colored, icon-bearing custom React Flow node. Resolves the effective input
  * and output port lists for the node (declared manifest ports first, falling
  * back to synthetic single-pin labels) so every visible handle has a name.
@@ -128,14 +156,20 @@ function FlowNodeCardImpl({ data, selected }: NodeProps<RagNodeData>) {
   // Resolve effective ports for THIS node, layered:
   //   1. Framework `type: input` / `output` nodes get their canonical single
   //      synthetic port (no inputs for input, no outputs for output).
-  //   2. Declared manifest ports win.
-  //   3. Otherwise a synthetic "in"/"out" label fills the default handle.
+  //   2. Config-driven ports (manifest declares `dynamicPorts`) are read from
+  //      this node's own config.
+  //   3. Declared manifest ports win.
+  //   4. Otherwise a synthetic "in"/"out" label fills the default handle.
   let inputPorts: PortInfo[] = [];
   let outputPorts: PortInfo[] = [];
   if (kind === "input") {
     outputPorts = [FRAMEWORK_INPUT_OUT];
   } else if (kind === "output") {
     inputPorts = [FRAMEWORK_OUTPUT_IN];
+  } else if (manifest?.dynamicPorts) {
+    const resolved = dynamicPortsFor(manifest.dynamicPorts, node.config);
+    inputPorts = resolved.inputPorts;
+    outputPorts = resolved.outputPorts;
   } else {
     inputPorts = manifest?.inputPorts && manifest.inputPorts.length > 0 ? manifest.inputPorts : [FALLBACK_IN];
     outputPorts = manifest?.outputPorts && manifest.outputPorts.length > 0 ? manifest.outputPorts : [FALLBACK_OUT];

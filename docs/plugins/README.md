@@ -77,7 +77,9 @@ treatment as long as their `id` matches a bundled markdown filename.
 | static_value_tool | tool | [static_value_tool.md](static_value_tool.md) |
 | text_document_loader | loader | [text_document_loader.md](text_document_loader.md) |
 | text_parser | parser | [text_parser.md](text_parser.md) |
+| transform | transformer | [transform.md](transform.md) |
 | vector_upsert | sink | [vector_upsert.md](vector_upsert.md) |
 | webhook_output | sink | [webhook_output.md](webhook_output.md) |
 | webhook_trigger | datasource | [webhook_trigger.md](webhook_trigger.md) |
 | while_loop | router | [while_loop.md](while_loop.md) |
+| xml_codec | transformer | [xml_codec.md](xml_codec.md) |

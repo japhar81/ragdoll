@@ -3367,6 +3367,7 @@ function projectPlugin(plugin: RegisteredPlugin): {
   secretsSchema?: unknown;
   inputPorts?: unknown;
   outputPorts?: unknown;
+  dynamicPorts?: { inputsFrom?: string; outputsFrom?: string };
   ui?: {
     icon?: string;
     color?: string;
@@ -3397,6 +3398,7 @@ function projectPlugin(plugin: RegisteredPlugin): {
     ...(m.secretsSchema !== undefined ? { secretsSchema: m.secretsSchema } : {}),
     ...(m.inputPorts !== undefined ? { inputPorts: m.inputPorts } : {}),
     ...(m.outputPorts !== undefined ? { outputPorts: m.outputPorts } : {}),
+    ...(m.dynamicPorts !== undefined ? { dynamicPorts: m.dynamicPorts } : {}),
     ...(ui !== undefined ? { ui } : {})
   };
 }

@@ -13,6 +13,10 @@ export {
   opensearchDeletePlugin,
   pathClassifierPlugin
 } from "./ingest.ts";
+// Data-shaping plugins (JSONata/JMESPath transform + XML codec) live in their
+// own module; re-exported so the plugin-loader's namespace scan registers
+// them alongside the rest.
+export { transformPlugin, xmlCodecPlugin } from "./transform.ts";
 import { createVectorStore } from "../../../packages/vector/src/index.ts";
 import type { DistanceMetric, VectorPoint } from "../../../packages/vector/src/index.ts";
 import {
