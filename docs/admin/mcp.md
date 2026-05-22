@@ -32,7 +32,7 @@ are flagged (see "Dangerous tools" below).
 | `list_schedules` | cron schedules |
 | `list_config_definitions`, `list_config_values`, `get_resolved_config` | config catalog + effective resolution |
 | `list_secrets` | secret metadata only — values are ALWAYS `REDACTED` |
-| `list_plugins`, `get_plugin` | plugin registry |
+| `list_plugins`, `get_plugin`, `get_plugin_docs` | plugin registry — manifests (config schema + named ports) and narrative docs |
 | `list_users`, `get_user`, `list_grants` | users + grants |
 | `list_roles`, `list_identity_providers`, `get_auth_settings` | RBAC + SSO |
 | `list_executions`, `get_execution`, `get_execution_trace` | run history |
@@ -93,6 +93,33 @@ A well-behaved client should:
    `destructiveHint: true`).
 2. Show the ⚠ prefix verbatim in any approval UI.
 3. Refuse to call a destructive tool autonomously without a human signal.
+
+## Building pipelines
+
+The plugin tools give an LLM everything it needs to author a pipeline spec
+from scratch — discover the nodes, then understand each one in context:
+
+1. `list_plugins` — the registry: every plugin's category, id, version.
+2. `get_plugin` — one plugin's **structured manifest**: config schema (with
+   per-field types + defaults) and the named input/output **port contract**
+   that edges wire to. Plugins whose ports are author-defined (e.g.
+   `transform`) carry `dynamicPorts` instead of a fixed port list.
+3. `get_plugin_docs` — the **narrative doc**: what the node does, its
+   inputs/outputs in prose, gotchas, typical pipeline position, and worked
+   examples. Read this alongside the manifest before wiring a node.
+
+Then compose and persist the spec:
+
+4. `validate_pipeline_spec` — dry-run a candidate spec (DAG shape, plugin
+   refs, port names, config/secret refs) without saving. Iterate against the
+   returned warnings/errors.
+5. `create_pipeline` then `save_pipeline_version` — persist the spec as a
+   version (`publish: true` to make it deployable).
+6. `deploy_pipeline` then `run_pipeline` — serve and execute it.
+
+To **edit** an existing pipeline, `list_pipeline_versions` returns every
+saved version with its full spec: read the latest, modify it, and
+`save_pipeline_version` the result as a new version.
 
 ## Resources
 
