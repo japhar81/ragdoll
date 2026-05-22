@@ -162,6 +162,29 @@ pipeline spec in their config and recursively execute it via the
 `runSubgraph` callback the runtime provides on `PluginExecutionInput`. See
 `docs/plugins/foreach.md` etc. for the per-iteration input contract.
 
+### Config-driven ports
+
+A plugin whose ports the *author* defines per node (rather than the plugin
+author fixing them) declares `dynamicPorts` instead of `inputPorts` /
+`outputPorts`:
+
+```ts
+manifest: {
+  // …
+  dynamicPorts: { inputsFrom: "inputs", outputsFrom: "outputs" }
+}
+```
+
+`inputsFrom` names a config key holding a `string[]` of input port names;
+`outputsFrom` names a config key holding an object whose keys are output port
+names. The builder reads handle names from the node's own config, so the
+canvas re-draws as the author edits config. **Leave `inputPorts` /
+`outputPorts` undeclared** — an empty static contract is what stops
+`validatePipelineSpec` from warning about the author-named ports. The runtime
+is unaffected: it routes edges by name whether or not the port was statically
+declared. `transform` (see `docs/plugins/transform.md`) is the reference
+example.
+
 ## Auto-discovery
 
 `packages/plugin-loader` builds the registry by scanning `Object.values()` of

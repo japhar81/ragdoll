@@ -1,0 +1,41 @@
+apiVersion: rag-platform/v1
+kind: Pipeline
+metadata:
+  name: transform-demo
+  description: "Reshapes a JSON payload with the transform plugin. One configurable input port fans out to two independently-wired output ports, each computed by its own JSONata expression. Runs with no external services; supply a run input with a payload object holding title, items and tags."
+spec:
+  nodes:
+    - id: input
+      type: input
+    - id: derive
+      plugin:
+        category: transformer
+        id: transform
+        version: "1.0.0"
+      config:
+        engine: jsonata
+        inputs:
+          - payload
+        outputs:
+          summary: "payload.title & ' - ' & $string($count(payload.items)) & ' items'"
+          keywords: payload.tags
+    - id: out_summary
+      type: output
+    - id: out_keywords
+      type: output
+  edges:
+    # The run input carries a `payload` object; forward it to the transform's
+    # configured `payload` input port.
+    - from: input
+      to: derive
+      fromPort: payload
+      toPort: payload
+    # Each transform output port is wired independently to its own output node.
+    - from: derive
+      to: out_summary
+      fromPort: summary
+      toPort: result
+    - from: derive
+      to: out_keywords
+      fromPort: keywords
+      toPort: result

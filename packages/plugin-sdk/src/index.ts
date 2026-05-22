@@ -72,6 +72,23 @@ export interface PluginManifest {
    *  should match these names; an absent key on a declared port marks that
    *  branch dead so downstream nodes wired to it are skipped. */
   outputPorts?: PortDef[];
+  /**
+   * Marks a plugin whose ports are NOT fixed — each node instance defines its
+   * own ports through its `config`. The builder reads port names from the
+   * node's config instead of the static `inputPorts` / `outputPorts`:
+   *   - `inputsFrom`  names a config key holding a `string[]` of input port
+   *                   names.
+   *   - `outputsFrom` names a config key holding an object whose keys are the
+   *                   output port names.
+   * A dynamic-port plugin should leave `inputPorts` / `outputPorts` undeclared
+   * so `validatePipelineSpec` does not warn about the author-named ports. Used
+   * by `transform`. The runtime is unaffected — it routes edges by name
+   * regardless of whether the port was statically declared.
+   */
+  dynamicPorts?: {
+    inputsFrom?: string;
+    outputsFrom?: string;
+  };
   configDefinitions?: ConfigDefinition[];
   capabilities?: string[];
   ui?: {

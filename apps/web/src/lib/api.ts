@@ -886,6 +886,12 @@ export interface PluginInfo {
   secretsSchema?: JsonSchemaLike;
   inputPorts?: PortInfo[];
   outputPorts?: PortInfo[];
+  /** Set when the plugin's ports are config-driven: the builder reads handle
+   *  names from the node's own config (e.g. `transform`) rather than the
+   *  static inputPorts/outputPorts. `inputsFrom` is a config key holding a
+   *  string[] of input port names; `outputsFrom` a config key holding an
+   *  object whose keys are output port names. */
+  dynamicPorts?: { inputsFrom?: string; outputsFrom?: string };
   ui?: PluginUi;
 }
 
