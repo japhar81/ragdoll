@@ -170,8 +170,9 @@ export function buildE2EHarness(options: BuildOptions = {}): E2EHarness {
   const datasources = new InMemoryDatasourceConnectionRepository();
   const usageRecords = new InMemoryUsageRecordRepository();
 
+  const apiKeys = new ApiKeyService(new InMemoryApiKeyRepository());
   const auth = new AuthResolver({
-    apiKeys: new ApiKeyService(new InMemoryApiKeyRepository()),
+    apiKeys,
     dev: new DevAuthProvider({
       roles: (options.devRoles as any) ?? ["platform_admin"],
       tenantId: options.devTenant
@@ -193,6 +194,7 @@ export function buildE2EHarness(options: BuildOptions = {}): E2EHarness {
     vectorCollections,
     executionStore,
     auth,
+    apiKeys,
     queue,
     secretProvider,
     pluginRegistry,

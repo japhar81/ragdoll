@@ -243,6 +243,7 @@ async function buildDeps(): Promise<{ deps: AppDeps; pool?: PoolLike }> {
       // /api/executions/:id reflects worker runs.
       executionStore,
       auth,
+      apiKeys,
       sessions,
       queue,
       secretProvider: new DatabaseEncryptedSecretProvider(
@@ -293,6 +294,7 @@ async function buildDeps(): Promise<{ deps: AppDeps; pool?: PoolLike }> {
       vectorCollections: new InMemoryVectorCollectionRepository(),
       executionStore: new InMemoryExecutionStore(),
       auth,
+      apiKeys,
       sessions,
       queue,
       secretProvider: new DatabaseEncryptedSecretProvider(

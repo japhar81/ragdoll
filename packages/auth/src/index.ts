@@ -157,6 +157,8 @@ export interface ApiKeyRepository {
   findByPrefix(prefix: string): Promise<ApiKeyRecord | undefined>;
   touch(id: string): Promise<void>;
   revoke(id: string): Promise<void>;
+  /** Every key (active and revoked) issued for a principal. */
+  listByPrincipal(principalId: string): Promise<ApiKeyRecord[]>;
 }
 
 export class InMemoryApiKeyRepository implements ApiKeyRepository {
@@ -183,6 +185,12 @@ export class InMemoryApiKeyRepository implements ApiKeyRepository {
     const record = this.records.get(id);
     if (record) record.revokedAt = new Date().toISOString();
   }
+
+  async listByPrincipal(principalId: string): Promise<ApiKeyRecord[]> {
+    return [...this.records.values()].filter(
+      (r) => r.principalId === principalId
+    );
+  }
 }
 
 function sha256Hex(value: string): string {
@@ -199,6 +207,9 @@ export interface IssueApiKeyInput {
 export interface IssuedApiKey {
   id: string;
   plaintext: string;
+  /** The stored record (incl. hash). Returned once at issue time so callers
+   *  can echo the key's metadata without a follow-up read. */
+  record: ApiKeyRecord;
 }
 
 /**
@@ -220,7 +231,7 @@ export class ApiKeyService {
     const secret = randomBytes(24).toString("hex");
     const plaintext = `rgd_${prefix}_${secret}`;
 
-    await this.repository.create({
+    const record = await this.repository.create({
       id,
       prefix,
       hash: sha256Hex(plaintext),
@@ -231,7 +242,17 @@ export class ApiKeyService {
       createdAt: new Date().toISOString()
     });
 
-    return { id, plaintext };
+    return { id, plaintext, record };
+  }
+
+  /** Every key (active and revoked) issued for a principal. */
+  async list(principalId: string): Promise<ApiKeyRecord[]> {
+    return this.repository.listByPrincipal(principalId);
+  }
+
+  /** Revoke a key by id. A revoked key fails {@link verify} from then on. */
+  async revoke(id: string): Promise<void> {
+    await this.repository.revoke(id);
   }
 
   async verify(rawKey: string): Promise<Principal> {
