@@ -666,7 +666,29 @@ export const api = {
     request<void>(
       "DELETE",
       `/api/identity-providers/${encodeURIComponent(id)}`
-    )
+    ),
+
+  // ---- self-service profile --------------------------------------------
+  updateProfile: (patch: { displayName?: string | null }) =>
+    request<{ user: AccountUser }>("PATCH", "/api/auth/me", patch),
+  changePassword: (input: { currentPassword?: string; newPassword: string }) =>
+    request<{ ok: boolean }>("POST", "/api/auth/password", input),
+
+  // ---- API keys (self-service) -----------------------------------------
+  listApiKeys: () =>
+    request<{ apiKeys: ApiKeyView[] }>("GET", "/api/api-keys"),
+  /**
+   * Mint a key. `plaintext` is returned exactly once — it is unrecoverable
+   * afterwards, so the caller must surface it to the user immediately.
+   */
+  createApiKey: (input: { name: string; role: string; tenantId?: string }) =>
+    request<{ apiKey: ApiKeyView; plaintext: string }>(
+      "POST",
+      "/api/api-keys",
+      input
+    ),
+  revokeApiKey: (id: string) =>
+    request<void>("DELETE", `/api/api-keys/${encodeURIComponent(id)}`)
 };
 
 // ---- response row shapes (loosely typed; only fields the UI reads) -------
@@ -935,4 +957,20 @@ export interface AuthSettings {
   signupMode: "admin_only" | "open_default_role" | "open_no_access";
   defaultRole?: string | null;
   updatedAt?: string;
+}
+
+/** Non-secret view of an API key (the hash and one-time plaintext are never
+ *  part of this shape — only the non-credential lookup `prefix`). */
+export interface ApiKeyView {
+  id: string;
+  name: string;
+  prefix: string;
+  roles: string[];
+  tenantId: string | null;
+  /** `*` (global) or `t/<tenantId>`. */
+  scope: string;
+  createdAt: string;
+  lastUsedAt: string | null;
+  revokedAt: string | null;
+  status: "active" | "revoked";
 }

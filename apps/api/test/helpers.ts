@@ -131,9 +131,12 @@ export function buildHarness(options: BuildOptions = {}): Harness {
   const queue = new InMemoryQueue();
 
   const sessions = new SessionTokenService("test-session-secret");
+  // One ApiKeyService shared by the resolver and the app so a key minted via
+  // POST /api/api-keys is immediately verifiable.
+  const apiKeys = new ApiKeyService(new InMemoryApiKeyRepository());
   const auth = new AuthResolver({
     sessions,
-    apiKeys: new ApiKeyService(new InMemoryApiKeyRepository()),
+    apiKeys,
     // Strict default-deny harness: no header-trusting dev provider.
     dev: options.withAuth
       ? undefined
@@ -178,6 +181,7 @@ export function buildHarness(options: BuildOptions = {}): Harness {
     vectorCollections: new InMemoryVectorCollectionRepository(),
     executionStore: new InMemoryExecutionStore(),
     auth,
+    apiKeys,
     queue,
     secretProvider: new DatabaseEncryptedSecretProvider(
       new InMemorySecretRepository(),

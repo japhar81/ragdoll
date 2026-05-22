@@ -18,6 +18,7 @@ import {
 } from "../../../packages/core/src/index.ts";
 import {
   AuthResolver,
+  ApiKeyService,
   enforce,
   UnauthorizedError,
   InvalidCredentialsError,
@@ -37,7 +38,8 @@ import {
   InvalidWebhookTokenError,
   type SsoIdentity,
   type Permission,
-  type Principal
+  type Principal,
+  type ApiKeyRecord
 } from "../../../packages/auth/src/index.ts";
 import {
   AuthorizationError,
@@ -84,6 +86,7 @@ import {
   InMemoryAuthSettingsRepository,
   InMemoryRoleRepository,
   InMemoryWebhookTriggerRepository,
+  InMemoryApiKeyRepository,
   type WebhookTriggerRepository,
   type WebhookTriggerRow,
   type UserRepository,
@@ -245,6 +248,13 @@ export interface AppDeps {
   sessions?: SessionTokenService;
   /** Built from the stores when omitted (needs `sessions`). */
   accounts?: AccountService;
+  /**
+   * Issues / lists / revokes API keys. SHOULD be the same instance handed to
+   * the `AuthResolver` so a key minted via `POST /api/api-keys` is immediately
+   * verifiable. When omitted `createApp` falls back to a fresh in-memory
+   * service (its keys then won't be recognised by an unrelated resolver).
+   */
+  apiKeys?: ApiKeyService;
 }
 
 export interface App {
@@ -391,6 +401,8 @@ export function createApp(deps: AppDeps): App {
     deps.roles ?? new InMemoryRoleRepository();
   const webhookTriggers: WebhookTriggerRepository =
     deps.webhookTriggers ?? new InMemoryWebhookTriggerRepository();
+  const apiKeys: ApiKeyService =
+    deps.apiKeys ?? new ApiKeyService(new InMemoryApiKeyRepository());
   // The authorizer is the scoped, default-deny decision point. When omitted
   // (legacy harnesses) route `enforce(...)` keeps using the flat role map.
   const authorizer: Authorizer | undefined = deps.authorizer;
@@ -2682,6 +2694,26 @@ export function createApp(deps: AppDeps): App {
     };
   }
 
+  /**
+   * Non-secret view of an API key. The stored sha256 `hash` and the one-time
+   * plaintext are NEVER part of this projection — only the lookup `prefix`,
+   * which is not a credential on its own.
+   */
+  function publicApiKey(r: ApiKeyRecord): Record<string, unknown> {
+    return {
+      id: r.id,
+      name: r.name,
+      prefix: r.prefix,
+      roles: r.roles,
+      tenantId: r.tenantId ?? null,
+      scope: r.tenantId ? `t/${r.tenantId}` : "*",
+      createdAt: r.createdAt,
+      lastUsedAt: r.lastUsedAt ?? null,
+      revokedAt: r.revokedAt ?? null,
+      status: r.revokedAt ? "revoked" : "active"
+    };
+  }
+
   /** Non-secret view of an IdP (client secrets / SP keys are write-only). */
   function publicIdp(p: IdentityProviderRow): Record<string, unknown> {
     const cfg = { ...(p.config as Record<string, unknown>) };
@@ -2810,6 +2842,190 @@ export function createApp(deps: AppDeps): App {
       grants,
       permissions
     });
+  });
+
+  // ---- self-service profile ----------------------------------------------
+  // Any signed-in user may edit their OWN account; these need no permission
+  // grant (the principal IS the resource). API-key principals have no
+  // editable account, so they are refused.
+  route("PATCH", "/api/auth/me", async (ctx) => {
+    const p = ctx.principal;
+    if (p.type !== "user") {
+      return error(403, "forbidden", {
+        message: "no editable profile for this principal"
+      });
+    }
+    const before = await users.get(p.id);
+    if (!before) return error(404, "not_found");
+    const body = ctx.request.body;
+    if (!isObject(body)) return error(422, "validation_failed", { issues: [] });
+    const patch: Partial<UserRow> = { updatedAt: nowIso() };
+    if (typeof body.displayName === "string" || body.displayName === null) {
+      patch.displayName = body.displayName as string | null;
+    }
+    const updated = await users.update(p.id, patch);
+    await audit(ctx, "user.update", "user", p.id, publicUser(before), publicUser(updated));
+    return ok({ user: publicUser(updated) });
+  });
+
+  route("POST", "/api/auth/password", async (ctx) => {
+    const p = ctx.principal;
+    if (p.type !== "user") {
+      return error(403, "forbidden", {
+        message: "no password for this principal"
+      });
+    }
+    const user = await users.get(p.id);
+    if (!user) return error(404, "not_found");
+    const body = ctx.request.body;
+    if (
+      !isObject(body) ||
+      typeof body.newPassword !== "string" ||
+      body.newPassword.length < 8
+    ) {
+      return error(422, "validation_failed", {
+        issues: [
+          { path: "newPassword", message: "newPassword must be at least 8 characters" }
+        ]
+      });
+    }
+    // A user who already has a password must prove they know it. An SSO-only
+    // account (no stored hash) may set an initial password without one.
+    if (user.passwordHash) {
+      const current =
+        typeof body.currentPassword === "string" ? body.currentPassword : "";
+      if (!(await passwords.verify(current, user.passwordHash))) {
+        return error(403, "invalid_credentials", {
+          message: "current password is incorrect"
+        });
+      }
+    }
+    let passwordHash: string;
+    try {
+      passwordHash = await passwords.hash(body.newPassword);
+    } catch (e) {
+      if (e instanceof Error && e.name === "WeakPasswordError") {
+        return error(422, "validation_failed", {
+          issues: [{ path: "newPassword", message: "password is too weak" }]
+        });
+      }
+      throw e;
+    }
+    await users.update(p.id, { passwordHash, updatedAt: nowIso() });
+    await audit(ctx, "user.password_change", "user", p.id, undefined, undefined);
+    return ok({ ok: true });
+  });
+
+  // ---- API keys (self-service) -------------------------------------------
+  // A user manages their OWN keys. A new key carries an explicit role at an
+  // explicit scope, and `enforce` caps it: the creator must already hold
+  // every permission that role confers at that scope, so a key can never
+  // exceed its issuer.
+  route("GET", "/api/api-keys", async (ctx) => {
+    const p = ctx.principal;
+    if (p.type !== "user") {
+      return error(403, "forbidden", {
+        message: "API keys are managed by a signed-in user"
+      });
+    }
+    const records = await apiKeys.list(p.id);
+    records.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+    return ok({ apiKeys: records.map(publicApiKey) });
+  });
+
+  route("POST", "/api/api-keys", async (ctx) => {
+    const p = ctx.principal;
+    if (p.type !== "user") {
+      return error(403, "forbidden", {
+        message: "API keys are managed by a signed-in user"
+      });
+    }
+    const body = ctx.request.body;
+    if (
+      !isObject(body) ||
+      typeof body.name !== "string" ||
+      body.name.trim() === ""
+    ) {
+      return error(422, "validation_failed", {
+        issues: [{ path: "name", message: "name is required" }]
+      });
+    }
+    if (typeof body.role !== "string" || body.role === "") {
+      return error(422, "validation_failed", {
+        issues: [{ path: "role", message: "role is required" }]
+      });
+    }
+    const role = body.role;
+    const tenantId =
+      typeof body.tenantId === "string" && body.tenantId ? body.tenantId : undefined;
+
+    const catalog = await effectiveCatalog();
+    if (!catalog.has(role)) {
+      return error(422, "validation_failed", {
+        issues: [{ path: "role", message: `unknown role: ${role}` }]
+      });
+    }
+    if (tenantId) {
+      const tenant = await deps.tenants.get(tenantId);
+      if (!tenant) {
+        return error(422, "validation_failed", {
+          issues: [{ path: "tenantId", message: "unknown tenant" }]
+        });
+      }
+    }
+
+    // Cap the key at its creator's authority: reuse the exact scoped decision
+    // the rest of the API uses. `enforce` throws AuthorizationError (-> 403)
+    // for any permission of `role` the creator does not hold at this scope.
+    const resource = scopeResource(tenantId ? `t/${tenantId}` : "*");
+    for (const permission of catalog.get(role) ?? []) {
+      enforce(p, permission as Permission, resource);
+    }
+
+    const issued = await apiKeys.issue({
+      principalId: p.id,
+      tenantId,
+      name: body.name.trim(),
+      roles: [role] as ApiKeyRecord["roles"]
+    });
+    await audit(
+      ctx,
+      "apikey.create",
+      "api_key",
+      issued.id,
+      undefined,
+      publicApiKey(issued.record)
+    );
+    // `plaintext` is returned exactly once — it is never recoverable later.
+    return ok(
+      { apiKey: publicApiKey(issued.record), plaintext: issued.plaintext },
+      201
+    );
+  });
+
+  route("DELETE", "/api/api-keys/:id", async (ctx) => {
+    const p = ctx.principal;
+    if (p.type !== "user") {
+      return error(403, "forbidden", {
+        message: "API keys are managed by a signed-in user"
+      });
+    }
+    const target = (await apiKeys.list(p.id)).find(
+      (k) => k.id === ctx.params.id
+    );
+    if (!target) {
+      return error(404, "not_found", { message: "API key not found" });
+    }
+    await apiKeys.revoke(target.id);
+    await audit(
+      ctx,
+      "apikey.revoke",
+      "api_key",
+      target.id,
+      publicApiKey(target),
+      publicApiKey({ ...target, revokedAt: target.revokedAt ?? nowIso() })
+    );
+    return { status: 204, body: undefined, headers: {} };
   });
 
   // ---- auth: SSO ----------------------------------------------------------

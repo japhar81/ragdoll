@@ -29,6 +29,7 @@ import { UsersScreen } from "./components/UsersScreen.tsx";
 import { RolesScreen } from "./components/RolesScreen.tsx";
 import { IdentityProvidersScreen } from "./components/IdentityProvidersScreen.tsx";
 import { AuthSettingsScreen } from "./components/AuthSettingsScreen.tsx";
+import { ProfileScreen } from "./components/ProfileScreen.tsx";
 import { LoginScreen } from "./components/LoginScreen.tsx";
 import { AuthProvider, useAuth } from "./auth/AuthContext.tsx";
 import "./styles.css";
@@ -221,9 +222,15 @@ function Shell() {
           </Tooltip>
         </div>
         <div className="sidebar-user">
-          <div className="sidebar-user-id" title={auth.user?.email ?? ""}>
+          <NavLink
+            to="/profile"
+            className={({ isActive }) =>
+              isActive ? "sidebar-user-id active" : "sidebar-user-id"
+            }
+            title="Open your profile"
+          >
             {auth.user?.displayName || auth.user?.email || "signed in"}
-          </div>
+          </NavLink>
           <button className="link-btn" onClick={() => auth.logout()}>
             Sign out
           </button>
@@ -263,6 +270,8 @@ function Shell() {
           element={<IdentityProvidersScreen />}
         />
         <Route path="/auth-settings" element={<AuthSettingsScreen />} />
+        {/* Self-service: reachable by any signed-in user (no nav perm). */}
+        <Route path="/profile" element={<ProfileScreen />} />
         {/* Unknown routes: fall back to whichever view the user can see, so a
             stale bookmark or a typo doesn't 404 the SPA. */}
         <Route

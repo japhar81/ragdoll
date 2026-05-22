@@ -1505,7 +1505,11 @@ table.grid th {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  text-decoration: none;
+  display: block;
 }
+.sidebar-user-id:hover { color: #fff; }
+.sidebar-user-id.active { color: #93c5fd; }
 .sidebar-user .link-btn { color: #93c5fd; align-self: flex-start; }
 
 .row-actions { display: inline-flex; gap: 10px; }
