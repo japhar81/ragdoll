@@ -131,7 +131,7 @@ test("if_then routes payload to `then` and skips downstream wired to `else`", as
     spec: {
       nodes: [
         { id: "input", type: "input" },
-        { id: "branch", plugin: { category: "router", id: "if_then", version: "1.0.0" } },
+        { id: "branch", plugin: { category: "control", id: "if_then", version: "1.0.0" } },
         { id: "then_node", plugin: { category: "transformer", id: "then_branch", version: "1.0.0" } },
         { id: "else_node", plugin: { category: "transformer", id: "else_branch", version: "1.0.0" } }
       ],
@@ -183,7 +183,7 @@ test("foreach runs the body once per item and gathers results", async () => {
       nodes: [
         {
           id: "loop",
-          plugin: { category: "router", id: "foreach", version: "1.0.0" },
+          plugin: { category: "control", id: "foreach", version: "1.0.0" },
           config: { body }
         }
       ],
@@ -222,7 +222,7 @@ test("for_loop respects count from config and emits results+final", async () => 
     kind: "Pipeline",
     metadata: { name: "for-test" },
     spec: {
-      nodes: [{ id: "loop", plugin: { category: "router", id: "for_loop", version: "1.0.0" }, config: { count: 4, body } }],
+      nodes: [{ id: "loop", plugin: { category: "control", id: "for_loop", version: "1.0.0" }, config: { count: 4, body } }],
       edges: []
     }
   };
@@ -260,7 +260,7 @@ test("while_loop terminates when predicate goes false and respects maxIterations
     kind: "Pipeline",
     metadata: { name: "while-test" },
     spec: {
-      nodes: [{ id: "loop", plugin: { category: "router", id: "while_loop", version: "1.0.0" }, config: { body, maxIterations: 50 } }],
+      nodes: [{ id: "loop", plugin: { category: "control", id: "while_loop", version: "1.0.0" }, config: { body, maxIterations: 50 } }],
       edges: []
     }
   };
@@ -500,7 +500,7 @@ test("diamond with skip: a skipped branch doesn't prevent the live branch from r
     spec: {
       nodes: [
         { id: "input", type: "input" },
-        { id: "branch", plugin: { category: "router", id: "if_then", version: "1.0.0" } },
+        { id: "branch", plugin: { category: "control", id: "if_then", version: "1.0.0" } },
         { id: "alive", plugin: { category: "transformer", id: "live_side", version: "1.0.0" } },
         { id: "sink", plugin: { category: "transformer", id: "sink", version: "1.0.0" } }
       ],
@@ -655,8 +655,8 @@ test("pipeline validation flags unknown port references as warnings", async () =
     metadata: { name: "bad-port" },
     spec: {
       nodes: [
-        { id: "branch", plugin: { category: "router", id: "if_then", version: "1.0.0" } },
-        { id: "sink", plugin: { category: "router", id: "if_then", version: "1.0.0" } }
+        { id: "branch", plugin: { category: "control", id: "if_then", version: "1.0.0" } },
+        { id: "sink", plugin: { category: "control", id: "if_then", version: "1.0.0" } }
       ],
       edges: [{ from: "branch", to: "sink", fromPort: "maybe", toPort: "value" }]
     }

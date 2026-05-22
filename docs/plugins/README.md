@@ -53,9 +53,9 @@ treatment as long as their `id` matches a bundled markdown filename.
 | delta_filter | transformer | [delta_filter.md](delta_filter.md) |
 | field_router | router | [field_router.md](field_router.md) |
 | filesystem_source | datasource | [filesystem_source.md](filesystem_source.md) |
-| for_loop | router | [for_loop.md](for_loop.md) |
-| foreach | router | [foreach.md](foreach.md) |
-| if_then | router | [if_then.md](if_then.md) |
+| for_loop | control | [for_loop.md](for_loop.md) |
+| foreach | control | [foreach.md](foreach.md) |
+| if_then | control | [if_then.md](if_then.md) |
 | opensearch_delete | sink | [opensearch_delete.md](opensearch_delete.md) |
 | json_output_parser | output_parser | [json_output_parser.md](json_output_parser.md) |
 | manual_text_input | datasource | [manual_text_input.md](manual_text_input.md) |
@@ -81,5 +81,5 @@ treatment as long as their `id` matches a bundled markdown filename.
 | vector_upsert | sink | [vector_upsert.md](vector_upsert.md) |
 | webhook_output | sink | [webhook_output.md](webhook_output.md) |
 | webhook_trigger | datasource | [webhook_trigger.md](webhook_trigger.md) |
-| while_loop | router | [while_loop.md](while_loop.md) |
+| while_loop | control | [while_loop.md](while_loop.md) |
 | xml_codec | transformer | [xml_codec.md](xml_codec.md) |

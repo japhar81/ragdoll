@@ -128,7 +128,7 @@ test("loaded registry has at least one plugin for every category", () => {
   }
 });
 
-test("every registered manifest is form-renderable (configSchema + ui icon/group)", () => {
+test("every registered manifest is form-renderable (configSchema + ui icon)", () => {
   const registry = loadPluginRegistry();
   for (const plugin of registry.list()) {
     const manifest = plugin.manifest;
@@ -143,9 +143,11 @@ test("every registered manifest is form-renderable (configSchema + ui icon/group
       typeof manifest.ui?.icon === "string" && manifest.ui.icon.length > 0,
       `${manifest.id} declares ui.icon`
     );
+    // The palette section is derived from `category` (see apps/web palette.ts
+    // CATEGORY_GROUP) — a non-empty category is all grouping needs.
     assert.ok(
-      typeof manifest.ui?.paletteGroup === "string" && manifest.ui.paletteGroup.length > 0,
-      `${manifest.id} declares ui.paletteGroup`
+      typeof manifest.category === "string" && manifest.category.length > 0,
+      `${manifest.id} declares a category`
     );
     // Plugins that actually expose config properties must also have formHints
     // so the UI renders proper widgets instead of guessing.

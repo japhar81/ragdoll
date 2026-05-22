@@ -86,7 +86,6 @@ test("external crawler plugins registered when PYTHON_PLUGIN_URL is set", async 
     assert.equal(c4Schema?.properties?.extract?.default, "markdown");
     assert.equal(crawl4ai?.manifest.category, "datasource");
     assert.deepEqual(crawl4ai?.manifest.capabilities, ["ingestion"]);
-    assert.equal(crawl4ai?.manifest.ui?.paletteGroup, "Crawling");
     assert.equal(typeof crawl4ai?.manifest.ui?.icon, "string");
     assert.ok(crawl4ai?.manifest.ui?.formHints, "formHints present");
     assert.ok(crawl4ai?.manifest.secretsSchema, "secretsSchema present");
@@ -104,7 +103,6 @@ test("external crawler plugins registered when PYTHON_PLUGIN_URL is set", async 
     assert.equal(sSchema?.properties?.maxPages?.default, 20);
     assert.equal(sSchema?.properties?.maxDepth?.default, 2);
     assert.equal(sSchema?.properties?.allowPrivateNetworks?.default, false);
-    assert.equal(scrapy?.manifest.ui?.paletteGroup, "Crawling");
 
     // In-process plugins still discovered alongside external ones.
     assert.ok(registry.get({ category: "llm", id: "provider_chat", version: "1.0.0" }));

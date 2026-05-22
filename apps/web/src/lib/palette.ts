@@ -69,18 +69,18 @@ export function newNodeFromPlugin(
 export const PALETTE_GROUP_ORDER = [
   "Sources",
   "Ingestion",
+  "Parsing",
   "Embeddings",
+  "Storage",
   "Retrieval",
   "Prompting",
   "Models",
-  "Parsing",
+  "Transform",
+  "Routing",
+  "Control",
   "Guardrails",
   "Evaluation",
-  "Transforms",
-  "Routing",
   "Memory",
-  "Storage",
-  "Crawling",
   "Tools",
   "Other"
 ] as const;
@@ -88,9 +88,12 @@ export const PALETTE_GROUP_ORDER = [
 const OTHER_GROUP = "Other";
 
 /**
- * Default group a plugin category maps to when the plugin publishes no
- * `ui.paletteGroup`. Keeps the 18 core categories landing in sensible
- * sections of PALETTE_GROUP_ORDER.
+ * The palette group each plugin category maps to. Category is the single
+ * source of truth for plugin organization — the builtin plugins set no
+ * `ui.paletteGroup`, so this map drives the whole palette. (`ui.paletteGroup`
+ * remains an opt-in override for external plugins; see `groupForPlugin`.)
+ * Every one of the 19 core categories is mapped, so no builtin ever falls
+ * into the trailing "Other" bucket.
  */
 const CATEGORY_GROUP: Record<string, string> = {
   datasource: "Sources",
@@ -107,8 +110,9 @@ const CATEGORY_GROUP: Record<string, string> = {
   guardrail: "Guardrails",
   evaluator: "Evaluation",
   output_parser: "Parsing",
-  transformer: "Transforms",
+  transformer: "Transform",
   router: "Routing",
+  control: "Control",
   memory: "Memory",
   sink: "Storage"
 };

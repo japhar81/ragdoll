@@ -156,7 +156,6 @@ export const transformPlugin: InProcessPlugin = {
     ui: {
       icon: "shuffle",
       color: "#9333ea",
-      paletteGroup: "Transform",
       formHints: {
         engine: { widget: "select" },
         inputs: { widget: "tags" },
@@ -249,7 +248,6 @@ export const xmlCodecPlugin: InProcessPlugin = {
     ui: {
       icon: "file-code",
       color: "#9333ea",
-      paletteGroup: "Transform",
       formHints: {
         mode: { widget: "select" },
         ignoreAttributes: { widget: "checkbox" },

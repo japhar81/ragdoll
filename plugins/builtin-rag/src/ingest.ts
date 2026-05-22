@@ -194,7 +194,6 @@ export const filesystemSourcePlugin: InProcessPlugin = {
     capabilities: ["ingestion"],
     ui: {
       icon: "folder",
-      paletteGroup: "Sources",
       formHints: {
         include: { widget: "tags" },
         exclude: { widget: "tags" },
@@ -311,7 +310,6 @@ export const deltaFilterPlugin: InProcessPlugin = {
     capabilities: ["ingestion"],
     ui: {
       icon: "filter",
-      paletteGroup: "Ingestion",
       formHints: {
         compareBy: { widget: "select" },
         stateKey: { widget: "text" }
@@ -716,7 +714,6 @@ export const codeChunkerPlugin: InProcessPlugin = {
     capabilities: ["ingestion"],
     ui: {
       icon: "code",
-      paletteGroup: "Ingestion",
       formHints: {
         maxChars: { widget: "number", min: 200, step: 100 },
         minChars: { widget: "number", min: 0, step: 100 }
@@ -787,7 +784,6 @@ export const qdrantDeletePlugin: InProcessPlugin = {
     ui: {
       icon: "trash",
       color: "#dc2626",
-      paletteGroup: "Storage",
       formHints: { collection: { widget: "text" }, apiKey: { widget: "secret" } }
     }
   },
@@ -859,7 +855,6 @@ export const opensearchDeletePlugin: InProcessPlugin = {
     ui: {
       icon: "trash",
       color: "#dc2626",
-      paletteGroup: "Storage",
       formHints: { index: { widget: "text" } }
     }
   },
@@ -939,7 +934,6 @@ export const pathClassifierPlugin: InProcessPlugin = {
     capabilities: ["ingestion"],
     ui: {
       icon: "git-branch",
-      paletteGroup: "Routing",
       formHints: {
         docs: { widget: "text" },
         code: { widget: "text" },
