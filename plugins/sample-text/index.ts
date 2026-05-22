@@ -27,7 +27,6 @@ export const sampleUppercaseTransformer: InProcessPlugin = {
     capabilities: ["query"],
     ui: {
       icon: "type",
-      paletteGroup: "Transforms",
       formHints: { field: { widget: "text" } }
     }
   },

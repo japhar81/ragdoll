@@ -116,7 +116,6 @@ const CRAWL4AI_MANIFEST: PluginManifest = {
   ui: {
     icon: "spider",
     color: "#0ea5e9",
-    paletteGroup: "Crawling",
     formHints: {
       url: { widget: "text" },
       urls: { widget: "tags" },
@@ -186,7 +185,6 @@ const SCRAPY_MANIFEST: PluginManifest = {
   ui: {
     icon: "bug",
     color: "#16a34a",
-    paletteGroup: "Crawling",
     formHints: {
       startUrls: { widget: "tags" },
       allowedDomains: { widget: "tags" },

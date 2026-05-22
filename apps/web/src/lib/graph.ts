@@ -41,6 +41,7 @@ const THEME: Record<StyleKey, NodeTheme> = {
   output_parser: { color: "#64748b", icon: "\u{1F9E9}" },
   transformer: { color: "#64748b", icon: "\u{1F501}" },
   router: { color: "#ea580c", icon: "\u{1F500}" },
+  control: { color: "#c026d3", icon: "\u{1F504}" },
   memory: { color: "#a16207", icon: "\u{1F4BE}" },
   sink: { color: "#475569", icon: "\u{1FAA3}" }
 };

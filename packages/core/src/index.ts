@@ -101,6 +101,7 @@ export type PluginCategory =
   | "output_parser"
   | "transformer"
   | "router"
+  | "control"
   | "memory"
   | "sink";
 

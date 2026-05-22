@@ -149,18 +149,13 @@ test("groupPalette groups by paletteGroup||category in fixed order, name-sorted"
     plugin({ id: "zeta_llm", name: "Zeta LLM", category: "llm" }),
     plugin({ id: "alpha_llm", name: "Alpha LLM", category: "llm" }),
     plugin({ id: "src", name: "Source One", category: "datasource" }),
-    plugin({
-      id: "crawler",
-      name: "Crawler",
-      category: "datasource",
-      ui: { paletteGroup: "Crawling" }
-    }),
+    plugin({ id: "loop", name: "Loop", category: "control" }),
     plugin({ id: "mystery", name: "Mystery", category: "totally_unknown" })
   ];
   const groups = groupPalette(plugins);
   const names = groups.map((g) => g.group);
-  // Sources before Models before Crawling before Other (PALETTE_GROUP_ORDER).
-  assert.deepEqual(names, ["Sources", "Models", "Crawling", "Other"]);
+  // Sources before Models before Control before Other (PALETTE_GROUP_ORDER).
+  assert.deepEqual(names, ["Sources", "Models", "Control", "Other"]);
 
   const models = groups.find((g) => g.group === "Models")!;
   // Items sorted by name (case-insensitive): Alpha before Zeta.

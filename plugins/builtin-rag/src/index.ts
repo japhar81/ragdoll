@@ -84,7 +84,7 @@ export const manualTextInputPlugin: InProcessPlugin = {
       { name: "question", description: "Question payload, when the runtime input set one." }
     ],
     capabilities: ["query", "ingestion"],
-    ui: { icon: "keyboard", paletteGroup: "Sources" }
+    ui: { icon: "keyboard" }
   },
   async execute({ inputs }) {
     // Emit on named ports AND preserve flat spread so legacy unported edges
@@ -126,7 +126,6 @@ export const basicTextChunkerPlugin: InProcessPlugin = {
     capabilities: ["ingestion"],
     ui: {
       icon: "scissors",
-      paletteGroup: "Ingestion",
       formHints: {
         chunkSize: { widget: "number", min: 1, step: 50 },
         overlap: { widget: "number", min: 0, step: 10 }
@@ -209,7 +208,6 @@ export const basicPromptTemplatePlugin: InProcessPlugin = {
     capabilities: ["query"],
     ui: {
       icon: "file-text",
-      paletteGroup: "Prompting",
       formHints: { template: { widget: "textarea", rows: 6 } }
     }
   },
@@ -290,7 +288,6 @@ export const providerChatPlugin: InProcessPlugin = {
     ui: {
       icon: "message-square",
       color: "#7c3aed",
-      paletteGroup: "Models",
       formHints: {
         provider: { widget: "select" },
         temperature: { widget: "range", min: 0, max: 2, step: 0.1 },
@@ -343,7 +340,7 @@ export const jsonOutputParserPlugin: InProcessPlugin = {
       { name: "raw", description: "Original text string." }
     ],
     capabilities: ["query"],
-    ui: { icon: "braces", paletteGroup: "Parsing" }
+    ui: { icon: "braces" }
   },
   async execute({ inputs }) {
     const text = String((inputs.llm as any)?.text ?? inputs.text ?? "");
@@ -385,7 +382,6 @@ export const keywordGuardrailPlugin: InProcessPlugin = {
     capabilities: ["query"],
     ui: {
       icon: "shield",
-      paletteGroup: "Guardrails",
       formHints: { blockedKeywords: { widget: "tags" } }
     }
   },
@@ -418,7 +414,7 @@ export const evaluatorStubPlugin: InProcessPlugin = {
       { name: "notes", description: "Free-form notes string." }
     ],
     capabilities: ["evaluation"],
-    ui: { icon: "check-circle", paletteGroup: "Evaluation" }
+    ui: { icon: "check-circle" }
   },
   async execute() {
     return { outputs: { score: 1, passed: true, notes: "stub evaluator" } };
@@ -478,7 +474,6 @@ export const providerEmbeddingsPlugin: InProcessPlugin = {
     ui: {
       icon: "vector",
       color: "#0ea5e9",
-      paletteGroup: "Embeddings",
       formHints: {
         provider: { widget: "select" },
         apiKey: { widget: "secret" }
@@ -577,7 +572,6 @@ export const qdrantRetrieverPlugin: InProcessPlugin = {
     ui: {
       icon: "search",
       color: "#16a34a",
-      paletteGroup: "Retrieval",
       formHints: {
         provider: { widget: "select" },
         topK: { widget: "number", min: 1, step: 1 },
@@ -676,7 +670,6 @@ export const vectorUpsertPlugin: InProcessPlugin = {
     ui: {
       icon: "database",
       color: "#16a34a",
-      paletteGroup: "Storage",
       formHints: {
         distance: { widget: "select" },
         dimensions: { widget: "number", min: 1, step: 1 }
@@ -754,7 +747,6 @@ export const textDocumentLoaderPlugin: InProcessPlugin = {
     capabilities: ["ingestion"],
     ui: {
       icon: "file-input",
-      paletteGroup: "Ingestion",
       formHints: {
         trim: { widget: "checkbox" },
         splitOnBlankLines: { widget: "checkbox" }
@@ -841,7 +833,6 @@ export const textParserPlugin: InProcessPlugin = {
     capabilities: ["ingestion", "query"],
     ui: {
       icon: "file-text",
-      paletteGroup: "Ingestion",
       formHints: {
         stripHtml: { widget: "checkbox" },
         collapseWhitespace: { widget: "checkbox" }
@@ -949,7 +940,6 @@ export const qdrantVectorStorePlugin: InProcessPlugin = {
     ui: {
       icon: "database",
       color: "#16a34a",
-      paletteGroup: "Storage",
       formHints: {
         distance: { widget: "select" },
         dimensions: { widget: "number", min: 1, step: 1 },
@@ -1023,7 +1013,6 @@ export const scoreRerankerPlugin: InProcessPlugin = {
     capabilities: ["query"],
     ui: {
       icon: "arrow-up-down",
-      paletteGroup: "Retrieval",
       formHints: { topK: { widget: "number", min: 1, step: 1 } }
     }
   },
@@ -1095,7 +1084,6 @@ export const staticValueToolPlugin: InProcessPlugin = {
     capabilities: ["query"],
     ui: {
       icon: "box",
-      paletteGroup: "Tools",
       formHints: { value: { widget: "json" } }
     }
   },
@@ -1143,7 +1131,6 @@ export const fieldRouterPlugin: InProcessPlugin = {
     capabilities: ["query"],
     ui: {
       icon: "git-branch",
-      paletteGroup: "Routing",
       formHints: {
         field: { widget: "text" },
         routes: { widget: "json" },
@@ -1191,7 +1178,6 @@ export const bufferMemoryPlugin: InProcessPlugin = {
     capabilities: ["query"],
     ui: {
       icon: "history",
-      paletteGroup: "Memory",
       formHints: { maxMessages: { widget: "number", min: 1, step: 1 } }
     }
   },
@@ -1375,7 +1361,6 @@ export const openSearchInputPlugin: InProcessPlugin = {
     ui: {
       icon: "database",
       color: "#005EB8",
-      paletteGroup: "Sources",
       formHints: {
         size: { widget: "number", min: 1, step: 10 },
         query: { widget: "textarea", rows: 2 }
@@ -1462,7 +1447,6 @@ export const openSearchOutputPlugin: InProcessPlugin = {
     ui: {
       icon: "database",
       color: "#005EB8",
-      paletteGroup: "Storage",
       formHints: {
         distance: { widget: "select" },
         dimensions: { widget: "number", min: 1, step: 1 }
@@ -1575,7 +1559,6 @@ export const openSearchBm25RetrieverPlugin: InProcessPlugin = {
     ui: {
       icon: "search",
       color: "#005EB8",
-      paletteGroup: "Retrieval",
       formHints: {
         topK: { widget: "number", min: 1, step: 1 },
         fields: { widget: "json" },
@@ -1674,7 +1657,6 @@ export const openSearchVectorRetrieverPlugin: InProcessPlugin = {
     ui: {
       icon: "search",
       color: "#005EB8",
-      paletteGroup: "Retrieval",
       formHints: {
         provider: { widget: "select" },
         topK: { widget: "number", min: 1, step: 1 },
@@ -1808,7 +1790,6 @@ export const openSearchHybridRetrieverPlugin: InProcessPlugin = {
     ui: {
       icon: "search",
       color: "#005EB8",
-      paletteGroup: "Retrieval",
       formHints: {
         mode: { widget: "select" },
         provider: { widget: "select" },
@@ -1921,7 +1902,6 @@ export const webhookTriggerPlugin: InProcessPlugin = {
     capabilities: ["query", "ingestion"],
     ui: {
       icon: "webhook",
-      paletteGroup: "Sources",
       formHints: { description: { widget: "textarea" } }
     }
   },
@@ -1998,7 +1978,6 @@ export const webhookOutputPlugin: InProcessPlugin = {
     capabilities: ["query", "ingestion"],
     ui: {
       icon: "send",
-      paletteGroup: "Sinks",
       formHints: {
         url: { widget: "text" },
         method: { widget: "select" },
@@ -2128,7 +2107,7 @@ export const ifThenPlugin: InProcessPlugin = {
     id: "if_then",
     name: "If / Then",
     version: "1.0.0",
-    category: "router",
+    category: "control",
     description:
       "Routes the input payload to either the `then` or `else` output port based on a predicate. Downstream nodes wired to the unselected port are skipped by the runtime.",
     configSchema: {
@@ -2158,7 +2137,6 @@ export const ifThenPlugin: InProcessPlugin = {
     capabilities: ["query", "ingestion"],
     ui: {
       icon: "git-branch",
-      paletteGroup: "Control flow",
       formHints: {
         mode: { widget: "select" },
         equals: { widget: "json" }
@@ -2180,7 +2158,7 @@ export const forLoopPlugin: InProcessPlugin = {
     id: "for_loop",
     name: "For Loop",
     version: "1.0.0",
-    category: "router",
+    category: "control",
     description:
       "Runs the configured body subgraph N times. Each iteration receives `{ index, total }` plus the upstream inputs, and the body's terminal output is collected into the `results` port.",
     configSchema: {
@@ -2207,7 +2185,7 @@ export const forLoopPlugin: InProcessPlugin = {
       { name: "final", description: "Final iteration's output (same as results[results.length - 1])." }
     ],
     capabilities: ["query", "ingestion"],
-    ui: { icon: "repeat", paletteGroup: "Control flow", formHints: { body: { widget: "json" } } }
+    ui: { icon: "repeat", formHints: { body: { widget: "json" } } }
   },
   async execute({ inputs, config, runSubgraph }) {
     if (!runSubgraph) throw new Error("for_loop: runtime did not provide runSubgraph (external plugin transport not supported)");
@@ -2228,7 +2206,7 @@ export const forEachPlugin: InProcessPlugin = {
     id: "foreach",
     name: "ForEach",
     version: "1.0.0",
-    category: "router",
+    category: "control",
     description:
       "Runs the configured body subgraph once per item in `inputs.items`. Each iteration receives `{ item, index, total }` plus upstream inputs; outputs are gathered into `results`.",
     configSchema: {
@@ -2249,7 +2227,7 @@ export const forEachPlugin: InProcessPlugin = {
       { name: "results", description: "Array of body outputs in input order." }
     ],
     capabilities: ["query", "ingestion"],
-    ui: { icon: "list", paletteGroup: "Control flow", formHints: { body: { widget: "json" } } }
+    ui: { icon: "list", formHints: { body: { widget: "json" } } }
   },
   async execute({ inputs, config, runSubgraph }) {
     if (!runSubgraph) throw new Error("foreach: runtime did not provide runSubgraph");
@@ -2270,7 +2248,7 @@ export const whileLoopPlugin: InProcessPlugin = {
     id: "while_loop",
     name: "While Loop",
     version: "1.0.0",
-    category: "router",
+    category: "control",
     description:
       "Runs the configured body subgraph until the predicate is false. The body's output is fed back as the next iteration's state under `state`. Bounded by `maxIterations` to prevent runaway loops.",
     configSchema: {
@@ -2303,7 +2281,7 @@ export const whileLoopPlugin: InProcessPlugin = {
       { name: "iterations", description: "Number of body iterations executed." }
     ],
     capabilities: ["query", "ingestion"],
-    ui: { icon: "rotate-cw", paletteGroup: "Control flow", formHints: { body: { widget: "json" } } }
+    ui: { icon: "rotate-cw", formHints: { body: { widget: "json" } } }
   },
   async execute({ inputs, config, runSubgraph }) {
     if (!runSubgraph) throw new Error("while_loop: runtime did not provide runSubgraph");
