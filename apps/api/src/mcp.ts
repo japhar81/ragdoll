@@ -1193,6 +1193,21 @@ function toolCatalog(app: App): ToolDef[] {
           headers: h
         })
     ),
+    tool(
+      "get_plugin_docs",
+      {
+        description:
+          "Fetch the narrative documentation for a plugin by id — what it does, its inputs/outputs, gotchas, typical pipeline position, and worked examples. Complements get_plugin (the structured manifest: config schema + named port contract). Read both before wiring a plugin into a pipeline spec.",
+        readOnly: true
+      },
+      obj({ id: str("plugin id, e.g. 'transform', 'qdrant_retriever'") }, ["id"]),
+      (a, h) =>
+        callApi(app, {
+          method: "GET",
+          path: `/api/plugins/${encodeURIComponent(String(a.id))}/docs`,
+          headers: h
+        })
+    ),
 
     // ---- Users + RBAC -----------------------------------------------------
     tool(

@@ -74,7 +74,10 @@ test("MCP listTools returns the full catalog", async () => {
     "create_pipeline_trigger",
     "list_users",
     "list_roles",
-    "get_audit_log"
+    "get_audit_log",
+    "list_plugins",
+    "get_plugin",
+    "get_plugin_docs"
   ]) {
     assert.ok(names.includes(expected), `missing tool: ${expected}`);
   }
@@ -250,5 +253,43 @@ test("MCP can create a tenant + environment + folder via tools", async () => {
     arguments: { name: "from-mcp" }
   });
   assert.equal(folder.isError ?? false, false);
+  await client.close();
+});
+
+// ---- Plugin discovery: list / manifest / narrative docs -----------------
+
+test("MCP get_plugin_docs returns the narrative markdown for a plugin", async () => {
+  const h = buildHarness({ withAuth: true });
+  const bearer = await seedAdmin(h);
+  const client = await bootClient({ app: h.app, bearer });
+  const res = await client.callTool({
+    name: "get_plugin_docs",
+    arguments: { id: "transform" }
+  });
+  assert.equal(res.isError ?? false, false);
+  const body = JSON.parse((res.content as Array<{ text: string }>)[0].text);
+  assert.equal(body.pluginId, "transform");
+  // The doc is the real docs/plugins/transform.md narrative.
+  assert.match(body.doc, /# Transform/);
+  assert.match(body.doc, /JSONata|JMESPath/);
+  await client.close();
+});
+
+test("MCP get_plugin_docs rejects an unknown or path-traversing id", async () => {
+  const h = buildHarness({ withAuth: true });
+  const bearer = await seedAdmin(h);
+  const client = await bootClient({ app: h.app, bearer });
+  // A plugin with no narrative doc -> 404 -> isError (not a crash).
+  const missing = await client.callTool({
+    name: "get_plugin_docs",
+    arguments: { id: "no_such_plugin" }
+  });
+  assert.equal(missing.isError, true);
+  // A `..` traversal attempt is rejected by the id allowlist, never served.
+  const unsafe = await client.callTool({
+    name: "get_plugin_docs",
+    arguments: { id: "../../README" }
+  });
+  assert.equal(unsafe.isError, true);
   await client.close();
 });

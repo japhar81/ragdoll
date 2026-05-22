@@ -7,6 +7,7 @@
  * zero install.
  */
 import { randomUUID } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import {
   redactValue,
   type ConfigDefinition,
@@ -2219,6 +2220,22 @@ export function createApp(deps: AppDeps): App {
     return ok({ plugin: projectPlugin(found) });
   });
 
+  // Narrative plugin documentation (docs/plugins/<id>.md) — what the node
+  // does, inputs/outputs, gotchas, typical pipeline position, examples. The
+  // manifest carries the structured contract; this carries the prose. Surfaced
+  // for the builder's Docs tab and, via the MCP `get_plugin_docs` tool, for an
+  // LLM authoring pipelines.
+  route("GET", "/api/plugins/:id/docs", async (ctx) => {
+    enforce(ctx.principal, "execution:view_logs");
+    const id = ctx.params.id;
+    // Plugin ids are lowercase alphanumeric + underscore. Reject anything else
+    // so the id can never escape `docs/plugins/` via `..`, slashes, etc.
+    if (!/^[a-z0-9_]+$/.test(id)) return error(404, "not_found");
+    const doc = await readPluginDoc(id);
+    if (doc === undefined) return error(404, "not_found");
+    return ok({ pluginId: id, doc });
+  });
+
   // ---- providers ----------------------------------------------------------
   route("GET", "/api/providers", async (ctx) => {
     enforce(ctx.principal, "execution:view_logs");
@@ -3348,6 +3365,21 @@ export function createApp(deps: AppDeps): App {
 // ---------------------------------------------------------------------------
 // Module-level helpers (no closure over deps)
 // ---------------------------------------------------------------------------
+
+/**
+ * Reads the narrative markdown doc for a plugin id from `docs/plugins/<id>.md`,
+ * resolved relative to this module (works regardless of cwd, and in the
+ * container image where `COPY . .` places the repo under /app). Returns
+ * `undefined` when the file is absent — a plugin without a narrative doc is
+ * not an error. The `id` MUST be pre-validated by the caller.
+ */
+async function readPluginDoc(id: string): Promise<string | undefined> {
+  try {
+    return await readFile(new URL(`../../../docs/plugins/${id}.md`, import.meta.url), "utf8");
+  } catch {
+    return undefined;
+  }
+}
 
 /**
  * Projects a registered plugin's manifest onto the public shape consumed by
