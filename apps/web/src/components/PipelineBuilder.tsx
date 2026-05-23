@@ -597,24 +597,24 @@ export function PipelineBuilder(props: {
     }
   }
 
-  // Tenant-association rollup, shared via the same cache key as the
-  // Pipelines screen so a single network sweep serves both. Used below to
-  // auto-select the tenant the editing pipeline is bound to, instead of
-  // leaving the dropdown on the unrelated `tenant-local` demo default.
+  // Tenant-association rollup, shared via the same cache key (and SHAPE)
+  // as the Pipelines screen so a single network sweep serves both. The
+  // shape mirrors `TenantPipelinesResult` from PipelinesScreen exactly —
+  // diverging fields here would corrupt whichever caller mounts second.
   const tenantPipelinesAll = useQuery({
     queryKey: ["tenant-pipelines-all", tenants.map((t) => t.id)],
     enabled: tenants.length > 0,
     queryFn: async () => {
-      const out: Array<{ tenantId: string; pipelineIds: string[] }> = [];
+      const out: Array<{
+        tenantId: string;
+        pipelines: Array<{ pipelineId: string }>;
+      }> = [];
       for (const t of tenants) {
         try {
           const res = await api.listTenantPipelines(t.id);
-          out.push({
-            tenantId: t.id,
-            pipelineIds: res.pipelines.map((p) => p.pipelineId)
-          });
+          out.push({ tenantId: t.id, pipelines: res.pipelines });
         } catch {
-          out.push({ tenantId: t.id, pipelineIds: [] });
+          out.push({ tenantId: t.id, pipelines: [] });
         }
       }
       return out;
@@ -630,7 +630,7 @@ export function PipelineBuilder(props: {
     if (!editing) return;
     if (!tenantPipelinesAll.data) return;
     const matches = tenantPipelinesAll.data.filter((t) =>
-      t.pipelineIds.includes(editing.id)
+      (t.pipelines ?? []).some((p) => p.pipelineId === editing.id)
     );
     if (matches.length === 0) return;
     if (matches.some((t) => t.tenantId === tenantId)) return;
