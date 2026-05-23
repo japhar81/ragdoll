@@ -597,6 +597,46 @@ export function PipelineBuilder(props: {
     }
   }
 
+  // Tenant-association rollup, shared via the same cache key as the
+  // Pipelines screen so a single network sweep serves both. Used below to
+  // auto-select the tenant the editing pipeline is bound to, instead of
+  // leaving the dropdown on the unrelated `tenant-local` demo default.
+  const tenantPipelinesAll = useQuery({
+    queryKey: ["tenant-pipelines-all", tenants.map((t) => t.id)],
+    enabled: tenants.length > 0,
+    queryFn: async () => {
+      const out: Array<{ tenantId: string; pipelineIds: string[] }> = [];
+      for (const t of tenants) {
+        try {
+          const res = await api.listTenantPipelines(t.id);
+          out.push({
+            tenantId: t.id,
+            pipelineIds: res.pipelines.map((p) => p.pipelineId)
+          });
+        } catch {
+          out.push({ tenantId: t.id, pipelineIds: [] });
+        }
+      }
+      return out;
+    }
+  });
+
+  // When the Edit hand-off targets a pipeline that is associated with a
+  // tenant, snap the tenant dropdown to one that actually covers it — the
+  // default `tenant-local` is almost always wrong for a freshly-created
+  // pipeline tied to a different tenant.
+  useEffect(() => {
+    const editing = props.editing;
+    if (!editing) return;
+    if (!tenantPipelinesAll.data) return;
+    const matches = tenantPipelinesAll.data.filter((t) =>
+      t.pipelineIds.includes(editing.id)
+    );
+    if (matches.length === 0) return;
+    if (matches.some((t) => t.tenantId === tenantId)) return;
+    setTenantId(matches[0].tenantId);
+  }, [props.editing, tenantPipelinesAll.data, tenantId, setTenantId]);
+
   // When the Pipelines tree hands us a pipeline to edit, load its latest
   // version's spec into the graph (GET versions -> pick latestVersionId).
   useEffect(() => {
@@ -612,6 +652,9 @@ export function PipelineBuilder(props: {
       try {
         const { pipeline } = await api.getPipeline(target.id);
         setPipelineSlug(pipeline.slug);
+        // The URL hand-off only carries the id (`name: ""`), so the
+        // toolbar's Name field is blank until we read the real row.
+        setPipelineName(pipeline.name);
         setPipelineDescription(pipeline.description ?? "");
       } catch {
         setPipelineSlug(target.id);
@@ -627,6 +670,12 @@ export function PipelineBuilder(props: {
           res.versions.find((v) => v.isLatest) ??
           res.versions[res.versions.length - 1];
         if (!latest) {
+          // A pipeline that has never been saved should land on a TRULY
+          // blank canvas — without this the editor still shows the
+          // hard-coded STARTER_SPEC seeded into the initial useNodesState
+          // (the warning below says "blank canvas", so honour it).
+          setNodes([]);
+          setEdges([]);
           clog.result(`Editing ${target.name}`, 200, res);
           clog.log(
             "warn",
