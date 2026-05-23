@@ -5,7 +5,7 @@ visual builder, control plane, and runtime so pipeline definitions stay
 versioned, portable, diffable, and executable outside the UI.
 
 The platform is working and tested: a large offline unit suite plus
-functional, e2e, plugin, CLI, and web-logic tests (**422 tests passing**)
+functional, e2e, plugin, CLI, and web-logic tests (**540 tests passing**)
 run with **zero install**.
 
 ## What's in the box
@@ -62,12 +62,26 @@ run with **zero install**.
   enforced collection-per-tenant-pipeline isolation, plus an OpenSearch
   client + knn_vector store for the OpenSearch plugin suite.
 
+**Live updates and collaboration** (ADR 0015)
+
+- A `ChangeBus` (`packages/events`) publishes every audited mutation
+  and execution lifecycle transition. In-process for tests and
+  single-replica local; Redis pub/sub when `REDIS_URL` is set so events
+  fan out across API replicas and from the worker into the API.
+- `/api/events` WebSocket endpoint with auth-after-open (Bearer or
+  ApiKey) and tenant scope filtering, so MCP / CLI / cross-tab changes
+  reflect in the UI within a frame.
+- Builder rooms broadcast presence + spec edits to peers editing the
+  same pipeline — a top-right roster shows who else is in there.
+
 **Web UI**
 
 - React Flow visual Builder with resolved-config preview, validation,
   and per-node 3-tab inspector (Config / Resolved / Docs).
 - Folder tree, scheduler, executions trace viewer, RBAC admin
   (users / roles / IdPs / auth settings).
+- Self-service profile screen with display-name edit, password change,
+  and API key management (mint / list / revoke).
 - Embedded help: hover tooltips, `?` field popovers, `⌘K` command
   palette (cmdk), keyboard shortcuts overlay, and a slide-in help
   drawer that renders bundled markdown docs offline.

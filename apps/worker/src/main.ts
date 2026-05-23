@@ -17,6 +17,11 @@
 import { InMemoryQueue } from "./index.ts";
 import type { QueuePort } from "./index.ts";
 import { createWorker, type WorkerDeps, type WorkerRepositories } from "./handlers.ts";
+import {
+  InMemoryChangeBus,
+  createRedisChangeBus,
+  type ChangeBus
+} from "../../../packages/events/src/index.ts";
 import { createScheduler } from "./scheduler.ts";
 import { loadRegistries } from "../../../packages/plugin-loader/src/index.ts";
 import { createVectorStore } from "../../../packages/vector/src/index.ts";
@@ -139,6 +144,17 @@ async function buildDeps(): Promise<BuiltDeps> {
     logger.info("worker using in-memory execution store + repositories");
   }
 
+  // Live-events bus: Redis when configured so worker writes reach the API's
+  // /api/events fan-out across replicas; in-memory otherwise (tests / single
+  // local process — broadcasts simply have no remote subscriber).
+  const redisUrl = process.env.REDIS_URL;
+  const changeBus: ChangeBus = redisUrl
+    ? await createRedisChangeBus({ redisUrl, logger })
+    : new InMemoryChangeBus({ logger });
+  logger.info("worker change_bus_ready", {
+    transport: redisUrl ? "redis" : "in-process"
+  });
+
   return {
     deps: {
       store,
@@ -152,7 +168,8 @@ async function buildDeps(): Promise<BuiltDeps> {
       logger,
       maxRetries: Number(process.env.WORKER_MAX_RETRIES ?? 1),
       mirrorUsageToRepository,
-      ingestStateRepository
+      ingestStateRepository,
+      changeBus
     },
     schedules
   };

@@ -112,3 +112,27 @@ tenant-isolation and version-binding controls apply.
 Before/after diffs are passed through `redactValue` before persistence, and
 secret values are written as `REDACTED`. The secrets API never returns a
 plaintext value at any endpoint (list/create/rotate all return `REDACTED`).
+
+## Live events (`/api/events`)
+
+Every audited mutation is ALSO published to a `ChangeBus` (see ADR 0015)
+so the UI can update in real time without polling. The worker publishes
+`execution.*` lifecycle events on the same bus.
+
+A WebSocket endpoint at `/api/events` fans events out to authenticated
+clients. Auth is the same as the REST surface — the first frame after open
+is `{type:"auth", token|apiKey}` and the connection runs through
+`AuthResolver` like every other route. A 10 s grace window closes idle
+unauthenticated sockets.
+
+Each connection's *scope reach* is computed once at auth time from the
+principal's grants: a global-scope grant lets the connection see every
+event; a tenant grant restricts it to that tenant. Platform-level events
+(`tenantId: null`) reach only global-scope principals. Builder rooms (one
+channel per pipeline) are gated by `pipeline:update` at the pipeline scope
+so a viewer cannot see another tenant's draft.
+
+Transport: in-process when `REDIS_URL` is unset (tests, single-replica
+local); Redis pub/sub on channel `ragdoll:changes` otherwise — required
+for multi-replica fan-out and for the worker→API channel. Bus failures
+log but never block a mutation; the audit log remains authoritative.

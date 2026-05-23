@@ -43,6 +43,7 @@ import type { VectorStore } from "../../../packages/vector/src/index.ts";
 import type { Tracer, Meter } from "../../../packages/observability/src/index.ts";
 import { NoopTracer, NoopMeter } from "../../../packages/observability/src/index.ts";
 import type { StructuredLogger } from "../../../packages/observability/src/index.ts";
+import type { ChangeBus } from "../../../packages/events/src/index.ts";
 import type {
   PipelineVersionRepository,
   ConfigDefinitionRepository,
@@ -137,6 +138,14 @@ export interface WorkerDeps {
    * in every mode.
    */
   mirrorUsageToRepository?: boolean;
+  /**
+   * Optional live-event bus. When set, the worker publishes execution
+   * lifecycle ChangeEvents (`execution.started`, `execution.node.started`,
+   * `execution.node.completed`, `execution.completed`/`.failed`) so the API
+   * fans them out over `/api/events` to subscribed clients. Omitted in tests
+   * — the wrapper is bypassed and no broadcasts occur.
+   */
+  changeBus?: ChangeBus;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -346,6 +355,119 @@ function defaultIngestionSpec(): PipelineSpec {
  * (in-memory wiring) so pipeline-run usage surfaces via `/api/usage` without
  * risking a double write in Postgres mode (see `WorkerDeps`).
  */
+/**
+ * ExecutionStore decorator that mirrors every lifecycle write onto a
+ * {@link ChangeBus} so the API can rebroadcast to subscribed WebSocket
+ * clients. The publish is best-effort: a bus failure is logged but never
+ * rolled back, so a transient Redis outage never breaks the run.
+ */
+class PublishingExecutionStore implements ExecutionStore {
+  private inner: ExecutionStore;
+  private bus: ChangeBus;
+  private logger?: StructuredLogger;
+  /**
+   * Node records carry no tenantId; the parent execution does. Cache the
+   * mapping from `start()` so node events can be scoped correctly, and drop
+   * it on `complete()` to keep the map bounded.
+   */
+  private tenantByExecution = new Map<string, string>();
+
+  constructor(
+    inner: ExecutionStore,
+    bus: ChangeBus,
+    logger?: StructuredLogger
+  ) {
+    this.inner = inner;
+    this.bus = bus;
+    this.logger = logger;
+  }
+
+  private async fire(
+    action: string,
+    targetId: string,
+    tenantId: string | null | undefined,
+    payload?: Record<string, unknown>
+  ): Promise<void> {
+    try {
+      await this.bus.publish({
+        id: randomUUID(),
+        action,
+        targetType: "execution",
+        targetId,
+        tenantId: tenantId ?? null,
+        actorId: null,
+        at: new Date().toISOString(),
+        payload
+      });
+    } catch (e) {
+      this.logger?.warn?.("change_bus_publish_failed", {
+        action,
+        error: e instanceof Error ? e.message : String(e)
+      });
+    }
+  }
+
+  async start(record: ExecutionRecord): Promise<void> {
+    await this.inner.start(record);
+    this.tenantByExecution.set(record.executionId, record.tenantId);
+    await this.fire("execution.started", record.executionId, record.tenantId, {
+      pipelineId: record.pipelineId,
+      pipelineVersionId: record.pipelineVersionId,
+      status: record.status,
+      startedAt: record.startedAt
+    });
+  }
+
+  async complete(record: ExecutionRecord): Promise<void> {
+    await this.inner.complete(record);
+    const action =
+      record.status === "succeeded"
+        ? "execution.completed"
+        : record.status === "failed"
+          ? "execution.failed"
+          : "execution.updated";
+    await this.fire(action, record.executionId, record.tenantId, {
+      pipelineId: record.pipelineId,
+      pipelineVersionId: record.pipelineVersionId,
+      status: record.status,
+      completedAt: record.completedAt
+    });
+    this.tenantByExecution.delete(record.executionId);
+  }
+
+  async startNode(record: ExecutionNodeRecord): Promise<void> {
+    await this.inner.startNode(record);
+    await this.fire(
+      "execution.node.started",
+      record.executionId,
+      this.tenantByExecution.get(record.executionId) ?? null,
+      {
+        nodeId: record.nodeId,
+        status: record.status,
+        startedAt: record.startedAt
+      }
+    );
+  }
+
+  async completeNode(record: ExecutionNodeRecord): Promise<void> {
+    await this.inner.completeNode(record);
+    await this.fire(
+      "execution.node.completed",
+      record.executionId,
+      this.tenantByExecution.get(record.executionId) ?? null,
+      {
+        nodeId: record.nodeId,
+        status: record.status,
+        completedAt: record.completedAt
+      }
+    );
+  }
+
+  async recordUsage(record: UsageRecord): Promise<void> {
+    return this.inner.recordUsage(record);
+  }
+}
+
 class UsageMirroringExecutionStore implements ExecutionStore {
   private inner: ExecutionStore;
   private usageRepo: UsageRecordRepository;
@@ -467,9 +589,15 @@ export function createWorker(deps: WorkerDeps): Worker {
     description: "End-to-end pipeline execution duration."
   });
   const now = deps.now ?? (() => new Date());
-  const runtimeStore: ExecutionStore = deps.mirrorUsageToRepository
+  // Compose the runtime store decorators outermost-first:
+  // events → usage mirror → real store. Publishing runs only after the inner
+  // write succeeds, so a failed write never produces a misleading broadcast.
+  const usageMirrored: ExecutionStore = deps.mirrorUsageToRepository
     ? new UsageMirroringExecutionStore(deps.store, deps.repositories.usageRecords)
     : deps.store;
+  const runtimeStore: ExecutionStore = deps.changeBus
+    ? new PublishingExecutionStore(usageMirrored, deps.changeBus, deps.logger)
+    : usageMirrored;
 
   function executor(): DagExecutor {
     return new DagExecutor({

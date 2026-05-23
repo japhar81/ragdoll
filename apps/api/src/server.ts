@@ -10,6 +10,12 @@ import { randomUUID } from "node:crypto";
 import Fastify from "fastify";
 import { createApp, type AppDeps } from "./app.ts";
 import { handleMcpRequest } from "./mcp.ts";
+import { mountWebsocket } from "./websocket.ts";
+import {
+  InMemoryChangeBus,
+  createRedisChangeBus,
+  type ChangeBus
+} from "../../../packages/events/src/index.ts";
 import {
   AuthResolver,
   DevAuthProvider,
@@ -144,11 +150,24 @@ async function bootstrapAccessControl(
   logger.info("bootstrap_admin_created", { email });
 }
 
-async function buildDeps(): Promise<{ deps: AppDeps; pool?: PoolLike }> {
+async function buildDeps(): Promise<{
+  deps: AppDeps;
+  pool?: PoolLike;
+  changeBus: ChangeBus;
+}> {
   const logger = getLogger();
   const env = process.env.RAGDOLL_ENV ?? "development";
   const databaseUrl = process.env.DATABASE_URL;
   const redisUrl = process.env.REDIS_URL;
+  // The change-event bus underpins /api/events. Redis when configured so it
+  // fans out across replicas AND lets the worker publish execution events;
+  // in-process otherwise (single-replica local / tests).
+  const changeBus: ChangeBus = redisUrl
+    ? await createRedisChangeBus({ redisUrl, logger })
+    : new InMemoryChangeBus({ logger });
+  logger.info("change_bus_ready", {
+    transport: redisUrl ? "redis" : "in-process"
+  });
   const { plugins: pluginRegistry, providers: providerRegistry } = loadRegistries();
   // When REDIS_URL is set, enqueue onto the SAME BullMQ queue the separate
   // worker container consumes (both default to "ragdoll-jobs"); otherwise an
@@ -244,6 +263,7 @@ async function buildDeps(): Promise<{ deps: AppDeps; pool?: PoolLike }> {
       executionStore,
       auth,
       apiKeys,
+      changeBus,
       sessions,
       queue,
       secretProvider: new DatabaseEncryptedSecretProvider(
@@ -295,6 +315,7 @@ async function buildDeps(): Promise<{ deps: AppDeps; pool?: PoolLike }> {
       executionStore: new InMemoryExecutionStore(),
       auth,
       apiKeys,
+      changeBus,
       sessions,
       queue,
       secretProvider: new DatabaseEncryptedSecretProvider(
@@ -328,7 +349,7 @@ async function buildDeps(): Promise<{ deps: AppDeps; pool?: PoolLike }> {
 
   await bootstrapAccessControl(rbacForAuthz, usersForBootstrap, logger);
 
-  return { deps, pool };
+  return { deps, pool, changeBus };
 }
 
 /**
@@ -368,7 +389,7 @@ async function main(): Promise<void> {
   const requestDuration = meter.histogram("ragdoll_api_request_duration_ms", {
     description: "API request duration in milliseconds."
   });
-  const { deps, pool } = await buildDeps();
+  const { deps, pool, changeBus } = await buildDeps();
   const app = createApp(deps);
 
   const fastify = Fastify({ logger: false });
@@ -379,6 +400,17 @@ async function main(): Promise<void> {
     { parseAs: "string" },
     (_request: any, body: any, done: any) => done(null, body)
   );
+
+  // Live-events WebSocket. Registered BEFORE the framework-agnostic
+  // catch-all so the `/api/events` upgrade isn't swallowed by `fastify.all`.
+  // Awaited so the plugin is loaded before the route is added (otherwise
+  // upgrades fall through to the HTTP handler with a 500).
+  await mountWebsocket(fastify, {
+    bus: changeBus,
+    auth: deps.auth,
+    authorizer: deps.authorizer,
+    logger
+  });
 
   // MCP transport needs raw req/res (Streamable HTTP, SSE-style), so we
   // register it BEFORE the framework-agnostic catch-all and bypass app.handle.

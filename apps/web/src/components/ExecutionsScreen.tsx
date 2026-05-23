@@ -7,6 +7,7 @@ import {
   sampleForDisplay,
   summarizeExecution
 } from "../lib/execTrace.ts";
+import { useEvents } from "../events/EventsProvider.tsx";
 import type { ExecutionNodeRecord } from "../lib/types.ts";
 
 /**
@@ -15,10 +16,12 @@ import type { ExecutionNodeRecord } from "../lib/types.ts";
  * (sampled) or a prominent Error block, and a node-level timeline with
  * latency / status / expandable sampled Input+Output / error.
  *
- * While the selected execution is non-terminal the trace query auto-polls
- * (~1.5s) so the panel updates live as the worker writes progress; polling
- * stops once it reaches a terminal status. (Polling, not WS: the trace lives
- * in a shared store the API reads — see lib/execTrace.ts.)
+ * Live updates ride the `/api/events` WebSocket: the worker publishes
+ * `execution.*` events which the EventsProvider invalidates into this
+ * screen's queries, so node transitions and the terminal state appear
+ * within a frame. When the socket is offline (initial connect, reconnect,
+ * or a missing credential) the trace query falls back to a slow poll so
+ * progress still shows up. Polling stops once the execution is terminal.
  */
 const TRACE_POLL_MS = 1500;
 
@@ -81,6 +84,11 @@ function NodeRow(props: { node: ExecutionNodeRecord }) {
 
 export function ExecutionsScreen() {
   const [selected, setSelected] = useState<string | undefined>();
+  const events = useEvents();
+  // When the live socket is connected, lean on event-driven invalidation
+  // (the EventsProvider maps `execution.*` events onto these query keys).
+  // Fall back to polling only while disconnected.
+  const liveConnected = events.status === "connected";
 
   const executions = useQuery({
     queryKey: ["executions"],
@@ -92,8 +100,10 @@ export function ExecutionsScreen() {
     queryFn: () => api.getExecutionTrace(selected as string),
     enabled: Boolean(selected),
     // Live-update while the selected execution is still running; stop on
-    // terminal so a finished execution isn't re-fetched forever.
+    // terminal so a finished execution isn't re-fetched forever. Once the
+    // WS is connected, events drive the refresh and we skip the timer.
     refetchInterval: (query) => {
+      if (liveConnected) return false;
       const status = query.state.data?.execution?.status;
       return status && isTerminalStatus(status) ? false : TRACE_POLL_MS;
     }
@@ -130,7 +140,10 @@ export function ExecutionsScreen() {
               <span className={`status status-${ex.status}`}>{ex.status}</span>
             )}
             {summary && !summary.terminal && (
-              <span className="muted"> · live (polling…)</span>
+              <span className="muted">
+                {" "}
+                · live ({liveConnected ? "streaming" : "polling"}…)
+              </span>
             )}
           </h2>
           {trace.isLoading && <p className="muted">Loading trace…</p>}

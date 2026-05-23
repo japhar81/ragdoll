@@ -32,6 +32,7 @@ import { AuthSettingsScreen } from "./components/AuthSettingsScreen.tsx";
 import { ProfileScreen } from "./components/ProfileScreen.tsx";
 import { LoginScreen } from "./components/LoginScreen.tsx";
 import { AuthProvider, useAuth } from "./auth/AuthContext.tsx";
+import { EventsProvider, useEvents, statusLabel } from "./events/EventsProvider.tsx";
 import "./styles.css";
 
 const queryClient = new QueryClient({
@@ -231,9 +232,12 @@ function Shell() {
           >
             {auth.user?.displayName || auth.user?.email || "signed in"}
           </NavLink>
-          <button className="link-btn" onClick={() => auth.logout()}>
-            Sign out
-          </button>
+          <div className="sidebar-user-actions">
+            <LiveStatusBadge />
+            <button className="link-btn" onClick={() => auth.logout()}>
+              Sign out
+            </button>
+          </div>
         </div>
       </aside>
 
@@ -329,10 +333,27 @@ export default function App() {
       <QueryClientProvider client={queryClient}>
         <TooltipProvider>
           <AuthProvider>
-            <Gate />
+            <EventsProvider>
+              <Gate />
+            </EventsProvider>
           </AuthProvider>
         </TooltipProvider>
       </QueryClientProvider>
     </BrowserRouter>
+  );
+}
+
+/** Compact connection-status pill rendered in the sidebar. */
+function LiveStatusBadge() {
+  const events = useEvents();
+  return (
+    <span
+      className={`live-badge live-badge-${events.status}`}
+      title={`Live updates: ${statusLabel(events.status)}`}
+      aria-label={`Live updates ${statusLabel(events.status)}`}
+    >
+      <span className="live-dot" />
+      {statusLabel(events.status)}
+    </span>
   );
 }

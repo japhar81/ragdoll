@@ -1,4 +1,10 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useBuilderRoom } from "../events/EventsProvider.tsx";
+import { BuilderRoster } from "../events/BuilderRoster.tsx";
+import type {
+  BuilderEdit,
+  BuilderPresence
+} from "../../../../packages/events/src/index.ts";
 import ReactFlow, {
   Background,
   Controls,
@@ -1113,6 +1119,67 @@ export function PipelineBuilder(props: {
   // Slug is the create-time identity; immutable once the pipeline row exists.
   const realPipeline = hasRealPipeline({ pipelineId, openedViaTree });
 
+  // --- Collaborative editing (Builder room) ------------------------------
+  // Join the room ONLY for saved pipelines; an unsaved draft has no shared
+  // identity. Apply incoming edits with a flag that suppresses our own
+  // re-broadcast on the next state-change cycle (last-writer-wins per
+  // broadcast). Programmatic loads land via the same path; skipping the
+  // first broadcast per (pipelineId, room-activation) avoids clobbering a
+  // peer that already has unsaved edits when we join.
+  const [roster, setRoster] = useState<BuilderPresence[]>([]);
+  const applyingRemoteRef = useRef(false);
+  const broadcastSeededRef = useRef(false);
+  const collabPipelineId = realPipeline ? pipelineId : undefined;
+
+  const applyRemoteEdit = useCallback(
+    (edit: BuilderEdit) => {
+      const spec = edit.spec as {
+        nodes?: typeof nodes;
+        edges?: typeof edges;
+      };
+      if (Array.isArray(spec?.nodes) || Array.isArray(spec?.edges)) {
+        applyingRemoteRef.current = true;
+      }
+      if (Array.isArray(spec?.nodes)) setNodes(spec.nodes);
+      if (Array.isArray(spec?.edges)) setEdges(spec.edges);
+    },
+    [setNodes, setEdges]
+  );
+
+  const room = useBuilderRoom(collabPipelineId, {
+    onRoster: setRoster,
+    onEdit: applyRemoteEdit
+  });
+
+  // Reset the seed flag when we (re)join a different room, so the first
+  // post-join state tick doesn't clobber a peer.
+  useEffect(() => {
+    broadcastSeededRef.current = false;
+  }, [collabPipelineId]);
+
+  useEffect(() => {
+    if (!collabPipelineId) return;
+    if (applyingRemoteRef.current) {
+      applyingRemoteRef.current = false;
+      return;
+    }
+    if (!broadcastSeededRef.current) {
+      broadcastSeededRef.current = true;
+      return;
+    }
+    const t = window.setTimeout(() => {
+      room.broadcastEdit({ nodes, edges });
+    }, 300);
+    return () => window.clearTimeout(t);
+  }, [nodes, edges, room, collabPipelineId]);
+
+  // Broadcast focus changes (selected node) as presence so other editors see
+  // who is on which node.
+  useEffect(() => {
+    if (!collabPipelineId) return;
+    room.setFocus(selectedId ?? null);
+  }, [selectedId, room, collabPipelineId]);
+
   return (
     <section className="builder">
       <header className="toolbar">
@@ -1235,6 +1302,16 @@ export function PipelineBuilder(props: {
             tenants unavailable
           </span>
         )}
+        {/* "Who else is editing this pipeline?" — pushed to the right by
+            margin-left:auto so it sits at the top-right of the toolbar. */}
+        <span style={{ marginLeft: "auto" }}>
+          {collabPipelineId && (
+            <BuilderRoster
+              members={roster}
+              selfConnectionId={room.connectionId}
+            />
+          )}
+        </span>
       </header>
       <div className="builder-main">
       <div
