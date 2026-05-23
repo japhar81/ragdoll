@@ -1511,6 +1511,76 @@ table.grid th {
 .sidebar-user-id:hover { color: #fff; }
 .sidebar-user-id.active { color: #93c5fd; }
 .sidebar-user .link-btn { color: #93c5fd; align-self: flex-start; }
+.sidebar-user-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+/* Live-events connection indicator (events/EventsProvider.tsx). */
+.live-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: #94a3b8;
+  letter-spacing: 0.02em;
+}
+.live-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #64748b;
+  box-shadow: 0 0 0 0 rgba(34, 197, 94, 0);
+}
+.live-badge-connected .live-dot {
+  background: #22c55e;
+  box-shadow: 0 0 0 3px rgba(34, 197, 94, 0.15);
+}
+.live-badge-connecting .live-dot,
+.live-badge-reconnecting .live-dot {
+  background: #f59e0b;
+  animation: live-pulse 1.4s ease-in-out infinite;
+}
+.live-badge-offline .live-dot { background: #475569; }
+@keyframes live-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+
+/* Builder roster (collab presence indicator, top right of the canvas). */
+.builder-roster {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.builder-roster-avatar {
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  background: #1e293b;
+  color: #e2e8f0;
+  font-size: 11px;
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 2px solid #0f172a;
+  margin-left: -8px;
+  position: relative;
+  cursor: default;
+}
+.builder-roster-avatar:first-child { margin-left: 0; }
+.builder-roster-avatar.self {
+  background: #1e3a8a;
+  color: #dbeafe;
+}
+.builder-roster-count {
+  font-size: 11px;
+  color: #94a3b8;
+  margin-left: 4px;
+}
 
 .row-actions { display: inline-flex; gap: 10px; }
 

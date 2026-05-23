@@ -143,6 +143,10 @@ import type {
 import type { ProviderRegistry } from "../../../packages/providers/src/index.ts";
 import type { StructuredLogger } from "../../../packages/observability/src/index.ts";
 import type { QueuePort, QueueJob } from "../../../apps/worker/src/index.ts";
+import {
+  InMemoryChangeBus,
+  type ChangeBus
+} from "../../../packages/events/src/index.ts";
 
 /**
  * The shared queue contract specifies `QueueJob.type` includes `"run_pipeline"`
@@ -255,6 +259,14 @@ export interface AppDeps {
    * service (its keys then won't be recognised by an unrelated resolver).
    */
   apiKeys?: ApiKeyService;
+  /**
+   * Change-event bus. Every audited mutation publishes a {@link ChangeEvent};
+   * the WebSocket endpoint (`/api/events`) fans events out to subscribed
+   * clients so the web UI updates in real time. Multi-replica deploys MUST
+   * pass a Redis-backed bus so events cross processes; when omitted
+   * `createApp` falls back to in-process pubsub (single-replica + tests).
+   */
+  changeBus?: ChangeBus;
 }
 
 export interface App {
@@ -403,6 +415,8 @@ export function createApp(deps: AppDeps): App {
     deps.webhookTriggers ?? new InMemoryWebhookTriggerRepository();
   const apiKeys: ApiKeyService =
     deps.apiKeys ?? new ApiKeyService(new InMemoryApiKeyRepository());
+  const changeBus: ChangeBus =
+    deps.changeBus ?? new InMemoryChangeBus({ logger: deps.logger });
   // The authorizer is the scoped, default-deny decision point. When omitted
   // (legacy harnesses) route `enforce(...)` keeps using the flat role map.
   const authorizer: Authorizer | undefined = deps.authorizer;
@@ -435,9 +449,12 @@ export function createApp(deps: AppDeps): App {
     before: unknown,
     after: unknown
   ): Promise<void> {
+    const at = nowIso();
+    const tenantId = ctx.principal.tenantId ?? null;
+    const actorId = ctx.principal.id ?? null;
     await deps.auditLogs.append({
-      actorId: ctx.principal.id,
-      tenantId: ctx.principal.tenantId ?? null,
+      actorId,
+      tenantId,
       pipelineId: null,
       action,
       targetType,
@@ -447,8 +464,31 @@ export function createApp(deps: AppDeps): App {
       requestId: headerValue(ctx.request.headers, "x-request-id") ?? null,
       sourceIp: headerValue(ctx.request.headers, "x-forwarded-for") ?? null,
       userAgent: headerValue(ctx.request.headers, "user-agent") ?? null,
-      createdAt: nowIso()
+      createdAt: at
     });
+    // Best-effort live broadcast: a transient bus failure must NEVER block a
+    // mutation or roll back an audit row. The audit table is the system of
+    // record; the bus is the "live UI" channel on top.
+    try {
+      await changeBus.publish({
+        id: randomUUID(),
+        action,
+        targetType,
+        targetId,
+        tenantId,
+        actorId,
+        at,
+        payload:
+          after === undefined
+            ? undefined
+            : { after: redactValue(after) as Record<string, unknown> }
+      });
+    } catch (e) {
+      deps.logger.warn?.("change_bus_publish_failed", {
+        action,
+        error: e instanceof Error ? e.message : String(e)
+      });
+    }
   }
 
   /** Tenant scope from explicit header, falling back to the principal. */

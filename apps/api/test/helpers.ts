@@ -45,6 +45,7 @@ import {
 } from "../../../packages/secrets/src/index.ts";
 import { ConsoleJsonLogger } from "../../../packages/observability/src/index.ts";
 import { InMemoryQueue } from "../../../apps/worker/src/index.ts";
+import type { ChangeBus } from "../../../packages/events/src/index.ts";
 import { PluginRegistry, type InProcessPlugin } from "../../../packages/plugin-sdk/src/index.ts";
 import { ProviderRegistry, type ProviderAdapter } from "../../../packages/providers/src/index.ts";
 import type { PipelineSpec } from "../../../packages/core/src/index.ts";
@@ -116,6 +117,10 @@ export interface BuildOptions {
    * behaviour unchanged.
    */
   withAuth?: boolean;
+  /** Inject a specific change-event bus so a test can subscribe and assert
+   *  what gets published. When omitted createApp uses its in-process fallback
+   *  (invisible to the test). */
+  changeBus?: ChangeBus;
 }
 
 export function buildHarness(options: BuildOptions = {}): Harness {
@@ -182,6 +187,7 @@ export function buildHarness(options: BuildOptions = {}): Harness {
     executionStore: new InMemoryExecutionStore(),
     auth,
     apiKeys,
+    changeBus: options.changeBus,
     queue,
     secretProvider: new DatabaseEncryptedSecretProvider(
       new InMemorySecretRepository(),
