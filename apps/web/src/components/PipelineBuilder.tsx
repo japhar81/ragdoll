@@ -2,10 +2,6 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { useBuilderRoom } from "../events/EventsProvider.tsx";
 import { BuilderRoster } from "../events/BuilderRoster.tsx";
 import { BuilderTree } from "./builder/BuilderTree.tsx";
-import { BuilderStages } from "./builder/BuilderStages.tsx";
-import { BuilderCards } from "./builder/BuilderCards.tsx";
-import { BuilderOutline } from "./builder/BuilderOutline.tsx";
-import { projectGraphToTree, type TreeNode } from "../lib/treeProjection.ts";
 import type {
   BuilderEdit,
   BuilderPresence
@@ -259,21 +255,12 @@ export function PipelineBuilder(props: {
   const clog = useConsoleLog();
   const [inspectorWidth, setInspectorWidth] = useState(360);
   const [paletteWidth, setPaletteWidth] = useState(220);
-  // Five-way view switch — same nodes/edges state, different projections.
-  // Persisted so the choice survives reload.
-  type BuilderView = "flow" | "tree" | "stages" | "cards" | "outline";
+  // Flow View vs Tree View. Persisted so the choice survives reload.
+  type BuilderView = "flow" | "tree";
   const [builderView, setBuilderView] = useState<BuilderView>(() => {
     try {
       const v = localStorage.getItem("ragdoll.builderView");
-      if (
-        v === "tree" ||
-        v === "stages" ||
-        v === "cards" ||
-        v === "outline"
-      ) {
-        return v;
-      }
-      return "flow";
+      return v === "tree" ? "tree" : "flow";
     } catch {
       return "flow";
     }
@@ -874,73 +861,6 @@ export function PipelineBuilder(props: {
     [pluginList, setNodes, setEdges]
   );
 
-  // Tree View handler: re-parent `nodeId` so its primary incoming edge now
-  // originates at `newParentId`. Fan-in (other incoming edges) is left
-  // alone — those still appear as cross-refs in the tree view.
-  const reparentNode = useCallback(
-    (nodeId: string, newParentId: string) => {
-      if (nodeId === newParentId) return;
-      setEdges((current) => {
-        const tree = projectGraphToTree(
-          nodes.map((n) => n.id),
-          current.map((e) => ({
-            source: e.source,
-            target: e.target,
-            sourceHandle: e.sourceHandle,
-            targetHandle: e.targetHandle
-          }))
-        );
-        // Locate the primary parent of `nodeId` in the current projection.
-        let primaryParent: string | undefined;
-        function walk(t: TreeNode, parent?: string): boolean {
-          if (t.id === nodeId) {
-            primaryParent = parent;
-            return true;
-          }
-          for (const c of t.children) if (walk(c, t.id)) return true;
-          return false;
-        }
-        for (const r of tree.roots) walk(r);
-        // No prior primary parent — the node was a root. Just append the
-        // new edge so it now hangs off newParentId.
-        if (!primaryParent) {
-          return addEdge(
-            {
-              source: newParentId,
-              target: nodeId,
-              sourceHandle: null,
-              targetHandle: null,
-              ...EDGE_DEFAULTS
-            } as Connection,
-            current
-          );
-        }
-        // Rewrite the existing primary-parent edge in place — keeps the
-        // ports + edge id, so React Flow doesn't think it's a brand new
-        // edge.
-        const idx = current.findIndex(
-          (e) => e.source === primaryParent && e.target === nodeId
-        );
-        if (idx === -1) {
-          return addEdge(
-            {
-              source: newParentId,
-              target: nodeId,
-              sourceHandle: null,
-              targetHandle: null,
-              ...EDGE_DEFAULTS
-            } as Connection,
-            current
-          );
-        }
-        return current.map((e, i) =>
-          i === idx ? { ...e, source: newParentId } : e
-        );
-      });
-    },
-    [nodes, setEdges]
-  );
-
   // Tree View handler: remove a node and every edge attached to it.
   const deleteNodeById = useCallback(
     (id: string) => {
@@ -953,29 +873,42 @@ export function PipelineBuilder(props: {
     [selectedId, setNodes, setEdges]
   );
 
-  // Tree View handler: change one edge's port pair. `null` clears the
-  // port (= revert to default). React Flow's onEdgesChange picks the
-  // new handles up automatically when the user switches back to Flow View.
-  const updateEdgePorts = useCallback(
+  // Tree View handler: wire one input port (single-source by design) —
+  // any pre-existing edge into the same (target, targetPort) is removed
+  // before the new one is added.
+  const connectTreeEdge = useCallback(
     (
-      edgeId: string,
-      patch: { sourceHandle?: string | null; targetHandle?: string | null }
+      sourceId: string,
+      sourcePort: string | null,
+      targetId: string,
+      targetPort: string | null
     ) => {
-      setEdges((curr) =>
-        curr.map((e) =>
-          e.id === edgeId
-            ? {
-                ...e,
-                ...(patch.sourceHandle !== undefined
-                  ? { sourceHandle: patch.sourceHandle }
-                  : {}),
-                ...(patch.targetHandle !== undefined
-                  ? { targetHandle: patch.targetHandle }
-                  : {})
-              }
-            : e
-        )
-      );
+      setEdges((curr) => {
+        const filtered = curr.filter(
+          (e) =>
+            !(
+              e.target === targetId &&
+              (e.targetHandle ?? null) === targetPort
+            )
+        );
+        return addEdge(
+          {
+            source: sourceId,
+            sourceHandle: sourcePort,
+            target: targetId,
+            targetHandle: targetPort,
+            ...EDGE_DEFAULTS
+          } as Connection,
+          filtered
+        );
+      });
+    },
+    [setEdges]
+  );
+
+  const disconnectTreeEdge = useCallback(
+    (edgeId: string) => {
+      setEdges((curr) => curr.filter((e) => e.id !== edgeId));
     },
     [setEdges]
   );
@@ -1592,11 +1525,8 @@ export function PipelineBuilder(props: {
           <div className="builder-view-tabs" role="tablist" aria-label="Builder view">
             {(
               [
-                ["flow", "Flow"],
-                ["tree", "Tree"],
-                ["stages", "Stages"],
-                ["cards", "Cards"],
-                ["outline", "Outline"]
+                ["flow", "Flow View"],
+                ["tree", "Tree View"]
               ] as Array<[BuilderView, string]>
             ).map(([id, label]) => (
               <button
@@ -1621,37 +1551,10 @@ export function PipelineBuilder(props: {
             selectedId={selectedId}
             onSelect={setSelectedId}
             onAddChild={addNodeAsChildOf}
-            onReparent={reparentNode}
             onDelete={deleteNodeById}
             pluginManifestMap={pluginManifestMap}
-            onUpdateEdge={updateEdgePorts}
-          />
-        ) : builderView === "stages" ? (
-          <BuilderStages
-            nodes={nodes}
-            edges={edges}
-            selectedId={selectedId}
-            onSelect={setSelectedId}
-            onAddChild={addNodeAsChildOf}
-            onDelete={deleteNodeById}
-            pluginManifestMap={pluginManifestMap}
-            onUpdateEdge={updateEdgePorts}
-          />
-        ) : builderView === "cards" ? (
-          <BuilderCards
-            nodes={nodes}
-            edges={edges}
-            selectedId={selectedId}
-            onSelect={setSelectedId}
-            onDelete={deleteNodeById}
-            pluginManifestMap={pluginManifestMap}
-            onUpdateEdge={updateEdgePorts}
-          />
-        ) : builderView === "outline" ? (
-          <BuilderOutline
-            nodes={nodes}
-            edges={edges}
-            pipelineName={pipelineName}
+            onConnect={connectTreeEdge}
+            onDisconnect={disconnectTreeEdge}
           />
         ) : (
         <div
