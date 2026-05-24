@@ -667,6 +667,12 @@ export function createApp(deps: AppDeps): App {
     }> = {
       id: jobId,
       type: "run_pipeline",
+      // Pipeline runs MUST NOT silently retry: nodes like `delta_filter`
+      // persist state on each attempt, so a failed first attempt that wrote
+      // state turns retry #2 into a no-op (all docs "unchanged"). One shot;
+      // surface failures immediately. Per-node retries inside the
+      // DagExecutor remain controlled by WORKER_MAX_RETRIES.
+      attempts: 1,
       payload: {
         tenantId,
         pipelineId,

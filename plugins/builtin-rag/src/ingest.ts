@@ -239,6 +239,13 @@ export const filesystemSourcePlugin: InProcessPlugin = {
       } catch {
         continue;
       }
+      // Postgres jsonb cannot store the U+0000 (NUL) character — the
+      // executions store would 22P02 on insert and the whole run would fail
+      // with "unsupported Unicode escape sequence". Quietly skip any file
+      // that decodes to text containing NUL: those are typically binary
+      // assets (.so / .pyc / git pack files) misclassified by the include
+      // glob, not source we want to index.
+      if (content.includes("\u0000")) continue;
       const doc = {
         docId: entry.relPath,
         path: entry.relPath,

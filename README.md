@@ -162,6 +162,34 @@ For local development:
 
 **Change both env vars before any non-local deployment.**
 
+### Indexing a host codebase
+
+The worker and the file-watcher sidecar both mount **`CODEBASE_PATH`** at
+`/workspace`, read-only. The `code_indexer` pipeline (and the bundled
+`codebase-ingest-*` demos) walk that path. Default is the RAGdoll repo
+itself, so the smoke flow works on a fresh checkout.
+
+To index a different codebase, copy `.env.example` to `.env` and set:
+
+```env
+CODEBASE_PATH=/Users/you/IdeaProjects/your-codebase
+# Optional: post the file-watcher to a webhook trigger so changes
+# kick off an incremental pipeline run.
+FILE_WATCHER_WEBHOOK_URL=http://api:3001/api/triggers/webhook/<token>
+```
+
+Then `make refresh` (the script picks up `api worker web file-watcher`
+by default). Container logs:
+
+```sh
+docker compose -f infra/docker/docker-compose.yml logs -f file-watcher
+```
+
+The watcher debounces bursts of edits and POSTs once per quiet window
+(default 5 s). Until `FILE_WATCHER_WEBHOOK_URL` is set, the sidecar runs
+but logs `webhook_url_unset_skipping` instead of firing — that's by
+design so the stack starts cleanly out of the box.
+
 ### CLI
 
 A standalone bin (`apps/cli/`) + a repo-root convenience wrapper:

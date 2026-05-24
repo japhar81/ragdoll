@@ -298,6 +298,12 @@ services:
       # starting.
       PYTHON_PLUGIN_URL: http://python-plugins:8000
       PYTHON_PLUGIN_TIMEOUT_MS: "300000"
+    volumes:
+      # `filesystem_source` and the codebase-ingest pipelines walk /workspace.
+      # CODEBASE_PATH is set in `.env` (or your shell) — defaults to the repo
+      # itself so the smoke pipeline just works on a fresh checkout. Change
+      # it to point at any host directory you want indexed.
+      - "${CODEBASE_PATH:-../..}:/workspace:ro"
     depends_on:
       postgres:
         condition: service_healthy
@@ -311,6 +317,27 @@ services:
         condition: service_healthy
       opensearch:
         condition: service_healthy
+
+  # File-watcher sidecar: watches the same /workspace mount and POSTs to a
+  # RAGdoll webhook trigger URL on changes so a pipeline re-runs incrementally.
+  # FILE_WATCHER_WEBHOOK_URL is unset by default; the service warns and exits
+  # the loop until it's set (the watch keeps running, no Redis cost). Add the
+  # URL to .env once you've created the webhook trigger for your pipeline.
+  file-watcher:
+    build:
+      context: ../..
+      dockerfile: infra/docker/file-watcher.Dockerfile
+    environment:
+      WATCH_PATH: /workspace
+      FILE_WATCHER_WEBHOOK_URL: "${FILE_WATCHER_WEBHOOK_URL:-}"
+      FILE_WATCHER_DEBOUNCE_MS: "${FILE_WATCHER_DEBOUNCE_MS:-5000}"
+      FILE_WATCHER_IGNORE: "${FILE_WATCHER_IGNORE:-node_modules,.git,dist,build,.next,.cache}"
+    volumes:
+      - "${CODEBASE_PATH:-../..}:/workspace:ro"
+    depends_on:
+      api:
+        condition: service_started
+    restart: unless-stopped
 
   web:
     build:

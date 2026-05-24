@@ -6,4 +6,6 @@
 # the first /run may take tens of seconds.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-exec docker compose -f infra/docker/docker-compose.yml up --build "$@"
+ENV_ARGS=()
+[[ -f .env ]] && ENV_ARGS=(--env-file ./.env)
+exec docker compose "${ENV_ARGS[@]}" -f infra/docker/docker-compose.yml up --build "$@"

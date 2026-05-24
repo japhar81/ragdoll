@@ -1,6 +1,30 @@
+import { createHash } from "node:crypto";
 import type { InProcessPlugin } from "../../../packages/plugin-sdk/src/index.ts";
 import type { PipelineSpec } from "../../../packages/core/src/index.ts";
 import { OpenAIProvider, AnthropicProvider, OllamaCompatibleProvider, ProviderRegistry } from "../../../packages/providers/src/index.ts";
+
+/**
+ * Derive a deterministic v5-style UUID from an arbitrary key. Qdrant point
+ * ids are valid only as UUIDs or unsigned 64-bit ints — chunk fallbacks
+ * like `${executionId}_${index}` (with embedded dashes followed by
+ * non-hex tails) fail validation with `Bad Request`. Hashing the natural
+ * key `${docId}::${chunkIndex}` keeps incremental upserts replacing the
+ * same point instead of creating new ones on every run.
+ */
+function deterministicUuid(key: string): string {
+  const hex = createHash("sha1").update(key).digest("hex");
+  return (
+    hex.slice(0, 8) +
+    "-" +
+    hex.slice(8, 12) +
+    "-" +
+    hex.slice(12, 16) +
+    "-" +
+    hex.slice(16, 20) +
+    "-" +
+    hex.slice(20, 32)
+  );
+}
 
 // Codebase + docs ingest plugins live in their own module to keep this file
 // from sprawling further. Re-exported so the plugin-loader's namespace scan
@@ -968,12 +992,22 @@ export const qdrantVectorStorePlugin: InProcessPlugin = {
     const dimensions = Number(config.dimensions ?? vectors[0]?.length ?? 0);
     await store.ensureCollection(collection, { dimensions, distance });
 
-    const idPrefix = String(context.executionId ?? "doc");
     const points: VectorPoint[] = vectors.map((vector, index) => {
       const chunk = chunks[index] ?? {};
       const { text, index: chunkIndex, ...rest } = chunk;
+      // Qdrant accepts UUIDs or unsigned ints only. Use the chunk's own id
+      // when present, otherwise hash the natural key so re-running on the
+      // same source replaces rather than duplicates.
+      const docId = String(
+        (chunk as Record<string, unknown>).docId ?? (chunk as Record<string, unknown>).path ?? ""
+      );
+      const idx = typeof chunkIndex === "number" ? chunkIndex : index;
+      const pointId =
+        typeof chunk.id === "string" && chunk.id.length > 0
+          ? chunk.id
+          : deterministicUuid(`${context.tenantId}::${collection}::${docId}::${idx}`);
       return {
-        id: String(chunk.id ?? `${idPrefix}_${index}`),
+        id: pointId,
         vector,
         tenantId: context.tenantId,
         payload: { text: text ?? "", chunkIndex: chunkIndex ?? index, ...rest }

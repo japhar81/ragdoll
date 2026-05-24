@@ -12,8 +12,12 @@
 # Optionally pass explicit service names: ./scripts/dev-refresh.sh api
 set -euo pipefail
 cd "$(dirname "$0")/.."
-COMPOSE=(docker compose -f infra/docker/docker-compose.yml)
-SERVICES=("${@:-api worker web}")
+# --env-file only when one exists, so fresh checkouts before `cp .env.example
+# .env` still come up — every env var has a sensible default in compose.
+ENV_ARGS=()
+[[ -f .env ]] && ENV_ARGS=(--env-file ./.env)
+COMPOSE=(docker compose "${ENV_ARGS[@]}" -f infra/docker/docker-compose.yml)
+SERVICES=("${@:-api worker web file-watcher}")
 
 "${COMPOSE[@]}" up -d --build ${SERVICES[@]}
 # otel-collector config is volume-mounted; pick up edits without a rebuild.
