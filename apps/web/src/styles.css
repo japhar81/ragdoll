@@ -502,6 +502,182 @@ button.palette-item:active {
   animation: builder-tree-flash 700ms ease-out;
 }
 
+/* Stages view — topological layers stacked top to bottom (apps/web/src/
+ * components/builder/BuilderStages.tsx). */
+.builder-canvas-col > .builder-stages,
+.builder-canvas-col > .builder-cards,
+.builder-canvas-col > .builder-outline {
+  flex: 1;
+  min-height: 0;
+}
+.builder-stages {
+  display: flex;
+  flex-direction: column;
+  background: #f8fafc;
+  overflow: auto;
+  outline: none;
+}
+.builder-stage {
+  border-top: 1px solid #e2e8f0;
+  padding: 10px 14px 14px;
+}
+.builder-stage-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 12px;
+  color: #475569;
+  margin-bottom: 8px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.builder-stage-cards {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.builder-stage-card {
+  flex: 1 1 220px;
+  min-width: 220px;
+  max-width: 320px;
+  background: #fff;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  padding: 8px 10px;
+  cursor: pointer;
+  font-size: 13px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.builder-stage-card:hover { border-color: #94a3b8; }
+.builder-stage-card.selected {
+  border-color: #2563eb;
+  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.15);
+}
+.builder-stage-card-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.builder-stage-card-head strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.builder-stage-card-inputs {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.builder-stage-card-input {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+}
+.builder-stage-card-input-source {
+  background: none;
+  border: 0;
+  color: #2563eb;
+  font-family: ui-monospace, SFMono-Regular, monospace;
+  padding: 0;
+  cursor: pointer;
+}
+.builder-stage-card-input-source:hover { text-decoration: underline; }
+
+/* Cards view — one node = one card (apps/web/src/components/builder/
+ * BuilderCards.tsx). */
+.builder-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px;
+  background: #f8fafc;
+  overflow: auto;
+  outline: none;
+}
+.builder-card {
+  background: #fff;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  padding: 12px 14px;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.builder-card:hover { border-color: #94a3b8; }
+.builder-card.selected {
+  border-color: #2563eb;
+  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.15);
+}
+.builder-card-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 14px;
+}
+.builder-card-body {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+.builder-card-body h4 {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #64748b;
+  margin: 0 0 6px;
+  font-weight: 600;
+}
+.builder-card-edge {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  padding: 2px 0;
+}
+.builder-card-link {
+  background: none;
+  border: 0;
+  color: #2563eb;
+  font-family: ui-monospace, SFMono-Regular, monospace;
+  padding: 0;
+  cursor: pointer;
+}
+.builder-card-link:hover { text-decoration: underline; }
+.builder-card-empty { margin: 0; font-size: 12px; }
+
+/* Outline view — Mermaid text dump (apps/web/src/components/builder/
+ * BuilderOutline.tsx). */
+.builder-outline {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 14px;
+  background: #f8fafc;
+  overflow: auto;
+}
+.builder-outline-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.builder-outline-code {
+  background: #0f172a;
+  color: #e2e8f0;
+  font-family: ui-monospace, SFMono-Regular, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  padding: 12px 16px;
+  border-radius: 6px;
+  overflow: auto;
+  white-space: pre;
+  margin: 0;
+}
+
 /* Layout dropdown anchored to the canvas upper-left (above the React Flow
  * pane, below any React Flow panels). z-index intentionally higher than
  * react-flow__controls / react-flow__minimap which are 4/5. */
