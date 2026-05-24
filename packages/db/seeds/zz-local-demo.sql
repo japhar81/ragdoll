@@ -24,8 +24,8 @@ INSERT INTO pipeline_versions (id, pipeline_id, version, status, spec, checksum,
     '00000000-0000-0000-0000-0000000d3010',
     '1.0.0',
     'published',
-    '{"apiVersion":"rag-platform/v1","kind":"Pipeline","metadata":{"name":"local-demo"},"spec":{"nodes":[{"id":"input","type":"input"},{"id":"prompt","plugin":{"category":"prompt_template","id":"basic_rag_prompt","version":"1.0.0"}},{"id":"llm","plugin":{"category":"llm","id":"provider_chat","version":"1.0.0"},"config":{"provider":"${config.llm.provider}","model":"${config.llm.model}","baseUrl":"${config.llm.base_url}"}},{"id":"output","type":"output"}],"edges":[{"from":"input","to":"prompt","fromPort":"question","toPort":"question"},{"from":"prompt","to":"llm","fromPort":"messages","toPort":"messages"},{"from":"llm","to":"output"}]}}'::jsonb,
-    '66fd87ed',
+    '{"apiVersion":"rag-platform/v1","kind":"Pipeline","metadata":{"name":"local-demo"},"spec":{"nodes":[{"id":"input","type":"input","ui":{"position":{"x":8.71875,"y":40}}},{"id":"prompt","plugin":{"category":"prompt_template","id":"basic_rag_prompt","version":"1.0.0"},"ui":{"position":{"x":469,"y":40}}},{"id":"llm","plugin":{"category":"llm","id":"provider_chat","version":"1.0.0"},"config":{"provider":"${config.llm.provider}","model":"${config.llm.model}","baseUrl":"${config.llm.base_url}"},"ui":{"position":{"x":931,"y":40}}},{"id":"output","type":"output","ui":{"position":{"x":1391.28125,"y":40}}}],"edges":[{"from":"input","to":"prompt","fromPort":"question","toPort":"question"},{"from":"prompt","to":"llm","fromPort":"messages","toPort":"messages"},{"from":"llm","to":"output"}]}}'::jsonb,
+    'e81f221f',
     now()
   )
 ON CONFLICT (pipeline_id, version) DO NOTHING;

@@ -33,8 +33,8 @@ INSERT INTO pipeline_versions (id, pipeline_id, version, status, spec, checksum,
     '00000000-0000-0000-0000-0000000d3020',
     '1.0.0',
     'published',
-    '{"apiVersion":"rag-platform/v1","kind":"Pipeline","metadata":{"name":"web-crawl-demo"},"spec":{"nodes":[{"id":"input","type":"input"},{"id":"crawl","plugin":{"category":"datasource","id":"crawl4ai_crawler","version":"1.0.0"},"config":{"url":"https://www.cnn.com","maxPages":5,"maxDepth":1,"sameDomainOnly":true,"extract":"markdown","timeoutMs":60000}},{"id":"output","type":"output"}],"edges":[{"from":"input","to":"crawl"},{"from":"crawl","to":"output","fromPort":"documents","toPort":"documents"}]}}'::jsonb,
-    '6064eec4',
+    '{"apiVersion":"rag-platform/v1","kind":"Pipeline","metadata":{"name":"web-crawl-demo"},"spec":{"nodes":[{"id":"input","type":"input","ui":{"position":{"x":18.6875,"y":40}}},{"id":"crawl","plugin":{"category":"datasource","id":"crawl4ai_crawler","version":"1.0.0"},"config":{"url":"https://www.cnn.com","maxPages":5,"maxDepth":1,"sameDomainOnly":true,"extract":"markdown","timeoutMs":60000},"ui":{"position":{"x":479.65625,"y":40}}},{"id":"output","type":"output","ui":{"position":{"x":941.65625,"y":40}}}],"edges":[{"from":"input","to":"crawl"},{"from":"crawl","to":"output","fromPort":"documents","toPort":"documents"}]}}'::jsonb,
+    'c5728209',
     now()
   )
 ON CONFLICT (pipeline_id, version) DO NOTHING;
@@ -76,8 +76,8 @@ INSERT INTO pipeline_versions (id, pipeline_id, version, status, spec, checksum,
     '00000000-0000-0000-0000-0000000d3030',
     '1.0.0',
     'published',
-    '{"apiVersion":"rag-platform/v1","kind":"Pipeline","metadata":{"name":"crawl-summarize-demo"},"spec":{"nodes":[{"id":"input","type":"input"},{"id":"retrieve","plugin":{"category":"datasource","id":"crawl4ai_crawler","version":"1.0.0"},"config":{"url":"https://www.cnn.com","maxPages":5,"maxDepth":1,"sameDomainOnly":true,"extract":"markdown","timeoutMs":60000}},{"id":"prompt","plugin":{"category":"prompt_template","id":"basic_rag_prompt","version":"1.0.0"}},{"id":"llm","plugin":{"category":"llm","id":"provider_chat","version":"1.0.0"},"config":{"provider":"${config.llm.provider}","model":"${config.llm.model}","baseUrl":"${config.llm.base_url}"}},{"id":"output","type":"output"}],"edges":[{"from":"input","to":"prompt","fromPort":"question","toPort":"question"},{"from":"input","to":"retrieve"},{"from":"retrieve","to":"prompt","fromPort":"documents","toPort":"documents"},{"from":"prompt","to":"llm","fromPort":"messages","toPort":"messages"},{"from":"llm","to":"output"}]}}'::jsonb,
-    'afa24a54',
+    '{"apiVersion":"rag-platform/v1","kind":"Pipeline","metadata":{"name":"crawl-summarize-demo"},"spec":{"nodes":[{"id":"input","type":"input","ui":{"position":{"x":1.091796875,"y":40}}},{"id":"retrieve","plugin":{"category":"datasource","id":"crawl4ai_crawler","version":"1.0.0"},"config":{"url":"https://www.cnn.com","maxPages":5,"maxDepth":1,"sameDomainOnly":true,"extract":"markdown","timeoutMs":60000},"ui":{"position":{"x":459.57373046875,"y":40}}},{"id":"prompt","plugin":{"category":"prompt_template","id":"basic_rag_prompt","version":"1.0.0"},"ui":{"position":{"x":918.72705078125,"y":40}}},{"id":"llm","plugin":{"category":"llm","id":"provider_chat","version":"1.0.0"},"config":{"provider":"${config.llm.provider}","model":"${config.llm.model}","baseUrl":"${config.llm.base_url}"},"ui":{"position":{"x":1379.3037109375,"y":40}}},{"id":"output","type":"output","ui":{"position":{"x":1841.3037109375,"y":40}}}],"edges":[{"from":"input","to":"prompt","fromPort":"question","toPort":"question"},{"from":"input","to":"retrieve"},{"from":"retrieve","to":"prompt","fromPort":"documents","toPort":"documents"},{"from":"prompt","to":"llm","fromPort":"messages","toPort":"messages"},{"from":"llm","to":"output"}]}}'::jsonb,
+    '082812fa',
     now()
   )
 ON CONFLICT (pipeline_id, version) DO NOTHING;

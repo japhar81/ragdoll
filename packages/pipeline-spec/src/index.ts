@@ -1,8 +1,73 @@
 import type { PipelineSpec, PipelineNode, PluginRef } from "../../core/src/index.ts";
 import { pluginKey, type PluginRegistry } from "../../plugin-sdk/src/index.ts";
+import { applyLayout } from "./layouts.ts";
 
 export * from "./yaml.ts";
 export * from "./lifecycle.ts";
+export * from "./layouts.ts";
+
+/**
+ * Apply a left-to-right Sugiyama layout to a pipeline spec, writing
+ * `ui.position` on every node that lacks one. Nodes that already have a
+ * position are left untouched so a user's saved layout survives. Pure:
+ * returns a new spec, never mutates the input.
+ *
+ * Used by:
+ *  - the API SAVE path so a spec authored without positions (CLI, MCP,
+ *    a hand-written YAML) lands in storage with positions baked in;
+ *  - the web Builder's `specToGraph` as a defensive fallback for older
+ *    seeded specs that never went through the API SAVE path.
+ */
+export function autoLayoutSpec(spec: PipelineSpec): PipelineSpec {
+  const nodes = spec.spec?.nodes ?? [];
+  const edges = spec.spec?.edges ?? [];
+  if (nodes.length === 0) return spec;
+  // If every node already carries a position, return the input untouched
+  // so callers can rely on this function as a no-op when not needed.
+  const allHavePositions = nodes.every((n: PipelineNode) => {
+    const ui = n.ui as { position?: { x?: unknown; y?: unknown } } | undefined;
+    const pos = ui?.position;
+    return (
+      pos !== undefined &&
+      typeof (pos as { x?: unknown }).x === "number" &&
+      typeof (pos as { y?: unknown }).y === "number"
+    );
+  });
+  if (allHavePositions) return spec;
+  const layoutNodes = nodes.map((n: PipelineNode) => {
+    const ui = n.ui as { position?: { x: number; y: number } } | undefined;
+    return { id: n.id, position: ui?.position };
+  });
+  const layoutEdges = edges.map((e) => ({ from: e.from, to: e.to }));
+  const positions = applyLayout("layered-LR", layoutNodes, layoutEdges);
+  const nextNodes: PipelineNode[] = nodes.map((n: PipelineNode) => {
+    // Preserve any explicitly-set position so a partial spec (some nodes
+    // positioned, some not) doesn't lose the user's chosen layout. Only
+    // fill in the gaps.
+    const existing = (n.ui as { position?: { x?: unknown; y?: unknown } } | undefined)
+      ?.position;
+    if (
+      existing &&
+      typeof (existing as { x?: unknown }).x === "number" &&
+      typeof (existing as { y?: unknown }).y === "number"
+    ) {
+      return n;
+    }
+    const placed = positions.get(n.id);
+    if (!placed) return n;
+    return {
+      ...n,
+      ui: {
+        ...(n.ui ?? {}),
+        position: { x: placed.x, y: placed.y }
+      }
+    };
+  });
+  return {
+    ...spec,
+    spec: { ...(spec.spec ?? { nodes: [], edges: [] }), nodes: nextNodes, edges }
+  };
+}
 
 export interface ValidationIssue {
   level: "error" | "warning";

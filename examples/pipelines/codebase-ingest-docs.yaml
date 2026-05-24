@@ -2,127 +2,142 @@ apiVersion: rag-platform/v1
 kind: Pipeline
 metadata:
   name: codebase-ingest-docs
-  description: "Delta-aware ingestion of the docs/ tree into OpenSearch as a BM25 + kNN hybrid index. Independent state bucket from codebase-ingest-code."
+  description: Delta-aware ingestion of the docs/ tree into OpenSearch as a BM25 + kNN hybrid index. Independent state bucket from codebase-ingest-code.
 spec:
   nodes:
-    - id: fs
-      plugin:
-        category: datasource
-        id: filesystem_source
-        version: "1.0.0"
-      config:
-        rootPath: "/workspace"
-        include:
-          - "docs/**/*.md"
-          - "docs/**/*.mdx"
-          - "**/README.md"
-        maxFileSize: 1048576
-        computeHash: false
-
-    - id: delta
-      plugin:
-        category: transformer
-        id: delta_filter
-        version: "1.0.0"
-      config:
-        stateKey: "docs"
-        compareBy: "mtime"
-
-    # Markdown narrative chunks well with paragraph boundaries, so the
-    # basic text chunker is a better fit here than code_chunker.
-    - id: chunk
-      plugin:
-        category: chunker
-        id: basic_text_chunker
-        version: "1.0.0"
-      config:
-        chunkSize: 1500
-        overlap: 150
-
-    - id: embed
-      plugin:
-        category: embedder
-        id: provider_embeddings
-        version: "1.0.0"
-      config:
-        provider: "${config.embedding.provider}"
-        model: "${config.embedding.model}"
-      secrets:
-        apiKey:
-          scope: tenant
-          key: embedding.api_key
-
-    - id: write
-      plugin:
-        category: sink
-        id: opensearch_output
-        version: "1.0.0"
-      config:
-        index: "codebase-docs"
-        vectorField: "embedding"
-        dimensions: 1536
-        createKnnIndex: true
-        idField: "docId"
-      secrets:
-        username:
-          scope: tenant
-          key: opensearch.username
-        password:
-          scope: tenant
-          key: opensearch.password
-
-    - id: delete
-      plugin:
-        category: sink
-        id: opensearch_delete
-        version: "1.0.0"
-      config:
-        index: "codebase-docs"
-      secrets:
-        username:
-          scope: tenant
-          key: opensearch.username
-        password:
-          scope: tenant
-          key: opensearch.password
-
-    - id: out
-      type: output
-
+  - id: fs
+    plugin:
+      category: datasource
+      id: filesystem_source
+      version: 1.0.0
+    config:
+      rootPath: /workspace
+      include:
+      - "docs/**/*.md"
+      - "docs/**/*.mdx"
+      - "**/README.md"
+      maxFileSize: 1048576
+      computeHash: false
+    ui:
+      position:
+        x: -4.924163818359375
+        y: 110
+  - id: delta
+    plugin:
+      category: transformer
+      id: delta_filter
+      version: 1.0.0
+    config:
+      stateKey: docs
+      compareBy: mtime
+    ui:
+      position:
+        x: 452.82713317871094
+        y: 110
+  - id: chunk
+    plugin:
+      category: chunker
+      id: basic_text_chunker
+      version: 1.0.0
+    config:
+      chunkSize: 1500
+      overlap: 150
+    ui:
+      position:
+        x: 910.5723037719727
+        y: 29
+  - id: embed
+    plugin:
+      category: embedder
+      id: provider_embeddings
+      version: 1.0.0
+    config:
+      provider: "${config.embedding.provider}"
+      model: "${config.embedding.model}"
+    secrets:
+      apiKey:
+        scope: tenant
+        key: embedding.api_key
+    ui:
+      position:
+        x: 1369.381181716919
+        y: 110
+  - id: write
+    plugin:
+      category: sink
+      id: opensearch_output
+      version: 1.0.0
+    config:
+      index: codebase-docs
+      vectorField: embedding
+      dimensions: 1536
+      createKnnIndex: true
+      idField: docId
+    secrets:
+      username:
+        scope: tenant
+        key: opensearch.username
+      password:
+        scope: tenant
+        key: opensearch.password
+    ui:
+      position:
+        x: 1829.1748056411743
+        y: 110
+  - id: delete
+    plugin:
+      category: sink
+      id: opensearch_delete
+      version: 1.0.0
+    config:
+      index: codebase-docs
+    secrets:
+      username:
+        scope: tenant
+        key: opensearch.username
+      password:
+        scope: tenant
+        key: opensearch.password
+    ui:
+      position:
+        x: 911.7939338684082
+        y: 191
+  - id: out
+    type: output
+    ui:
+      position:
+        x: 2291.1748056411743
+        y: 110
   edges:
-    - from: fs
-      to: delta
-      fromPort: documents
-      toPort: documents
-
-    - from: delta
-      to: chunk
-      fromPort: new
-      toPort: documents
-    - from: delta
-      to: chunk
-      fromPort: modified
-      toPort: documents
-
-    - from: chunk
-      to: embed
-      fromPort: chunks
-      toPort: chunks
-    - from: chunk
-      to: write
-      fromPort: chunks
-      toPort: chunks
-    - from: embed
-      to: write
-      fromPort: vectors
-      toPort: vectors
-
-    - from: delta
-      to: delete
-      fromPort: deleted
-      toPort: deleted
-
-    - from: write
-      to: out
-    - from: delete
-      to: out
+  - from: fs
+    to: delta
+    fromPort: documents
+    toPort: documents
+  - from: delta
+    to: chunk
+    fromPort: new
+    toPort: documents
+  - from: delta
+    to: chunk
+    fromPort: modified
+    toPort: documents
+  - from: chunk
+    to: embed
+    fromPort: chunks
+    toPort: chunks
+  - from: chunk
+    to: write
+    fromPort: chunks
+    toPort: chunks
+  - from: embed
+    to: write
+    fromPort: vectors
+    toPort: vectors
+  - from: delta
+    to: delete
+    fromPort: deleted
+    toPort: deleted
+  - from: write
+    to: out
+  - from: delete
+    to: out

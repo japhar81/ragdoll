@@ -5,39 +5,54 @@ metadata:
   description: "Parses an XML feed into JSON with xml_codec, then projects the item titles out with a transform (JSONata) node. Runs with no external services; supply a run input with an xml string."
 spec:
   nodes:
-    - id: input
-      type: input
-    - id: parse
-      plugin:
-        category: transformer
-        id: xml_codec
-        version: "1.0.0"
-      config:
-        mode: parse
-    - id: titles
-      plugin:
-        category: transformer
-        id: transform
-        version: "1.0.0"
-      config:
-        engine: jsonata
-        inputs:
-          - json
-        outputs:
-          titles: json.feed.item.title
-    - id: output
-      type: output
+  - id: input
+    type: input
+    ui:
+      position:
+        x: 8.71875
+        y: 40
+  - id: parse
+    plugin:
+      category: transformer
+      id: xml_codec
+      version: 1.0.0
+    config:
+      mode: parse
+    ui:
+      position:
+        x: 469
+        y: 40
+  - id: titles
+    plugin:
+      category: transformer
+      id: transform
+      version: 1.0.0
+    config:
+      engine: jsonata
+      inputs:
+      - json
+      outputs:
+        titles: json.feed.item.title
+    ui:
+      position:
+        x: 931
+        y: 40
+  - id: output
+    type: output
+    ui:
+      position:
+        x: 1391.28125
+        y: 40
   edges:
-    # The run input carries an `xml` string; parse it to JSON.
-    - from: input
-      to: parse
-      fromPort: xml
-      toPort: xml
-    - from: parse
-      to: titles
-      fromPort: json
-      toPort: json
-    - from: titles
-      to: output
-      fromPort: titles
-      toPort: result
+  - from: input
+    to: parse
+    fromPort: xml
+    toPort: xml
+  - from: parse
+    to: titles
+    fromPort: json
+    toPort: json
+  - from: titles
+    to: output
+    fromPort: titles
+    toPort: result

@@ -59,7 +59,10 @@ import { BuilderConsole, useConsoleLog } from "./BuilderConsole.tsx";
 import { TenantSelect, useSelectedTenant } from "./useTenants.tsx";
 import { useEnvironments, EnvironmentSelect } from "./useEnvironments.tsx";
 import { ToolbarMenu } from "./ToolbarMenu.tsx";
-import { applyLayout, type LayoutKind } from "../lib/layouts.ts";
+import {
+  applyLayout,
+  type LayoutKind
+} from "../../../../packages/pipeline-spec/src/layouts.ts";
 import {
   validatePipelineSpec,
   type ValidationIssue
