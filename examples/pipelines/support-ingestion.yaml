@@ -5,6 +5,19 @@ metadata:
   labels:
     domain: support
     mode: ingestion
+  stages:
+  - id: s_auto_1
+    label: Stage 1
+  - id: s_auto_2
+    label: Stage 2
+  - id: s_auto_3
+    label: Stage 3
+  - id: s_auto_4
+    label: Stage 4
+  - id: s_auto_5
+    label: Stage 5
+  - id: s_auto_6
+    label: Stage 6
 spec:
   nodes:
   - id: input
@@ -13,6 +26,7 @@ spec:
       position:
         x: -1.8408203125
         y: 40
+      stageId: s_auto_1
   - id: load
     plugin:
       category: loader
@@ -22,6 +36,7 @@ spec:
       position:
         x: 453.6171875
         y: 40
+      stageId: s_auto_2
   - id: chunk
     plugin:
       category: chunker
@@ -34,6 +49,7 @@ spec:
       position:
         x: 909.018798828125
         y: 40
+      stageId: s_auto_3
   - id: embed
     plugin:
       category: embedder
@@ -46,6 +62,7 @@ spec:
       position:
         x: 1366.055908203125
         y: 40
+      stageId: s_auto_4
   - id: write
     plugin:
       category: vector_store
@@ -57,12 +74,14 @@ spec:
       position:
         x: 1825.574462890625
         y: 40
+      stageId: s_auto_5
   - id: output
     type: output
     ui:
       position:
         x: 2287.574462890625
         y: 40
+      stageId: s_auto_6
   edges:
   - from: input
     to: load

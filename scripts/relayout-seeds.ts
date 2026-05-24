@@ -18,6 +18,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   autoLayoutSpec,
+  autoStageSpec,
   loadPipelineSpec,
   specChecksum,
   stringifyYaml
@@ -75,7 +76,9 @@ async function relayoutFile(file: string): Promise<{ changed: number }> {
     if (!spec || typeof spec !== "object" || (spec as Record<string, unknown>).kind !== "Pipeline") {
       continue;
     }
-    const laidOut = autoLayoutSpec(spec);
+    // Layout AND stage in one pass — both are no-ops when the
+    // respective fields are already populated, so re-running is safe.
+    const laidOut = autoStageSpec(autoLayoutSpec(spec));
     const newChecksum = specChecksum(laidOut).slice(0, 8);
     const newJson = sqlEscapeJson(JSON.stringify(laidOut));
     const nextMatch =
@@ -120,7 +123,7 @@ async function relayoutExamples(): Promise<{ changed: number }> {
     } catch {
       continue;
     }
-    const laidOut = autoLayoutSpec(spec);
+    const laidOut = autoStageSpec(autoLayoutSpec(spec));
     if (laidOut === spec) continue;
     await writeFile(filePath, stringifyYaml(laidOut));
     // eslint-disable-next-line no-console

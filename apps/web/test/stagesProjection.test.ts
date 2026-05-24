@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import {
   projectStages,
   type StagesEdge
-} from "../src/lib/stagesProjection.ts";
+} from "../../../packages/pipeline-spec/src/stagesProjection.ts";
 
 test("linear chain: each node in its own stage", () => {
   const { stages } = projectStages(

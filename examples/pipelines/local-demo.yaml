@@ -2,6 +2,15 @@ apiVersion: rag-platform/v1
 kind: Pipeline
 metadata:
   name: local-demo
+  stages:
+  - id: s_auto_1
+    label: Stage 1
+  - id: s_auto_2
+    label: Stage 2
+  - id: s_auto_3
+    label: Stage 3
+  - id: s_auto_4
+    label: Stage 4
 spec:
   nodes:
   - id: input
@@ -10,6 +19,7 @@ spec:
       position:
         x: 8.71875
         y: 40
+      stageId: s_auto_1
   - id: prompt
     plugin:
       category: prompt_template
@@ -19,6 +29,7 @@ spec:
       position:
         x: 469
         y: 40
+      stageId: s_auto_2
   - id: llm
     plugin:
       category: llm
@@ -32,12 +43,14 @@ spec:
       position:
         x: 931
         y: 40
+      stageId: s_auto_3
   - id: output
     type: output
     ui:
       position:
         x: 1391.28125
         y: 40
+      stageId: s_auto_4
   edges:
   - from: input
     to: prompt

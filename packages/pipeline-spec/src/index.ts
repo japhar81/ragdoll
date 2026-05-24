@@ -1,10 +1,12 @@
 import type { PipelineSpec, PipelineNode, PluginRef } from "../../core/src/index.ts";
 import { pluginKey, type PluginRegistry } from "../../plugin-sdk/src/index.ts";
 import { applyLayout } from "./layouts.ts";
+import { projectStages } from "./stagesProjection.ts";
 
 export * from "./yaml.ts";
 export * from "./lifecycle.ts";
 export * from "./layouts.ts";
+export * from "./stagesProjection.ts";
 
 /**
  * Apply a left-to-right Sugiyama layout to a pipeline spec, writing
@@ -65,6 +67,56 @@ export function autoLayoutSpec(spec: PipelineSpec): PipelineSpec {
   });
   return {
     ...spec,
+    spec: { ...(spec.spec ?? { nodes: [], edges: [] }), nodes: nextNodes, edges }
+  };
+}
+
+/**
+ * Apply topological-layer staging to a pipeline spec. No-op when the
+ * spec already carries `metadata.stages`; otherwise builds one stage
+ * per layer (sources at "Stage 1", convergence rows at the end) and
+ * writes `ui.stageId` on every node so the Builder Tree groups them
+ * and the Flow View renders containers around them. Pure: returns a
+ * new spec, never mutates the input.
+ *
+ * Used by the one-off DB / seed / example migration scripts so every
+ * pre-populated pipeline boots with sensible stage sections. NOT
+ * applied on the API save path — new pipelines may intentionally
+ * carry their own (or no) stages.
+ */
+export function autoStageSpec(spec: PipelineSpec): PipelineSpec {
+  const existing = (spec.metadata as { stages?: unknown } | undefined)?.stages;
+  if (Array.isArray(existing) && existing.length > 0) return spec;
+  const nodes = spec.spec?.nodes ?? [];
+  const edges = spec.spec?.edges ?? [];
+  if (nodes.length === 0) return spec;
+  const projection = projectStages(
+    nodes.map((n) => n.id),
+    edges.map((e) => ({ source: e.from, target: e.to }))
+  );
+  if (projection.stages.length === 0) return spec;
+  // Stable, deterministic stage ids (no Math.random) so re-running
+  // the migration on the same input produces identical output —
+  // matters for idempotent migrations + checksum stability.
+  const stages = projection.stages.map((s, i) => ({
+    id: `s_auto_${i + 1}`,
+    label: `Stage ${i + 1}`
+  }));
+  const stageByNode = new Map<string, string>();
+  projection.stages.forEach((stage, i) => {
+    for (const nid of stage.nodeIds) stageByNode.set(nid, stages[i].id);
+  });
+  const nextNodes: PipelineNode[] = nodes.map((n: PipelineNode) => {
+    const stageId = stageByNode.get(n.id);
+    if (!stageId) return n;
+    return {
+      ...n,
+      ui: { ...(n.ui ?? {}), stageId }
+    };
+  });
+  return {
+    ...spec,
+    metadata: { ...spec.metadata, stages },
     spec: { ...(spec.spec ?? { nodes: [], edges: [] }), nodes: nextNodes, edges }
   };
 }

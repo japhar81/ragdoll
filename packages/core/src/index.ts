@@ -111,6 +111,14 @@ export interface PluginRef {
   version: string;
 }
 
+/** User-defined Builder stage (purely organizational; no runtime
+ *  semantics — only the Builder reads it). Pipeline nodes reference a
+ *  stage by id via `ui.stageId`. */
+export interface PipelineStage {
+  id: string;
+  label: string;
+}
+
 export interface PipelineSpec {
   apiVersion: "rag-platform/v1";
   kind: "Pipeline";
@@ -119,6 +127,8 @@ export interface PipelineSpec {
     description?: string;
     labels?: Record<string, string>;
     annotations?: Record<string, string>;
+    /** Ordered list of Builder stage sections. */
+    stages?: PipelineStage[];
   };
   spec: {
     parameters?: ConfigDefinition[];

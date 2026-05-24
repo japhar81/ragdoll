@@ -3,6 +3,13 @@ kind: Pipeline
 metadata:
   name: transform-demo
   description: "Reshapes a JSON payload with the transform plugin. One configurable input port fans out to two independently-wired output ports, each computed by its own JSONata expression. Runs with no external services; supply a run input with a payload object holding title, items and tags."
+  stages:
+  - id: s_auto_1
+    label: Stage 1
+  - id: s_auto_2
+    label: Stage 2
+  - id: s_auto_3
+    label: Stage 3
 spec:
   nodes:
   - id: input
@@ -11,6 +18,7 @@ spec:
       position:
         x: 13.015625
         y: 110
+      stageId: s_auto_1
   - id: derive
     plugin:
       category: transformer
@@ -27,18 +35,21 @@ spec:
       position:
         x: 473.2109375
         y: 110
+      stageId: s_auto_2
   - id: out_summary
     type: output
     ui:
       position:
         x: 938.5625
         y: 29
+      stageId: s_auto_3
   - id: out_keywords
     type: output
     ui:
       position:
         x: 935.2109375
         y: 191
+      stageId: s_auto_3
   edges:
   - from: input
     to: derive
