@@ -101,15 +101,21 @@ export class DatabaseEncryptedSecretProvider implements SecretProvider {
 
   async get(ref: SecretRef, tenantBoundary?: string): Promise<string> {
     enforceTenantBoundary(ref, tenantBoundary);
-    const record = await this.repository.find(ref);
-    if (!record) throw new SecretNotFoundError(ref);
+    // A tenant-scoped ref intentionally omits `tenantId` so the same pipeline
+    // spec is portable across tenants — each run resolves its own secret.
+    // Inject the runtime's tenant boundary as the effective tenantId before
+    // we hit the repo; without this every tenant ref 404s with the spec
+    // shape the seeds and `code_indexer` use.
+    const lookupRef = resolveTenantRef(ref, tenantBoundary);
+    const record = await this.repository.find(lookupRef);
+    if (!record) throw new SecretNotFoundError(lookupRef);
     const key = await this.keys.keyById(record.keyId);
     return decrypt(record.ciphertext, key);
   }
 
   async delete(ref: SecretRef, tenantBoundary?: string): Promise<void> {
     enforceTenantBoundary(ref, tenantBoundary);
-    await this.repository.delete(ref);
+    await this.repository.delete(resolveTenantRef(ref, tenantBoundary));
   }
 
   async list(scope: Partial<SecretRef>): Promise<Array<Omit<SecretRecord, "ciphertext">>> {
@@ -152,6 +158,19 @@ function enforceTenantBoundary(ref: SecretRef, tenantBoundary?: string): void {
   if (tenantBoundary && ref.tenantId && ref.tenantId !== tenantBoundary) {
     throw new SecretAccessDeniedError();
   }
+}
+
+/**
+ * For a tenant-scoped ref with no `tenantId`, fill it in from the runtime
+ * boundary. Refs with an explicit `tenantId` are left alone — the boundary
+ * check above already guarantees the explicit value matches the runtime
+ * tenant. No-op for non-tenant scopes.
+ */
+function resolveTenantRef(ref: SecretRef, tenantBoundary?: string): SecretRef {
+  if (ref.scope !== "tenant") return ref;
+  if (ref.tenantId) return ref;
+  if (!tenantBoundary) return ref;
+  return { ...ref, tenantId: tenantBoundary };
 }
 
 function matchesPartialRef(ref: SecretRef, partial: Partial<SecretRef>): boolean {
