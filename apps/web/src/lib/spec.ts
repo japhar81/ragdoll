@@ -11,6 +11,7 @@ import type {
   PipelineEdge,
   PipelineNode,
   PipelineSpec,
+  PipelineStage,
   PluginCategory,
   PluginRef
 } from "./types.ts";
@@ -184,6 +185,10 @@ export function graphToSpec(
     description?: string;
     labels?: Record<string, string>;
     annotations?: Record<string, string>;
+    /** User-defined stages (ordered). Round-tripped to/from
+     *  `spec.metadata.stages`; nodes carry their stage assignment as
+     *  `node.ui.stageId`. */
+    stages?: PipelineStage[];
   }
 ): PipelineSpec {
   const specNodes: PipelineNode[] = nodes.map((flowNode) => {
@@ -207,7 +212,10 @@ export function graphToSpec(
       name: metadata.name,
       ...(metadata.description ? { description: metadata.description } : {}),
       ...(metadata.labels ? { labels: metadata.labels } : {}),
-      ...(metadata.annotations ? { annotations: metadata.annotations } : {})
+      ...(metadata.annotations ? { annotations: metadata.annotations } : {}),
+      ...(metadata.stages && metadata.stages.length > 0
+        ? { stages: metadata.stages }
+        : {})
     },
     spec: { nodes: specNodes, edges: specEdges }
   };

@@ -66,6 +66,16 @@ export interface PipelineEdge {
   toPort?: string;
 }
 
+/** Ordered, user-defined organizational group — purely a Builder
+ *  concept. Stages don't change runtime semantics; they cluster nodes
+ *  in the Tree View under named sections and render as Flow View group
+ *  containers. Persisted on the pipeline spec so the layout survives
+ *  reload + reopen across editors. */
+export interface PipelineStage {
+  id: string;
+  label: string;
+}
+
 export interface PipelineSpec {
   apiVersion: "rag-platform/v1";
   kind: "Pipeline";
@@ -74,6 +84,9 @@ export interface PipelineSpec {
     description?: string;
     labels?: Record<string, string>;
     annotations?: Record<string, string>;
+    /** Optional, ordered list of user-defined stages. Pipeline nodes
+     *  reference a stage by id via `node.ui.stageId`. */
+    stages?: PipelineStage[];
   };
   spec: {
     nodes: PipelineNode[];

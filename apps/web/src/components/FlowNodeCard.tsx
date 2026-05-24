@@ -199,7 +199,10 @@ function FlowNodeCardImpl({ data, selected }: NodeProps<RagNodeData>) {
         {theme.icon}
       </span>
       <div className="rf-body">
-        <div className="rf-title">{data.label}</div>
+        <div className="rf-title">
+          {(node.ui as { label?: string } | undefined)?.label?.trim() ||
+            data.label}
+        </div>
         {node.plugin && (
           <div className="rf-sub">
             {node.plugin.id}@{node.plugin.version}

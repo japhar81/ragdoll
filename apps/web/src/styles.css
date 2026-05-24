@@ -2798,3 +2798,78 @@ kbd {
   font-size: 12px;
   font-style: italic;
 }
+
+/* Inspector "Display name" field — sits between the node identity block
+ * and the tab strip. Free-form text, capped to 64 chars; empty value
+ * strips `ui.label` so the strict id re-takes the slot. */
+.inspector-display-name {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 11px;
+  color: #475569;
+  margin: 8px 0 14px;
+}
+.inspector-display-name input {
+  font-size: 13px;
+  padding: 4px 8px;
+}
+
+/* Tree View stage management — toolbar + banner controls
+ * (components/builder/BuilderTree.tsx). */
+.builder-tree-toolbar {
+  display: inline-flex;
+  gap: 12px;
+  align-items: center;
+}
+.builder-tree-toolbar .link-btn { font-size: 11px; }
+.builder-tree-stage-head-unassigned {
+  background: #f1f5f9;
+  color: #64748b;
+}
+.builder-tree-stage-name {
+  cursor: pointer;
+  user-select: none;
+}
+.builder-tree-stage-name:hover { text-decoration: underline; }
+.builder-tree-stage-head input {
+  font-size: 11px;
+  padding: 2px 6px;
+  text-transform: none;
+  letter-spacing: 0;
+  width: 200px;
+}
+.builder-tree-stage-del {
+  font-size: 11px;
+  color: #ef4444;
+  margin-left: auto;
+}
+.builder-tree-stage-empty {
+  padding: 6px 14px 4px;
+  font-size: 12px;
+  font-style: italic;
+}
+
+/* Flow View stage overlay — React Flow wrapper has width/height; we
+ * paint the box on the wrapper itself and pin a small label inside. */
+.react-flow__node-stageGroup {
+  background: rgba(37, 99, 235, 0.06);
+  border: 1.5px dashed #93c5fd;
+  border-radius: 10px;
+  /* Pass clicks through so children remain the click targets. */
+  pointer-events: none;
+}
+.stage-group-label {
+  position: absolute;
+  top: 6px;
+  left: 12px;
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: #1d4ed8;
+  background: rgba(255, 255, 255, 0.7);
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-weight: 600;
+  user-select: none;
+}

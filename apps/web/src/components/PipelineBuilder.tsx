@@ -77,11 +77,26 @@ import type {
   FlowNode,
   PipelineNode,
   PipelineSpec,
+  PipelineStage,
   SecretRef
 } from "../lib/types.ts";
 import type { EditingPipeline } from "../App.tsx";
 
-const nodeTypes = { ragNode: FlowNodeCard };
+/**
+ * Synthetic group container drawn behind a stage's member nodes. The
+ * wrapper React Flow gives us already carries the bounding box via
+ * `node.style.{width,height}`; this component just paints the label.
+ * `pointerEvents: none` (applied via CSS) keeps the group from
+ * intercepting drags so children stay independently selectable.
+ */
+function StageGroupNode(props: { data: { label?: string } }) {
+  return <div className="stage-group-label">{props.data?.label ?? ""}</div>;
+}
+
+const nodeTypes = {
+  ragNode: FlowNodeCard,
+  stageGroup: StageGroupNode
+};
 
 /**
  * Run poller: the worker runs the pipeline async and writes the per-node
@@ -255,6 +270,10 @@ export function PipelineBuilder(props: {
   const clog = useConsoleLog();
   const [inspectorWidth, setInspectorWidth] = useState(360);
   const [paletteWidth, setPaletteWidth] = useState(220);
+  // User-defined stages (ordered). Round-tripped through
+  // `spec.metadata.stages`. Each PipelineNode references one via
+  // `node.ui.stageId`; nodes with no stageId render under "Unassigned".
+  const [stages, setStages] = useState<PipelineStage[]>([]);
   // Flow View vs Tree View. Persisted so the choice survives reload.
   type BuilderView = "flow" | "tree";
   const [builderView, setBuilderView] = useState<BuilderView>(() => {
@@ -404,10 +423,240 @@ export function PipelineBuilder(props: {
     () =>
       graphToSpec(nodes as unknown as FlowNode[], edges as unknown as FlowEdge[], {
         name: pipelineName,
-        description: pipelineDescription.trim() || undefined
+        description: pipelineDescription.trim() || undefined,
+        stages: stages.length > 0 ? stages : undefined
       }),
-    [nodes, edges, pipelineName, pipelineDescription]
+    [nodes, edges, pipelineName, pipelineDescription, stages]
   );
+
+  // Stage management — pipeline-level CRUD that mutates the local
+  // `stages` array. Persistence rides on the next save through the
+  // graphToSpec call above (stages land in metadata.stages).
+  const addStage = useCallback((label: string) => {
+    setStages((curr) => {
+      const trimmed = label.trim();
+      if (!trimmed) return curr;
+      // Stable id: a short random suffix avoids collisions when the
+      // same label is added twice (which is otherwise harmless).
+      const id =
+        "s_" +
+        Math.random().toString(36).slice(2, 8) +
+        Math.random().toString(36).slice(2, 6);
+      return [...curr, { id, label: trimmed }];
+    });
+  }, []);
+  const renameStage = useCallback((stageId: string, label: string) => {
+    const trimmed = label.trim();
+    if (!trimmed) return;
+    setStages((curr) =>
+      curr.map((s) => (s.id === stageId ? { ...s, label: trimmed } : s))
+    );
+  }, []);
+  const deleteStage = useCallback((stageId: string) => {
+    setStages((curr) => curr.filter((s) => s.id !== stageId));
+    // Detach every node that referenced the deleted stage so they fall
+    // into the "Unassigned" bucket instead of pointing at a ghost id.
+    setNodes((curr) =>
+      curr.map((flow) => {
+        const pn = (flow.data as { node?: PipelineNode } | undefined)?.node;
+        if (!pn || (pn.ui as { stageId?: string } | undefined)?.stageId !== stageId) {
+          return flow;
+        }
+        const { stageId: _, ...uiRest } = (pn.ui ?? {}) as {
+          stageId?: string;
+          [k: string]: unknown;
+        };
+        return {
+          ...flow,
+          data: { ...flow.data, node: { ...pn, ui: uiRest } }
+        };
+      })
+    );
+  }, [setNodes]);
+  const reorderStages = useCallback((from: number, to: number) => {
+    setStages((curr) => {
+      if (from < 0 || to < 0 || from >= curr.length || to >= curr.length) {
+        return curr;
+      }
+      const next = curr.slice();
+      const [moved] = next.splice(from, 1);
+      next.splice(to, 0, moved);
+      return next;
+    });
+  }, []);
+  const assignNodeToStage = useCallback(
+    (nodeId: string, stageId: string | null) => {
+      setNodes((curr) =>
+        curr.map((flow) => {
+          if (flow.id !== nodeId) return flow;
+          const pn = (flow.data as { node?: PipelineNode } | undefined)?.node;
+          if (!pn) return flow;
+          const ui = { ...(pn.ui ?? {}) } as { [k: string]: unknown };
+          if (stageId) ui.stageId = stageId;
+          else delete ui.stageId;
+          return {
+            ...flow,
+            data: { ...flow.data, node: { ...pn, ui } }
+          };
+        })
+      );
+    },
+    [setNodes]
+  );
+
+  // Synthetic Flow View overlay: one stageGroup node per stage that
+  // currently has members, sized to enclose them with a small padding.
+  // These are NOT part of the pipeline spec — they're recomputed on
+  // every render from the live `nodes` + `stages` state and stripped
+  // out of `onNodesChange` so React Flow can't move them into the
+  // saved data.
+  const stageOverlayNodes = useMemo<Node[]>(() => {
+    if (stages.length === 0) return [];
+    const DEFAULT_W = 240;
+    const DEFAULT_H = 120;
+    const PAD_X = 24;
+    const PAD_TOP = 40;
+    const PAD_BOTTOM = 24;
+    const out: Node[] = [];
+    for (const stage of stages) {
+      const members = nodes.filter(
+        (n) =>
+          (n.data as { node?: { ui?: { stageId?: string } } } | undefined)
+            ?.node?.ui?.stageId === stage.id
+      );
+      if (members.length === 0) continue;
+      let minX = Infinity;
+      let minY = Infinity;
+      let maxX = -Infinity;
+      let maxY = -Infinity;
+      for (const m of members) {
+        const x = m.position?.x ?? 0;
+        const y = m.position?.y ?? 0;
+        const w = (m as Node & { width?: number }).width ?? DEFAULT_W;
+        const h = (m as Node & { height?: number }).height ?? DEFAULT_H;
+        if (x < minX) minX = x;
+        if (y < minY) minY = y;
+        if (x + w > maxX) maxX = x + w;
+        if (y + h > maxY) maxY = y + h;
+      }
+      out.push({
+        id: `stage:${stage.id}`,
+        type: "stageGroup",
+        position: { x: minX - PAD_X, y: minY - PAD_TOP },
+        style: {
+          width: maxX - minX + PAD_X * 2,
+          height: maxY - minY + PAD_TOP + PAD_BOTTOM
+        },
+        data: { label: stage.label },
+        draggable: false,
+        selectable: false,
+        focusable: false,
+        zIndex: -1
+      } as unknown as Node);
+    }
+    return out;
+  }, [nodes, stages]);
+
+  // Combined node list for React Flow: overlays first so they render
+  // behind, real pipeline nodes on top.
+  const reactFlowNodes = useMemo(
+    () => [...stageOverlayNodes, ...(nodes as Node[])],
+    [stageOverlayNodes, nodes]
+  );
+
+  // Drop overlay-targeted changes before they hit setNodes — they're
+  // synthetic; only real pipeline node changes belong in state.
+  const onNodesChangeFiltered = useCallback(
+    (changes: Parameters<typeof onNodesChange>[0]) => {
+      const real = changes.filter((c) => {
+        const id = (c as { id?: string }).id;
+        return !id || !id.startsWith("stage:");
+      });
+      if (real.length > 0) onNodesChange(real);
+    },
+    [onNodesChange]
+  );
+
+  // Convenience: derive one stage per topological layer and assign
+  // every currently-unassigned node accordingly. Useful as a starting
+  // point so the user isn't manually building stages from scratch on
+  // an existing pipeline.
+  const autoStage = useCallback(() => {
+    // Inline the topological computation so we don't take a dep on the
+    // separate stagesProjection module from this file (it's already
+    // imported elsewhere; this keeps autoStage close to the state it
+    // mutates).
+    const inDeg = new Map<string, number>();
+    const adj = new Map<string, string[]>();
+    for (const n of nodes) {
+      inDeg.set(n.id, 0);
+      adj.set(n.id, []);
+    }
+    for (const e of edges) {
+      if (!inDeg.has(e.source) || !inDeg.has(e.target)) continue;
+      if (e.source === e.target) continue;
+      inDeg.set(e.target, (inDeg.get(e.target) ?? 0) + 1);
+      adj.get(e.source)!.push(e.target);
+    }
+    const layer = new Map<string, number>();
+    let frontier = nodes
+      .filter((n) => (inDeg.get(n.id) ?? 0) === 0)
+      .map((n) => n.id);
+    for (const id of frontier) layer.set(id, 0);
+    let safety = nodes.length * (nodes.length + 1);
+    while (frontier.length > 0 && safety-- > 0) {
+      const next: string[] = [];
+      for (const id of frontier) {
+        const cur = layer.get(id) ?? 0;
+        for (const t of adj.get(id) ?? []) {
+          const prior = layer.get(t);
+          if (prior === undefined || prior < cur + 1) {
+            layer.set(t, cur + 1);
+            next.push(t);
+          }
+        }
+      }
+      frontier = next;
+    }
+    // Anything still unplaced (cycle members) → last layer.
+    let maxLayer = -1;
+    for (const v of layer.values()) if (v > maxLayer) maxLayer = v;
+    const cyclePin = maxLayer + 1;
+    for (const n of nodes) if (!layer.has(n.id)) layer.set(n.id, cyclePin);
+    const layerCount = (maxLayer < 0 ? 0 : maxLayer + 1) + (cyclePin === maxLayer + 1 && nodes.some((n) => !layer.has(n.id) || layer.get(n.id) === cyclePin) ? 0 : 0);
+    // Build one stage per occupied layer (skip empties).
+    const layers = new Map<number, string[]>();
+    for (const [id, l] of layer) {
+      const arr = layers.get(l) ?? [];
+      arr.push(id);
+      layers.set(l, arr);
+    }
+    const occupied = [...layers.keys()].sort((a, b) => a - b);
+    const newStages: PipelineStage[] = occupied.map((l, i) => ({
+      id: `s_auto_${i}_${Math.random().toString(36).slice(2, 6)}`,
+      label: `Stage ${i + 1}`
+    }));
+    setStages(newStages);
+    // Assign each node to its layer's stage. Existing stage assignments
+    // get OVERWRITTEN — the user explicitly asked for an auto-stage.
+    setNodes((curr) =>
+      curr.map((flow) => {
+        const l = layer.get(flow.id);
+        if (l === undefined) return flow;
+        const stageId = newStages[occupied.indexOf(l)]?.id;
+        if (!stageId) return flow;
+        const pn = (flow.data as { node?: PipelineNode } | undefined)?.node;
+        if (!pn) return flow;
+        const ui = { ...(pn.ui ?? {}), stageId } as Record<string, unknown>;
+        return {
+          ...flow,
+          data: { ...flow.data, node: { ...pn, ui } }
+        };
+      })
+    );
+    // `layerCount` is computed for readability; silence the lint.
+    void layerCount;
+  }, [nodes, edges, setNodes]);
 
 
   /**
@@ -707,6 +956,12 @@ export function PipelineBuilder(props: {
           if (loaded.metadata?.description) {
             setPipelineDescription(loaded.metadata.description);
           }
+          // Restore user-defined stages from the spec so the builder
+          // reopens with the same Tree sections + Flow group containers
+          // the author saved.
+          const loadedStages = (loaded.metadata as { stages?: PipelineStage[] } | undefined)
+            ?.stages;
+          setStages(Array.isArray(loadedStages) ? loadedStages : []);
           setNodes(toFlowNodes(loaded));
           setEdges(toFlowEdges(loaded));
           setVersion(latest.version);
@@ -1555,6 +1810,12 @@ export function PipelineBuilder(props: {
             pluginManifestMap={pluginManifestMap}
             onConnect={connectTreeEdge}
             onDisconnect={disconnectTreeEdge}
+            stages={stages}
+            onAddStage={addStage}
+            onRenameStage={renameStage}
+            onDeleteStage={deleteStage}
+            onAssignNodeToStage={assignNodeToStage}
+            onAutoStage={autoStage}
           />
         ) : (
         <div
@@ -1566,13 +1827,13 @@ export function PipelineBuilder(props: {
           <PluginManifestContext.Provider value={pluginManifestMap}>
             <NodeValidationContext.Provider value={validationByNode}>
             <ReactFlow
-              nodes={nodes}
+              nodes={reactFlowNodes}
               edges={edges}
               nodeTypes={nodeTypes}
               onInit={(instance) => {
                 rfRef.current = instance;
               }}
-              onNodesChange={onNodesChange}
+              onNodesChange={onNodesChangeFiltered}
               onEdgesChange={onEdgesChange}
               onConnect={onConnect}
               isValidConnection={isValidConnection}
@@ -1607,19 +1868,46 @@ export function PipelineBuilder(props: {
             </p>
           )}
           {selectedNode && (
-            <p>
-              Node <strong>{selectedNode.id}</strong>{" "}
-              {selectedNode.type ? `(${selectedNode.type})` : ""}
-              {selectedNode.plugin && (
-                <>
-                  <br />
-                  <span className="muted">
-                    {selectedNode.plugin.category} / {selectedNode.plugin.id} @{" "}
-                    {selectedNode.plugin.version}
-                  </span>
-                </>
-              )}
-            </p>
+            <>
+              <p>
+                Node <strong>{selectedNode.id}</strong>{" "}
+                {selectedNode.type ? `(${selectedNode.type})` : ""}
+                {selectedNode.plugin && (
+                  <>
+                    <br />
+                    <span className="muted">
+                      {selectedNode.plugin.category} / {selectedNode.plugin.id} @{" "}
+                      {selectedNode.plugin.version}
+                    </span>
+                  </>
+                )}
+              </p>
+              <label className="inspector-display-name">
+                Display name
+                <input
+                  type="text"
+                  value={
+                    (selectedNode.ui as { label?: string } | undefined)?.label ??
+                    ""
+                  }
+                  placeholder={selectedNode.id}
+                  maxLength={64}
+                  onChange={(e) => {
+                    const v = e.target.value;
+                    updateSelectedNode((node) => ({
+                      ...node,
+                      ui: {
+                        ...(node.ui ?? {}),
+                        // Empty string strips the alias so the strict id
+                        // re-becomes the display name (and we don't carry
+                        // empty strings around the spec).
+                        label: v.trim() ? v : undefined
+                      }
+                    }));
+                  }}
+                />
+              </label>
+            </>
           )}
 
           {/* Three tabs: Config (default — edit), Resolved (preview the

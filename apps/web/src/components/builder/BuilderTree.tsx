@@ -1,59 +1,58 @@
 /**
- * Tree View — stages × expandable per-node pin editor.
+ * Tree View — user-defined stage sections × per-node expandable pin editor.
  *
- * The DAG renders as a flat list grouped by topological stage. Each
- * stage is a thin banner; under it sit the nodes that run in that
- * stage. A node row collapses to a single line (icon · id · plugin)
- * for scannability and expands into a "PINS" panel:
+ * Stages are now first-class organizational containers (see
+ * `PipelineSpec.metadata.stages` and `node.ui.stageId`). Tree View
+ * groups nodes by their stage id; nodes with no stage land in an
+ * "Unassigned" pseudo-section at the bottom. The toolbar above the
+ * tree owns stage CRUD ("+ Add stage", "Auto-stage from flow"); each
+ * stage banner exposes rename, delete, and reorder controls. Per-row
+ * "Move to ▾" reassigns a node's stage.
  *
- *  - INPUTS  — one row per declared input port (or per port that has
- *              any current incoming edge). The source is chosen via a
- *              single `<select>` listing every other node's output
- *              ports — the input port stays single-source by design,
- *              so picking a new source replaces the prior wire.
- *  - OUTPUTS — one row per declared output port. Currently-connected
- *              targets list as `→ nodeX.portY` items with an × to
- *              detach. A "+ Add target ▾" selector appends a target.
- *
- * Everything writes through to the same React Flow `edges` array the
- * Flow View reads, so toggling between tabs is seamless.
+ * Each row is single-line when collapsed. Expanded shows INPUTS (one
+ * row per declared input port, with a `<select>` of every other node's
+ * output ports) and OUTPUTS (one row per declared output port, with
+ * currently-connected targets + "+ Add target ▾"). All edits go through
+ * the shared `edges` array so toggling to the Flow View reflects the
+ * change immediately.
  */
 import { useCallback, useMemo, useState } from "react";
 import type { Node, Edge } from "reactflow";
-import { projectStages } from "../../lib/stagesProjection.ts";
-import { nodeIcon, nodeLabel, portsFor } from "../../lib/builderViews.ts";
+import {
+  nodeIcon,
+  nodeLabel,
+  nodeDisplay,
+  portsFor
+} from "../../lib/builderViews.ts";
 import { decodePaletteDrag, type PaletteDragItem } from "../../lib/palette.ts";
 import { DND_MIME } from "../../lib/graph.ts";
 import type { PluginInfo } from "../../lib/api.ts";
+import type { PipelineStage } from "../../lib/types.ts";
 
 export interface BuilderTreeProps {
   nodes: Node[];
   edges: Edge[];
   selectedId: string | undefined;
   onSelect: (id: string | undefined) => void;
-  /** Drop a palette item — parent id is empty since the new tree
-   *  doesn't tie creation to a parent (wire via the expanded editor). */
   onAddChild: (parentId: string, item: PaletteDragItem) => void;
   onDelete: (id: string) => void;
   pluginManifestMap: Map<string, PluginInfo>;
-  /** Ensure an edge from (sourceId, sourcePort) → (targetId, targetPort)
-   *  exists. Any existing edge into the same (targetId, targetPort) is
-   *  REPLACED so input ports stay single-source. `null` ports mean the
-   *  default / no specific handle. */
   onConnect: (
     sourceId: string,
     sourcePort: string | null,
     targetId: string,
     targetPort: string | null
   ) => void;
-  /** Remove one specific edge by its React Flow edge id. */
   onDisconnect: (edgeId: string) => void;
+  stages: PipelineStage[];
+  onAddStage: (label: string) => void;
+  onRenameStage: (stageId: string, label: string) => void;
+  onDeleteStage: (stageId: string) => void;
+  onAssignNodeToStage: (nodeId: string, stageId: string | null) => void;
+  onAutoStage: () => void;
 }
 
-/** Encode a (nodeId, port|null) pair for use as an `<option>` value.
- *  Plain `nodeId.port` is ambiguous because a port name may contain `.`;
- *  pick a separator that nothing real uses. */
-const SEP = "";
+const SEP = "";
 const NONE = "__none__";
 function encodePin(nodeId: string, port: string | null | undefined): string {
   return `${nodeId}${SEP}${port ?? ""}`;
@@ -65,9 +64,18 @@ function decodePin(s: string): { nodeId: string; port: string | null } {
   return { nodeId: s.slice(0, i), port: port === "" ? null : port };
 }
 
-/** Friendly label for an `(nodeId, port|null)` option. */
-function pinLabel(nodeId: string, port: string | null | undefined): string {
-  return port ? `${nodeId}.${port}` : `${nodeId} (default)`;
+/** Friendly label for a `(nodeId, port|null)` option. Uses the node's
+ *  alias when set; appends the strict id in parens when distinct from
+ *  the alias so two nodes with the same alias stay distinguishable. */
+function pinLabel(
+  nodeById: Map<string, Node>,
+  nodeId: string,
+  port: string | null | undefined
+): string {
+  const display = nodeDisplay(nodeById.get(nodeId));
+  const portPart = port ? `.${port}` : " (default)";
+  if (display && display !== nodeId) return `${display}${portPart} (${nodeId})`;
+  return `${nodeId}${portPart}`;
 }
 
 interface PinEditorProps {
@@ -77,15 +85,27 @@ interface PinEditorProps {
   node: Node;
   onConnect: BuilderTreeProps["onConnect"];
   onDisconnect: BuilderTreeProps["onDisconnect"];
+  stages: PipelineStage[];
+  onAssignNodeToStage: BuilderTreeProps["onAssignNodeToStage"];
 }
 
 function PinEditor(props: PinEditorProps) {
-  const { nodes, edges, pluginManifestMap, node, onConnect, onDisconnect } =
-    props;
+  const {
+    nodes,
+    edges,
+    pluginManifestMap,
+    node,
+    onConnect,
+    onDisconnect,
+    stages,
+    onAssignNodeToStage
+  } = props;
+  const nodeById = useMemo(() => {
+    const m = new Map<string, Node>();
+    for (const n of nodes) m.set(n.id, n);
+    return m;
+  }, [nodes]);
 
-  // Effective input/output port lists — union of declared manifest
-  // ports and any ports already used by current edges (so dynamic-port
-  // plugins still show what they have wired).
   const { inputs, outputs } = useMemo(() => {
     const declared = portsFor(node, pluginManifestMap);
     const ins = new Set<string>(declared.inputs);
@@ -94,40 +114,20 @@ function PinEditor(props: PinEditorProps) {
       if (e.target === node.id && e.targetHandle) ins.add(e.targetHandle);
       if (e.source === node.id && e.sourceHandle) outs.add(e.sourceHandle);
     }
-    // For unconfigured plugin nodes with no declared ports and no current
-    // edges, show a synthetic "default" so the user can begin wiring.
-    if (ins.size === 0 && declared.inputs.length === 0 && node.type !== "input") {
-      // Only inputs side — if this is a true source node we leave it empty
-      // (an output node with no declared inputs is unusual but still
-      //  editable with the synthetic slot).
-    }
-    return {
-      inputs: [...ins].sort(),
-      outputs: [...outs].sort()
-    };
+    return { inputs: [...ins].sort(), outputs: [...outs].sort() };
   }, [node, edges, pluginManifestMap]);
 
-  // Every other node's output ports — option list for input dropdowns.
   const sourceOptions = useMemo(() => {
     const out: Array<{ nodeId: string; port: string | null; key: string }> =
       [];
     for (const other of nodes) {
       if (other.id === node.id) continue;
       const ps = portsFor(other, pluginManifestMap).outputs;
-      if (ps.length === 0) {
-        // A node with no declared outputs (e.g. an Output IO node) can't
-        // be a source — skip it.
-        continue;
-      }
+      if (ps.length === 0) continue;
       for (const p of ps) {
-        out.push({
-          nodeId: other.id,
-          port: p,
-          key: encodePin(other.id, p)
-        });
+        out.push({ nodeId: other.id, port: p, key: encodePin(other.id, p) });
       }
     }
-    // Stable order: by nodeId, then port.
     out.sort((a, b) =>
       a.nodeId === b.nodeId
         ? (a.port ?? "").localeCompare(b.port ?? "")
@@ -136,8 +136,6 @@ function PinEditor(props: PinEditorProps) {
     return out;
   }, [nodes, node.id, pluginManifestMap]);
 
-  // Every other node's input ports — option list for output add-target
-  // dropdowns.
   const targetOptions = useMemo(() => {
     const out: Array<{ nodeId: string; port: string | null; key: string }> =
       [];
@@ -146,11 +144,7 @@ function PinEditor(props: PinEditorProps) {
       const ps = portsFor(other, pluginManifestMap).inputs;
       if (ps.length === 0) continue;
       for (const p of ps) {
-        out.push({
-          nodeId: other.id,
-          port: p,
-          key: encodePin(other.id, p)
-        });
+        out.push({ nodeId: other.id, port: p, key: encodePin(other.id, p) });
       }
     }
     out.sort((a, b) =>
@@ -161,15 +155,42 @@ function PinEditor(props: PinEditorProps) {
     return out;
   }, [nodes, node.id, pluginManifestMap]);
 
+  const currentStageId =
+    (node.data as { node?: { ui?: { stageId?: string } } } | undefined)?.node
+      ?.ui?.stageId ?? "";
+
   return (
     <div className="builder-pin-editor">
-      {/* INPUTS */}
+      {/* Stage assignment — first thing so re-org is one click. */}
+      <div className="builder-pin-section">
+        <div className="builder-pin-heading">Stage</div>
+        <div className="builder-pin-row">
+          <span className="builder-pin-name">assigned to</span>
+          <select
+            value={currentStageId || NONE}
+            onChange={(e) => {
+              const v = e.target.value;
+              onAssignNodeToStage(node.id, v === NONE ? null : v);
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <option value={NONE}>(unassigned)</option>
+            {stages.map((s) => (
+              <option key={s.id} value={s.id}>
+                {s.label}
+              </option>
+            ))}
+          </select>
+        </div>
+      </div>
+
       {inputs.length > 0 && (
         <div className="builder-pin-section">
           <div className="builder-pin-heading">Inputs</div>
           {inputs.map((portName) => {
             const wired = edges.find(
-              (e) => e.target === node.id && (e.targetHandle ?? null) === portName
+              (e) =>
+                e.target === node.id && (e.targetHandle ?? null) === portName
             );
             return (
               <div key={"in:" + portName} className="builder-pin-row">
@@ -195,7 +216,7 @@ function PinEditor(props: PinEditorProps) {
                   <option value={NONE}>(disconnected)</option>
                   {sourceOptions.map((opt) => (
                     <option key={opt.key} value={opt.key}>
-                      {pinLabel(opt.nodeId, opt.port)}
+                      {pinLabel(nodeById, opt.nodeId, opt.port)}
                     </option>
                   ))}
                 </select>
@@ -205,16 +226,14 @@ function PinEditor(props: PinEditorProps) {
         </div>
       )}
 
-      {/* OUTPUTS */}
       {outputs.length > 0 && (
         <div className="builder-pin-section">
           <div className="builder-pin-heading">Outputs</div>
           {outputs.map((portName) => {
             const wired = edges.filter(
-              (e) => e.source === node.id && (e.sourceHandle ?? null) === portName
+              (e) =>
+                e.source === node.id && (e.sourceHandle ?? null) === portName
             );
-            // Targets already wired from THIS source port (so they don't
-            // appear again in the "+ Add target" dropdown).
             const usedKeys = new Set(
               wired.map((e) => encodePin(e.target, e.targetHandle ?? null))
             );
@@ -231,7 +250,7 @@ function PinEditor(props: PinEditorProps) {
                 <span className="builder-pin-targets">
                   {wired.map((e) => (
                     <span key={e.id} className="builder-pin-target">
-                      {pinLabel(e.target, e.targetHandle ?? null)}
+                      {pinLabel(nodeById, e.target, e.targetHandle ?? null)}
                       <button
                         type="button"
                         className="builder-pin-x"
@@ -247,8 +266,6 @@ function PinEditor(props: PinEditorProps) {
                   ))}
                   {available.length > 0 && (
                     <select
-                      // Always reset to empty so the user can pick the
-                      // same option again later.
                       value=""
                       onChange={(e) => {
                         const v = e.target.value;
@@ -262,7 +279,7 @@ function PinEditor(props: PinEditorProps) {
                       <option value="">+ Add target…</option>
                       {available.map((opt) => (
                         <option key={opt.key} value={opt.key}>
-                          {pinLabel(opt.nodeId, opt.port)}
+                          {pinLabel(nodeById, opt.nodeId, opt.port)}
                         </option>
                       ))}
                     </select>
@@ -294,6 +311,8 @@ interface NodeRowProps {
   pluginManifestMap: Map<string, PluginInfo>;
   onConnect: BuilderTreeProps["onConnect"];
   onDisconnect: BuilderTreeProps["onDisconnect"];
+  stages: PipelineStage[];
+  onAssignNodeToStage: BuilderTreeProps["onAssignNodeToStage"];
 }
 
 function NodeRow(props: NodeRowProps) {
@@ -307,9 +326,16 @@ function NodeRow(props: NodeRowProps) {
     edges,
     pluginManifestMap,
     onConnect,
-    onDisconnect
+    onDisconnect,
+    stages,
+    onAssignNodeToStage
   } = props;
   const isSelected = node.id === selectedId;
+  const display = nodeDisplay(node);
+  const labelSub = nodeLabel(node);
+  const subParts: string[] = [];
+  if (labelSub) subParts.push(labelSub);
+  if (display !== node.id) subParts.push(node.id);
   return (
     <>
       <div
@@ -332,8 +358,10 @@ function NodeRow(props: NodeRowProps) {
           {nodeIcon(node)}
         </span>
         <span className="builder-tree-label">
-          <strong>{node.id}</strong>
-          <span className="muted"> {nodeLabel(node)}</span>
+          <strong>{display}</strong>
+          {subParts.length > 0 && (
+            <span className="muted"> {subParts.join(" · ")}</span>
+          )}
         </span>
       </div>
       {expanded && (
@@ -344,9 +372,88 @@ function NodeRow(props: NodeRowProps) {
           node={node}
           onConnect={onConnect}
           onDisconnect={onDisconnect}
+          stages={stages}
+          onAssignNodeToStage={onAssignNodeToStage}
         />
       )}
     </>
+  );
+}
+
+interface StageHeadProps {
+  stage: PipelineStage | null;
+  nodeCount: number;
+  onRename: (id: string, label: string) => void;
+  onDelete: (id: string) => void;
+}
+
+function StageHead(props: StageHeadProps) {
+  const { stage, nodeCount, onRename, onDelete } = props;
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(stage?.label ?? "");
+  if (!stage) {
+    return (
+      <header className="builder-tree-stage-head builder-tree-stage-head-unassigned">
+        <span>Unassigned</span>
+        <span className="muted">
+          {nodeCount} node{nodeCount === 1 ? "" : "s"}
+        </span>
+      </header>
+    );
+  }
+  if (editing) {
+    const commit = () => {
+      const trimmed = draft.trim();
+      if (trimmed && trimmed !== stage.label) onRename(stage.id, trimmed);
+      setEditing(false);
+    };
+    return (
+      <header className="builder-tree-stage-head">
+        <input
+          autoFocus
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onBlur={commit}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              e.preventDefault();
+              commit();
+            } else if (e.key === "Escape") {
+              setDraft(stage.label);
+              setEditing(false);
+            }
+          }}
+        />
+        <span className="muted">
+          {nodeCount} node{nodeCount === 1 ? "" : "s"}
+        </span>
+      </header>
+    );
+  }
+  return (
+    <header className="builder-tree-stage-head">
+      <span
+        className="builder-tree-stage-name"
+        title="Click to rename"
+        onClick={() => {
+          setDraft(stage.label);
+          setEditing(true);
+        }}
+      >
+        {stage.label}
+      </span>
+      <span className="muted">
+        {nodeCount} node{nodeCount === 1 ? "" : "s"}
+      </span>
+      <button
+        type="button"
+        className="link-btn builder-tree-stage-del"
+        title="Delete stage (nodes move to Unassigned)"
+        onClick={() => onDelete(stage.id)}
+      >
+        delete
+      </button>
+    </header>
   );
 }
 
@@ -360,26 +467,45 @@ export function BuilderTree(props: BuilderTreeProps) {
     onDelete,
     pluginManifestMap,
     onConnect,
-    onDisconnect
+    onDisconnect,
+    stages,
+    onAddStage,
+    onRenameStage,
+    onDeleteStage,
+    onAssignNodeToStage,
+    onAutoStage
   } = props;
 
-  const stages = useMemo(
-    () =>
-      projectStages(
-        nodes.map((n) => n.id),
-        edges.map((e) => ({ source: e.source, target: e.target }))
-      ).stages,
-    [nodes, edges]
-  );
+  // Build the section list: every declared stage in declared order
+  // (with its members), followed by an Unassigned bucket for anything
+  // whose stageId is missing or unknown.
+  const sections = useMemo(() => {
+    const known = new Set(stages.map((s) => s.id));
+    const byStage = new Map<string, Node[]>();
+    for (const s of stages) byStage.set(s.id, []);
+    const unassigned: Node[] = [];
+    for (const n of nodes) {
+      const sid = (n.data as { node?: { ui?: { stageId?: string } } } | undefined)
+        ?.node?.ui?.stageId;
+      if (sid && known.has(sid)) {
+        byStage.get(sid)!.push(n);
+      } else {
+        unassigned.push(n);
+      }
+    }
+    const sectionStages = stages.map((s) => ({
+      stage: s as PipelineStage | null,
+      nodes: (byStage.get(s.id) ?? []).slice().sort((a, b) => a.id.localeCompare(b.id))
+    }));
+    if (unassigned.length > 0) {
+      sectionStages.push({
+        stage: null,
+        nodes: unassigned.slice().sort((a, b) => a.id.localeCompare(b.id))
+      });
+    }
+    return sectionStages;
+  }, [nodes, stages]);
 
-  const nodeById = useMemo(() => {
-    const m = new Map<string, Node>();
-    for (const n of nodes) m.set(n.id, n);
-    return m;
-  }, [nodes]);
-
-  // Per-node expansion state. Collapsed by default so the staged
-  // overview is the first thing the user sees.
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
   const toggleExpand = useCallback((id: string) => {
     setExpanded((prev) => {
@@ -394,7 +520,6 @@ export function BuilderTree(props: BuilderTreeProps) {
     (event: React.KeyboardEvent<HTMLDivElement>) => {
       if (!selectedId) return;
       if (event.key === "Delete" || event.key === "Backspace") {
-        // Skip when the user is actually inside an editor (select / input).
         const tag = (event.target as HTMLElement | null)?.tagName;
         if (tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA") return;
         event.preventDefault();
@@ -410,8 +535,6 @@ export function BuilderTree(props: BuilderTreeProps) {
       const item = decodePaletteDrag(raw);
       if (!item) return;
       event.preventDefault();
-      // No parent — the new node lands as a root (stage 0). Wire it via
-      // the expanded INPUTS editor.
       onAddChild("", item);
     },
     [onAddChild]
@@ -427,12 +550,29 @@ export function BuilderTree(props: BuilderTreeProps) {
     >
       <header className="builder-tree-head">
         <span className="muted">
-          {nodes.length} node{nodes.length === 1 ? "" : "s"} ·
-          {" "}
+          {nodes.length} node{nodes.length === 1 ? "" : "s"} ·{" "}
           {stages.length} stage{stages.length === 1 ? "" : "s"}
         </span>
-        <span className="muted builder-tree-hint">
-          drag plugins from the palette to add · expand a row to view + edit its pins
+        <span className="builder-tree-toolbar">
+          <button
+            type="button"
+            className="link-btn"
+            title="Append a new stage"
+            onClick={() => {
+              const name = window.prompt("New stage name:");
+              if (name && name.trim()) onAddStage(name.trim());
+            }}
+          >
+            + Add stage
+          </button>
+          <button
+            type="button"
+            className="link-btn"
+            title="Generate stages from the topological layout"
+            onClick={onAutoStage}
+          >
+            Auto-stage
+          </button>
         </span>
       </header>
 
@@ -441,34 +581,40 @@ export function BuilderTree(props: BuilderTreeProps) {
           Drop a node from the palette to start.
         </p>
       ) : (
-        stages.map((stage) => (
-          <section key={stage.index} className="builder-tree-stage">
-            <header className="builder-tree-stage-head">
-              <span>Stage {stage.index + 1}</span>
-              <span className="muted">
-                {stage.nodeIds.length} node
-                {stage.nodeIds.length === 1 ? "" : "s"}
-              </span>
-            </header>
-            {stage.nodeIds.map((id) => {
-              const flow = nodeById.get(id);
-              if (!flow) return null;
-              return (
-                <NodeRow
-                  key={id}
-                  node={flow}
-                  expanded={expanded.has(id)}
-                  selectedId={selectedId}
-                  onSelect={onSelect}
-                  onToggle={toggleExpand}
-                  nodes={nodes}
-                  edges={edges}
-                  pluginManifestMap={pluginManifestMap}
-                  onConnect={onConnect}
-                  onDisconnect={onDisconnect}
-                />
-              );
-            })}
+        sections.map((section, i) => (
+          <section
+            key={section.stage ? section.stage.id : "__unassigned__" + i}
+            className="builder-tree-stage"
+          >
+            <StageHead
+              stage={section.stage}
+              nodeCount={section.nodes.length}
+              onRename={onRenameStage}
+              onDelete={onDeleteStage}
+            />
+            {section.nodes.length === 0 && section.stage && (
+              <p className="muted builder-tree-stage-empty">
+                Empty — assign a node from another stage via its "Stage"
+                dropdown in the expanded view.
+              </p>
+            )}
+            {section.nodes.map((node) => (
+              <NodeRow
+                key={node.id}
+                node={node}
+                expanded={expanded.has(node.id)}
+                selectedId={selectedId}
+                onSelect={onSelect}
+                onToggle={toggleExpand}
+                nodes={nodes}
+                edges={edges}
+                pluginManifestMap={pluginManifestMap}
+                onConnect={onConnect}
+                onDisconnect={onDisconnect}
+                stages={stages}
+                onAssignNodeToStage={onAssignNodeToStage}
+              />
+            ))}
           </section>
         ))
       )}
