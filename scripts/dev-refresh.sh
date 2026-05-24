@@ -13,7 +13,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 COMPOSE=(docker compose -f infra/docker/docker-compose.yml)
-SERVICES=("${@:-api worker web}")
+SERVICES=("${@:-api worker web file-watcher}")
 
 "${COMPOSE[@]}" up -d --build ${SERVICES[@]}
 # otel-collector config is volume-mounted; pick up edits without a rebuild.
