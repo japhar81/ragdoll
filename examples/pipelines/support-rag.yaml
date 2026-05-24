@@ -6,81 +6,109 @@ metadata:
     domain: support
 spec:
   parameters:
-    - key: retrieval.top_k
-      type: integer
-      defaultValue: 5
-      allowedScopes: [global, pipeline, tenant_pipeline, runtime]
-      tenantOverridable: true
-      runtimeOverridable: true
-      description: Number of retrieved chunks.
-    - key: chunking.chunk_size
-      type: integer
-      defaultValue: 1000
-      allowedScopes: [pipeline]
-      tenantOverridable: false
-      runtimeOverridable: false
-      description: Locked chunk size for index compatibility.
+  - key: retrieval.top_k
+    type: integer
+    defaultValue: 5
+    allowedScopes:
+    - global
+    - pipeline
+    - tenant_pipeline
+    - runtime
+    tenantOverridable: true
+    runtimeOverridable: true
+    description: Number of retrieved chunks.
+  - key: chunking.chunk_size
+    type: integer
+    defaultValue: 1000
+    allowedScopes:
+    - pipeline
+    tenantOverridable: false
+    runtimeOverridable: false
+    description: Locked chunk size for index compatibility.
   nodes:
-    - id: input
-      type: input
-    - id: retrieve
-      plugin:
-        category: retriever
-        id: qdrant_retriever
-        version: "1.0.0"
-      config:
-        top_k: "${config.retrieval.top_k}"
-        collection: "${config.vector.collection}"
-    - id: prompt
-      plugin:
-        category: prompt_template
-        id: basic_rag_prompt
-        version: "1.0.0"
-    - id: guardrail
-      plugin:
-        category: guardrail
-        id: simple_keyword_guardrail
-        version: "1.0.0"
-      config:
-        blockedKeywords: ["ignore previous instructions"]
-    - id: llm
-      plugin:
-        category: llm
-        id: provider_chat
-        version: "1.0.0"
-      config:
-        provider: "${config.llm.provider}"
-        model: "${config.llm.model}"
-        temperature: "${config.llm.temperature}"
-        baseUrl: "${config.llm.base_url}"
-      secrets:
-        apiKey:
-          scope: tenant
-          key: llm.api_key
-    - id: output
-      type: output
+  - id: input
+    type: input
+    ui:
+      position:
+        x: -1.8408203125
+        y: 40
+  - id: retrieve
+    plugin:
+      category: retriever
+      id: qdrant_retriever
+      version: 1.0.0
+    config:
+      top_k: "${config.retrieval.top_k}"
+      collection: "${config.vector.collection}"
+    ui:
+      position:
+        x: 453.6171875
+        y: 40
+  - id: prompt
+    plugin:
+      category: prompt_template
+      id: basic_rag_prompt
+      version: 1.0.0
+    ui:
+      position:
+        x: 909.018798828125
+        y: 40
+  - id: guardrail
+    plugin:
+      category: guardrail
+      id: simple_keyword_guardrail
+      version: 1.0.0
+    config:
+      blockedKeywords:
+      - ignore previous instructions
+    ui:
+      position:
+        x: 1366.055908203125
+        y: 40
+  - id: llm
+    plugin:
+      category: llm
+      id: provider_chat
+      version: 1.0.0
+    config:
+      provider: "${config.llm.provider}"
+      model: "${config.llm.model}"
+      temperature: "${config.llm.temperature}"
+      baseUrl: "${config.llm.base_url}"
+    secrets:
+      apiKey:
+        scope: tenant
+        key: llm.api_key
+    ui:
+      position:
+        x: 1825.574462890625
+        y: 40
+  - id: output
+    type: output
+    ui:
+      position:
+        x: 2287.574462890625
+        y: 40
   edges:
-    # Question fans out: retriever uses it to embed + query; prompt uses it
-    # to fill the template. Documents flow only from retriever into prompt.
-    - from: input
-      to: retrieve
-      fromPort: question
-      toPort: question
-    - from: input
-      to: prompt
-      fromPort: question
-      toPort: question
-    - from: retrieve
-      to: prompt
-      fromPort: documents
-      toPort: documents
-    - from: prompt
-      to: guardrail
-      fromPort: messages
-      toPort: messages
-    - from: guardrail
-      to: llm
-      fromPort: messages
-      toPort: messages
-    - from: llm
-      to: output
+  - from: input
+    to: retrieve
+    fromPort: question
+    toPort: question
+  - from: input
+    to: prompt
+    fromPort: question
+    toPort: question
+  - from: retrieve
+    to: prompt
+    fromPort: documents
+    toPort: documents
+  - from: prompt
+    to: guardrail
+    fromPort: messages
+    toPort: messages
+  - from: guardrail
+    to: llm
+    fromPort: messages
+    toPort: messages
+  - from: llm
+    to: output

@@ -2,132 +2,132 @@ apiVersion: rag-platform/v1
 kind: Pipeline
 metadata:
   name: codebase-ingest-code
-  description: "Symbol-aware ingestion of a polyglot codebase into Qdrant. First pass embeds everything; subsequent passes touch only deltas (and delete rows for files removed on disk)."
+  description: Symbol-aware ingestion of a polyglot codebase into Qdrant. First pass embeds everything; subsequent passes touch only deltas (and delete rows for files removed on disk).
 spec:
   nodes:
-    # Walk the worker filesystem. The default exclude list strips .git,
-    # node_modules, dist, target, __pycache__, .venv, etc.
-    - id: fs
-      plugin:
-        category: datasource
-        id: filesystem_source
-        version: "1.0.0"
-      config:
-        rootPath: "/workspace"
-        include:
-          - "**/*.{ts,tsx,js,jsx,py,go,rs,java,kt,c,h,cpp,cc,hpp,cs,rb,php,sh}"
-        exclude:
-          - "docs/**"          # docs go to opensearch via codebase-ingest-docs
-        maxFileSize: 524288    # 512 KiB; vendored bundles and generated files get skipped
-        computeHash: false     # mtime is enough; turn on for compareBy: hash
-
-    # Detect new / modified / deleted files vs last run. mtime mode is the
-    # cheap default. Switch to mtime+hash if branch-hopping causes spurious
-    # re-embeds.
-    - id: delta
-      plugin:
-        category: transformer
-        id: delta_filter
-        version: "1.0.0"
-      config:
-        stateKey: "code"
-        compareBy: "mtime"
-
-    # Symbol-aware chunking by extension; falls back to line chunking for
-    # unknown languages.
-    - id: chunk
-      plugin:
-        category: chunker
-        id: code_chunker
-        version: "1.0.0"
-      config:
-        maxChars: 4000
-        minChars: 400
-
-    - id: embed
-      plugin:
-        category: embedder
-        id: provider_embeddings
-        version: "1.0.0"
-      config:
-        provider: "${config.embedding.provider}"
-        model: "${config.embedding.model}"
-      secrets:
-        apiKey:
-          scope: tenant
-          key: embedding.api_key
-
-    - id: write
-      plugin:
-        category: vector_store
-        id: qdrant_vector_store
-        version: "1.0.0"
-      config:
-        collection: "codebase"
-      secrets:
-        apiKey:
-          scope: tenant
-          key: qdrant.api_key
-
-    # Delete branch: removes vectors for files that disappeared from disk.
-    # idPrefix must match what the upsert side wrote (qdrant_vector_store
-    # uses executionId as the prefix by default, so this matches only when
-    # you wire a custom idPrefix on both sides; for the demo we delete by
-    # bare docId).
-    - id: delete
-      plugin:
-        category: sink
-        id: qdrant_delete
-        version: "1.0.0"
-      config:
-        collection: "codebase"
-      secrets:
-        apiKey:
-          scope: tenant
-          key: qdrant.api_key
-
-    - id: out
-      type: output
-
+  - id: fs
+    plugin:
+      category: datasource
+      id: filesystem_source
+      version: 1.0.0
+    config:
+      rootPath: /workspace
+      include:
+      - "**/*.{ts,tsx,js,jsx,py,go,rs,java,kt,c,h,cpp,cc,hpp,cs,rb,php,sh}"
+      exclude:
+      - "docs/**"
+      maxFileSize: 524288
+      computeHash: false
+    ui:
+      position:
+        x: -4.924163818359375
+        y: 110
+  - id: delta
+    plugin:
+      category: transformer
+      id: delta_filter
+      version: 1.0.0
+    config:
+      stateKey: code
+      compareBy: mtime
+    ui:
+      position:
+        x: 452.82713317871094
+        y: 110
+  - id: chunk
+    plugin:
+      category: chunker
+      id: code_chunker
+      version: 1.0.0
+    config:
+      maxChars: 4000
+      minChars: 400
+    ui:
+      position:
+        x: 910.5723037719727
+        y: 29
+  - id: embed
+    plugin:
+      category: embedder
+      id: provider_embeddings
+      version: 1.0.0
+    config:
+      provider: "${config.embedding.provider}"
+      model: "${config.embedding.model}"
+    secrets:
+      apiKey:
+        scope: tenant
+        key: embedding.api_key
+    ui:
+      position:
+        x: 1369.381181716919
+        y: 110
+  - id: write
+    plugin:
+      category: vector_store
+      id: qdrant_vector_store
+      version: 1.0.0
+    config:
+      collection: codebase
+    secrets:
+      apiKey:
+        scope: tenant
+        key: qdrant.api_key
+    ui:
+      position:
+        x: 1829.1748056411743
+        y: 110
+  - id: delete
+    plugin:
+      category: sink
+      id: qdrant_delete
+      version: 1.0.0
+    config:
+      collection: codebase
+    secrets:
+      apiKey:
+        scope: tenant
+        key: qdrant.api_key
+    ui:
+      position:
+        x: 911.7939338684082
+        y: 191
+  - id: out
+    type: output
+    ui:
+      position:
+        x: 2291.1748056411743
+        y: 110
   edges:
-    - from: fs
-      to: delta
-      fromPort: documents
-      toPort: documents
-
-    # New + modified files take the chunk/embed/write path. Two parallel
-    # edges fan into the chunker; merging happens at the input layer.
-    - from: delta
-      to: chunk
-      fromPort: new
-      toPort: documents
-    - from: delta
-      to: chunk
-      fromPort: modified
-      toPort: documents
-
-    - from: chunk
-      to: embed
-      fromPort: chunks
-      toPort: chunks
-    - from: chunk
-      to: write
-      fromPort: chunks
-      toPort: chunks
-    - from: embed
-      to: write
-      fromPort: vectors
-      toPort: vectors
-
-    # Deleted docs take the delete-sink branch and the rest is skipped.
-    - from: delta
-      to: delete
-      fromPort: deleted
-      toPort: deleted
-
-    # Both terminal sinks feed the framework output node so the execution
-    # records a meaningful tail; pick either side for the run-result view.
-    - from: write
-      to: out
-    - from: delete
-      to: out
+  - from: fs
+    to: delta
+    fromPort: documents
+    toPort: documents
+  - from: delta
+    to: chunk
+    fromPort: new
+    toPort: documents
+  - from: delta
+    to: chunk
+    fromPort: modified
+    toPort: documents
+  - from: chunk
+    to: embed
+    fromPort: chunks
+    toPort: chunks
+  - from: chunk
+    to: write
+    fromPort: chunks
+    toPort: chunks
+  - from: embed
+    to: write
+    fromPort: vectors
+    toPort: vectors
+  - from: delta
+    to: delete
+    fromPort: deleted
+    toPort: deleted
+  - from: write
+    to: out
+  - from: delete
+    to: out

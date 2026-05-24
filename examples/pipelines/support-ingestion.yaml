@@ -7,61 +7,78 @@ metadata:
     mode: ingestion
 spec:
   nodes:
-    - id: input
-      type: input
-    - id: load
-      plugin:
-        category: loader
-        id: file_document_loader
-        version: "1.0.0"
-    - id: chunk
-      plugin:
-        category: chunker
-        id: basic_text_chunker
-        version: "1.0.0"
-      config:
-        chunkSize: "${config.chunking.chunk_size}"
-        overlap: 100
-    - id: embed
-      plugin:
-        category: embedder
-        id: provider_embeddings
-        version: "1.0.0"
-      config:
-        provider: "${config.embedding.provider}"
-        model: "${config.embedding.model}"
-    - id: write
-      plugin:
-        category: vector_store
-        id: qdrant_vector_store
-        version: "1.0.0"
-      config:
-        isolationMode: "${config.vector.isolation.mode}"
-    - id: output
-      type: output
+  - id: input
+    type: input
+    ui:
+      position:
+        x: -1.8408203125
+        y: 40
+  - id: load
+    plugin:
+      category: loader
+      id: file_document_loader
+      version: 1.0.0
+    ui:
+      position:
+        x: 453.6171875
+        y: 40
+  - id: chunk
+    plugin:
+      category: chunker
+      id: basic_text_chunker
+      version: 1.0.0
+    config:
+      chunkSize: "${config.chunking.chunk_size}"
+      overlap: 100
+    ui:
+      position:
+        x: 909.018798828125
+        y: 40
+  - id: embed
+    plugin:
+      category: embedder
+      id: provider_embeddings
+      version: 1.0.0
+    config:
+      provider: "${config.embedding.provider}"
+      model: "${config.embedding.model}"
+    ui:
+      position:
+        x: 1366.055908203125
+        y: 40
+  - id: write
+    plugin:
+      category: vector_store
+      id: qdrant_vector_store
+      version: 1.0.0
+    config:
+      isolationMode: "${config.vector.isolation.mode}"
+    ui:
+      position:
+        x: 1825.574462890625
+        y: 40
+  - id: output
+    type: output
+    ui:
+      position:
+        x: 2287.574462890625
+        y: 40
   edges:
-    # Loader receives the input payload (e.g. text/uri) unported so any
-    # legacy field shape still reaches it via the flatten fallback.
-    - from: input
-      to: load
-    # Loader emits documents/text; chunker reads text. Leave unported so the
-    # flatten fallback delivers whichever shape the loader produced.
-    - from: load
-      to: chunk
-    # Explicit chunk → embed (texts derived from chunks).
-    - from: chunk
-      to: embed
-      fromPort: chunks
-      toPort: chunks
-    # The write node needs BOTH chunks (for payload text) and vectors
-    # (for the embedding). Fan in from both upstreams.
-    - from: chunk
-      to: write
-      fromPort: chunks
-      toPort: chunks
-    - from: embed
-      to: write
-      fromPort: vectors
-      toPort: vectors
-    - from: write
-      to: output
+  - from: input
+    to: load
+  - from: load
+    to: chunk
+  - from: chunk
+    to: embed
+    fromPort: chunks
+    toPort: chunks
+  - from: chunk
+    to: write
+    fromPort: chunks
+    toPort: chunks
+  - from: embed
+    to: write
+    fromPort: vectors
+    toPort: vectors
+  - from: write
+    to: output

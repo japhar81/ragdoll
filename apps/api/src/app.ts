@@ -54,6 +54,7 @@ import {
 import { ConfigResolver } from "../../../packages/config-resolver/src/index.ts";
 import {
   validatePipelineSpec,
+  autoLayoutSpec,
   loadPipelineSpec,
   exportSpec,
   specChecksum,
@@ -1229,6 +1230,11 @@ export function createApp(deps: AppDeps): App {
     if (!validation.valid) {
       return error(422, "validation_failed", { issues: validation.errors });
     }
+    // Auto-layout specs that arrived without per-node positions (CLI /
+    // MCP / hand-written YAML / older seeds). A spec that already has
+    // positions on every node is left untouched. See
+    // packages/pipeline-spec/src/index.ts → autoLayoutSpec.
+    const laidOut = autoLayoutSpec(spec);
 
     const publish = body.publish === true;
     const existingRows = await deps.pipelineVersions.listByPipeline(pipelineId);
@@ -1245,7 +1251,7 @@ export function createApp(deps: AppDeps): App {
     if (publish) {
       let record: PipelineVersionRecord;
       try {
-        record = publishVersion(existingRecords, spec, body.version, {
+        record = publishVersion(existingRecords, laidOut, body.version, {
           pipelineId
         });
       } catch (e) {
@@ -1286,8 +1292,8 @@ export function createApp(deps: AppDeps): App {
     );
     if (existingDraft) {
       const updated = await deps.pipelineVersions.update(existingDraft.id, {
-        spec,
-        checksum: specChecksum(spec)
+        spec: laidOut,
+        checksum: specChecksum(laidOut)
       });
       await audit(ctx, "pipeline_version.save_draft", "pipeline_version", updated.id, existingDraft, {
         version: updated.version
@@ -1307,8 +1313,8 @@ export function createApp(deps: AppDeps): App {
       pipelineId,
       version: body.version,
       status: "draft",
-      spec,
-      checksum: specChecksum(spec),
+      spec: laidOut,
+      checksum: specChecksum(laidOut),
       createdBy: ctx.principal.id,
       createdAt: nowIso(),
       publishedAt: null
@@ -1340,6 +1346,12 @@ export function createApp(deps: AppDeps): App {
     if (!validation.valid) {
       return error(422, "validation_failed", { issues: validation.errors });
     }
+    // Auto-layout (LR) when positions are missing so a save from the
+    // CLI, MCP, or a hand-written YAML lands in storage with positions
+    // already baked in. A spec that already carries positions on every
+    // node is left untouched, so a Builder save preserves the user's
+    // arrangement.
+    const laidOutSave = autoLayoutSpec(spec);
     const level =
       body.level === "minor" || body.level === "major" || body.level === "patch"
         ? (body.level as "patch" | "minor" | "major")
@@ -1365,7 +1377,7 @@ export function createApp(deps: AppDeps): App {
     const result = nextVersionOnSave({
       existingVersions,
       latest: latestRow ? toRecord(latestRow) : undefined,
-      spec,
+      spec: laidOutSave,
       level,
       pipelineId
     });

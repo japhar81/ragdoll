@@ -1,6 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { layeredLayout, forceLayout, applyLayout } from "../src/lib/layouts.ts";
+import {
+  layeredLayout,
+  forceLayout,
+  applyLayout
+} from "../../../packages/pipeline-spec/src/layouts.ts";
 
 // ---------------------------------------------------------------------------
 // layeredLayout

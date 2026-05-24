@@ -4,32 +4,48 @@ metadata:
   name: local-demo
 spec:
   nodes:
-    - id: input
-      type: input
-    - id: prompt
-      plugin:
-        category: prompt_template
-        id: basic_rag_prompt
-        version: "1.0.0"
-    - id: llm
-      plugin:
-        category: llm
-        id: provider_chat
-        version: "1.0.0"
-      config:
-        provider: "${config.llm.provider}"
-        model: "${config.llm.model}"
-        baseUrl: "${config.llm.base_url}"
-    - id: output
-      type: output
+  - id: input
+    type: input
+    ui:
+      position:
+        x: 8.71875
+        y: 40
+  - id: prompt
+    plugin:
+      category: prompt_template
+      id: basic_rag_prompt
+      version: 1.0.0
+    ui:
+      position:
+        x: 469
+        y: 40
+  - id: llm
+    plugin:
+      category: llm
+      id: provider_chat
+      version: 1.0.0
+    config:
+      provider: "${config.llm.provider}"
+      model: "${config.llm.model}"
+      baseUrl: "${config.llm.base_url}"
+    ui:
+      position:
+        x: 931
+        y: 40
+  - id: output
+    type: output
+    ui:
+      position:
+        x: 1391.28125
+        y: 40
   edges:
-    - from: input
-      to: prompt
-      fromPort: question
-      toPort: question
-    - from: prompt
-      to: llm
-      fromPort: messages
-      toPort: messages
-    - from: llm
-      to: output
+  - from: input
+    to: prompt
+    fromPort: question
+    toPort: question
+  - from: prompt
+    to: llm
+    fromPort: messages
+    toPort: messages
+  - from: llm
+    to: output

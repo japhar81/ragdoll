@@ -15,6 +15,7 @@ import type {
   PluginCategory,
   PluginRef
 } from "./types.ts";
+import { autoLayoutSpec } from "../../../../packages/pipeline-spec/src/index.ts";
 
 export const PLUGIN_CATEGORIES: PluginCategory[] = [
   "datasource",
@@ -149,7 +150,19 @@ function flowTypeFor(node: PipelineNode): string | undefined {
  * read from `node.ui.position` if present, otherwise laid out left-to-right.
  */
 export function specToGraph(spec: PipelineSpec): { nodes: FlowNode[]; edges: FlowEdge[] } {
-  const nodes: FlowNode[] = (spec.spec?.nodes ?? []).map((node, index) => {
+  // Defensive auto-layout — covers older seeded specs / hand-written
+  // YAML / any spec that arrived without per-node positions. The API
+  // SAVE path already bakes positions in for fresh saves, but a spec
+  // that lands here unset (e.g. directly loaded from a seed) still
+  // gets a tidy left-to-right layout the user can immediately adjust.
+  // The web's `PipelineSpec` is the same structural shape as the core
+  // package's, but TS treats the two distinct module declarations as
+  // unrelated. Cast through unknown so the shared helper sees the
+  // right shape without us duplicating it.
+  const positioned = autoLayoutSpec(
+    spec as unknown as Parameters<typeof autoLayoutSpec>[0]
+  ) as unknown as PipelineSpec;
+  const nodes: FlowNode[] = (positioned.spec?.nodes ?? []).map((node, index) => {
     const ui = node.ui as { position?: { x: number; y: number } } | undefined;
     const position = ui?.position ?? { x: 40 + index * 240, y: 140 };
     return {
