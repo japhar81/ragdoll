@@ -11,17 +11,32 @@ import type { PluginInfo } from "./api.ts";
 interface NodeLike {
   type?: string;
   plugin?: { category?: string; id?: string; version?: string };
+  ui?: { label?: string };
 }
 
-/** Human label for a React Flow node: the plugin id (so a freshly-loaded
- *  pipeline reads "qdrant_retriever" instead of "(unconfigured)"), or the
- *  IO type for input/output nodes. */
+/** Plugin / type label for a React Flow node — the secondary text under
+ *  the friendly display name (e.g. "filesystem_source"). IO nodes get
+ *  "input" / "output"; an unconfigured plugin shows "(unconfigured)". */
 export function nodeLabel(flow: Node | undefined): string {
   const pn = (flow?.data as { node?: NodeLike } | undefined)?.node;
   if (!pn) return "";
   if (pn.type === "input") return "input";
   if (pn.type === "output") return "output";
   return pn.plugin?.id ?? "(unconfigured)";
+}
+
+/** Friendly display name — the user-set alias from `ui.label`, or the
+ *  strict node id when no alias is set. The Tree View shows this as the
+ *  primary text on a row so a long pipeline reads "Docs Source" instead
+ *  of hunting for "fs_docs". */
+export function nodeDisplay(flow: Node | undefined): string {
+  const pn = (flow?.data as { node?: NodeLike } | undefined)?.node;
+  if (!pn) return flow?.id ?? "";
+  const label = pn.ui?.label;
+  if (typeof label === "string" && label.trim().length > 0) {
+    return label.trim();
+  }
+  return flow?.id ?? "";
 }
 
 /** Single-character mnemonic icon per plugin category. Purely cosmetic;
