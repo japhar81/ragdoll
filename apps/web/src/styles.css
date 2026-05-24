@@ -375,6 +375,83 @@ button.palette-item:active {
   padding: 1px 6px;
 }
 
+/* Cross-ref / join-ref leaves rendered under their parent row. They
+ * behave like rows but never expand. */
+.builder-tree-subrow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  padding: 2px 8px 2px 4px;
+  color: #475569;
+  cursor: default;
+  user-select: none;
+}
+.builder-tree-subrow:hover { background: #f8fafc; }
+.builder-tree-crossref .tree-sub-icon {
+  color: #d97706;
+  font-weight: 700;
+  width: 16px;
+  text-align: center;
+}
+.builder-tree-joinref { cursor: pointer; }
+.builder-tree-joinref .tree-sub-icon {
+  color: #2563eb;
+  font-weight: 700;
+  width: 16px;
+  text-align: center;
+}
+.tree-join-badge {
+  display: inline-block;
+  font-size: 10px;
+  color: #1d4ed8;
+  background: #dbeafe;
+  border: 1px solid #bfdbfe;
+  border-radius: 3px;
+  padding: 0 5px;
+  margin-left: 6px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+/* Port chip + inline editor. */
+.tree-port-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: #475569;
+  background: #f1f5f9;
+  border: 1px solid #e2e8f0;
+  border-radius: 4px;
+  padding: 1px 6px;
+  margin-left: auto;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.tree-port-chip:hover {
+  color: #0f172a;
+  background: #e2e8f0;
+}
+.tree-port-chip-ref { background: #fff7ed; border-color: #fed7aa; color: #9a3412; }
+.tree-port-chip-join { background: #eff6ff; border-color: #bfdbfe; color: #1d4ed8; }
+.tree-port-name { font-family: ui-monospace, SFMono-Regular, monospace; }
+.tree-port-arrow { color: #94a3b8; }
+.tree-port-editor {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+}
+.tree-port-editor select {
+  font-size: 11px;
+  padding: 1px 4px;
+}
+.tree-port-btn {
+  font-size: 11px;
+  padding: 2px 8px;
+}
+
 /* Layout dropdown anchored to the canvas upper-left (above the React Flow
  * pane, below any React Flow panels). z-index intentionally higher than
  * react-flow__controls / react-flow__minimap which are 4/5. */

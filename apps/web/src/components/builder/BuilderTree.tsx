@@ -11,8 +11,17 @@
  *                                    (a node id) → re-parents the dragged
  *                                    node onto the drop row (rewrites the
  *                                    primary-parent edge; fan-in is kept).
+ *
+ * Convergence nodes (in-degree > 1, e.g. an `out` that receives every
+ * branch) are hoisted to the top level instead of hiding under one
+ * parent. Each contributing branch ends with a `→ joinId` leaf so the
+ * data flow is visible where the data leaves; the hoisted row at the
+ * bottom lists every contributing parent with its port pair.
+ *
+ * Every edge — primary, cross-ref, and join-ref — surfaces an editable
+ * `from → to` port chip so the user can rewire without leaving the tree.
  */
-import { useMemo, useState, useCallback, useRef } from "react";
+import { useEffect, useMemo, useState, useCallback, useRef } from "react";
 import type { Node, Edge } from "reactflow";
 import {
   projectGraphToTree,
@@ -21,6 +30,7 @@ import {
 } from "../../lib/treeProjection.ts";
 import { type PaletteDragItem, decodePaletteDrag } from "../../lib/palette.ts";
 import { DND_MIME } from "../../lib/graph.ts";
+import type { PluginInfo } from "../../lib/api.ts";
 
 /** Internal MIME for tree → tree drags. Kept distinct from the palette
  *  MIME so a single drop handler can dispatch on payload type. */
@@ -42,10 +52,180 @@ export interface BuilderTreeProps {
   onReparent: (nodeId: string, newParentId: string) => void;
   /** Remove the selected node — called by the Delete/Backspace handler. */
   onDelete: (id: string) => void;
+  /** Plugin manifests keyed by `${category}:${id}:${version}` — the port
+   *  editor reads each node's declared input/output ports from here. */
+  pluginManifestMap: Map<string, PluginInfo>;
+  /** Mutate one edge's port pair. `null` clears a port (= default). */
+  onUpdateEdge: (
+    edgeId: string,
+    patch: { sourceHandle?: string | null; targetHandle?: string | null }
+  ) => void;
 }
 
-/** Per-row drop hint, surfaced as a visual indicator while dragging. */
-type DropMode = "child" | "reparent" | "blocked" | null;
+interface NodeLike {
+  type?: string;
+  plugin?: { category?: string; id?: string; version?: string };
+}
+
+/** Static port list for a node — declared `inputPorts` / `outputPorts`
+ *  from the plugin manifest, or the synthetic single port that I/O nodes
+ *  carry implicitly. Dynamic-ported plugins fall back to whatever names
+ *  are already used in the spec so the dropdown still surfaces them. */
+function portsFor(
+  flowNode: Node | undefined,
+  manifestMap: Map<string, PluginInfo>
+): { inputs: string[]; outputs: string[] } {
+  const pn = (flowNode?.data as { node?: NodeLike } | undefined)?.node;
+  if (!pn) return { inputs: [], outputs: [] };
+  if (pn.type === "input") return { inputs: [], outputs: ["output"] };
+  if (pn.type === "output") return { inputs: ["input"], outputs: [] };
+  const ref = pn.plugin;
+  if (!ref?.category || !ref.id || !ref.version) {
+    return { inputs: [], outputs: [] };
+  }
+  const m = manifestMap.get(`${ref.category}:${ref.id}:${ref.version}`);
+  return {
+    inputs: (m?.inputPorts ?? []).map((p) => p.name),
+    outputs: (m?.outputPorts ?? []).map((p) => p.name)
+  };
+}
+
+interface PortChipProps {
+  edgeId: string | undefined;
+  sourceId: string;
+  targetId: string;
+  fromPort: string | null | undefined;
+  toPort: string | null | undefined;
+  nodes: Node[];
+  manifestMap: Map<string, PluginInfo>;
+  onUpdateEdge: BuilderTreeProps["onUpdateEdge"];
+  variant?: "primary" | "ref" | "join";
+}
+
+function PortChip(props: PortChipProps) {
+  const {
+    edgeId,
+    sourceId,
+    targetId,
+    fromPort,
+    toPort,
+    nodes,
+    manifestMap,
+    onUpdateEdge,
+    variant = "primary"
+  } = props;
+  const [editing, setEditing] = useState(false);
+  // Keep a draft so the user can cancel without writing.
+  const [from, setFrom] = useState<string>(fromPort ?? "");
+  const [to, setTo] = useState<string>(toPort ?? "");
+  useEffect(() => {
+    setFrom(fromPort ?? "");
+    setTo(toPort ?? "");
+  }, [fromPort, toPort]);
+
+  const sourceNode = useMemo(
+    () => nodes.find((n) => n.id === sourceId),
+    [nodes, sourceId]
+  );
+  const targetNode = useMemo(
+    () => nodes.find((n) => n.id === targetId),
+    [nodes, targetId]
+  );
+  const sourcePorts = portsFor(sourceNode, manifestMap).outputs;
+  const targetPorts = portsFor(targetNode, manifestMap).inputs;
+
+  // If a current port doesn't appear in the manifest list (e.g. a
+  // dynamic-port plugin or a freshly renamed plugin) keep it in the
+  // dropdown so the user can still see what's wired today.
+  const sourceOpts = useMemo(() => {
+    const set = new Set(sourcePorts);
+    if (fromPort) set.add(fromPort);
+    return [...set];
+  }, [sourcePorts, fromPort]);
+  const targetOpts = useMemo(() => {
+    const set = new Set(targetPorts);
+    if (toPort) set.add(toPort);
+    return [...set];
+  }, [targetPorts, toPort]);
+
+  if (!editing) {
+    return (
+      <button
+        type="button"
+        className={`tree-port-chip tree-port-chip-${variant}`}
+        title="Click to edit the port binding"
+        onClick={(e) => {
+          e.stopPropagation();
+          setEditing(true);
+        }}
+      >
+        <span className="tree-port-name">{fromPort || "default"}</span>
+        <span className="tree-port-arrow">→</span>
+        <span className="tree-port-name">{toPort || "default"}</span>
+      </button>
+    );
+  }
+
+  return (
+    <span
+      className="tree-port-editor"
+      onClick={(e) => e.stopPropagation()}
+      onMouseDown={(e) => e.stopPropagation()}
+    >
+      <select
+        value={from}
+        onChange={(e) => setFrom(e.target.value)}
+        title="Source port"
+      >
+        <option value="">(default)</option>
+        {sourceOpts.map((p) => (
+          <option key={p} value={p}>
+            {p}
+          </option>
+        ))}
+      </select>
+      <span className="tree-port-arrow">→</span>
+      <select
+        value={to}
+        onChange={(e) => setTo(e.target.value)}
+        title="Target port"
+      >
+        <option value="">(default)</option>
+        {targetOpts.map((p) => (
+          <option key={p} value={p}>
+            {p}
+          </option>
+        ))}
+      </select>
+      <button
+        type="button"
+        className="primary tree-port-btn"
+        onClick={() => {
+          if (edgeId) {
+            onUpdateEdge(edgeId, {
+              sourceHandle: from ? from : null,
+              targetHandle: to ? to : null
+            });
+          }
+          setEditing(false);
+        }}
+      >
+        save
+      </button>
+      <button
+        type="button"
+        className="link-btn tree-port-btn"
+        onClick={() => {
+          setFrom(fromPort ?? "");
+          setTo(toPort ?? "");
+          setEditing(false);
+        }}
+      >
+        cancel
+      </button>
+    </span>
+  );
+}
 
 interface RowProps {
   node: TreeNode;
@@ -63,7 +243,12 @@ interface RowProps {
   onAddChild: BuilderTreeProps["onAddChild"];
   onReparent: BuilderTreeProps["onReparent"];
   tree: ReturnType<typeof projectGraphToTree>;
+  nodes: Node[];
+  manifestMap: Map<string, PluginInfo>;
+  onUpdateEdge: BuilderTreeProps["onUpdateEdge"];
 }
+
+type DropMode = "child" | "reparent" | "blocked" | null;
 
 function Row(props: RowProps) {
   const {
@@ -81,16 +266,17 @@ function Row(props: RowProps) {
     setHoverId,
     onAddChild,
     onReparent,
-    tree
+    tree,
+    nodes,
+    manifestMap,
+    onUpdateEdge
   } = props;
   const flow = pipelineNodeFor(node.id);
   const isExpanded = expanded.has(node.id);
-  const hasChildren = node.children.length > 0;
+  const hasChildren = node.children.length > 0 || node.joinRefs.length > 0;
   const isSelected = node.id === selectedId;
   const isHover = node.id === hoverId;
 
-  // Decide which kind of drop the row would accept given the *current* drag.
-  // Computed at hover time so we can show a hint chip and refuse cycles.
   const dropMode: DropMode = useMemo(() => {
     if (!isHover) return null;
     if (dragId) {
@@ -132,9 +318,6 @@ function Row(props: RowProps) {
     (event: React.DragEvent<HTMLDivElement>) => {
       event.preventDefault();
       setHoverId(null);
-      // Tree-move (internal) takes precedence — a drag-started node always
-      // sets that MIME; checking it first avoids treating a stray palette
-      // item as a re-parent.
       const moveId = event.dataTransfer.getData(TREE_MOVE_MIME);
       if (moveId) {
         if (moveId === node.id) return;
@@ -146,7 +329,6 @@ function Row(props: RowProps) {
       const item = decodePaletteDrag(raw);
       if (item) {
         onAddChild(node.id, item);
-        // Auto-expand the drop target so the new child is visible.
         if (!isExpanded) toggleExpand(node.id);
       }
     },
@@ -167,6 +349,7 @@ function Row(props: RowProps) {
         className={
           "builder-tree-row" +
           (isSelected ? " selected" : "") +
+          (node.isJoin ? " join" : "") +
           (isHover && dropMode === "reparent" ? " drop-reparent" : "") +
           (isHover && dropMode === "child" ? " drop-child" : "") +
           (isHover && dropMode === "blocked" ? " drop-blocked" : "")
@@ -199,25 +382,95 @@ function Row(props: RowProps) {
         <span className="builder-tree-label">
           <strong>{node.id}</strong>
           <span className="muted"> {pluginLabelFor(flow)}</span>
+          {node.isJoin && <span className="tree-join-badge">join</span>}
         </span>
-        {node.crossRefs.length > 0 && (
-          <span className="builder-tree-refs" title="Additional inputs">
-            {node.crossRefs.map((ref, i) => (
-              <span key={i} className="builder-tree-ref">
-                ← {ref.fromId}
-                {ref.fromPort ? `:${ref.fromPort}` : ""}
-              </span>
-            ))}
-          </span>
+        {/* Primary-parent port chip — every non-root non-join row has one. */}
+        {node.primaryEdge && (
+          <PortChip
+            edgeId={node.primaryEdge.edgeId}
+            sourceId={node.primaryEdge.fromId}
+            targetId={node.id}
+            fromPort={node.primaryEdge.fromPort}
+            toPort={node.primaryEdge.toPort}
+            nodes={nodes}
+            manifestMap={manifestMap}
+            onUpdateEdge={onUpdateEdge}
+            variant="primary"
+          />
         )}
       </div>
+
+      {/* Cross-refs: every additional incoming edge to this row. On a
+          join row these are the FULL parent list; on a regular row they
+          show cycle back-edges. Rendered as their own indented leaves
+          so each gets its own port chip. */}
+      {isExpanded &&
+        node.crossRefs.map((ref, i) => (
+          <div
+            key={"cr:" + (ref.edgeId ?? `${ref.fromId}:${i}`)}
+            className="builder-tree-subrow builder-tree-crossref"
+            style={{ paddingLeft: 4 + (node.depth + 1) * 16 }}
+          >
+            <span className="tree-sub-icon" aria-hidden>
+              ←
+            </span>
+            <span className="builder-tree-label">
+              <strong>{ref.fromId}</strong>
+              <span className="muted"> incoming</span>
+            </span>
+            <PortChip
+              edgeId={ref.edgeId}
+              sourceId={ref.fromId}
+              targetId={node.id}
+              fromPort={ref.fromPort}
+              toPort={ref.toPort}
+              nodes={nodes}
+              manifestMap={manifestMap}
+              onUpdateEdge={onUpdateEdge}
+              variant="ref"
+            />
+          </div>
+        ))}
+
+      {/* Recursive children — primary-parent flows. */}
       {isExpanded &&
         node.children.map((child) => (
-          <Row
-            key={child.id}
-            {...props}
-            node={child}
-          />
+          <Row key={child.id} {...props} node={child} />
+        ))}
+
+      {/* Outgoing "→ joinId" leaves so each branch reveals where it
+          terminates (the convergence row lives at the top level). */}
+      {isExpanded &&
+        node.joinRefs.map((jr, i) => (
+          <div
+            key={"jr:" + (jr.edgeId ?? `${jr.targetId}:${i}`)}
+            className="builder-tree-subrow builder-tree-joinref"
+            style={{ paddingLeft: 4 + (node.depth + 1) * 16 }}
+            onClick={(e) => {
+              e.stopPropagation();
+              onSelect(jr.targetId);
+            }}
+            title={`→ ${jr.targetId}`}
+          >
+            <span className="tree-sub-icon" aria-hidden>
+              →
+            </span>
+            <span className="builder-tree-label">
+              <strong>{jr.targetId}</strong>
+              <span className="muted"> (join target)</span>
+            </span>
+            <PortChip
+              edgeId={jr.edgeId}
+              sourceId={node.id}
+              targetId={jr.targetId}
+              fromPort={jr.fromPort}
+              toPort={jr.toPort}
+              nodes={nodes}
+              manifestMap={manifestMap}
+              onUpdateEdge={onUpdateEdge}
+              variant="join"
+            />
+          </div>
         ))}
     </>
   );
@@ -230,6 +483,7 @@ export function BuilderTree(props: BuilderTreeProps) {
       projectGraphToTree(
         nodes.map((n) => n.id),
         edges.map((e) => ({
+          id: e.id,
           source: e.source,
           target: e.target,
           sourceHandle: e.sourceHandle,
@@ -239,8 +493,6 @@ export function BuilderTree(props: BuilderTreeProps) {
     [nodes, edges]
   );
 
-  // Open every node by default so a freshly-loaded pipeline reveals its
-  // structure; once the user collapses something we honor that choice.
   const [expanded, setExpanded] = useState<Set<string>>(() => {
     const s = new Set<string>();
     function walk(t: TreeNode): void {
@@ -253,13 +505,14 @@ export function BuilderTree(props: BuilderTreeProps) {
   const expandedRef = useRef(expanded);
   expandedRef.current = expanded;
 
-  // Auto-add new nodes to the expanded set so a drop reveals its result.
-  // Pure side effect of `tree` growing — never collapses anything.
   useMemo(() => {
     const e = expandedRef.current;
     let dirty = false;
     function walk(t: TreeNode): void {
-      if (!e.has(t.id) && t.children.length > 0) {
+      if (
+        !e.has(t.id) &&
+        (t.children.length > 0 || t.joinRefs.length > 0 || t.crossRefs.length > 0)
+      ) {
         e.add(t.id);
         dirty = true;
       }
@@ -299,7 +552,6 @@ export function BuilderTree(props: BuilderTreeProps) {
     if (!pn) return "•";
     if (pn.type === "input") return "▶";
     if (pn.type === "output") return "■";
-    // A tiny mnemonic per category — purely cosmetic.
     const cat = pn.plugin?.category ?? "";
     const map: Record<string, string> = {
       datasource: "📥",
@@ -325,9 +577,6 @@ export function BuilderTree(props: BuilderTreeProps) {
     return map[cat] ?? "•";
   }, []);
 
-  // Keyboard delete: while a node is selected and focus is in the tree,
-  // Delete/Backspace removes it. Backspace alone would interfere with
-  // input fields in the inspector, so we only listen on the tree pane.
   const onKeyDown = useCallback(
     (event: React.KeyboardEvent<HTMLDivElement>) => {
       if (!selectedId) return;
@@ -339,18 +588,13 @@ export function BuilderTree(props: BuilderTreeProps) {
     [selectedId, onDelete]
   );
 
-  // Root-level drop catches palette items dropped outside any row so a
-  // new node still lands somewhere visible (it becomes a new root).
   const handleRootDrop = useCallback(
     (event: React.DragEvent<HTMLDivElement>) => {
-      // Only act when the drop wasn't already handled by a row.
       if (event.defaultPrevented) return;
       const raw = event.dataTransfer.getData(DND_MIME);
       const item = decodePaletteDrag(raw);
       if (!item) return;
       event.preventDefault();
-      // Adding "to root" still uses onAddChild with a synthetic non-id;
-      // the parent component knows to treat "" as "no parent, just add".
       props.onAddChild("", item);
     },
     [props]
@@ -370,7 +614,7 @@ export function BuilderTree(props: BuilderTreeProps) {
         </span>
         <span className="muted builder-tree-hint">
           drag plugins from the palette to add · drag a row onto another to
-          re-parent · Delete to remove
+          re-parent · click a port chip to rewire · Delete to remove
         </span>
       </header>
       {tree.roots.length === 0 ? (
@@ -396,6 +640,9 @@ export function BuilderTree(props: BuilderTreeProps) {
             onAddChild={props.onAddChild}
             onReparent={props.onReparent}
             tree={tree}
+            nodes={nodes}
+            manifestMap={props.pluginManifestMap}
+            onUpdateEdge={props.onUpdateEdge}
           />
         ))
       )}
