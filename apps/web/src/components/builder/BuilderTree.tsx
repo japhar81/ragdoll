@@ -246,6 +246,15 @@ interface RowProps {
   nodes: Node[];
   manifestMap: Map<string, PluginInfo>;
   onUpdateEdge: BuilderTreeProps["onUpdateEdge"];
+  /** Node id whose every visual mention should be highlighted while the
+   *  user hovers a link pill — gives a "preview" of the navigation
+   *  before they click. Null when no link is being hovered. */
+  linkHoverId: string | null;
+  setLinkHoverId: (id: string | null) => void;
+  /** Reveal a hoisted join row when the user clicks one of its inline
+   *  pills (scrolls into view + briefly flashes so the connection
+   *  reads as "same node, multiple mentions"). */
+  revealNode: (id: string) => void;
 }
 
 type DropMode = "child" | "reparent" | "blocked" | null;
@@ -271,10 +280,22 @@ function Row(props: RowProps) {
     manifestMap,
     onUpdateEdge
   } = props;
+  const {
+    linkHoverId,
+    setLinkHoverId,
+    revealNode
+  } = props;
   const flow = pipelineNodeFor(node.id);
   const isExpanded = expanded.has(node.id);
-  const hasChildren = node.children.length > 0 || node.joinRefs.length > 0;
+  // A row is expandable when it has primary children OR (for hoisted
+  // join rows) when it has crossRefs to reveal.
+  const hasChildren = node.children.length > 0 || node.crossRefs.length > 0;
   const isSelected = node.id === selectedId;
+  // Row is "linked" while the user hovers a "→ id" pill that points at
+  // it — a transient halo that makes "one logical node, several visual
+  // mentions" legible. Solid selection styling stays on the row that's
+  // actually selected.
+  const isLinked = !isSelected && linkHoverId === node.id;
   const isHover = node.id === hoverId;
 
   const dropMode: DropMode = useMemo(() => {
@@ -346,9 +367,11 @@ function Row(props: RowProps) {
   return (
     <>
       <div
+        data-tree-node-id={node.id}
         className={
           "builder-tree-row" +
           (isSelected ? " selected" : "") +
+          (isLinked ? " linked" : "") +
           (node.isJoin ? " join" : "") +
           (isHover && dropMode === "reparent" ? " drop-reparent" : "") +
           (isHover && dropMode === "child" ? " drop-child" : "") +
@@ -398,6 +421,37 @@ function Row(props: RowProps) {
             variant="primary"
           />
         )}
+        {/* Inline "→ target" pills for every outgoing edge into a hoisted
+            join. Clicking a pill scrolls the hoisted row into view and
+            selects it — the same row that lists every contributing edge
+            (with editable port chips). Hovering a pill previews the
+            hoisted row by lighting it up. */}
+        {node.joinRefs.length > 0 && (
+          <span className="tree-link-pills">
+            {node.joinRefs.map((jr, i) => {
+              const isJoinSelected = jr.targetId === selectedId;
+              return (
+                <button
+                  type="button"
+                  key={"link:" + (jr.edgeId ?? `${jr.targetId}:${i}`)}
+                  className={
+                    "tree-link-pill" + (isJoinSelected ? " selected" : "")
+                  }
+                  title={`Jump to ${jr.targetId}`}
+                  onMouseEnter={() => setLinkHoverId(jr.targetId)}
+                  onMouseLeave={() => setLinkHoverId(null)}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onSelect(jr.targetId);
+                    revealNode(jr.targetId);
+                  }}
+                >
+                  → {jr.targetId}
+                </button>
+              );
+            })}
+          </span>
+        )}
       </div>
 
       {/* Cross-refs: every additional incoming edge to this row. On a
@@ -436,41 +490,6 @@ function Row(props: RowProps) {
       {isExpanded &&
         node.children.map((child) => (
           <Row key={child.id} {...props} node={child} />
-        ))}
-
-      {/* Outgoing "→ joinId" leaves so each branch reveals where it
-          terminates (the convergence row lives at the top level). */}
-      {isExpanded &&
-        node.joinRefs.map((jr, i) => (
-          <div
-            key={"jr:" + (jr.edgeId ?? `${jr.targetId}:${i}`)}
-            className="builder-tree-subrow builder-tree-joinref"
-            style={{ paddingLeft: 4 + (node.depth + 1) * 16 }}
-            onClick={(e) => {
-              e.stopPropagation();
-              onSelect(jr.targetId);
-            }}
-            title={`→ ${jr.targetId}`}
-          >
-            <span className="tree-sub-icon" aria-hidden>
-              →
-            </span>
-            <span className="builder-tree-label">
-              <strong>{jr.targetId}</strong>
-              <span className="muted"> (join target)</span>
-            </span>
-            <PortChip
-              edgeId={jr.edgeId}
-              sourceId={node.id}
-              targetId={jr.targetId}
-              fromPort={jr.fromPort}
-              toPort={jr.toPort}
-              nodes={nodes}
-              manifestMap={manifestMap}
-              onUpdateEdge={onUpdateEdge}
-              variant="join"
-            />
-          </div>
         ))}
     </>
   );
@@ -533,6 +552,19 @@ export function BuilderTree(props: BuilderTreeProps) {
 
   const [dragId, setDragId] = useState<string | null>(null);
   const [hoverId, setHoverId] = useState<string | null>(null);
+  const [linkHoverId, setLinkHoverId] = useState<string | null>(null);
+  const treeRef = useRef<HTMLDivElement | null>(null);
+  // Reveal a row by id: scroll it into view + add a 'flashing' class for
+  // ~700ms so the user sees which row a `→ target` pill points at.
+  const revealNode = useCallback((id: string) => {
+    const el = treeRef.current?.querySelector<HTMLElement>(
+      `[data-tree-node-id="${id}"]`
+    );
+    if (!el) return;
+    el.scrollIntoView({ behavior: "smooth", block: "center" });
+    el.classList.add("flashing");
+    window.setTimeout(() => el.classList.remove("flashing"), 700);
+  }, []);
 
   const pipelineNodeFor = useCallback(
     (id: string) => nodes.find((n) => n.id === id),
@@ -602,6 +634,7 @@ export function BuilderTree(props: BuilderTreeProps) {
 
   return (
     <div
+      ref={treeRef}
       className="builder-tree"
       tabIndex={0}
       onKeyDown={onKeyDown}
@@ -614,7 +647,8 @@ export function BuilderTree(props: BuilderTreeProps) {
         </span>
         <span className="muted builder-tree-hint">
           drag plugins from the palette to add · drag a row onto another to
-          re-parent · click a port chip to rewire · Delete to remove
+          re-parent · click a port chip to rewire · click a → pill to jump
+          to its join · Delete to remove
         </span>
       </header>
       {tree.roots.length === 0 ? (
@@ -643,6 +677,9 @@ export function BuilderTree(props: BuilderTreeProps) {
             nodes={nodes}
             manifestMap={props.pluginManifestMap}
             onUpdateEdge={props.onUpdateEdge}
+            linkHoverId={linkHoverId}
+            setLinkHoverId={setLinkHoverId}
+            revealNode={revealNode}
           />
         ))
       )}

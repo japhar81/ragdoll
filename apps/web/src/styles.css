@@ -452,6 +452,56 @@ button.palette-item:active {
   padding: 2px 8px;
 }
 
+/* Inline "→ joinId" link pills on a branch row, replacing the prior
+ * sub-row representation. Reads as "this branch's data goes there",
+ * not as another instance of the node. */
+.tree-link-pills {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 8px;
+}
+.tree-link-pill {
+  font-size: 11px;
+  color: #1d4ed8;
+  background: #eff6ff;
+  border: 1px solid #bfdbfe;
+  border-radius: 4px;
+  padding: 1px 6px;
+  cursor: pointer;
+  font-family: ui-monospace, SFMono-Regular, monospace;
+  white-space: nowrap;
+}
+.tree-link-pill:hover {
+  background: #dbeafe;
+  color: #1e40af;
+}
+/* When the join the pill points at IS the current selection, glow so
+ * the user sees every visual mention of that node at once. */
+.tree-link-pill.selected {
+  background: #2563eb;
+  color: #fff;
+  border-color: #1d4ed8;
+}
+
+/* Transient halo on a row whose "→ id" pill is currently being hovered
+ * elsewhere — previews "this is the same node". Less prominent than the
+ * persistent selection styling. */
+.builder-tree-row.linked {
+  background: #eff6ff;
+  border-left-color: #93c5fd;
+}
+
+/* A row briefly pulses when a "→ id" pill scrolls it into view, so the
+ * user sees the destination of the navigation. */
+@keyframes builder-tree-flash {
+  0%   { background: #fde68a; }
+  100% { background: transparent; }
+}
+.builder-tree-row.flashing {
+  animation: builder-tree-flash 700ms ease-out;
+}
+
 /* Layout dropdown anchored to the canvas upper-left (above the React Flow
  * pane, below any React Flow panels). z-index intentionally higher than
  * react-flow__controls / react-flow__minimap which are 4/5. */
