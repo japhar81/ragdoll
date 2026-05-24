@@ -1,6 +1,8 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useBuilderRoom } from "../events/EventsProvider.tsx";
 import { BuilderRoster } from "../events/BuilderRoster.tsx";
+import { BuilderTree } from "./builder/BuilderTree.tsx";
+import { projectGraphToTree, type TreeNode } from "../lib/treeProjection.ts";
 import type {
   BuilderEdit,
   BuilderPresence
@@ -254,6 +256,22 @@ export function PipelineBuilder(props: {
   const clog = useConsoleLog();
   const [inspectorWidth, setInspectorWidth] = useState(360);
   const [paletteWidth, setPaletteWidth] = useState(220);
+  // Flow View vs Tree View. Persisted so the choice survives reload.
+  const [builderView, setBuilderView] = useState<"flow" | "tree">(() => {
+    try {
+      const v = localStorage.getItem("ragdoll.builderView");
+      return v === "tree" ? "tree" : "flow";
+    } catch {
+      return "flow";
+    }
+  });
+  useEffect(() => {
+    try {
+      localStorage.setItem("ragdoll.builderView", builderView);
+    } catch {
+      /* private-mode: no-op */
+    }
+  }, [builderView]);
   // Inspector tab selection. Sticky inside the session — selecting a new node
   // keeps the previously-active tab so a "compare configs across nodes" flow
   // doesn't drop the user back on Config every time.
@@ -773,6 +791,153 @@ export function PipelineBuilder(props: {
       });
     },
     [setNodes, pluginList]
+  );
+
+  // Tree View handler: drop a palette item as a child of `parentId`, wiring
+  // a single edge from the parent to the new node. `parentId === ""` means
+  // "no parent — add as a new root", mirroring the canvas-drop semantics.
+  const addNodeAsChildOf = useCallback(
+    (parentId: string, item: PaletteDragItem) => {
+      let newId = "";
+      setNodes((current) => {
+        const existing = new Set(current.map((n) => n.id));
+        const base = item.kind === "io" ? item.io : item.id;
+        let id = base;
+        let n = 1;
+        while (existing.has(id)) id = `${base}_${n++}`;
+        newId = id;
+        let pipelineNode: PipelineNode;
+        if (item.kind === "io") {
+          pipelineNode = newIoNode(item.io, id);
+        } else {
+          const info = pluginList.find(
+            (p) =>
+              p.category === item.category &&
+              p.id === item.id &&
+              p.version === item.version
+          );
+          pipelineNode = newNodeFromPlugin(
+            {
+              category: item.category,
+              id: item.id,
+              version: item.version,
+              configSchema: info?.configSchema
+            },
+            id
+          );
+        }
+        const flow = specToGraph({
+          ...STARTER_SPEC,
+          spec: { nodes: [pipelineNode], edges: [] }
+        }).nodes[0];
+        // The Flow View doesn't care about x/y when invisible, but we still
+        // assign a sane default so toggling back lands the new node
+        // somewhere reasonable instead of stacking at (0,0).
+        flow.position = {
+          x: 160 + (current.length % 5) * 60,
+          y: 360 + (current.length % 4) * 60
+        };
+        return [
+          ...current,
+          { ...flow, type: "ragNode" } as unknown as Node
+        ];
+      });
+      if (parentId && newId) {
+        setEdges((curr) =>
+          addEdge(
+            {
+              source: parentId,
+              target: newId,
+              sourceHandle: null,
+              targetHandle: null,
+              ...EDGE_DEFAULTS
+            } as Connection,
+            curr
+          )
+        );
+      }
+      setSelectedId(newId);
+    },
+    [pluginList, setNodes, setEdges]
+  );
+
+  // Tree View handler: re-parent `nodeId` so its primary incoming edge now
+  // originates at `newParentId`. Fan-in (other incoming edges) is left
+  // alone — those still appear as cross-refs in the tree view.
+  const reparentNode = useCallback(
+    (nodeId: string, newParentId: string) => {
+      if (nodeId === newParentId) return;
+      setEdges((current) => {
+        const tree = projectGraphToTree(
+          nodes.map((n) => n.id),
+          current.map((e) => ({
+            source: e.source,
+            target: e.target,
+            sourceHandle: e.sourceHandle,
+            targetHandle: e.targetHandle
+          }))
+        );
+        // Locate the primary parent of `nodeId` in the current projection.
+        let primaryParent: string | undefined;
+        function walk(t: TreeNode, parent?: string): boolean {
+          if (t.id === nodeId) {
+            primaryParent = parent;
+            return true;
+          }
+          for (const c of t.children) if (walk(c, t.id)) return true;
+          return false;
+        }
+        for (const r of tree.roots) walk(r);
+        // No prior primary parent — the node was a root. Just append the
+        // new edge so it now hangs off newParentId.
+        if (!primaryParent) {
+          return addEdge(
+            {
+              source: newParentId,
+              target: nodeId,
+              sourceHandle: null,
+              targetHandle: null,
+              ...EDGE_DEFAULTS
+            } as Connection,
+            current
+          );
+        }
+        // Rewrite the existing primary-parent edge in place — keeps the
+        // ports + edge id, so React Flow doesn't think it's a brand new
+        // edge.
+        const idx = current.findIndex(
+          (e) => e.source === primaryParent && e.target === nodeId
+        );
+        if (idx === -1) {
+          return addEdge(
+            {
+              source: newParentId,
+              target: nodeId,
+              sourceHandle: null,
+              targetHandle: null,
+              ...EDGE_DEFAULTS
+            } as Connection,
+            current
+          );
+        }
+        return current.map((e, i) =>
+          i === idx ? { ...e, source: newParentId } : e
+        );
+      });
+    },
+    [nodes, setEdges]
+  );
+
+  // Tree View handler: remove a node and every edge attached to it.
+  const deleteNodeById = useCallback(
+    (id: string) => {
+      setNodes((curr) => curr.filter((n) => n.id !== id));
+      setEdges((curr) =>
+        curr.filter((e) => e.source !== id && e.target !== id)
+      );
+      if (selectedId === id) setSelectedId(undefined);
+    },
+    [selectedId, setNodes, setEdges]
   );
 
   const onDragOver = useCallback((event: React.DragEvent) => {
@@ -1383,6 +1548,42 @@ export function PipelineBuilder(props: {
           aria-orientation="vertical"
           title="Drag to resize the node palette"
         />
+        <div className="builder-canvas-col">
+          <div className="builder-view-tabs" role="tablist" aria-label="Builder view">
+            <button
+              type="button"
+              role="tab"
+              aria-selected={builderView === "flow"}
+              className={
+                "builder-view-tab" + (builderView === "flow" ? " active" : "")
+              }
+              onClick={() => setBuilderView("flow")}
+            >
+              Flow View
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={builderView === "tree"}
+              className={
+                "builder-view-tab" + (builderView === "tree" ? " active" : "")
+              }
+              onClick={() => setBuilderView("tree")}
+            >
+              Tree View
+            </button>
+          </div>
+        {builderView === "tree" ? (
+          <BuilderTree
+            nodes={nodes}
+            edges={edges}
+            selectedId={selectedId}
+            onSelect={setSelectedId}
+            onAddChild={addNodeAsChildOf}
+            onReparent={reparentNode}
+            onDelete={deleteNodeById}
+          />
+        ) : (
         <div
           className="canvas"
           ref={canvasRef}
@@ -1415,6 +1616,8 @@ export function PipelineBuilder(props: {
             </ReactFlow>
             </NodeValidationContext.Provider>
           </PluginManifestContext.Provider>
+        </div>
+        )}
         </div>
         <div
           className="col-resizer"
