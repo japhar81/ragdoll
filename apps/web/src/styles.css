@@ -259,6 +259,122 @@ button.palette-item:active {
   height: 100%;
 }
 
+/* Builder middle column: tabs sit on top of the canvas/tree pane. */
+.builder-canvas-col {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+}
+.builder-canvas-col > .canvas,
+.builder-canvas-col > .builder-tree {
+  flex: 1;
+  min-height: 0;
+}
+.builder-view-tabs {
+  display: flex;
+  gap: 4px;
+  padding: 6px 6px 0;
+  background: #f1f5f9;
+  border-bottom: 1px solid #e2e8f0;
+}
+.builder-view-tab {
+  border: 1px solid #e2e8f0;
+  border-bottom: none;
+  background: #fff;
+  color: #475569;
+  font-size: 12px;
+  padding: 6px 12px;
+  border-radius: 6px 6px 0 0;
+  cursor: pointer;
+}
+.builder-view-tab:hover { color: #0f172a; }
+.builder-view-tab.active {
+  background: #f1f5f9;
+  color: #0f172a;
+  font-weight: 600;
+  border-color: #cbd5e1;
+}
+
+/* FinalBuilder-style tree view (components/builder/BuilderTree.tsx). */
+.builder-tree {
+  display: flex;
+  flex-direction: column;
+  background: #fff;
+  overflow: auto;
+  outline: none;
+  padding-bottom: 16px;
+}
+.builder-tree-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 14px;
+  border-bottom: 1px solid #e2e8f0;
+  background: #f8fafc;
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+.builder-tree-hint { font-size: 11px; }
+.builder-tree-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  padding: 3px 8px 3px 4px;
+  color: #0f172a;
+  cursor: pointer;
+  border-left: 2px solid transparent;
+  user-select: none;
+}
+.builder-tree-row:hover { background: #f8fafc; }
+.builder-tree-row.selected {
+  background: #dbeafe;
+  border-left-color: #2563eb;
+}
+.builder-tree-row.drop-child {
+  outline: 2px dashed #16a34a;
+  outline-offset: -2px;
+  background: #ecfdf5;
+}
+.builder-tree-row.drop-reparent {
+  outline: 2px dashed #2563eb;
+  outline-offset: -2px;
+  background: #eff6ff;
+}
+.builder-tree-row.drop-blocked {
+  outline: 2px dashed #ef4444;
+  outline-offset: -2px;
+  background: #fef2f2;
+  cursor: not-allowed;
+}
+.builder-tree-caret {
+  background: none;
+  border: 0;
+  color: #475569;
+  font-size: 12px;
+  width: 16px;
+  text-align: center;
+  cursor: pointer;
+  padding: 0;
+}
+.builder-tree-caret:disabled { cursor: default; color: #94a3b8; }
+.builder-tree-icon { font-size: 14px; line-height: 1; }
+.builder-tree-label { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.builder-tree-label .muted { color: #64748b; font-weight: 400; margin-left: 6px; }
+.builder-tree-refs { display: inline-flex; gap: 4px; flex-wrap: wrap; }
+.builder-tree-ref {
+  font-size: 10px;
+  color: #475569;
+  background: #f1f5f9;
+  border: 1px solid #e2e8f0;
+  border-radius: 4px;
+  padding: 1px 6px;
+}
+
 /* Layout dropdown anchored to the canvas upper-left (above the React Flow
  * pane, below any React Flow panels). z-index intentionally higher than
  * react-flow__controls / react-flow__minimap which are 4/5. */
