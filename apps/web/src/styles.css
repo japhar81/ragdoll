@@ -2694,3 +2694,107 @@ kbd {
   overflow: auto;
   font-size: 12px;
 }
+
+/* Tree View v3 — staged sections + per-node expandable pin editor
+ * (components/builder/BuilderTree.tsx). */
+.builder-tree-stage {
+  border-top: 1px solid #e2e8f0;
+}
+.builder-tree-stage:first-of-type { border-top: 0; }
+.builder-tree-stage-head {
+  position: sticky;
+  top: 38px; /* below `.builder-tree-head` */
+  background: #f8fafc;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 6px 14px;
+  font-size: 11px;
+  color: #475569;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  border-bottom: 1px solid #e2e8f0;
+}
+
+/* Expanded pin editor sits under its row; indented to align with the
+ * label, padded so the controls don't crowd the caret. */
+.builder-pin-editor {
+  background: #f8fafc;
+  border-left: 3px solid #cbd5e1;
+  margin: 4px 14px 10px 32px;
+  padding: 8px 12px;
+  border-radius: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: 12px;
+}
+.builder-pin-section {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.builder-pin-heading {
+  font-size: 10px;
+  color: #475569;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-weight: 600;
+  margin-bottom: 2px;
+}
+.builder-pin-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 22px;
+  flex-wrap: wrap;
+}
+.builder-pin-name {
+  font-family: ui-monospace, SFMono-Regular, monospace;
+  font-size: 12px;
+  color: #0f172a;
+  min-width: 96px;
+}
+.builder-pin-arrow { color: #94a3b8; font-weight: 700; }
+.builder-pin-row select {
+  font-size: 12px;
+  padding: 2px 4px;
+  min-width: 220px;
+}
+.builder-pin-out .builder-pin-arrow { color: #16a34a; }
+.builder-pin-targets {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+.builder-pin-target {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-family: ui-monospace, SFMono-Regular, monospace;
+  font-size: 11px;
+  color: #0f172a;
+  background: #ecfdf5;
+  border: 1px solid #bbf7d0;
+  border-radius: 4px;
+  padding: 1px 4px 1px 8px;
+}
+.builder-pin-x {
+  background: none;
+  border: 0;
+  color: #16a34a;
+  font-weight: 700;
+  cursor: pointer;
+  padding: 0 4px;
+}
+.builder-pin-x:hover { color: #b91c1c; }
+.builder-pin-add {
+  font-size: 11px;
+  padding: 2px 4px;
+}
+.builder-pin-empty {
+  margin: 0;
+  font-size: 12px;
+  font-style: italic;
+}
