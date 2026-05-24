@@ -40,20 +40,34 @@ test("two roots produce a forest", () => {
   );
 });
 
-test("fan-in renders the second parent as a crossRef on the target", () => {
-  // chunk and embed both feed write — write's primary parent is the
-  // first one BFS sees (chunk, alphabetical), embed becomes a crossRef.
+test("fan-in: a multi-parent join is hoisted to the top level with every parent as a crossRef", () => {
+  // chunk and embed both feed write — `write` is a join node so it
+  // becomes its own top-level row with both sources listed inline, and
+  // each chain ends with a joinRef pointing to it.
   const ids = ["chunk", "embed", "write"];
   const edges: ProjEdge[] = [
     { source: "chunk", target: "write", sourceHandle: "chunks" },
     { source: "embed", target: "write", sourceHandle: "vectors" }
   ];
   const tree = projectGraphToTree(ids, edges);
+  // Roots first (by id), then joins (by id): chunk, embed, write.
+  assert.deepEqual(
+    tree.roots.map((r) => r.id),
+    ["chunk", "embed", "write"]
+  );
   const write = findNode(tree, "write");
   assert.ok(write);
-  assert.equal(write!.crossRefs.length, 1);
-  assert.equal(write!.crossRefs[0].fromId, "embed");
-  assert.equal(write!.crossRefs[0].fromPort, "vectors");
+  assert.equal(write!.isJoin, true);
+  assert.equal(write!.primaryEdge, undefined);
+  assert.equal(write!.crossRefs.length, 2);
+  assert.deepEqual(
+    write!.crossRefs.map((c) => c.fromId).sort(),
+    ["chunk", "embed"]
+  );
+  // Each parent chain ends with a "→ write" joinRef leaf.
+  const chunk = findNode(tree, "chunk")!;
+  assert.equal(chunk.joinRefs.length, 1);
+  assert.equal(chunk.joinRefs[0].targetId, "write");
 });
 
 test("fan-out: a single source with two children renders both children", () => {
@@ -112,6 +126,47 @@ test("a graph that is all cycle still gets a synthetic root and exposes every no
   const p = findNode(tree, "p");
   assert.equal(p!.crossRefs.length, 1);
   assert.equal(p!.crossRefs[0].fromId, "q");
+});
+
+test("primaryEdge carries the placing edge's id and ports", () => {
+  const ids = ["a", "b"];
+  const edges: ProjEdge[] = [
+    {
+      id: "e1",
+      source: "a",
+      target: "b",
+      sourceHandle: "out",
+      targetHandle: "in"
+    }
+  ];
+  const tree = projectGraphToTree(ids, edges);
+  const b = findNode(tree, "b");
+  assert.ok(b);
+  assert.equal(b!.primaryEdge?.edgeId, "e1");
+  assert.equal(b!.primaryEdge?.fromPort, "out");
+  assert.equal(b!.primaryEdge?.toPort, "in");
+  // Roots have no primary edge.
+  const a = findNode(tree, "a");
+  assert.equal(a!.primaryEdge, undefined);
+});
+
+test("crossRef carries its own edge id so the editor can mutate exactly that edge", () => {
+  const ids = ["chunk", "embed", "write"];
+  const edges: ProjEdge[] = [
+    { id: "e1", source: "chunk", target: "write", sourceHandle: "chunks", targetHandle: "chunks" },
+    { id: "e2", source: "embed", target: "write", sourceHandle: "vectors", targetHandle: "vectors" }
+  ];
+  const tree = projectGraphToTree(ids, edges);
+  const write = findNode(tree, "write")!;
+  assert.equal(write.isJoin, true);
+  // Both parents land as crossRefs on the hoisted join row.
+  const byFrom = Object.fromEntries(
+    write.crossRefs.map((r) => [r.fromId, r])
+  );
+  assert.equal(byFrom["chunk"].edgeId, "e1");
+  assert.equal(byFrom["chunk"].toPort, "chunks");
+  assert.equal(byFrom["embed"].edgeId, "e2");
+  assert.equal(byFrom["embed"].toPort, "vectors");
 });
 
 test("edges referencing unknown ids are silently dropped", () => {

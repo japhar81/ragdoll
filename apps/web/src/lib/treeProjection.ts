@@ -17,6 +17,10 @@
  *  PipelineSpec edge once `sourceHandle`/`targetHandle` are mapped onto
  *  `fromPort`/`toPort`. */
 export interface ProjEdge {
+  /** React Flow edge id, carried so the tree's port editor can mutate
+   *  exactly the right edge via setEdges. Optional because some tests
+   *  pass minimal shapes. */
+  id?: string;
   source: string;
   target: string;
   sourceHandle?: string | null;
@@ -26,7 +30,32 @@ export interface ProjEdge {
 /** One reference to a non-primary parent → child join, rendered inline so
  *  the tree never silently drops a real edge. */
 export interface CrossRef {
+  /** Edge id — lets the editor mutate this exact edge. */
+  edgeId?: string;
   /** The other source node id (the one not picked as primary parent). */
+  fromId: string;
+  fromPort?: string | null;
+  toPort?: string | null;
+}
+
+/** A non-expanding "→ target" leaf rendered under a row whose outgoing edge
+ *  lands on a node that lives elsewhere in the tree (a join node). The
+ *  data flow is shown where the data leaves; the actual target row sits
+ *  at the top level with every contributing edge listed underneath. */
+export interface JoinRef {
+  edgeId?: string;
+  /** The convergence node this row's data flows INTO. */
+  targetId: string;
+  fromPort?: string | null;
+  toPort?: string | null;
+}
+
+/** The single edge that placed this node under its tree parent. Roots have
+ *  no primary edge; every other node does. */
+export interface PrimaryEdge {
+  edgeId?: string;
+  /** Source (parent) node id — handy when the port editor needs to look
+   *  the source's plugin manifest up to enumerate output ports. */
   fromId: string;
   fromPort?: string | null;
   toPort?: string | null;
@@ -37,16 +66,27 @@ export interface TreeNode {
   id: string;
   /** Indent level (0 = root). */
   depth: number;
-  /** True when this node ALSO appears earlier in the tree under a
-   *  different primary parent — should never be true for a freshly
-   *  projected forest, but kept for symmetry with future "show full
-   *  fan-in" features. */
-  isPlaceholder: boolean;
+  /** True when this node is a join (in-degree > 1) and therefore hoisted
+   *  to the top level — the row still renders with every parent listed
+   *  as a crossRef, but it has no `primaryEdge` because no single
+   *  parent "owns" it. */
+  isJoin: boolean;
   /** Children whose primary-parent edge originates at this node. */
   children: TreeNode[];
-  /** Every non-primary incoming edge → rendered inline so the tree never
-   *  hides a real wire. Empty when the node has at most one parent. */
+  /**
+   * Every non-primary incoming edge → rendered inline so the tree never
+   * hides a real wire. For a join node this carries EVERY incoming edge
+   * (because no parent was promoted to primary).
+   */
   crossRefs: CrossRef[];
+  /** Outgoing edges into a join node — rendered as non-expanding
+   *  "→ joinId" leaves under this row so the user sees where the data
+   *  leaves on this branch. */
+  joinRefs: JoinRef[];
+  /** The edge that placed THIS node under its parent — exposed so the
+   *  Tree View can show + edit the port pair inline. Undefined for
+   *  roots and for join nodes. */
+  primaryEdge?: PrimaryEdge;
 }
 
 export interface ProjectedTree {
@@ -101,11 +141,25 @@ export function projectGraphToTree(
     list.sort((a, b) => byId(a.target, b.target));
   }
 
+  // Pre-pass: a node with more than one incoming edge is a "join". The
+  // tree projection NEVER nests a join under one of its parents —
+  // instead it hoists the join to the top level and renders every
+  // incoming edge inline under that hoisted row, so the user sees the
+  // convergence at the convergence point (not buried under whichever
+  // parent BFS visited first).
+  const isJoin = new Set<string>();
+  for (const id of ids) if ((inDeg.get(id) ?? 0) > 1) isJoin.add(id);
+
   const primaryParent = new Map<string, string>();
+  const primaryEdgeOf = new Map<string, PrimaryEdge>();
   const crossRefs = new Map<string, CrossRef[]>();
+  const joinRefsOf = new Map<string, JoinRef[]>();
   const visited = new Set<string>();
   const childrenOf = new Map<string, string[]>();
-  for (const id of ids) childrenOf.set(id, []);
+  for (const id of ids) {
+    childrenOf.set(id, []);
+    joinRefsOf.set(id, []);
+  }
 
   function enqueueRoots(): string[] {
     const queue = ids
@@ -126,18 +180,49 @@ export function projectGraphToTree(
     while (queue.length > 0) {
       const current = queue.shift()!;
       for (const edge of out.get(current) ?? []) {
+        // Convergence target: don't nest, just leave a "→ target" leaf
+        // here AND record this edge as a parent listing on the target so
+        // its hoisted row shows the full fan-in.
+        if (isJoin.has(edge.target)) {
+          joinRefsOf.get(current)!.push({
+            edgeId: edge.id,
+            targetId: edge.target,
+            fromPort: edge.sourceHandle ?? null,
+            toPort: edge.targetHandle ?? null
+          });
+          const refs = crossRefs.get(edge.target) ?? [];
+          refs.push({
+            edgeId: edge.id,
+            fromId: current,
+            fromPort: edge.sourceHandle ?? null,
+            toPort: edge.targetHandle ?? null
+          });
+          crossRefs.set(edge.target, refs);
+          if (!visited.has(edge.target)) {
+            visited.add(edge.target);
+            queue.push(edge.target);
+          }
+          continue;
+        }
         if (!visited.has(edge.target)) {
           visited.add(edge.target);
           primaryParent.set(edge.target, current);
+          primaryEdgeOf.set(edge.target, {
+            edgeId: edge.id,
+            fromId: current,
+            fromPort: edge.sourceHandle ?? null,
+            toPort: edge.targetHandle ?? null
+          });
           childrenOf.get(current)!.push(edge.target);
           queue.push(edge.target);
           continue;
         }
-        // Non-primary edge into an already-placed node: record an inline
-        // cross-reference under the destination so the user sees the join
-        // where the data actually arrives.
+        // Non-primary edge into an already-placed (non-join) node — only
+        // possible for cycles. Record as a crossRef so the loop is
+        // visible.
         const existing = crossRefs.get(edge.target) ?? [];
         existing.push({
+          edgeId: edge.id,
           fromId: current,
           fromPort: edge.sourceHandle ?? null,
           toPort: edge.targetHandle ?? null
@@ -158,22 +243,32 @@ export function projectGraphToTree(
   // Materialise the tree depth-first from the root set so children come
   // out in BFS order.
   function build(id: string, depth: number): TreeNode {
-    const refs = crossRefs.get(id) ?? [];
     return {
       id,
       depth,
-      isPlaceholder: false,
+      isJoin: isJoin.has(id),
       children: (childrenOf.get(id) ?? []).map((childId) =>
         build(childId, depth + 1)
       ),
-      crossRefs: refs
+      crossRefs: crossRefs.get(id) ?? [],
+      joinRefs: joinRefsOf.get(id) ?? [],
+      primaryEdge: primaryEdgeOf.get(id)
     };
   }
 
+  // Top-level rows: nodes with no parent (genuine roots) PLUS hoisted
+  // joins. Sort by id within each bucket; joins come after roots so the
+  // sources read top-down and the convergence rows follow underneath.
   const rootIds = ids
-    .filter((id) => !primaryParent.has(id) && visited.has(id))
+    .filter(
+      (id) =>
+        visited.has(id) && !primaryParent.has(id) && !isJoin.has(id)
+    )
     .sort(byId);
-  return { roots: rootIds.map((id) => build(id, 0)) };
+  const joinIds = ids.filter((id) => isJoin.has(id)).sort(byId);
+  return {
+    roots: [...rootIds, ...joinIds].map((id) => build(id, 0))
+  };
 }
 
 /** True when `candidate` is reachable from `start` via the primary-parent

@@ -940,6 +940,33 @@ export function PipelineBuilder(props: {
     [selectedId, setNodes, setEdges]
   );
 
+  // Tree View handler: change one edge's port pair. `null` clears the
+  // port (= revert to default). React Flow's onEdgesChange picks the
+  // new handles up automatically when the user switches back to Flow View.
+  const updateEdgePorts = useCallback(
+    (
+      edgeId: string,
+      patch: { sourceHandle?: string | null; targetHandle?: string | null }
+    ) => {
+      setEdges((curr) =>
+        curr.map((e) =>
+          e.id === edgeId
+            ? {
+                ...e,
+                ...(patch.sourceHandle !== undefined
+                  ? { sourceHandle: patch.sourceHandle }
+                  : {}),
+                ...(patch.targetHandle !== undefined
+                  ? { targetHandle: patch.targetHandle }
+                  : {})
+              }
+            : e
+        )
+      );
+    },
+    [setEdges]
+  );
+
   const onDragOver = useCallback((event: React.DragEvent) => {
     event.preventDefault();
     event.dataTransfer.dropEffect = "move";
@@ -1582,6 +1609,8 @@ export function PipelineBuilder(props: {
             onAddChild={addNodeAsChildOf}
             onReparent={reparentNode}
             onDelete={deleteNodeById}
+            pluginManifestMap={pluginManifestMap}
+            onUpdateEdge={updateEdgePorts}
           />
         ) : (
         <div
