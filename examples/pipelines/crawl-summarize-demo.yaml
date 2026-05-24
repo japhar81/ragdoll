@@ -2,6 +2,17 @@ apiVersion: rag-platform/v1
 kind: Pipeline
 metadata:
   name: crawl-summarize-demo
+  stages:
+  - id: s_auto_1
+    label: Stage 1
+  - id: s_auto_2
+    label: Stage 2
+  - id: s_auto_3
+    label: Stage 3
+  - id: s_auto_4
+    label: Stage 4
+  - id: s_auto_5
+    label: Stage 5
 spec:
   nodes:
   - id: input
@@ -10,6 +21,7 @@ spec:
       position:
         x: 1.091796875
         y: 40
+      stageId: s_auto_1
   - id: retrieve
     plugin:
       category: datasource
@@ -26,6 +38,7 @@ spec:
       position:
         x: 459.57373046875
         y: 40
+      stageId: s_auto_2
   - id: prompt
     plugin:
       category: prompt_template
@@ -35,6 +48,7 @@ spec:
       position:
         x: 918.72705078125
         y: 40
+      stageId: s_auto_3
   - id: llm
     plugin:
       category: llm
@@ -48,12 +62,14 @@ spec:
       position:
         x: 1379.3037109375
         y: 40
+      stageId: s_auto_4
   - id: output
     type: output
     ui:
       position:
         x: 1841.3037109375
         y: 40
+      stageId: s_auto_5
   edges:
   - from: input
     to: prompt

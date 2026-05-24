@@ -17,6 +17,7 @@
 import { Pool } from "pg";
 import {
   autoLayoutSpec,
+  autoStageSpec,
   specChecksum
 } from "../packages/pipeline-spec/src/index.ts";
 
@@ -92,7 +93,11 @@ async function main(): Promise<void> {
         continue;
       }
       const before = row.spec as Parameters<typeof autoLayoutSpec>[0];
-      const after = autoLayoutSpec(before);
+      // Apply both transforms — layout fills in positions, stages
+      // groups nodes by topological layer. Each one is a no-op when
+      // the relevant fields are already populated, so this is safe to
+      // run on top of an earlier layout-only pass.
+      const after = autoStageSpec(autoLayoutSpec(before));
       if (after === before) {
         unchanged += 1;
         continue;

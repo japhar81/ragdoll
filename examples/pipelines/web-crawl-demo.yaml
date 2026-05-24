@@ -2,6 +2,13 @@ apiVersion: rag-platform/v1
 kind: Pipeline
 metadata:
   name: web-crawl-demo
+  stages:
+  - id: s_auto_1
+    label: Stage 1
+  - id: s_auto_2
+    label: Stage 2
+  - id: s_auto_3
+    label: Stage 3
 spec:
   nodes:
   - id: input
@@ -10,6 +17,7 @@ spec:
       position:
         x: 18.6875
         y: 40
+      stageId: s_auto_1
   - id: crawl
     plugin:
       category: datasource
@@ -26,12 +34,14 @@ spec:
       position:
         x: 479.65625
         y: 40
+      stageId: s_auto_2
   - id: output
     type: output
     ui:
       position:
         x: 941.65625
         y: 40
+      stageId: s_auto_3
   edges:
   - from: input
     to: crawl

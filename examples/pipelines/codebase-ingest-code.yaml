@@ -3,6 +3,19 @@ kind: Pipeline
 metadata:
   name: codebase-ingest-code
   description: Symbol-aware ingestion of a polyglot codebase into Qdrant. First pass embeds everything; subsequent passes touch only deltas (and delete rows for files removed on disk).
+  stages:
+  - id: s_auto_1
+    label: Stage 1
+  - id: s_auto_2
+    label: Stage 2
+  - id: s_auto_3
+    label: Stage 3
+  - id: s_auto_4
+    label: Stage 4
+  - id: s_auto_5
+    label: Stage 5
+  - id: s_auto_6
+    label: Stage 6
 spec:
   nodes:
   - id: fs
@@ -22,6 +35,7 @@ spec:
       position:
         x: -4.924163818359375
         y: 110
+      stageId: s_auto_1
   - id: delta
     plugin:
       category: transformer
@@ -34,6 +48,7 @@ spec:
       position:
         x: 452.82713317871094
         y: 110
+      stageId: s_auto_2
   - id: chunk
     plugin:
       category: chunker
@@ -46,6 +61,7 @@ spec:
       position:
         x: 910.5723037719727
         y: 29
+      stageId: s_auto_3
   - id: embed
     plugin:
       category: embedder
@@ -62,6 +78,7 @@ spec:
       position:
         x: 1369.381181716919
         y: 110
+      stageId: s_auto_4
   - id: write
     plugin:
       category: vector_store
@@ -77,6 +94,7 @@ spec:
       position:
         x: 1829.1748056411743
         y: 110
+      stageId: s_auto_5
   - id: delete
     plugin:
       category: sink
@@ -92,12 +110,14 @@ spec:
       position:
         x: 911.7939338684082
         y: 191
+      stageId: s_auto_3
   - id: out
     type: output
     ui:
       position:
         x: 2291.1748056411743
         y: 110
+      stageId: s_auto_6
   edges:
   - from: fs
     to: delta
