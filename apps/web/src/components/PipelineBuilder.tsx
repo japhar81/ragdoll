@@ -2,6 +2,9 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { useBuilderRoom } from "../events/EventsProvider.tsx";
 import { BuilderRoster } from "../events/BuilderRoster.tsx";
 import { BuilderTree } from "./builder/BuilderTree.tsx";
+import { BuilderStages } from "./builder/BuilderStages.tsx";
+import { BuilderCards } from "./builder/BuilderCards.tsx";
+import { BuilderOutline } from "./builder/BuilderOutline.tsx";
 import { projectGraphToTree, type TreeNode } from "../lib/treeProjection.ts";
 import type {
   BuilderEdit,
@@ -256,11 +259,21 @@ export function PipelineBuilder(props: {
   const clog = useConsoleLog();
   const [inspectorWidth, setInspectorWidth] = useState(360);
   const [paletteWidth, setPaletteWidth] = useState(220);
-  // Flow View vs Tree View. Persisted so the choice survives reload.
-  const [builderView, setBuilderView] = useState<"flow" | "tree">(() => {
+  // Five-way view switch — same nodes/edges state, different projections.
+  // Persisted so the choice survives reload.
+  type BuilderView = "flow" | "tree" | "stages" | "cards" | "outline";
+  const [builderView, setBuilderView] = useState<BuilderView>(() => {
     try {
       const v = localStorage.getItem("ragdoll.builderView");
-      return v === "tree" ? "tree" : "flow";
+      if (
+        v === "tree" ||
+        v === "stages" ||
+        v === "cards" ||
+        v === "outline"
+      ) {
+        return v;
+      }
+      return "flow";
     } catch {
       return "flow";
     }
@@ -1577,28 +1590,29 @@ export function PipelineBuilder(props: {
         />
         <div className="builder-canvas-col">
           <div className="builder-view-tabs" role="tablist" aria-label="Builder view">
-            <button
-              type="button"
-              role="tab"
-              aria-selected={builderView === "flow"}
-              className={
-                "builder-view-tab" + (builderView === "flow" ? " active" : "")
-              }
-              onClick={() => setBuilderView("flow")}
-            >
-              Flow View
-            </button>
-            <button
-              type="button"
-              role="tab"
-              aria-selected={builderView === "tree"}
-              className={
-                "builder-view-tab" + (builderView === "tree" ? " active" : "")
-              }
-              onClick={() => setBuilderView("tree")}
-            >
-              Tree View
-            </button>
+            {(
+              [
+                ["flow", "Flow"],
+                ["tree", "Tree"],
+                ["stages", "Stages"],
+                ["cards", "Cards"],
+                ["outline", "Outline"]
+              ] as Array<[BuilderView, string]>
+            ).map(([id, label]) => (
+              <button
+                key={id}
+                type="button"
+                role="tab"
+                aria-selected={builderView === id}
+                className={
+                  "builder-view-tab" +
+                  (builderView === id ? " active" : "")
+                }
+                onClick={() => setBuilderView(id)}
+              >
+                {label}
+              </button>
+            ))}
           </div>
         {builderView === "tree" ? (
           <BuilderTree
@@ -1611,6 +1625,33 @@ export function PipelineBuilder(props: {
             onDelete={deleteNodeById}
             pluginManifestMap={pluginManifestMap}
             onUpdateEdge={updateEdgePorts}
+          />
+        ) : builderView === "stages" ? (
+          <BuilderStages
+            nodes={nodes}
+            edges={edges}
+            selectedId={selectedId}
+            onSelect={setSelectedId}
+            onAddChild={addNodeAsChildOf}
+            onDelete={deleteNodeById}
+            pluginManifestMap={pluginManifestMap}
+            onUpdateEdge={updateEdgePorts}
+          />
+        ) : builderView === "cards" ? (
+          <BuilderCards
+            nodes={nodes}
+            edges={edges}
+            selectedId={selectedId}
+            onSelect={setSelectedId}
+            onDelete={deleteNodeById}
+            pluginManifestMap={pluginManifestMap}
+            onUpdateEdge={updateEdgePorts}
+          />
+        ) : builderView === "outline" ? (
+          <BuilderOutline
+            nodes={nodes}
+            edges={edges}
+            pipelineName={pipelineName}
           />
         ) : (
         <div
