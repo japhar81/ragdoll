@@ -122,11 +122,20 @@ async function bootstrapAccessControl(
   users: UserRepository,
   logger: ReturnType<typeof getLogger>
 ): Promise<void> {
-  const existing = await rbac.listRolePermissions();
-  if (existing.length === 0) {
-    const rows = defaultCatalogRows();
-    for (const row of rows) await rbac.addRolePermission(row);
-    logger.info("rbac_catalog_seeded", { rows: rows.length });
+  // Idempotent union: always re-apply the default catalog rows. The
+  // `addRolePermission` call uses `ON CONFLICT DO NOTHING`, so this is
+  // safe to run on every boot. We had a real bug where migration 010
+  // pre-seeded the dataset permissions, which left the table non-empty
+  // before the API ever booted — the previous `existing.length === 0`
+  // guard then skipped seeding everything else, leaving platform_admin
+  // with only the dataset permissions and operators staring at
+  // `HTTP 403: missing permission execution:view_logs` on a fresh stack.
+  const rows = defaultCatalogRows();
+  const before = (await rbac.listRolePermissions()).length;
+  for (const row of rows) await rbac.addRolePermission(row);
+  const after = (await rbac.listRolePermissions()).length;
+  if (after !== before) {
+    logger.info("rbac_catalog_seeded", { added: after - before, total: after });
   }
 
   const email = process.env.BOOTSTRAP_ADMIN_EMAIL?.trim().toLowerCase();

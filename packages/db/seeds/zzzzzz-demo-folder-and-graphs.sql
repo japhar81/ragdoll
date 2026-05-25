@@ -17,7 +17,11 @@
 
 INSERT INTO pipeline_folders (id, parent_id, name)
 VALUES ('00000000-0000-0000-0000-0000000df010', NULL, 'Demo Pipelines')
-ON CONFLICT (parent_id, name) DO NOTHING;
+-- pipeline_folders has UNIQUE (parent_id, name) — but NULL ≠ NULL in
+-- Postgres unique constraints, so a parent_id-NULL row doesn't
+-- de-duplicate on second seed. Fall back to PK ON CONFLICT so the
+-- second run is a clean no-op.
+ON CONFLICT (id) DO NOTHING;
 
 -- Move every shipped demo into the new folder. WHERE-by-slug is safe
 -- because slugs are unique; ON CONFLICT isn't possible on UPDATE so we
