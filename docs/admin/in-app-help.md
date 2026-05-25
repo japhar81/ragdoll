@@ -9,7 +9,7 @@ they're always offline-available and version-locked to your release.
 
 | Doc | When to open it |
 | --- | --- |
-| Access control · login, SSO, RBAC | Working with users, roles, identity providers, signup mode |
+| Settings · login, SSO, RBAC, retention | Users, roles, identity providers, signup mode, retention caps (the sidebar group was renamed from "Access" to "Settings") |
 | Triggering pipelines | Running pipelines from the UI / REST / cron / webhooks / CLI / MCP |
 | ragdoll CLI | Shell automation, CI, exporting data |
 | MCP endpoint | Wiring an LLM client to operate the platform |

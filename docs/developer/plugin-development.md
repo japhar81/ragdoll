@@ -14,6 +14,33 @@ runtime.
 - optional config, secrets, input, and output schemas
 - optional capabilities and UI metadata
 
+### Storage-touching plugins (Builder picker + validation)
+
+Plugins whose category is in `STORAGE_CATEGORIES`
+(`vector_store` / `retriever` / `sink` / `loader`) participate in the
+dataset-binding system. Two manifest fields drive the Builder UX and
+the validator:
+
+- `contract: 1 | 2` — `1` (default) is the legacy "name your own
+  collection in `config.collection`" path; `2` opts in to the
+  dataset-aware contract where the runtime resolves a
+  `ResolvedDataset` from `node.dataset.slug` (+ optional `alias`)
+  using the (tenant, env) the run was bound to. ADR 0019 covers the
+  full delta.
+- `datasetModalities?: ("vector" | "text" | "graph" | "image")[]` —
+  declares which backend slots the plugin needs inside the resolved
+  dataset. The Builder's slug picker hides datasets that don't
+  declare every required modality, and the validator emits
+  `dataset_modality_mismatch` if a pinned slug lacks one. Hybrid
+  plugins (e.g. `opensearch_hybrid_retriever`) list `["vector", "text"]`.
+  Plugins that pick modality from config at runtime (e.g.
+  `dataset_search`) leave this undeclared so the picker doesn't
+  pre-filter.
+
+The validator also fires `missing_required_dataset` on any v2 storage
+node without a `node.dataset.slug`. Save still works; Publish /
+Deploy / Run are blocked until the badge clears.
+
 ## In-process plugin
 
 ```ts
