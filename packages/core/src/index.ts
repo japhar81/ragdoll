@@ -180,6 +180,18 @@ export interface RuntimeContext {
   resolvedConfig: ResolvedConfig;
   deadline?: Date;
   signal?: AbortSignal;
+  /**
+   * Defense-in-depth permission check, populated by the worker when it has
+   * both an authorizer wired AND an `enqueuedBy` block on the job. Called
+   * once at executor entry; if it returns `false`, the run is recorded as
+   * `denied` and the DAG never executes. Untyped permission/resource here
+   * to keep `core` dependency-free; the worker passes `pipeline:run` plus
+   * the current run's tenant/pipeline/environment.
+   */
+  principalAuthorize?: (
+    permission: string,
+    resource?: { tenantId?: string; environment?: string; pipelineId?: string }
+  ) => boolean;
 }
 
 export interface Actor {
