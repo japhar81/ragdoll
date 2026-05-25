@@ -53,11 +53,18 @@ export type Permission =
   | "pipeline:run"
   | "plugin:manage"
   | "provider:manage"
-  // Access-control administration (new).
+  // Access-control administration.
   | "user:manage"
   | "role:manage"
   | "idp:manage"
-  | "auth:settings";
+  | "auth:settings"
+  // Dataset lifecycle (Phase 4 of dataset/RBAC/retrieval refactor).
+  // `read` = list / get / search; `write` = upsert chunks; `admin` =
+  // change schema / manage versions / delete. Scope mirrors every other
+  // permission: global / tenant / env.
+  | "dataset:read"
+  | "dataset:write"
+  | "dataset:admin";
 
 export interface Principal {
   id: string;
@@ -83,15 +90,16 @@ export const DEFAULT_ROLE_PERMISSIONS: Record<Role, Permission[]> = {
     "config:edit_global", "config:edit_pipeline", "config:edit_tenant",
     "secret:manage_tenant", "execution:view_logs", "execution:view_sensitive",
     "audit:view", "pipeline:run", "plugin:manage", "provider:manage",
-    "user:manage", "role:manage", "idp:manage", "auth:settings"
+    "user:manage", "role:manage", "idp:manage", "auth:settings",
+    "dataset:read", "dataset:write", "dataset:admin"
   ],
-  environment_admin: ["pipeline:deploy", "config:edit_pipeline", "execution:view_logs", "audit:view", "pipeline:run"],
-  pipeline_admin: ["pipeline:create", "pipeline:update", "pipeline:delete", "pipeline:deploy", "config:edit_pipeline", "execution:view_logs", "pipeline:run"],
-  pipeline_editor: ["pipeline:create", "pipeline:update", "config:edit_pipeline", "pipeline:run"],
-  tenant_admin: ["config:edit_tenant", "secret:manage_tenant", "execution:view_logs", "pipeline:run", "user:manage"],
-  tenant_operator: ["execution:view_logs", "pipeline:run"],
-  viewer: ["execution:view_logs"],
-  auditor: ["audit:view", "execution:view_logs"]
+  environment_admin: ["pipeline:deploy", "config:edit_pipeline", "execution:view_logs", "audit:view", "pipeline:run", "dataset:read", "dataset:write"],
+  pipeline_admin: ["pipeline:create", "pipeline:update", "pipeline:delete", "pipeline:deploy", "config:edit_pipeline", "execution:view_logs", "pipeline:run", "dataset:read", "dataset:write", "dataset:admin"],
+  pipeline_editor: ["pipeline:create", "pipeline:update", "config:edit_pipeline", "pipeline:run", "dataset:read", "dataset:write"],
+  tenant_admin: ["config:edit_tenant", "secret:manage_tenant", "execution:view_logs", "pipeline:run", "user:manage", "dataset:read", "dataset:write", "dataset:admin"],
+  tenant_operator: ["execution:view_logs", "pipeline:run", "dataset:read"],
+  viewer: ["execution:view_logs", "dataset:read"],
+  auditor: ["audit:view", "execution:view_logs", "dataset:read"]
 };
 
 /** Back-compat alias (was the only exported catalog before scopes existed). */

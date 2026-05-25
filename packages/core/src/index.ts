@@ -153,6 +153,100 @@ export interface PipelineEdge {
   toPort?: string;
 }
 
+// ---------------------------------------------------------------------------
+// Dataset (Phase 4 of dataset/RBAC/retrieval refactor)
+// ---------------------------------------------------------------------------
+
+/**
+ * Scope at which a Dataset is defined. Resolution at reference time walks
+ * `environment -> tenant -> global`, first match wins; cross-scope writes
+ * require explicit opt-in by the caller.
+ */
+export type DatasetScope = "global" | "tenant" | "environment";
+
+/**
+ * A named, schema'd container of vector / keyword / structured data that
+ * pipelines reference *by id* rather than by raw collection name. The
+ * platform owns the physical naming and backend selection; plugins only
+ * see the resolved {@link DatasetVersion} the runtime hands them.
+ *
+ * Multiple pipelines can ingest into and retrieve from the same Dataset —
+ * that's the whole point of the abstraction, and the reason a tenant
+ * with N ingestion pipelines plus M retrieval pipelines doesn't get
+ * N×M coupled collections anymore.
+ */
+export interface Dataset {
+  id: UUID;
+  scope: DatasetScope;
+  /** NULL when scope === 'global'. */
+  tenantId?: string;
+  /** Free-text env name (mirrors environments.name); set only when scope === 'environment'. */
+  environmentId?: string;
+  slug: string;
+  displayName: string;
+  description?: string;
+  embeddingProfile: EmbeddingProfile;
+  /** JSON-schema-like record shape every chunk written here must conform to. */
+  chunkSchema: Record<string, unknown>;
+  /** Which modalities the dataset is provisioned for. */
+  modalities: DatasetModality[];
+  /** Backend selection per modality. */
+  backends: DatasetBackends;
+  /** Currently-ready version id; pipelines pin to an alias unless otherwise. */
+  currentVersionId?: string;
+  archivedAt?: string;
+  createdAt: string;
+  createdBy?: string;
+  updatedAt: string;
+}
+
+export type DatasetModality = "vector" | "keyword";
+
+/**
+ * Backend declaration: which provider holds which modality. v1 supports
+ * one provider per modality; multi-backend layered storage lands in a
+ * later phase.
+ */
+export interface DatasetBackends {
+  vector?: { provider: "qdrant" | "pgvector" | "opensearch"; config?: Record<string, unknown> };
+  keyword?: { provider: "opensearch" | "postgres_fts"; config?: Record<string, unknown> };
+  hybrid?: { strategy: "rrf" | "weighted_sum"; config?: Record<string, unknown> };
+}
+
+/**
+ * Immutable snapshot of a Dataset's schema + the physical collection
+ * names where its data lives. Pipelines pin to a version (or to a
+ * moveable alias that resolves to one). Changing the schema requires a
+ * new version because the existing data was indexed under the old one.
+ */
+export interface DatasetVersion {
+  id: UUID;
+  datasetId: UUID;
+  versionLabel: string;
+  schemaSpec: Record<string, unknown>;
+  /** `{ vector: "rag_acme_prod_supportkb_v2", keyword: "..." }` */
+  backendCollections: Record<string, string>;
+  status: "building" | "ready" | "archived";
+  docCount: number;
+  sizeBytes: number;
+  createdAt: string;
+  readyAt?: string;
+}
+
+/**
+ * Moveable pointer (`stable`, `staging`, `canary`) into a Dataset's
+ * version timeline. Pipelines pin to an alias so the platform can swap
+ * the underlying version atomically.
+ */
+export interface DatasetAlias {
+  id: UUID;
+  datasetId: UUID;
+  alias: string;
+  versionId: UUID;
+  updatedAt: string;
+  updatedBy?: string;
+}
+
 export interface SecretRef {
   provider?: SecretProviderKind;
   scope: "tenant" | "environment" | "global" | "tenant_provider" | "datasource";
