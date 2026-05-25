@@ -4465,6 +4465,7 @@ function projectPlugin(plugin: RegisteredPlugin): {
   name: string;
   version: string;
   category: string;
+  contract?: number;
   description: string;
   mode: string;
   capabilities: string[];
@@ -4496,6 +4497,11 @@ function projectPlugin(plugin: RegisteredPlugin): {
     name: m.name,
     version: m.version,
     category: m.category,
+    // contract version drives the Builder's "needs a Dataset binding"
+    // validation rule — v1 plugins still use config.collection, v2 plugins
+    // must pin a slug. Without this on the wire, the client treats every
+    // plugin as v1 and the badge never lights up.
+    ...(m.contract !== undefined ? { contract: m.contract } : {}),
     description: m.description,
     mode: plugin.mode,
     capabilities: m.capabilities ?? [],

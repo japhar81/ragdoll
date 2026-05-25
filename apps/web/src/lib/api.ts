@@ -997,6 +997,9 @@ export interface PluginInfo {
   name: string;
   version: string;
   category: string;
+  /** Plugin contract version. v1 (default) uses config.collection; v2 takes
+   *  a ResolvedDataset on input.dataset and the Builder requires a slug pin. */
+  contract?: number;
   description?: string;
   mode?: string;
   capabilities?: string[];
