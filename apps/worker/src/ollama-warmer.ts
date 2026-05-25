@@ -23,19 +23,45 @@ export interface OllamaWarmerOptions {
   models: string[];
   baseUrl: string;
   intervalMs: number;
+  /**
+   * Max wall-clock time the `ready` promise will wait for every model
+   * to respond successfully before rejecting. Defaults to 10 minutes —
+   * long enough for `ollama-pull` to fetch CPU models on a cold
+   * cache, short enough to fail visibly if Ollama is misconfigured.
+   */
+  readyTimeoutMs?: number;
+  /** Poll interval for the readiness gate. Defaults to 5 seconds. */
+  readyPollMs?: number;
   logger?: StructuredLogger;
 }
 
+export interface OllamaWarmerHandle {
+  /** Stop the periodic heartbeat. Idempotent. */
+  stop: () => void;
+  /**
+   * Resolves once every configured model has responded successfully
+   * at least once (i.e. is pulled AND loadable). Rejects if any model
+   * cannot be made ready within {@link OllamaWarmerOptions.readyTimeoutMs}.
+   *
+   * Callers (e.g. the BullMQ consumer) await this to avoid taking
+   * jobs while `ollama-pull` is still fetching weights — otherwise the
+   * first /api/embed comes back 404 and the pipeline crashes.
+   */
+  ready: Promise<void>;
+}
+
 /**
- * Start the warmer; returns a stop function that clears the interval
- * and resolves once the in-flight ping settles. Idempotent — calling
- * stop twice is a no-op.
+ * Start the warmer; returns a handle exposing a `stop` callback and a
+ * `ready` promise that resolves once every model has been verified
+ * pullable + servable.
  */
-export function startOllamaWarmer(opts: OllamaWarmerOptions): () => void {
+export function startOllamaWarmer(opts: OllamaWarmerOptions): OllamaWarmerHandle {
   if (opts.models.length === 0) {
-    return () => {};
+    return { stop: () => {}, ready: Promise.resolve() };
   }
   const { models, baseUrl, intervalMs, logger } = opts;
+  const readyTimeoutMs = opts.readyTimeoutMs ?? 600_000; // 10 min default
+  const readyPollMs = opts.readyPollMs ?? 5_000;
 
   async function ping(
     endpoint: "/api/generate" | "/api/embed",
@@ -113,16 +139,67 @@ export function startOllamaWarmer(opts: OllamaWarmerOptions): () => void {
     }
   }
 
-  // Kick once synchronously to warm immediately on boot; subsequent
-  // pings happen on the interval. void the promise so the caller
-  // doesn't block on the first wave.
-  void pingOnce();
+  /**
+   * Probe a single model with a small request until it responds 2xx,
+   * polling at `readyPollMs` until `deadline`. Resolves true on
+   * success, false on deadline. Used by the boot readiness gate so
+   * the worker doesn't accept jobs while `ollama-pull` is still
+   * fetching weights.
+   */
+  async function waitUntilModelReady(
+    model: string,
+    deadline: number
+  ): Promise<boolean> {
+    while (Date.now() < deadline) {
+      try {
+        const gen = await ping("/api/generate", model);
+        if (gen.ok) return true;
+        // 400 "does not support generate" still means the model is
+        // pulled — the embed path is what matters for these models.
+        if (
+          gen.status === 400 &&
+          /does not support generate/i.test(gen.body ?? "")
+        ) {
+          const embed = await ping("/api/embed", model);
+          if (embed.ok) return true;
+        }
+        // 404 = model not yet pulled. Keep waiting.
+      } catch {
+        // Network error during `ollama-pull` startup. Keep waiting.
+      }
+      logger?.info?.("ollama_warm_waiting_for_model", { model });
+      await new Promise((resolve) => setTimeout(resolve, readyPollMs));
+    }
+    return false;
+  }
+
+  const readyDeadline = Date.now() + readyTimeoutMs;
+  const ready: Promise<void> = (async () => {
+    const results = await Promise.all(
+      models.map((model) => waitUntilModelReady(model, readyDeadline))
+    );
+    const failed = models.filter((_, i) => !results[i]);
+    if (failed.length > 0) {
+      throw new Error(
+        `ollama warmer timed out waiting for ${failed.join(", ")} after ${
+          readyTimeoutMs / 1000
+        }s`
+      );
+    }
+    logger?.info?.("ollama_warmer_ready", { models });
+  })();
+
+  // Subsequent pings happen on the interval. The initial pings are
+  // covered by the readiness probe above, so we don't double-fire
+  // here.
   const handle = setInterval(() => {
     void pingOnce();
   }, intervalMs);
-  // Don't keep the process alive solely for the warmer.
   const timer = handle as unknown as { unref?: () => void };
   if (typeof timer.unref === "function") timer.unref();
 
-  return () => clearInterval(handle);
+  return {
+    stop: () => clearInterval(handle),
+    ready
+  };
 }
