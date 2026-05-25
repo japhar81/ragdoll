@@ -32,7 +32,12 @@ everything beneath it:
 | `t/<tenantId>/e/<env>` | one environment of a tenant |
 | `t/<tenantId>/p/<pipelineId>` | one pipeline of a tenant |
 
-## Common tasks (Access section in the UI)
+## Common tasks (Settings section in the UI)
+
+> The sidebar group was renamed from "Access" to "Settings" — these
+> pages now live alongside Auth Settings and Retention under
+> **Settings** in the left nav.
+
 
 - **Users** — create local users (omit the password for SSO-only),
   enable/disable, delete, and open **Grants** to assign a role at a level

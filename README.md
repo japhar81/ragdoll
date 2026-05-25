@@ -77,14 +77,44 @@ run with **zero install**.
 **Web UI**
 
 - React Flow visual Builder with resolved-config preview, validation,
-  and per-node 3-tab inspector (Config / Resolved / Docs).
-- Folder tree, scheduler, executions trace viewer, RBAC admin
-  (users / roles / IdPs / auth settings).
+  and per-node 3-tab inspector (Config / Resolved / Docs), plus a
+  pipeline-level **Datasets** tab that lists every slug the spec
+  pins.
+- Builder slug-only dataset picker filters by `datasetModalities`
+  declared on each plugin manifest (qdrant → vector, opensearch →
+  text, hybrid → both). Validator emits `missing_required_dataset` /
+  `dataset_modality_mismatch` errors that block Publish / Deploy /
+  Run while keeping Save open.
+- Builder Details menu carries a per-pipeline **Timeout** field
+  (default 60 min, persisted in `spec.metadata.timeoutMs`); enforced
+  by the platform's stale-execution sweep.
+- Deploy modal wires each referenced slug to a concrete (scope,
+  tenant, env) dataset variant at deploy/run time — create new
+  variants inline if missing.
+- Activity grids (Executions / Audit / Usage) use **SVAR React Grid**
+  with virtual scroll, sticky header + footer (row count), and
+  auto-load on scroll-near-bottom via cursor pagination — paginated
+  endpoints return `{ rows, nextCursor, total }`.
+- Folder tree, scheduler (with un-deletable platform sweep
+  schedules), retention settings screen, executions trace viewer,
+  RBAC admin (users / roles / IdPs / auth settings) — all under a
+  unified **Settings** sidebar group.
 - Self-service profile screen with display-name edit, password change,
   and API key management (mint / list / revoke).
 - Embedded help: hover tooltips, `?` field popovers, `⌘K` command
   palette (cmdk), keyboard shortcuts overlay, and a slide-in help
   drawer that renders bundled markdown docs offline.
+
+**Platform sweepers** (ADR 0019, migration 012)
+
+- Two un-deletable schedules ship with the platform and run through
+  the same BullMQ concurrency pool as pipeline runs:
+  - `stale_exec_sweep` (every 5 min) — fails executions exceeding
+    their `spec.metadata.timeoutMs` (or the 60-min platform default
+    when unset).
+  - `retention_sweep` (hourly) — prunes executions / usage / audit
+    rows beyond the per-resource `max_count` / `max_age_days` caps
+    set on the `/retention` screen.
 
 **Observability** (ADR 0014)
 
@@ -119,13 +149,19 @@ make down
 Tests:
 
 ```sh
-npm test                  # unit (packages)
-npm run test:functional   # API + worker
-npm run test:e2e          # cross-component
-npm run test:plugins      # plugin contract
-npm run test:cli          # CLI
-npm run test:web          # web-logic helpers
-npm run test:all          # all of the above (422 tests)
+npm test                  # unit (packages, ~242 tests)
+npm run test:functional   # API + worker (~103 tests)
+npm run test:e2e          # cross-component (~8 tests)
+npm run test:plugins      # plugin contract (~69 tests)
+npm run test:security     # RBAC / cross-tenant / redaction (~32 tests)
+npm run test:cli          # CLI (~9 tests)
+npm run test:web          # web-logic helpers (~160 tests)
+npm run test:all          # all of the above (~623 tests; ~6s end-to-end)
+
+# Browser integration suite (drives the local stack — `make refresh` first).
+# Isolates state into a per-run `integration_testing` tenant; setup creates
+# it, teardown nukes it via the cascade FKs from migration 013. ~56 specs.
+npm run test:playwright
 ```
 
 Run services directly (in-memory unless `DATABASE_URL` / `REDIS_URL`
@@ -229,16 +265,9 @@ The wrapper invokes `apps/cli/src/index.ts` directly via Node's
   per-token streaming from `provider_chat` straight through to the
   HTTP response — requires a provider-layer AsyncIterable +
   executor plumbing. Lifecycle streaming is here today.
-- **Per-key permission intersection** for API keys is snapshot-at-mint
-  today: if the owner later loses a role, the key keeps the
-  snapshotted permission. Lands when dataset-aware grants do.
-- **Cross-encoder reranking** (`rerank_bge`) hits the HuggingFace
-  Inference API, not a local model. Local model loading needs a
-  Python sidecar + GPU/CPU weights — out of scope for v1.
-- **Sample pipelines** in `examples/pipelines/` still use the v1
-  (`config.collection`-style) shape. They run unchanged through the
-  shim; migration to `node.dataset` + sync execution is a curated
-  task per example.
+- **gRPC external-plugin transport** isn't implemented — the manifest
+  recognizes it, but `executeRegisteredPlugin` throws on the gRPC
+  branch. HTTP is the supported external transport.
 
 ## Key docs
 

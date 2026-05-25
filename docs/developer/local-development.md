@@ -12,7 +12,14 @@
 npm test                  # unit tests (packages only), offline, no install
 npm run test:functional   # apps/api + apps/worker functional tests, offline
 npm run test:e2e          # cross-component e2e (API+queue+worker), offline
-npm run test:all          # test + test:functional + test:e2e
+npm run test:plugins      # plugin contract tests
+npm run test:security     # RBAC / redaction / cross-tenant boundary
+npm run test:cli          # CLI smoke
+npm run test:web          # web-logic helpers (storage / api shaping / specs)
+npm run test:all          # everything above (~623 tests)
+npm run test:playwright   # browser integration suite — needs `make refresh`
+                          # to be running and per-run `integration_testing`
+                          # tenant; ~56 specs at tests/playwright/
 npm run typecheck         # tsc --noEmit (requires npm install)
 ```
 

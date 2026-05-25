@@ -22,8 +22,9 @@ import { datasetColor } from "../lib/datasetColor.ts";
  * version row is already cached when the user expanded the folder)
  * and the dataset refs are pulled out of `spec.spec.nodes[i].dataset`.
  *
- * Hover surfaces the alias; clicking would deep-link to the dataset
- * detail page once that route gains stable URLs (TODO).
+ * Hover surfaces the alias; clicking deep-links to the dataset's
+ * `/datasets/:id` page (env > tenant > global, same as the runtime
+ * resolver).
  */
 function PipelineDatasetPills(props: { pipelineId: string }) {
   const navigate = useNavigate();
