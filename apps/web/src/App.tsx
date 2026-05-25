@@ -48,7 +48,68 @@ type NavItem = {
   label: string;
   /** Sidebar visibility (any-of). Empty = visible to any authenticated user. */
   perms: string[];
+  /** Single glyph rendered before the label. Inline SVGs keep us free of
+   *  an icon dependency; one per nav row is small enough. */
+  icon?: string;
 };
+
+/** Outline-style 18×18 SVG paths, sized to match the sidebar's 13px text
+ *  baseline. Picked from Lucide / Tabler conventions — square route,
+ *  pure functional, no extra dependency. */
+const NAV_ICONS: Record<string, string> = {
+  pipelines:
+    "M5 4h14M5 12h14M5 20h14 M9 8h6 M9 16h6", // 3 horizontal bars + 2 short = "stacked stages"
+  datasets:
+    "M4 6c0-1.1 3.6-2 8-2s8 .9 8 2-3.6 2-8 2-8-.9-8-2zm0 0v6c0 1.1 3.6 2 8 2s8-.9 8-2V6 M4 12v6c0 1.1 3.6 2 8 2s8-.9 8-2v-6", // cylinder
+  builder: "M5 3v18 M19 3v18 M5 8h14 M5 16h14", // brackets
+  scheduler:
+    "M12 7v5l3 3 M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0z", // clock
+  executions: "M5 4l14 8-14 8V4z", // play
+  usage:
+    "M3 20h18 M7 16V8 M12 16V4 M17 16V11", // bars
+  audit:
+    "M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z M14 2v6h6 M9 13h6 M9 17h4", // document
+  tenants:
+    "M3 21V8l9-5 9 5v13 M9 21v-7h6v7 M3 9h18", // building
+  config: "M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8z M19 12a7 7 0 0 0-.1-1.2l2-1.5-2-3.5-2.5.6a7 7 0 0 0-2.1-1.2L13.5 3h-3l-.8 2.2a7 7 0 0 0-2.1 1.2L5.1 5.8l-2 3.5L5.1 11a7 7 0 0 0 0 2L3.1 14.5l2 3.5 2.5-.6a7 7 0 0 0 2.1 1.2l.8 2.2h3l.8-2.2a7 7 0 0 0 2.1-1.2l2.5.6 2-3.5L18.9 13 19 12z",
+  secrets: "M6 11V8a6 6 0 0 1 12 0v3 M5 11h14v10H5z M12 16v2",
+  users: "M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2 M22 21v-2a4 4 0 0 0-3-3.9 M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8z M16 3.1a4 4 0 0 1 0 7.8",
+  roles: "M12 1l3 6 6 .9-4.5 4.4 1 6.2-5.5-2.9-5.5 2.9 1-6.2L3 7.9 9 7z",
+  "identity-providers":
+    "M9 12l2 2 4-4 M12 22s-8-4-8-12V4l8-2 8 2v6c0 8-8 12-8 12z",
+  "auth-settings":
+    "M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0z M12 8v4l3 2",
+  retention:
+    "M3 6h18 M8 6v14a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V6 M10 11v6 M14 11v6 M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"
+};
+
+function iconKeyFor(path: string): string | undefined {
+  // /pipelines → "pipelines", /identity-providers → "identity-providers"
+  const m = path.match(/^\/([^/]+)/);
+  return m ? m[1] : undefined;
+}
+
+function NavIcon({ path }: { path: string }) {
+  const key = iconKeyFor(path);
+  const d = key ? NAV_ICONS[key] : undefined;
+  if (!d) return null;
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      width="14"
+      height="14"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className="nav-icon"
+      aria-hidden="true"
+    >
+      <path d={d} />
+    </svg>
+  );
+}
 
 const NAV_GROUPS: Array<{ group: string; items: NavItem[] }> = [
   {
@@ -204,10 +265,13 @@ function Shell() {
                 <NavLink
                   key={item.path}
                   to={item.path}
-                  className={({ isActive }) => (isActive ? "active" : undefined)}
+                  className={({ isActive }) =>
+                    `nav-link${isActive ? " active" : ""}`
+                  }
                   end={item.path === "/pipelines"}
                 >
-                  {item.label}
+                  <NavIcon path={item.path} />
+                  <span>{item.label}</span>
                 </NavLink>
               ))}
             </React.Fragment>

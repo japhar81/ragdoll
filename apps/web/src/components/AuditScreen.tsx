@@ -3,7 +3,7 @@ import { useInfiniteQuery } from "@tanstack/react-query";
 import { api } from "../lib/api.ts";
 import type { AuditRow } from "../lib/api.ts";
 import { Screen } from "./Screen.tsx";
-import { DataGrid, type DataGridColumn } from "./DataGrid.tsx";
+import { SvarDataGrid, type SvarColumn } from "./SvarDataGrid.tsx";
 
 /** Audit admin. GET /api/audit returns the redacted audit log list. */
 export function AuditScreen() {
@@ -22,52 +22,41 @@ export function AuditScreen() {
     [audit.data]
   );
 
-  const columns: DataGridColumn<AuditRow>[] = [
+  const columns: SvarColumn<AuditRow>[] = [
     {
-      key: "time",
+      id: "createdAt",
       header: "Time",
-      accessor: (l) => l.createdAt,
-      cell: (l) => new Date(l.createdAt).toLocaleString(),
-      width: "16%"
+      width: 180,
+      cell: (l) => new Date(l.createdAt).toLocaleString()
     },
-    { key: "actor", header: "Actor", accessor: (l) => l.actorId ?? "—", width: "18%" },
     {
-      key: "tenant",
+      id: "actorId",
+      header: "Actor",
+      cell: (l) => l.actorId ?? "—"
+    },
+    {
+      id: "tenantId",
       header: "Tenant",
-      accessor: (l) => l.tenantId ?? "—",
-      filter: "select",
-      width: "14%"
+      cell: (l) =>
+        l.tenantId ? <code>{l.tenantId.slice(0, 8)}…</code> : "—"
     },
+    { id: "action", header: "Action" },
+    { id: "targetType", header: "Target type" },
     {
-      key: "action",
-      header: "Action",
-      accessor: (l) => l.action,
-      filter: "select",
-      width: "18%"
-    },
-    {
-      key: "targetType",
-      header: "Target type",
-      accessor: (l) => l.targetType,
-      filter: "select",
-      width: "14%"
-    },
-    {
-      key: "targetId",
+      id: "targetId",
       header: "Target ID",
-      accessor: (l) => l.targetId,
-      cell: (l) => <code>{l.targetId}</code>,
-      width: "20%"
+      cell: (l) => <code>{l.targetId}</code>
     }
   ];
 
   return (
     <Screen title="Audit Log" isLoading={audit.isLoading} error={audit.error}>
-      <DataGrid
+      <SvarDataGrid<AuditRow>
         columns={columns}
         rows={rows}
-        rowKey={(l, i) => `${l.createdAt}-${l.targetId}-${i}`}
+        rowKey={(l) => `${l.createdAt}-${l.targetId}`}
         emptyMessage="No audit entries."
+        height="calc(100vh - 220px)"
         hasMore={audit.hasNextPage}
         isLoadingMore={audit.isFetchingNextPage}
         onLoadMore={() => {

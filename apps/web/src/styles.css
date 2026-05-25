@@ -40,17 +40,25 @@ body {
   padding: 6px 8px;
   border-radius: 6px;
   font-size: 14px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
-
+.sidebar nav a .nav-icon {
+  flex: 0 0 14px;
+  color: #94a3b8;
+}
 .sidebar nav a:hover {
   background: #1e293b;
   color: white;
 }
+.sidebar nav a:hover .nav-icon { color: #cbd5e1; }
 
 .sidebar nav a.active {
   background: #2563eb;
   color: white;
 }
+.sidebar nav a.active .nav-icon { color: white; }
 
 .builder {
   display: grid;
@@ -2084,11 +2092,26 @@ table.datagrid tbody tr.row-highlighted {
 .idp-field input { padding: 6px 8px; }
 
 .settings-card {
-  max-width: 640px;
+  /* Cards used to hard-cap at 640px regardless of viewport, which left a
+     wide screen 75% empty. Cap to the readable max instead — the
+     container's own width (.screen-body, scope-body, modal, etc.) sets
+     the upper bound. The narrow opt-in `.settings-card.compact` (used
+     by signup-mode pickers, sign-in form) keeps the focused look. */
+  width: 100%;
   border: 1px solid #e5e7eb;
   border-radius: 10px;
   padding: 18px 20px;
   background: #fff;
+  box-sizing: border-box;
+}
+.settings-card.compact { max-width: 640px; }
+/* Tile multiple cards into a responsive grid; one card per column up
+   to 720px wide, two across on wider screens, three on very wide. */
+.settings-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(380px, 100%), 1fr));
+  gap: 14px;
+  align-items: start;
 }
 .settings-card h3 { margin: 0 0 12px; }
 .mode-list { display: flex; flex-direction: column; gap: 8px; }
@@ -2645,6 +2668,36 @@ kbd {
   font-size: 0.85em;
   color: #64748b;
   font-style: italic;
+}
+/* SVAR grid wrapper — stretches the host to fill its column flex slot
+   and pads the load-more footer to match our other "more rows" CTAs. */
+.svar-grid-wrap {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+.svar-grid-host {
+  flex: 1 1 auto;
+  min-height: 320px;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  overflow: hidden;
+  background: white;
+}
+.svar-grid-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: #64748b;
+  font-style: italic;
+  font-size: 13px;
+}
+.svar-grid-loadmore {
+  display: flex;
+  justify-content: center;
+  padding: 10px 0 4px;
 }
 .row-system {
   background: #f8fafc;

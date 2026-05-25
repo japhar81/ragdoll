@@ -66,12 +66,13 @@ test.describe("executions / usage / audit pagination", () => {
     await expect(
       page.locator(".toolbar strong", { hasText: "Executions" })
     ).toBeVisible();
-    // "Execution" appears twice (column + detail block); restrict to grid header.
+    // SVAR Grid renders headers with `role="columnheader"`; check by role
+    // so the spec isn't coupled to its internal `<div>` vs `<th>` DOM.
     await expect(
-      page.locator("thead", { hasText: "Execution" })
+      page.getByRole("columnheader", { name: "Execution" })
     ).toBeVisible();
     await expect(
-      page.locator("thead", { hasText: "Status" })
+      page.getByRole("columnheader", { name: "Status" })
     ).toBeVisible();
   });
 });
