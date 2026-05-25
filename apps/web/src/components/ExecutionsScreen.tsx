@@ -196,6 +196,7 @@ export function ExecutionsScreen() {
         rowKey={(e) => e.executionId}
         height={selected ? 360 : undefined}
         emptyMessage="No executions yet."
+        rowNoun="execution"
         hasMore={executions.hasNextPage}
         isLoadingMore={executions.isFetchingNextPage}
         onLoadMore={() => {

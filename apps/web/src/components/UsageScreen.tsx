@@ -117,6 +117,7 @@ export function UsageScreen() {
           `${r.executionId ?? "no-exec"}-${r.inputTokens}-${r.outputTokens}`
         }
         emptyMessage="No usage records yet."
+        rowNoun="usage record"
         hasMore={usage.hasNextPage}
         isLoadingMore={usage.isFetchingNextPage}
         onLoadMore={() => {
