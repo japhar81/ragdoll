@@ -13,7 +13,11 @@ name: ragdoll
 
 services:
   postgres:
-    image: postgres:16
+    # pgvector/pgvector image is the official Postgres + pgvector build.
+    # pg16 tag matches the previous bare-postgres pg version so the
+    # data volume is upgrade-compatible. Required by Phase 6's
+    # PgVectorStore — see packages/db/migrations/011_pgvector.sql.
+    image: pgvector/pgvector:pg16
     environment:
       POSTGRES_USER: ragdoll
       POSTGRES_PASSWORD: ragdoll
@@ -250,6 +254,13 @@ services:
       # RAGDOLL_DEV_AUTH: "1"
       QDRANT_URL: http://qdrant:6333
       OPENSEARCH_URL: http://opensearch:9200
+      # Phase 6: which vector backend createVectorStore picks when a
+      # plugin hasn't been pointed at a specific Dataset. Default
+      # `qdrant` keeps every existing pipeline working unchanged; flip
+      # to `pgvector` to run Postgres-only (Qdrant container becomes
+      # optional). Per-Dataset backend selection lands in a follow-up
+      # via dataset.backends.vector.provider.
+      RAGDOLL_VECTOR_BACKEND: ${RAGDOLL_VECTOR_BACKEND:-qdrant}
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
       OTEL_SERVICE_NAME: ragdoll-api
       OTEL_RESOURCE_ATTRIBUTES: "service.namespace=ragdoll,deployment.environment=local"
@@ -290,6 +301,13 @@ services:
       SECRET_ENCRYPTION_KEY: local-dev-only-change-me-32-bytes-min
       QDRANT_URL: http://qdrant:6333
       OPENSEARCH_URL: http://opensearch:9200
+      # Phase 6: which vector backend createVectorStore picks when a
+      # plugin hasn't been pointed at a specific Dataset. Default
+      # `qdrant` keeps every existing pipeline working unchanged; flip
+      # to `pgvector` to run Postgres-only (Qdrant container becomes
+      # optional). Per-Dataset backend selection lands in a follow-up
+      # via dataset.backends.vector.provider.
+      RAGDOLL_VECTOR_BACKEND: ${RAGDOLL_VECTOR_BACKEND:-qdrant}
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
       OTEL_SERVICE_NAME: ragdoll-worker
       OTEL_RESOURCE_ATTRIBUTES: "service.namespace=ragdoll,deployment.environment=local"

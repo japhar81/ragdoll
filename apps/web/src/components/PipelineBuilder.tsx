@@ -228,6 +228,91 @@ function LayoutMenu({ onApply }: { onApply: (kind: LayoutKind) => void }) {
   );
 }
 
+/** Categories whose plugins touch a backend collection / index — the
+ *  ones a Dataset reference is meaningful for. Kept as a flat list here
+ *  (instead of in plugin-sdk) because it's pure UI-level filtering. */
+const STORAGE_CATEGORIES = new Set([
+  "vector_store",
+  "retriever",
+  "sink",
+  "loader"
+]);
+function isStorageCategory(category: string | undefined): boolean {
+  return !!category && STORAGE_CATEGORIES.has(category);
+}
+
+/**
+ * Inline Dataset picker shown above the Config section for
+ * storage-touching nodes. Lists Datasets visible at the builder's
+ * (tenantId, environment), and binds the chosen one onto
+ * `node.dataset = { slug, alias? }`. Defaults the alias to "stable"
+ * since pipelines pin to aliases for atomic version swaps; advanced
+ * users can edit the alias inline.
+ *
+ * Setting both fields to empty clears `node.dataset`, which puts the
+ * node back on the legacy "name your own collection" path.
+ */
+function DatasetPickerSection(props: {
+  node: PipelineNode;
+  tenantId: string | undefined;
+  environment: string;
+  onChange: (dataset: { slug: string; alias?: string } | undefined) => void;
+}) {
+  const datasets = useQuery({
+    queryKey: ["datasets-picker", props.tenantId, props.environment],
+    queryFn: () =>
+      api.listDatasets({
+        tenantId: props.tenantId,
+        environmentId: props.environment
+      }),
+    enabled: !!props.tenantId
+  });
+  const current = props.node.dataset as
+    | { slug: string; alias?: string }
+    | undefined;
+  return (
+    <div className="settings-card" style={{ padding: 8, marginBottom: 8 }}>
+      <h3 style={{ margin: 0 }}>Dataset</h3>
+      <p className="muted" style={{ marginTop: 2, fontSize: "0.85em" }}>
+        Pin this node to a managed dataset. The runtime resolves the
+        backend collection at execute time. Leave blank to keep using
+        the explicit collection name in Config.
+      </p>
+      <div className="inline-form" style={{ gap: 6 }}>
+        <select
+          value={current?.slug ?? ""}
+          onChange={(e) => {
+            const slug = e.target.value;
+            props.onChange(
+              slug ? { slug, alias: current?.alias ?? "stable" } : undefined
+            );
+          }}
+          disabled={!props.tenantId || datasets.isLoading}
+        >
+          <option value="">(none — use config.collection)</option>
+          {(datasets.data?.datasets ?? []).map((d) => (
+            <option key={d.id} value={d.slug}>
+              {d.slug} · {d.scope}
+              {d.environmentId ? `/${d.environmentId}` : ""}
+            </option>
+          ))}
+        </select>
+        {current?.slug && (
+          <input
+            value={current.alias ?? "stable"}
+            onChange={(e) =>
+              props.onChange({ slug: current.slug, alias: e.target.value || "stable" })
+            }
+            placeholder="alias (stable)"
+            style={{ width: 100 }}
+            title="Alias to pin (defaults to 'stable')"
+          />
+        )}
+      </div>
+    </div>
+  );
+}
+
 function download(name: string, text: string, mime: string): void {
   const blob = new Blob([text], { type: mime });
   const url = URL.createObjectURL(blob);
@@ -1978,6 +2063,22 @@ export function PipelineBuilder(props: {
                       }
                     }}
                   />
+                  {/* Phase 5/7: dataset picker for storage-touching nodes.
+                      The runtime resolves the chosen ref at execute time
+                      and either hands a v2 plugin a ResolvedDataset OR
+                      shims the backend collection names into a v1
+                      plugin's config. */}
+                  {selectedPlugin.data &&
+                    isStorageCategory(selectedPlugin.data.category) && (
+                      <DatasetPickerSection
+                        node={selectedNode}
+                        tenantId={tenantId}
+                        environment={environment}
+                        onChange={(dataset) =>
+                          updateSelectedNode((n) => ({ ...n, dataset }))
+                        }
+                      />
+                    )}
                   <h3>Config</h3>
                   {selectedPlugin.isLoading && (
                     <p className="muted">Loading plugin schema…</p>

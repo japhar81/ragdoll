@@ -56,6 +56,14 @@ export interface PipelineNode {
   plugin?: PluginRef;
   config?: Record<string, unknown>;
   secrets?: Record<string, SecretRef>;
+  /**
+   * Optional Dataset reference (Phase 5 of dataset/RBAC/retrieval
+   * refactor). When set on a storage-touching node, the runtime
+   * resolves the slug at execute time and either passes a
+   * ResolvedDataset to a v2 plugin or splices the backend collection
+   * names into a v1 plugin's config.
+   */
+  dataset?: { slug: string; alias?: string };
   ui?: Record<string, unknown>;
 }
 

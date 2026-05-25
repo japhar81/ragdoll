@@ -16,6 +16,7 @@ import { promises as fs } from "node:fs";
 import * as path from "node:path";
 import * as crypto from "node:crypto";
 import type { InProcessPlugin } from "../../../packages/plugin-sdk/src/index.ts";
+import { pickBackendName } from "./dataset-binding.ts";
 import { createVectorStore } from "../../../packages/vector/src/index.ts";
 import { createOpenSearchClient } from "../../../packages/opensearch/src/index.ts";
 
@@ -753,6 +754,7 @@ export const qdrantDeletePlugin: InProcessPlugin = {
     name: "Qdrant Delete",
     version: "1.0.0",
     category: "sink",
+    contract: 2,
     description:
       "Deletes points by id from a Qdrant collection. Pairs with `delta_filter.deleted` for delta-aware ingestion: when source documents disappear from disk, their vector rows go too.",
     configSchema: {
@@ -794,13 +796,16 @@ export const qdrantDeletePlugin: InProcessPlugin = {
       formHints: { collection: { widget: "text" }, apiKey: { widget: "secret" } }
     }
   },
-  async execute({ inputs, config, secrets, context }) {
+  async execute(input) {
+    const { inputs, config, secrets, context } = input;
     const store = createVectorStore({
       url: config.url ? String(config.url) : undefined,
       apiKey: secrets.apiKey ? String(secrets.apiKey) : undefined
     });
     const collection = String(
-      config.collection ?? context.resolvedConfig.values["vector.collection"]?.value ?? "default"
+      pickBackendName(input, "vector") ??
+        context.resolvedConfig.values["vector.collection"]?.value ??
+        "default"
     );
     const idPrefix = config.idPrefix ? String(config.idPrefix) : "";
     const entries = (inputs.deleted as Array<{ docId?: string }> | undefined) ?? [];
@@ -826,6 +831,7 @@ export const opensearchDeletePlugin: InProcessPlugin = {
     name: "OpenSearch Delete",
     version: "1.0.0",
     category: "sink",
+    contract: 2,
     description:
       "Bulk delete-by-id against an OpenSearch index. Tenant-scoped: refuses to issue the request if the docs don't carry the executing tenant id (defence-in-depth against cross-tenant deletes).",
     configSchema: {
@@ -865,7 +871,8 @@ export const opensearchDeletePlugin: InProcessPlugin = {
       formHints: { index: { widget: "text" } }
     }
   },
-  async execute({ inputs, config, secrets, context }) {
+  async execute(input) {
+    const { inputs, config, secrets, context } = input;
     const endpoint =
       (config.endpoint ? String(config.endpoint) : undefined) ??
       (context.resolvedConfig.values["opensearch.url"]?.value as string | undefined);
@@ -876,7 +883,7 @@ export const opensearchDeletePlugin: InProcessPlugin = {
       authorization: secrets.authorization
     });
     if (!client) throw new Error("opensearch_delete: endpoint not configured");
-    const index = String(config.index ?? "default");
+    const index = String(pickBackendName(input, "keyword") ?? "default");
     const idPrefix = config.idPrefix ? String(config.idPrefix) : "";
     const entries = (inputs.deleted as Array<{ docId?: string }> | undefined) ?? [];
     if (!Array.isArray(entries) || entries.length === 0) {

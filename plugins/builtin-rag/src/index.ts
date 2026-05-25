@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import type { InProcessPlugin } from "../../../packages/plugin-sdk/src/index.ts";
+import { pickBackendName } from "./dataset-binding.ts";
 import type { PipelineSpec } from "../../../packages/core/src/index.ts";
 import { OpenAIProvider, AnthropicProvider, OllamaCompatibleProvider, ProviderRegistry } from "../../../packages/providers/src/index.ts";
 
@@ -533,6 +534,7 @@ export const qdrantRetrieverPlugin: InProcessPlugin = {
     name: "Qdrant Retriever",
     version: "1.0.0",
     category: "retriever",
+    contract: 2,
     description: "Queries a vector store (Qdrant or in-memory) for the top-K most similar documents.",
     configSchema: {
       type: "object",
@@ -603,13 +605,16 @@ export const qdrantRetrieverPlugin: InProcessPlugin = {
       }
     }
   },
-  async execute({ inputs, config, secrets, context }) {
+  async execute(input) {
+    const { inputs, config, secrets, context } = input;
     const store = createVectorStore({
       url: config.url ? String(config.url) : undefined,
       apiKey: config.apiKey ? String(config.apiKey) : undefined
     });
     const collection = String(
-      config.collection ?? context.resolvedConfig.values["vector.collection"]?.value ?? "default"
+      pickBackendName(input, "vector") ??
+        context.resolvedConfig.values["vector.collection"]?.value ??
+        "default"
     );
     const topK = Number(config.topK ?? context.resolvedConfig.values["retriever.top_k"]?.value ?? 5);
 
@@ -649,6 +654,7 @@ export const vectorUpsertPlugin: InProcessPlugin = {
     name: "Vector Upsert",
     version: "1.0.0",
     category: "sink",
+    contract: 2,
     description: "Ensures a collection exists and upserts embedded chunks into the vector store.",
     configSchema: {
       type: "object",
@@ -700,13 +706,16 @@ export const vectorUpsertPlugin: InProcessPlugin = {
       }
     }
   },
-  async execute({ inputs, config, context }) {
+  async execute(input) {
+    const { inputs, config, context } = input;
     const store = createVectorStore({
       url: config.url ? String(config.url) : undefined,
       apiKey: config.apiKey ? String(config.apiKey) : undefined
     });
     const collection = String(
-      config.collection ?? context.resolvedConfig.values["vector.collection"]?.value ?? "default"
+      pickBackendName(input, "vector") ??
+        context.resolvedConfig.values["vector.collection"]?.value ??
+        "default"
     );
     const distance = String(
       config.distance ?? context.resolvedConfig.values["vector.distance"]?.value ?? "cosine"
@@ -914,6 +923,7 @@ export const qdrantVectorStorePlugin: InProcessPlugin = {
     name: "Qdrant Vector Store",
     version: "1.0.0",
     category: "vector_store",
+    contract: 2,
     description:
       "Ensures a collection exists and upserts embedded chunks/vectors into the vector store (Qdrant or in-memory).",
     configSchema: {
@@ -971,13 +981,16 @@ export const qdrantVectorStorePlugin: InProcessPlugin = {
       }
     }
   },
-  async execute({ inputs, config, secrets, context }) {
+  async execute(input) {
+    const { inputs, config, secrets, context } = input;
     const store = createVectorStore({
       url: config.url ? String(config.url) : undefined,
       apiKey: secrets.apiKey ? String(secrets.apiKey) : undefined
     });
     const collection = String(
-      config.collection ?? context.resolvedConfig.values["vector.collection"]?.value ?? "default"
+      pickBackendName(input, "vector") ??
+        context.resolvedConfig.values["vector.collection"]?.value ??
+        "default"
     );
     const distance = String(
       config.distance ?? context.resolvedConfig.values["vector.distance"]?.value ?? "cosine"
@@ -1358,6 +1371,7 @@ export const openSearchInputPlugin: InProcessPlugin = {
     name: "OpenSearch Input",
     version: "1.0.0",
     category: "datasource",
+    contract: 2,
     description:
       "Reads documents from an OpenSearch index (optionally filtered by a query_string) and emits them for ingestion or context.",
     configSchema: {
@@ -1401,9 +1415,10 @@ export const openSearchInputPlugin: InProcessPlugin = {
       }
     }
   },
-  async execute({ config, secrets, context }) {
+  async execute(input) {
+    const { config, secrets, context } = input;
     const client = openSearchClientFrom(config, secrets, context.resolvedConfig.values);
-    const index = String(config.index ?? "default");
+    const index = String(pickBackendName(input, "keyword") ?? "default");
     const size = Math.max(1, Number(config.size ?? 100));
     const textField = String(config.textField ?? "text");
     const tenantField = config.tenantField ? String(config.tenantField) : undefined;
@@ -1432,6 +1447,7 @@ export const openSearchOutputPlugin: InProcessPlugin = {
     name: "OpenSearch Output",
     version: "1.0.0",
     category: "sink",
+    contract: 2,
     description:
       "Bulk-indexes documents (or embedded chunks) into an OpenSearch index. Tags each doc with the tenant id and can provision a kNN index.",
     configSchema: {
@@ -1487,9 +1503,10 @@ export const openSearchOutputPlugin: InProcessPlugin = {
       }
     }
   },
-  async execute({ inputs, config, secrets, context }) {
+  async execute(input) {
+    const { inputs, config, secrets, context } = input;
     const client = openSearchClientFrom(config, secrets, context.resolvedConfig.values);
-    const index = String(config.index ?? "default");
+    const index = String(pickBackendName(input, "keyword") ?? "default");
     const idField = config.idField ? String(config.idField) : undefined;
     const vectorField = config.vectorField ? String(config.vectorField) : undefined;
 
@@ -1552,6 +1569,7 @@ export const openSearchBm25RetrieverPlugin: InProcessPlugin = {
     name: "OpenSearch BM25 Retriever",
     version: "1.0.0",
     category: "retriever",
+    contract: 2,
     description:
       "Lexical (BM25) retrieval over an OpenSearch index using multi_match, scoped to the execution tenant.",
     configSchema: {
@@ -1600,9 +1618,10 @@ export const openSearchBm25RetrieverPlugin: InProcessPlugin = {
       }
     }
   },
-  async execute({ inputs, config, secrets, context }) {
+  async execute(input) {
+    const { inputs, config, secrets, context } = input;
     const client = openSearchClientFrom(config, secrets, context.resolvedConfig.values);
-    const index = String(config.index ?? "default");
+    const index = String(pickBackendName(input, "keyword") ?? "default");
     const topK = Math.max(1, Number(config.topK ?? 5));
     const fields = Array.isArray(config.fields) ? (config.fields as string[]) : ["text"];
     const tenantField =
@@ -1638,6 +1657,7 @@ export const openSearchVectorRetrieverPlugin: InProcessPlugin = {
     name: "OpenSearch Vector Retriever",
     version: "1.0.0",
     category: "retriever",
+    contract: 2,
     description:
       "kNN vector retrieval over an OpenSearch knn_vector index. Embeds the question when no queryVector is supplied.",
     configSchema: {
@@ -1698,11 +1718,19 @@ export const openSearchVectorRetrieverPlugin: InProcessPlugin = {
       }
     }
   },
-  async execute({ inputs, config, secrets, context }) {
+  async execute(input) {
+    const { inputs, config, secrets, context } = input;
     const client = openSearchClientFrom(config, secrets, context.resolvedConfig.values);
     const store = new OpenSearchVectorStore({ client });
+    // OpenSearch's "index" is the same physical store name regardless of
+    // whether it's used for vector or keyword reads; the dataset's
+    // backendCollections.keyword wins, then vector (when the dataset is
+    // vector-only and points at the same OS index), then legacy config.
     const collection = String(
-      config.index ?? context.resolvedConfig.values["vector.collection"]?.value ?? "default"
+      pickBackendName(input, "keyword") ??
+        pickBackendName(input, "vector") ??
+        context.resolvedConfig.values["vector.collection"]?.value ??
+        "default"
     );
     const topK = Number(config.topK ?? context.resolvedConfig.values["retriever.top_k"]?.value ?? 5);
 
@@ -1741,6 +1769,7 @@ export const openSearchHybridRetrieverPlugin: InProcessPlugin = {
     name: "OpenSearch Hybrid Retriever",
     version: "1.0.0",
     category: "retriever",
+    contract: 2,
     description:
       "Hybrid retrieval: runs BM25 lexical and kNN vector search over one OpenSearch index and fuses them (RRF or weighted).",
     configSchema: {
@@ -1833,9 +1862,14 @@ export const openSearchHybridRetrieverPlugin: InProcessPlugin = {
       }
     }
   },
-  async execute({ inputs, config, secrets, context }) {
+  async execute(input) {
+    const { inputs, config, secrets, context } = input;
     const client = openSearchClientFrom(config, secrets, context.resolvedConfig.values);
-    const index = String(config.index ?? "default");
+    const index = String(
+      pickBackendName(input, "keyword") ??
+        pickBackendName(input, "vector") ??
+        "default"
+    );
     const topK = Math.max(1, Number(config.topK ?? 5));
     const candidateK = Math.max(topK, Number(config.candidateK ?? Math.max(topK * 4, 20)));
     const fields = Array.isArray(config.fields) ? (config.fields as string[]) : ["text"];
