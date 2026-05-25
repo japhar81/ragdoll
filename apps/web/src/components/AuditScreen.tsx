@@ -50,13 +50,17 @@ export function AuditScreen() {
   ];
 
   return (
-    <Screen title="Audit Log" isLoading={audit.isLoading} error={audit.error}>
+    <Screen
+      title="Audit Log"
+      isLoading={audit.isLoading}
+      error={audit.error}
+      fill
+    >
       <SvarDataGrid<AuditRow>
         columns={columns}
         rows={rows}
         rowKey={(l) => `${l.createdAt}-${l.targetId}`}
         emptyMessage="No audit entries."
-        height="calc(100vh - 220px)"
         hasMore={audit.hasNextPage}
         isLoadingMore={audit.isFetchingNextPage}
         onLoadMore={() => {

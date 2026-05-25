@@ -1,19 +1,26 @@
 import React from "react";
 import { ApiError } from "../lib/api.ts";
 
-/** Shared admin-screen chrome: title, loading/error states, content slot. */
+/** Shared admin-screen chrome: title, loading/error states, content slot.
+ *
+ * Pass `fill` when the screen's main content is a tall grid (executions,
+ * audit, usage). The body switches to a flex column so a child marked
+ * `flex: 1 1 auto` (the SVAR grid host) claims all the remaining
+ * vertical space — without a fragile `calc(100vh - …)` fudge. */
 export function Screen(props: {
   title: string;
   isLoading?: boolean;
   error?: unknown;
+  fill?: boolean;
   children: React.ReactNode;
 }) {
+  const bodyClass = props.fill ? "screen-body screen-body--fill" : "screen-body";
   return (
     <section className="builder">
       <header className="toolbar">
         <strong>{props.title}</strong>
       </header>
-      <div className="screen-body">
+      <div className={bodyClass}>
         {props.isLoading && <p className="muted">Loading…</p>}
         {props.error && (
           <p className="error">
