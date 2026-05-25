@@ -56,6 +56,14 @@ export interface PipelineNode {
   plugin?: PluginRef;
   config?: Record<string, unknown>;
   secrets?: Record<string, SecretRef>;
+  /**
+   * Optional Dataset reference (Phase 5 of dataset/RBAC/retrieval
+   * refactor). When set on a storage-touching node, the runtime
+   * resolves the slug at execute time and either passes a
+   * ResolvedDataset to a v2 plugin or splices the backend collection
+   * names into a v1 plugin's config.
+   */
+  dataset?: { slug: string; alias?: string };
   ui?: Record<string, unknown>;
 }
 
@@ -87,6 +95,11 @@ export interface PipelineSpec {
     /** Optional, ordered list of user-defined stages. Pipeline nodes
      *  reference a stage by id via `node.ui.stageId`. */
     stages?: PipelineStage[];
+    /** Phase 8 execution mode; absent reads as "batch". */
+    executionKind?: "batch" | "synchronous";
+    /** Phase 8 MCP auto-expose. Only meaningful when executionKind ===
+     *  "synchronous". */
+    mcpExpose?: boolean;
   };
   spec: {
     nodes: PipelineNode[];
@@ -102,6 +115,12 @@ export interface ValidationIssue {
   edge?: { from: string; to: string };
 }
 
+export interface DatasetSlotRef {
+  nodeId: string;
+  slug: string;
+  alias: string;
+}
+
 export interface PipelineValidationResult {
   valid: boolean;
   errors: ValidationIssue[];
@@ -109,6 +128,7 @@ export interface PipelineValidationResult {
   requiredSecrets: string[];
   requiredConfig: string[];
   missingPlugins: PluginRef[];
+  datasetSlots: DatasetSlotRef[];
 }
 
 /** Minimal React Flow node/edge shapes the converter understands. */

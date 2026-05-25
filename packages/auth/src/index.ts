@@ -1,7 +1,7 @@
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import {
   authorize,
-  requirePermission,
+  requirePermission as legacyRequirePermission,
   AuthorizationError,
   Authorizer,
   BuiltinPolicyEngine,
@@ -13,7 +13,7 @@ import {
 } from "../../authz/src/index.ts";
 
 export type { Permission, Role, Resource, PolicyStore, PolicyEngine };
-export { authorize, requirePermission, Authorizer, BuiltinPolicyEngine };
+export { authorize, Authorizer, BuiltinPolicyEngine };
 export { CasbinPolicyEngine, createCasbinEngine } from "../../authz/src/casbin.ts";
 
 // ---------------------------------------------------------------------------
@@ -26,6 +26,13 @@ export interface Principal {
   id: string;
   type: PrincipalType;
   tenantId?: string;
+  /**
+   * Optional environment scope carried by env-scoped API keys. When set,
+   * the principal's synthesized grants live at `t/<tenant>/e/<env>` and
+   * the key cannot act outside that environment (siblings under a tenant
+   * don't cover each other; see {@link scopeCovers}).
+   */
+  environment?: string;
   roles: Role[];
   /**
    * Per-request synchronous decision closure, attached by the API after the
@@ -145,11 +152,15 @@ export interface ApiKeyRecord {
   hash: string;
   principalId: string;
   tenantId?: string;
+  /** Optional environment scope. See {@link Principal.environment}. */
+  environmentId?: string;
   name: string;
   roles: Role[];
   createdAt: string;
   lastUsedAt?: string;
   revokedAt?: string;
+  /** Optional absolute expiration; verify() rejects after now(). */
+  expiresAt?: string;
 }
 
 export interface ApiKeyRepository {
@@ -200,8 +211,12 @@ function sha256Hex(value: string): string {
 export interface IssueApiKeyInput {
   principalId: string;
   tenantId?: string;
+  /** Optional environment scope. See {@link ApiKeyRecord.environmentId}. */
+  environmentId?: string;
   name: string;
   roles: Role[];
+  /** Optional absolute expiration (ISO 8601). */
+  expiresAt?: string;
 }
 
 export interface IssuedApiKey {
@@ -237,9 +252,11 @@ export class ApiKeyService {
       hash: sha256Hex(plaintext),
       principalId: input.principalId,
       tenantId: input.tenantId,
+      environmentId: input.environmentId,
       name: input.name,
       roles: input.roles,
-      createdAt: new Date().toISOString()
+      createdAt: new Date().toISOString(),
+      expiresAt: input.expiresAt
     });
 
     return { id, plaintext, record };
@@ -265,6 +282,14 @@ export class ApiKeyService {
     const record = await this.repository.findByPrefix(prefix);
     if (!record) throw new InvalidCredentialsError("Unknown API key");
     if (record.revokedAt) throw new InvalidCredentialsError("API key has been revoked");
+    if (
+      record.expiresAt &&
+      new Date(record.expiresAt).getTime() <= Date.now()
+    ) {
+      // Same constant-time error shape as revoked so callers don't
+      // distinguish revoked vs expired in the wire response.
+      throw new InvalidCredentialsError("API key has expired");
+    }
 
     const candidate = Buffer.from(sha256Hex(rawKey), "hex");
     const expected = Buffer.from(record.hash, "hex");
@@ -278,6 +303,7 @@ export class ApiKeyService {
       id: record.principalId,
       type: "api_key",
       tenantId: record.tenantId,
+      environment: record.environmentId,
       roles: record.roles
     };
   }
@@ -457,11 +483,86 @@ export function enforce(
     }
     return;
   }
-  requirePermission(
+  legacyRequirePermission(
     { id: principal.id, tenantId: principal.tenantId, roles: principal.roles },
     permission,
     { ...resource, tenantId: resource.tenantId ?? principal.tenantId }
   );
+}
+
+// ---------------------------------------------------------------------------
+// Unified permission helper (Phase 2 of dataset/RBAC/retrieval refactor)
+// ---------------------------------------------------------------------------
+
+/**
+ * Thrown by {@link requirePermission} when a principal is missing a
+ * permission for a given scope. Mirrors `enforce`/`AuthorizationError` but
+ * carries structured fields so worker handlers, the scheduler, and the
+ * runtime executor can record a denial with the originating subject and
+ * scope intact — important because those paths run after the original HTTP
+ * request and need to attribute a denial back to a specific principal +
+ * resource for audit logs and execution rows.
+ */
+export class PermissionDeniedError extends Error {
+  readonly subject: string;
+  readonly subjectType?: PrincipalType;
+  readonly action: Permission;
+  readonly resource: Resource;
+  readonly requestId?: string;
+  readonly reason?: string;
+  constructor(opts: {
+    subject: string;
+    subjectType?: PrincipalType;
+    action: Permission;
+    resource?: Resource;
+    requestId?: string;
+    reason?: string;
+  }) {
+    super(
+      `Permission denied: principal ${opts.subject} lacks ${opts.action}` +
+        (opts.reason ? ` (${opts.reason})` : "")
+    );
+    this.name = "PermissionDeniedError";
+    this.subject = opts.subject;
+    this.subjectType = opts.subjectType;
+    this.action = opts.action;
+    this.resource = opts.resource ?? {};
+    this.requestId = opts.requestId;
+    this.reason = opts.reason;
+  }
+}
+
+/**
+ * Canonical permission check shared by every layer that is NOT a Fastify
+ * route handler (REST routes keep using {@link enforce} so the existing
+ * AuthorizationError -> 403 mapping is unchanged). Worker job dequeue, the
+ * scheduler fire path, and the DagExecutor entry check call this. The
+ * decision prefers the scoped `principal.authorize` closure (Casbin /
+ * default-deny) and falls back to the legacy flat role map only when no
+ * closure is attached — important for offline test harnesses and any
+ * caller that resolves a principal outside an API request.
+ */
+export function requirePermission(
+  principal: Principal,
+  permission: Permission,
+  resource: Resource = {},
+  options: { requestId?: string } = {}
+): void {
+  const allowed = principal.authorize
+    ? principal.authorize(permission, resource)
+    : authorize(
+        { id: principal.id, tenantId: principal.tenantId, roles: principal.roles },
+        permission,
+        { ...resource, tenantId: resource.tenantId ?? principal.tenantId }
+      );
+  if (allowed) return;
+  throw new PermissionDeniedError({
+    subject: principal.id,
+    subjectType: principal.type,
+    action: permission,
+    resource,
+    requestId: options.requestId
+  });
 }
 
 // ---------------------------------------------------------------------------

@@ -39,6 +39,20 @@ export interface VectorStore {
 export interface VectorStoreConfig {
   url?: string;
   apiKey?: string;
+  /**
+   * Optional backend selector (Phase 6 of dataset/RBAC/retrieval
+   * refactor). When set, wins over the URL/env autodetect. Otherwise
+   * the factory picks Qdrant if a URL is configured, pgvector if
+   * `RAGDOLL_VECTOR_BACKEND=pgvector` is in the env, and finally
+   * falls back to the process-wide in-memory singleton.
+   */
+  provider?: "qdrant" | "pgvector" | "in_memory";
+  /**
+   * Postgres connection string for the pgvector backend. Defaults to
+   * `DATABASE_URL` so a stack running with a single Postgres just
+   * works.
+   */
+  pgUrl?: string;
 }
 
 export class VectorStoreError extends Error {
@@ -308,15 +322,100 @@ export function resetInMemoryVectorStore(): void {
   processWideInMemoryStore = undefined;
 }
 
+export * from "./pgvector.ts";
+
 /**
- * Factory: returns a QdrantVectorStore when a url is configured (via config.url
- * or the QDRANT_URL environment variable), otherwise the process-wide singleton
- * InMemoryVectorStore.
+ * Process-wide PgVectorStore singleton. Lazily constructs a pool the
+ * first time it's needed so the in-memory test path never imports `pg`.
+ */
+let processWidePgVectorStore: VectorStore | undefined;
+async function getPgVectorStore(connectionString: string): Promise<VectorStore> {
+  if (processWidePgVectorStore) return processWidePgVectorStore;
+  // Lazy-import `pg` so the module loads cleanly in environments without
+  // it (web bundle, offline test runner that hasn't installed deps).
+  const pgMod = (await import("pg")) as unknown as {
+    Pool: new (opts: { connectionString: string }) => unknown;
+  };
+  const Pool = pgMod.Pool;
+  const pool = new Pool({ connectionString });
+  const { PgVectorStore } = await import("./pgvector.ts");
+  processWidePgVectorStore = new PgVectorStore({
+    pool: pool as unknown as import("./pgvector.ts").PgPoolLike
+  });
+  return processWidePgVectorStore;
+}
+
+/**
+ * Resets the process-wide PgVectorStore singleton. Tests only.
+ */
+export function resetPgVectorStore(): void {
+  processWidePgVectorStore = undefined;
+}
+
+/**
+ * Factory: chooses between Qdrant, pgvector, and the in-memory
+ * singleton based on (in order): explicit `config.provider`,
+ * `RAGDOLL_VECTOR_BACKEND` env, `QDRANT_URL` env, default in-memory.
+ *
+ * Sync return — when the caller asks for pgvector we still return
+ * synchronously by constructing a thin proxy that awaits the pool on
+ * first call. Keeps the existing plugin call sites (which expect a
+ * VectorStore back, not a Promise) unchanged.
  */
 export function createVectorStore(config: VectorStoreConfig = {}): VectorStore {
-  const url = config.url ?? process.env.QDRANT_URL;
-  if (url) {
-    return new QdrantVectorStore({ url, apiKey: config.apiKey ?? process.env.QDRANT_API_KEY });
+  const provider =
+    config.provider ??
+    (process.env.RAGDOLL_VECTOR_BACKEND as VectorStoreConfig["provider"] | undefined);
+
+  if (provider === "in_memory") return getInMemoryVectorStore();
+
+  if (provider === "pgvector") {
+    const pgUrl = config.pgUrl ?? process.env.DATABASE_URL;
+    if (!pgUrl) {
+      throw new VectorStoreError(
+        "pgvector backend requires a connection string (pgUrl or DATABASE_URL)"
+      );
+    }
+    return createPgVectorStoreProxy(pgUrl);
+  }
+
+  if (provider === "qdrant" || config.url || process.env.QDRANT_URL) {
+    const url = config.url ?? process.env.QDRANT_URL;
+    if (!url) {
+      throw new VectorStoreError("qdrant backend requires a url");
+    }
+    return new QdrantVectorStore({
+      url,
+      apiKey: config.apiKey ?? process.env.QDRANT_API_KEY
+    });
   }
   return getInMemoryVectorStore();
+}
+
+/**
+ * Proxy that defers PgVectorStore construction until the first
+ * VectorStore method runs. Lets the factory stay synchronous (every
+ * existing plugin call site relies on that) while the pool itself is
+ * created via the lazy dynamic import.
+ */
+function createPgVectorStoreProxy(connectionString: string): VectorStore {
+  let pending: Promise<VectorStore> | undefined;
+  function instance(): Promise<VectorStore> {
+    if (!pending) pending = getPgVectorStore(connectionString);
+    return pending;
+  }
+  return {
+    ensureCollection: async (name, config) =>
+      (await instance()).ensureCollection(name, config),
+    upsert: async (collection, points) =>
+      (await instance()).upsert(collection, points),
+    query: async (collection, query) =>
+      (await instance()).query(collection, query),
+    deleteByIds: async (collection, ids) =>
+      (await instance()).deleteByIds(collection, ids),
+    deleteByTenant: async (collection, tenantId) =>
+      (await instance()).deleteByTenant(collection, tenantId),
+    deleteCollection: async (name) =>
+      (await instance()).deleteCollection(name)
+  };
 }

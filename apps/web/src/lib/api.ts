@@ -271,6 +271,27 @@ export const api = {
       `/api/pipelines/${encodeURIComponent(pipelineId)}/run`,
       input
     ),
+  /**
+   * Phase 8: synchronous in-process execution. Returns the terminal
+   * output in one HTTP round-trip; intended for synchronous pipelines
+   * (those with `metadata.executionKind: "synchronous"`).
+   */
+  invokePipeline: (
+    pipelineId: string,
+    input: { input?: unknown; environment?: string }
+  ) =>
+    request<{
+      executionId: string;
+      pipelineId: string;
+      pipelineVersionId: string;
+      version: string;
+      status: "succeeded";
+      output: Record<string, unknown>;
+    }>(
+      "POST",
+      `/api/pipelines/${encodeURIComponent(pipelineId)}/invoke`,
+      input
+    ),
 
   // ---- per-tenant Git storage (migration 007) ---------------------------
   getTenantStorage: (tenantId: string) =>
@@ -681,14 +702,89 @@ export const api = {
    * Mint a key. `plaintext` is returned exactly once — it is unrecoverable
    * afterwards, so the caller must surface it to the user immediately.
    */
-  createApiKey: (input: { name: string; role: string; tenantId?: string }) =>
+  createApiKey: (input: {
+    name: string;
+    role: string;
+    tenantId?: string;
+    /** Tenant-environment scope; the key cannot act outside this env. */
+    environmentId?: string;
+    /** ISO-8601 absolute expiration; omit for no expiration. */
+    expiresAt?: string;
+  }) =>
     request<{ apiKey: ApiKeyView; plaintext: string }>(
       "POST",
       "/api/api-keys",
       input
     ),
   revokeApiKey: (id: string) =>
-    request<void>("DELETE", `/api/api-keys/${encodeURIComponent(id)}`)
+    request<void>("DELETE", `/api/api-keys/${encodeURIComponent(id)}`),
+
+  // ---- datasets (Phase 4) ----------------------------------------------
+  listDatasets: (filter?: { tenantId?: string; environmentId?: string }) =>
+    request<{ datasets: DatasetView[] }>("GET", "/api/datasets", undefined, {
+      ...(filter?.tenantId ? { "x-tenant-id": filter.tenantId } : {}),
+      ...(filter?.environmentId
+        ? { "x-environment": filter.environmentId }
+        : {})
+    }),
+  getDataset: (id: string) =>
+    request<{ dataset: DatasetView }>(
+      "GET",
+      `/api/datasets/${encodeURIComponent(id)}`
+    ),
+  createDataset: (input: {
+    scope: "global" | "tenant" | "environment";
+    slug: string;
+    displayName: string;
+    description?: string;
+    tenantId?: string;
+    environmentId?: string;
+    modalities?: string[];
+    backends?: Record<string, unknown>;
+    embeddingProfile?: Record<string, unknown>;
+    chunkSchema?: Record<string, unknown>;
+  }) =>
+    request<{ dataset: DatasetView }>("POST", "/api/datasets", input),
+  updateDataset: (
+    id: string,
+    patch: { displayName?: string; description?: string | null; archived?: boolean }
+  ) =>
+    request<{ dataset: DatasetView }>(
+      "PATCH",
+      `/api/datasets/${encodeURIComponent(id)}`,
+      patch
+    ),
+  deleteDataset: (id: string) =>
+    request<void>("DELETE", `/api/datasets/${encodeURIComponent(id)}`),
+  listDatasetVersions: (id: string) =>
+    request<{
+      versions: DatasetVersionView[];
+      aliases: DatasetAliasView[];
+    }>("GET", `/api/datasets/${encodeURIComponent(id)}/versions`),
+  createDatasetVersion: (
+    id: string,
+    input: {
+      versionLabel?: string;
+      schemaSpec?: Record<string, unknown>;
+      backendCollections?: Record<string, string>;
+      status?: "building" | "ready" | "archived";
+    }
+  ) =>
+    request<{ version: DatasetVersionView }>(
+      "POST",
+      `/api/datasets/${encodeURIComponent(id)}/versions`,
+      input
+    ),
+  setDatasetAlias: (
+    datasetId: string,
+    alias: string,
+    versionId: string
+  ) =>
+    request<{ alias: DatasetAliasView }>(
+      "PATCH",
+      `/api/datasets/${encodeURIComponent(datasetId)}/aliases/${encodeURIComponent(alias)}`,
+      { versionId }
+    )
 };
 
 // ---- response row shapes (loosely typed; only fields the UI reads) -------
@@ -967,10 +1063,61 @@ export interface ApiKeyView {
   prefix: string;
   roles: string[];
   tenantId: string | null;
-  /** `*` (global) or `t/<tenantId>`. */
+  /** Environment scope (Phase 3); null when the key is tenant-wide. */
+  environmentId: string | null;
+  /** `*` (global), `t/<tenantId>`, or `t/<tenantId>/e/<env>`. */
   scope: string;
   createdAt: string;
   lastUsedAt: string | null;
   revokedAt: string | null;
-  status: "active" | "revoked";
+  /** Absolute expiration; null means "no expiration". */
+  expiresAt: string | null;
+  status: "active" | "revoked" | "expired";
+}
+
+/**
+ * Datasets (Phase 4). A Dataset is a named, schema'd, RBAC'd corpus
+ * pipelines reference by id rather than by raw collection name. See
+ * docs/architecture/initial-design.md (refactor docs) for the scope
+ * resolution rules.
+ */
+export interface DatasetView {
+  id: string;
+  scope: "global" | "tenant" | "environment";
+  tenantId: string | null;
+  environmentId: string | null;
+  slug: string;
+  displayName: string;
+  description: string | null;
+  embeddingProfile: Record<string, unknown>;
+  chunkSchema: Record<string, unknown>;
+  modalities: string[];
+  backends: Record<string, unknown>;
+  currentVersionId: string | null;
+  archivedAt: string | null;
+  createdAt: string;
+  createdBy: string | null;
+  updatedAt: string;
+}
+
+export interface DatasetVersionView {
+  id: string;
+  datasetId: string;
+  versionLabel: string;
+  schemaSpec: Record<string, unknown>;
+  backendCollections: Record<string, string>;
+  status: "building" | "ready" | "archived";
+  docCount: number | string;
+  sizeBytes: number | string;
+  createdAt: string;
+  readyAt: string | null;
+}
+
+export interface DatasetAliasView {
+  id: string;
+  datasetId: string;
+  alias: string;
+  versionId: string;
+  updatedAt: string;
+  updatedBy: string | null;
 }

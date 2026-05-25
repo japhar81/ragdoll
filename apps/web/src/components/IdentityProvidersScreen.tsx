@@ -1,8 +1,9 @@
-import React, { useState } from "react";
+import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, ApiError } from "../lib/api.ts";
 import type { IdentityProviderView } from "../lib/api.ts";
-import { Screen, Table } from "./Screen.tsx";
+import { Screen } from "./Screen.tsx";
+import { DataGrid, type DataGridColumn } from "./DataGrid.tsx";
 
 function errText(e: unknown): string {
   if (e instanceof ApiError) {
@@ -98,7 +99,7 @@ export function IdentityProvidersScreen() {
           </select>
         </div>
         <div className="idp-config">
-          {fields.map((f) => (
+          {fields.map((f: string) => (
             <label key={f} className="idp-field">
               <span>{f}</span>
               <input
@@ -118,30 +119,72 @@ export function IdentityProvidersScreen() {
         {create.isError && <span className="error">{errText(create.error)}</span>}
       </form>
 
-      <Table
-        columns={["Slug", "Name", "Kind", "Status", "Actions"]}
-        rows={(list.data?.providers ?? []).map((p) => [
-          <code key="s">{p.slug}</code>,
-          p.displayName,
-          <span key="k" className="status">{p.kind.toUpperCase()}</span>,
-          <span
-            key="e"
-            className={`status ${p.enabled ? "status-succeeded" : "status-failed"}`}
-          >
-            {p.enabled ? "enabled" : "disabled"}
-          </span>,
-          <span key="a" className="row-actions">
-            <button className="link-btn" onClick={() => toggle.mutate(p)}>
-              {p.enabled ? "disable" : "enable"}
-            </button>
-            <button
-              className="link-btn danger"
-              onClick={() => del.mutate(p.id)}
-            >
-              delete
-            </button>
-          </span>
-        ])}
+      <DataGrid<IdentityProviderView>
+        columns={
+          [
+            {
+              key: "slug",
+              header: "Slug",
+              accessor: (p) => p.slug,
+              cell: (p) => <code>{p.slug}</code>,
+              width: "20%"
+            },
+            {
+              key: "displayName",
+              header: "Name",
+              accessor: (p) => p.displayName,
+              width: "26%"
+            },
+            {
+              key: "kind",
+              header: "Kind",
+              accessor: (p) => p.kind,
+              filter: "select",
+              cell: (p) => (
+                <span className="status">{p.kind.toUpperCase()}</span>
+              ),
+              width: "14%"
+            },
+            {
+              key: "enabled",
+              header: "Status",
+              accessor: (p) => (p.enabled ? "enabled" : "disabled"),
+              filter: "select",
+              cell: (p) => (
+                <span
+                  className={`status ${p.enabled ? "status-succeeded" : "status-failed"}`}
+                >
+                  {p.enabled ? "enabled" : "disabled"}
+                </span>
+              ),
+              width: "14%"
+            },
+            {
+              key: "actions",
+              header: "",
+              accessor: () => "",
+              filter: "none",
+              sortable: false,
+              width: "26%",
+              cell: (p) => (
+                <span className="row-actions">
+                  <button className="link-btn" onClick={() => toggle.mutate(p)}>
+                    {p.enabled ? "disable" : "enable"}
+                  </button>
+                  <button
+                    className="link-btn danger"
+                    onClick={() => del.mutate(p.id)}
+                  >
+                    delete
+                  </button>
+                </span>
+              )
+            }
+          ] satisfies DataGridColumn<IdentityProviderView>[]
+        }
+        rows={list.data?.providers ?? []}
+        rowKey={(p) => p.id}
+        emptyMessage="No identity providers configured."
       />
       <p className="muted">
         Client secrets / SP keys are write-only — shown as <code>REDACTED</code>{" "}

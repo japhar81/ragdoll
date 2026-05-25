@@ -18,7 +18,6 @@ import {
 } from "../../../packages/events/src/index.ts";
 import {
   AuthResolver,
-  DevAuthProvider,
   ApiKeyService,
   SessionTokenService,
   Authorizer,
@@ -38,6 +37,9 @@ import {
   PostgresSecretRepository,
   PostgresTenantRepository,
   PostgresEnvironmentRepository,
+  PostgresDatasetRepository,
+  PostgresDatasetVersionRepository,
+  PostgresDatasetAliasRepository,
   PostgresPipelineRepository,
   PostgresPipelineVersionRepository,
   PostgresPipelineDeploymentRepository,
@@ -187,18 +189,18 @@ async function buildDeps(): Promise<{
     queue = new InMemoryQueue();
   }
 
-  // Auth: session/API-key always wired. The insecure header-trusting dev
-  // provider is now OFF by default (strict default-deny) — it is only honoured
-  // outside production AND when RAGDOLL_DEV_AUTH=1 is explicitly set, so local
-  // `make refresh` testing can opt back in without weakening real deploys.
+  // Auth: session tokens + API keys. The historical header-trusting
+  // DevAuthProvider was removed in Phase 12 of the dataset/RBAC/retrieval
+  // refactor — every caller now authenticates via a real Bearer token or
+  // a `rgd_…` API key. Local developers use the bootstrap admin user
+  // (BOOTSTRAP_ADMIN_EMAIL/PASSWORD env, default admin@ragdoll.local /
+  // ragdoll-admin) and mint a per-machine API key from the Profile screen.
   const sessionSecret = process.env.SESSION_SECRET ?? "dev-insecure-session-secret";
   const sessions = new SessionTokenService(sessionSecret);
-  const devAuthEnabled =
-    env !== "production" && process.env.RAGDOLL_DEV_AUTH === "1";
-  const devProvider = devAuthEnabled ? new DevAuthProvider() : undefined;
-  if (devAuthEnabled) {
-    logger.info("dev_auth_enabled", {
-      warning: "RAGDOLL_DEV_AUTH=1 trusts x-roles/x-actor-id headers verbatim"
+  if (process.env.RAGDOLL_DEV_AUTH === "1") {
+    logger.warn("dev_auth_removed", {
+      message:
+        "RAGDOLL_DEV_AUTH=1 is no longer supported. Sign in with the bootstrap admin (admin@ragdoll.local / ragdoll-admin) and mint an API key under Profile → API keys."
     });
   }
   const keyEncryptionSecret =
@@ -223,7 +225,7 @@ async function buildDeps(): Promise<{
     secretRepository = new PostgresSecretRepository(pool);
     const apiKeyRepo = new PostgresApiKeyRepository(pool);
     const apiKeys = new ApiKeyService(apiKeyRepo);
-    const auth = new AuthResolver({ sessions, apiKeys, dev: devProvider });
+    const auth = new AuthResolver({ sessions, apiKeys });
     const rbacPolicies = new PostgresRbacPolicyRepository(pool);
     const users = new PostgresUserRepository(pool);
     deps = {
@@ -237,6 +239,9 @@ async function buildDeps(): Promise<{
       webhookTriggers: new PostgresWebhookTriggerRepository(pool),
       tenantGitConfigs: new PostgresTenantGitConfigRepository(pool),
       environments: new PostgresEnvironmentRepository(pool),
+      datasets: new PostgresDatasetRepository(pool),
+      datasetVersions: new PostgresDatasetVersionRepository(pool),
+      datasetAliases: new PostgresDatasetAliasRepository(pool),
       pipelines: new PostgresPipelineRepository(pool),
       pipelineVersions: new PostgresPipelineVersionRepository(pool),
       deployments: new PostgresPipelineDeploymentRepository(pool),
@@ -283,7 +288,7 @@ async function buildDeps(): Promise<{
       "../../../packages/db/src/index.ts"
     );
     const apiKeys = new ApiKeyService(new InMemoryApiKeyRepository());
-    const auth = new AuthResolver({ sessions, apiKeys, dev: devProvider });
+    const auth = new AuthResolver({ sessions, apiKeys });
     const rbacPolicies = new InMemoryRbacPolicyRepository();
     const users = new InMemoryUserRepository();
     deps = {
@@ -513,6 +518,39 @@ async function main(): Promise<void> {
 
     if (response.body === undefined) return reply.send();
     if (typeof response.body === "string") return reply.send(response.body);
+    // Phase 13: real chunked delivery for async-iterable bodies (the
+    // /stream SSE route uses this). Detection is duck-typed on
+    // Symbol.asyncIterator so any AsyncGenerator / AsyncIterable works
+    // without a separate response type.
+    if (
+      response.body &&
+      typeof response.body === "object" &&
+      typeof (response.body as AsyncIterable<unknown>)[Symbol.asyncIterator] === "function"
+    ) {
+      reply.hijack();
+      reply.raw.statusCode = response.status;
+      reply.raw.setHeader("x-request-id", requestId);
+      for (const [k, v] of Object.entries(response.headers)) {
+        reply.raw.setHeader(k, v);
+      }
+      try {
+        for await (const chunk of response.body as AsyncIterable<string>) {
+          if (!reply.raw.write(chunk)) {
+            // Respect backpressure: wait for the drain event so we don't
+            // pile up bytes in the kernel send buffer on slow consumers.
+            await new Promise<void>((resolve) => reply.raw.once("drain", resolve));
+          }
+        }
+      } catch (e) {
+        logger.error("stream_failed", {
+          error: e instanceof Error ? e.message : String(e),
+          requestId
+        });
+      } finally {
+        reply.raw.end();
+      }
+      return;
+    }
     return reply.send(response.body);
   });
 

@@ -222,19 +222,29 @@ The wrapper invokes `apps/cli/src/index.ts` directly via Node's
 
 ## Honest limits
 
-- The dev auth provider (`RAGDOLL_DEV_AUTH=1`) is insecure and for
-  local use only; it accepts whatever `x-roles` / `x-actor-id` headers
-  the caller sends.
-- `POST /api/pipelines/:id/stream` returns a well-formed SSE sequence
-  but does not yet stream tokens (it reports `not_enabled`).
-- Local CPU Ollama is slow on first call (cold model). The first
-  `/run` of a fresh stack may take 30–60 s.
+- **Token-by-token provider streaming through SSE** isn't wired yet.
+  `POST /api/pipelines/:id/stream` emits real chunked execution
+  lifecycle frames (`execution.started` → `output` → `done`); each
+  arrives as soon as it's produced. What's still missing is
+  per-token streaming from `provider_chat` straight through to the
+  HTTP response — requires a provider-layer AsyncIterable +
+  executor plumbing. Lifecycle streaming is here today.
+- **Per-key permission intersection** for API keys is snapshot-at-mint
+  today: if the owner later loses a role, the key keeps the
+  snapshotted permission. Lands when dataset-aware grants do.
+- **Cross-encoder reranking** (`rerank_bge`) hits the HuggingFace
+  Inference API, not a local model. Local model loading needs a
+  Python sidecar + GPU/CPU weights — out of scope for v1.
+- **Sample pipelines** in `examples/pipelines/` still use the v1
+  (`config.collection`-style) shape. They run unchanged through the
+  shim; migration to `node.dataset` + sync execution is a curated
+  task per example.
 
 ## Key docs
 
 - Architecture: `docs/architecture/initial-design.md`,
   `docs/architecture/runtime.md`
-- ADRs: `docs/adr/0001`–`0014`
+- ADRs: `docs/adr/0001`–`0019`
 - Developer: `docs/developer/local-development.md`,
   `docs/developer/plugin-development.md`,
   `docs/developer/provider-development.md`

@@ -528,7 +528,11 @@ test("GET /api/plugins exposes configSchema + ui; per-plugin route returns a man
   assert.equal(unknown.body.error, "not_found");
 });
 
-test("ingest enqueues a job and stream reports not_enabled honestly", async () => {
+test("ingest enqueues a job and stream returns SSE frames from a real in-process run", async () => {
+  // Phase 8: /stream is no longer a not_enabled stub — it runs the
+  // pipeline in-process and emits execution.* events as SSE frames.
+  // We exercise the echo spec (a one-node fake plugin in the harness)
+  // so the test stays offline.
   const { request, queue } = buildHarness();
   const admin = { "x-actor-id": "a", "x-roles": "platform_admin", "x-tenant-id": "tenant-a" };
   const created = await request({
@@ -568,7 +572,10 @@ test("ingest enqueues a job and stream reports not_enabled honestly", async () =
   });
   assert.equal(stream.status, 200);
   assert.equal(stream.headers["content-type"], "text/event-stream");
-  assert.ok(String(stream.body).includes("not_enabled"));
+  const body = String(stream.body);
+  // Real SSE frames now: at least an `output` event and a `done` event.
+  assert.ok(body.includes("event: output\n"), `expected output frame in: ${body}`);
+  assert.ok(body.includes("event: done\n"), `expected done frame in: ${body}`);
 });
 
 test("usage summary aggregates records for the tenant", async () => {

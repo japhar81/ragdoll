@@ -55,12 +55,32 @@ export interface PortDef {
   schema?: JsonSchemaLike;
 }
 
+/**
+ * Plugin contract version (Phase 5 of dataset/RBAC/retrieval refactor).
+ *
+ * `1` (the default when `manifest.contract` is omitted) is the legacy
+ * shape every existing plugin still uses: storage-touching plugins name
+ * their Qdrant collection / OpenSearch index directly in
+ * `node.config.collection` / `node.config.index`.
+ *
+ * `2` plugins receive a {@link ResolvedDataset} on the execution input
+ * and call methods on it instead of naming a collection. The runtime
+ * resolves the dataset reference (slug + alias) into a physical backend
+ * choice, so pipelines decouple from raw collection names. A v1
+ * compatibility shim flips dataset references back into raw
+ * `config.collection` / `config.index` for legacy plugins so existing
+ * pipelines keep working unchanged through the migration.
+ */
+export type PluginContractVersion = 1 | 2;
+
 export interface PluginManifest {
   id: string;
   name: string;
   version: string;
   category: PluginCategory;
   description: string;
+  /** Defaults to 1 (legacy) when omitted. See {@link PluginContractVersion}. */
+  contract?: PluginContractVersion;
   configSchema?: JsonSchemaLike;
   secretsSchema?: JsonSchemaLike;
   inputSchema?: JsonSchemaLike;
@@ -133,6 +153,70 @@ export interface PluginManifest {
   };
 }
 
+/**
+ * How a v2 plugin (or a v1 plugin under the shim) addresses storage.
+ * Pipelines write `{ slug, alias? }` into a node's spec and the runtime
+ * resolves it at execution time — sliding through env → tenant → global
+ * exactly the way scoped grants work. The `alias` selects which version
+ * of the dataset to act against; omitting it pins to `stable`.
+ */
+export interface DatasetRef {
+  slug: string;
+  /** Defaults to "stable" when omitted; pipelines pin to "staging" /
+   *  "canary" for canary rollouts. */
+  alias?: string;
+}
+
+/**
+ * What a v2 plugin actually receives. The runtime has resolved the
+ * `DatasetRef` to a concrete dataset row + version, and threads enough
+ * context onto the object that the plugin can talk to whichever
+ * backend (Qdrant / OpenSearch / pgvector) holds the data without
+ * caring about the physical collection name.
+ *
+ * v1 plugins see neither the ref nor this object; instead, the shim
+ * synthesises `config.collection` / `config.index` from the resolved
+ * `backendCollections` so the plugin's existing read/write code path
+ * keeps working unchanged.
+ */
+export interface ResolvedDataset {
+  id: string;
+  slug: string;
+  scope: "global" | "tenant" | "environment";
+  tenantId?: string;
+  environmentId?: string;
+  modalities: string[];
+  embeddingProfile: Record<string, unknown>;
+  chunkSchema: Record<string, unknown>;
+  /** Resolved version metadata (id, label, status, doc_count, …). */
+  version: {
+    id: string;
+    versionLabel: string;
+    status: "building" | "ready" | "archived";
+  };
+  /** Backend collection / index names per modality, as recorded on the
+   *  resolved version. e.g. `{ vector: "rag_acme_kb_v3" }`. */
+  backendCollections: Record<string, string>;
+}
+
+/**
+ * Resolves {@link DatasetRef} against the running context's
+ * (tenantId, environment) — walking env → tenant → global, first match
+ * wins. Returns `undefined` when no dataset matches (the runtime then
+ * falls back to plugin-config-as-source-of-truth and logs a warning).
+ *
+ * Lives in plugin-sdk (not runtime) because plugin authors need the
+ * type to describe their inputs; concrete implementations are wired in
+ * by the runtime and the API.
+ */
+export interface DatasetResolver {
+  resolve(args: {
+    ref: DatasetRef;
+    tenantId?: string;
+    environmentId?: string;
+  }): Promise<ResolvedDataset | undefined>;
+}
+
 export interface PluginExecutionInput {
   context: RuntimeContext;
   node: {
@@ -140,10 +224,45 @@ export interface PluginExecutionInput {
     plugin: PluginRef;
     config?: Record<string, unknown>;
     secrets?: Record<string, SecretRef>;
+    /**
+     * Dataset reference declared on the node (Phase 5). v2 plugins
+     * receive the resolved object as `input.dataset`; v1 plugins get
+     * the resolved collection names spliced into `config.collection`
+     * / `config.index` via a shim so they keep working unchanged.
+     */
+    dataset?: DatasetRef;
   };
   inputs: Record<string, unknown>;
   config: Record<string, unknown>;
   secrets: Record<string, string>;
+  /**
+   * Resolved dataset (Phase 5). Only present when `node.dataset` was
+   * set in the spec AND the runtime managed to resolve it. v2 plugins
+   * branch on this; v1 plugins ignore it.
+   */
+  dataset?: ResolvedDataset;
+  /**
+   * Nested synchronous pipeline invocation (Phase 9, Round 2). Only
+   * populated when the current pipeline is itself running in
+   * synchronous mode — batch pipelines can't sub-invoke synchronously
+   * because BullMQ jobs aren't awaitable in-process. Cycles are
+   * detected by the runtime via a small per-execution call stack
+   * (max depth defaults to 8).
+   */
+  runPipelineByRef?: (args: {
+    slug: string;
+    input: unknown;
+    environment?: string;
+  }) => Promise<{ output: Record<string, unknown> }>;
+  /**
+   * Optional token sink for streaming LLM plugins (Phase 13 follow-up).
+   * When the surrounding execution is happening behind /stream and
+   * the plugin can produce incremental output, it calls onToken for
+   * each token; the SSE route forwards them as `token` frames in
+   * real time. Plugins that don't stream ignore this and return the
+   * full text in their `outputs` as usual.
+   */
+  onToken?: (token: string) => void;
   /**
    * Recursively execute a body pipeline spec from inside a plugin. Used by
    * iteration plugins (for/foreach/while) to evaluate their body N times. Only

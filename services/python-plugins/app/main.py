@@ -22,13 +22,14 @@ from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 
 from app.models import ExecuteRequest, HealthResponse
-from app.plugins import crawl4ai_plugin, scrapy_plugin
+from app.plugins import crawl4ai_plugin, rerank_bge_plugin, scrapy_plugin
 
 logger = logging.getLogger("ragdoll.python-plugins")
 
 # plugin.id -> handler(ExecuteRequest) -> dict with outputs/usage/metadata
 HANDLERS: Dict[str, Callable[[ExecuteRequest], Dict[str, Any]]] = {
     crawl4ai_plugin.PLUGIN_ID: crawl4ai_plugin.handle,
+    rerank_bge_plugin.PLUGIN_ID: rerank_bge_plugin.handle,
     scrapy_plugin.PLUGIN_ID: scrapy_plugin.handle,
 }
 

@@ -1,4 +1,5 @@
 import React, { useMemo, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, ApiError } from "../lib/api.ts";
 import {
@@ -11,6 +12,105 @@ import {
 import { Screen } from "./Screen.tsx";
 import type { EditingPipeline } from "../App.tsx";
 import type { PipelineVersionRow } from "../lib/api.ts";
+import type { PipelineSpec } from "../lib/types.ts";
+import { datasetColor } from "../lib/datasetColor.ts";
+
+/**
+ * Phase 11.2: render colored pills for every Dataset a pipeline
+ * references, so two pipelines sharing a corpus are visually paired
+ * at a glance. The pipeline's spec is fetched on demand (cheap — the
+ * version row is already cached when the user expanded the folder)
+ * and the dataset refs are pulled out of `spec.spec.nodes[i].dataset`.
+ *
+ * Hover surfaces the alias; clicking would deep-link to the dataset
+ * detail page once that route gains stable URLs (TODO).
+ */
+function PipelineDatasetPills(props: { pipelineId: string }) {
+  const navigate = useNavigate();
+  const versions = useQuery({
+    queryKey: ["pipeline-versions", props.pipelineId],
+    queryFn: () => api.listVersions(props.pipelineId),
+    staleTime: 30_000
+  });
+  // We need the dataset IDs (not just slugs) to deep-link. Cross-reference
+  // the spec's slug+alias against the live datasets list so the pill knows
+  // which dataset row to navigate to.
+  const visibleDatasets = useQuery({
+    queryKey: ["datasets-for-pills"],
+    queryFn: () => api.listDatasets(),
+    staleTime: 60_000
+  });
+  const refs = useMemo(() => {
+    const out: Array<{ slug: string; alias?: string; datasetId?: string }> = [];
+    const all = versions.data?.versions ?? [];
+    const latestId = versions.data?.latestVersionId;
+    const target = latestId
+      ? all.find((v) => v.id === latestId) ?? all[0]
+      : all[0];
+    if (!target?.spec) return out;
+    const spec = target.spec as PipelineSpec;
+    const datasets = visibleDatasets.data?.datasets ?? [];
+    const seen = new Set<string>();
+    for (const node of spec.spec?.nodes ?? []) {
+      const slug = node.dataset?.slug;
+      if (!slug || seen.has(slug)) continue;
+      seen.add(slug);
+      // Pick the narrowest-scoped dataset that matches the slug: env >
+      // tenant > global. The resolver does the same at runtime, so the
+      // pill points at the same row the executor would resolve to.
+      const env = datasets.find(
+        (d) => d.slug === slug && d.scope === "environment"
+      );
+      const tenant = datasets.find(
+        (d) => d.slug === slug && d.scope === "tenant"
+      );
+      const global = datasets.find(
+        (d) => d.slug === slug && d.scope === "global"
+      );
+      out.push({
+        slug,
+        alias: node.dataset?.alias,
+        datasetId: (env ?? tenant ?? global)?.id
+      });
+    }
+    return out;
+  }, [versions.data, visibleDatasets.data]);
+  if (refs.length === 0) return null;
+  return (
+    <span style={{ display: "inline-flex", gap: 4, marginLeft: 8 }}>
+      {refs.map(({ slug, alias, datasetId }) => {
+        const c = datasetColor(slug);
+        const common = {
+          title: `Dataset: ${slug}${alias ? ` @ ${alias}` : ""}${datasetId ? "" : " (not visible)"}`,
+          style: {
+            background: c.bg,
+            color: c.fg,
+            padding: "1px 6px",
+            borderRadius: 8,
+            fontSize: "0.8em"
+          } as const
+        };
+        return datasetId ? (
+          <button
+            key={slug}
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              navigate(`/datasets/${encodeURIComponent(datasetId)}`);
+            }}
+            {...common}
+          >
+            {slug}
+          </button>
+        ) : (
+          <span key={slug} {...common}>
+            {slug}
+          </span>
+        );
+      })}
+    </span>
+  );
+}
 
 function errText(e: unknown): string {
   if (e instanceof ApiError) {
@@ -150,6 +250,7 @@ export function PipelinesScreen(props: {
         <span className="tree-ico">{"\u{1F4C4}"}</span>
         <span className="tree-name">{p.name}</span>
         <span className="muted">{p.slug ?? p.id}</span>
+        <PipelineDatasetPills pipelineId={p.id} />
         <span className="tree-tools">
           <button
             className="link-btn"

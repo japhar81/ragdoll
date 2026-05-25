@@ -18,6 +18,7 @@ import { useGlobalHelpKeys } from "./components/help/useGlobalHelpKeys.ts";
 import { routeToDoc, type HelpDocSlug } from "./lib/help.ts";
 import { PipelineBuilder } from "./components/PipelineBuilder.tsx";
 import { PipelinesScreen } from "./components/PipelinesScreen.tsx";
+import { DatasetsScreen } from "./components/DatasetsScreen.tsx";
 import { SchedulerScreen } from "./components/SchedulerScreen.tsx";
 import { TenantsScreen } from "./components/TenantsScreen.tsx";
 import { ConfigScreen } from "./components/ConfigScreen.tsx";
@@ -56,6 +57,11 @@ const NAV_GROUPS: Array<{ group: string; items: NavItem[] }> = [
         path: "/pipelines",
         label: "Pipelines",
         perms: ["execution:view_logs", "pipeline:create", "pipeline:update"]
+      },
+      {
+        path: "/datasets",
+        label: "Datasets",
+        perms: ["dataset:read"]
       },
       {
         path: "/builder",
@@ -258,6 +264,8 @@ function Shell() {
           }
         />
         <Route path="/pipelines" element={<PipelinesRoute />} />
+        <Route path="/datasets" element={<DatasetsScreen />} />
+        <Route path="/datasets/:datasetId" element={<DatasetsScreen />} />
         <Route path="/builder" element={<BuilderRoute />} />
         <Route path="/builder/:pipelineId" element={<BuilderRoute />} />
         <Route path="/scheduler" element={<SchedulerScreen />} />

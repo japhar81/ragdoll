@@ -43,6 +43,15 @@ export interface ChangeEvent {
   tenantId: string | null;
   /** Principal id that caused the change. `null` for system-generated events. */
   actorId: string | null;
+  /**
+   * Optional permission required to receive this event. The WebSocket
+   * fan-out drops events for subscribers whose scoped authorize closure
+   * does not grant this permission at the event's tenant scope. Untagged
+   * events remain visible to every subscriber the tenant filter admits.
+   * Typed as a free string to keep this package dependency-free; consumers
+   * cast to `Permission` from `@ragdoll/auth`.
+   */
+  requiredPermission?: string;
   /** ISO timestamp the event occurred. */
   at: string;
   /** Optional, non-secret structured payload. */

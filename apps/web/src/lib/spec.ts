@@ -202,6 +202,11 @@ export function graphToSpec(
      *  `spec.metadata.stages`; nodes carry their stage assignment as
      *  `node.ui.stageId`. */
     stages?: PipelineStage[];
+    /** Phase 8 execution mode; omitted from the spec when "batch"
+     *  (the historical default) to keep diffs minimal. */
+    executionKind?: "batch" | "synchronous";
+    /** Phase 8 MCP auto-expose flag; omitted when false. */
+    mcpExpose?: boolean;
   }
 ): PipelineSpec {
   const specNodes: PipelineNode[] = nodes.map((flowNode) => {
@@ -228,7 +233,11 @@ export function graphToSpec(
       ...(metadata.annotations ? { annotations: metadata.annotations } : {}),
       ...(metadata.stages && metadata.stages.length > 0
         ? { stages: metadata.stages }
-        : {})
+        : {}),
+      ...(metadata.executionKind && metadata.executionKind !== "batch"
+        ? { executionKind: metadata.executionKind }
+        : {}),
+      ...(metadata.mcpExpose ? { mcpExpose: true } : {})
     },
     spec: { nodes: specNodes, edges: specEdges }
   };

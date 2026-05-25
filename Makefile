@@ -1,4 +1,4 @@
-.PHONY: up down refresh smoke test crawl-up obs
+.PHONY: up down refresh smoke test crawl-up crawl-up-reranker obs
 
 # Bring up the full local stack (build + start everything). First run pulls
 # CPU Ollama models and builds images.
@@ -27,6 +27,17 @@ test:
 # build — rebuild it explicitly, not on every code-refresh.
 crawl-up:
 	docker compose -f infra/docker/docker-compose.yml up -d --build python-plugins
+
+# Same as crawl-up, but also installs the `reranker` poetry group so the
+# rerank_bge plugin's `provider: local` branch works. Adds ~2GB of torch
+# + sentence-transformers weights to the image; only operators who want
+# local cross-encoder inference need this. Hosted HF API (the default
+# `provider: hf-api`) needs no extra deps.
+crawl-up-reranker:
+	docker compose -f infra/docker/docker-compose.yml build \
+	  --build-arg POETRY_INSTALL_ARGS='--no-root --only main --with reranker' \
+	  python-plugins
+	docker compose -f infra/docker/docker-compose.yml up -d python-plugins
 
 # Print (and on macOS open) the local Grafana URL. The all-in-one LGTM
 # container (otel-collector service) hosts Grafana on :3300; logs / metrics

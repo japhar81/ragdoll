@@ -31,6 +31,13 @@ import type { StructuredLogger } from "../../../packages/observability/src/index
 import type { QueuePort } from "./index.ts";
 import type { QueueJob } from "./index.ts";
 import type { RunPipelineJob } from "./handlers.ts";
+import {
+  PermissionDeniedError,
+  requirePermission,
+  type Permission,
+  type Principal
+} from "../../../packages/auth/src/index.ts";
+import type { Authorizer } from "../../../packages/authz/src/index.ts";
 
 export interface SchedulerDeps {
   schedules: ScheduleRepository;
@@ -38,6 +45,16 @@ export interface SchedulerDeps {
   /** Clock injection for deterministic tests; defaults to wall clock. */
   now?: () => Date;
   logger?: StructuredLogger;
+  /**
+   * Optional Authorizer. When wired AND the due schedule's row carries a
+   * `createdBy`, the scheduler re-resolves that principal's grants at fire
+   * time and refuses to enqueue if `pipeline:run` has been revoked since
+   * the schedule was created. The schedule is left in place (it can be
+   * resumed if the grant is restored) but skipped this tick, with a
+   * `paused_no_grant` log line so the admin UI can surface it. Without
+   * the authorizer the scheduler behaves exactly as today.
+   */
+  authorizer?: Authorizer;
 }
 
 export interface Scheduler {
@@ -134,10 +151,69 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
         continue;
       }
 
+      // Phase 2 dataset/RBAC refactor: re-check the creator's grants at
+      // fire time. A creator who lost `pipeline:run` between schedule
+      // creation and now must NOT keep firing pipelines through this
+      // schedule. We still advance `next_run_at` so the schedule keeps
+      // its cadence and a single restored grant resumes runs cleanly.
+      let enqueuedBy: RunPipelineJob["enqueuedBy"];
+      if (deps.authorizer && schedule.createdBy) {
+        const principal: Principal = {
+          id: schedule.createdBy,
+          type: "user",
+          tenantId: schedule.tenantId,
+          roles: []
+        };
+        try {
+          const closure = await deps.authorizer.authorizeClosure(principal, {
+            defaultTenantId: schedule.tenantId
+          });
+          principal.authorize = closure;
+          requirePermission(
+            principal,
+            "pipeline:run" as Permission,
+            {
+              tenantId: schedule.tenantId,
+              pipelineId: schedule.pipelineId,
+              environment: schedule.environment
+            }
+          );
+          enqueuedBy = {
+            principalId: schedule.createdBy,
+            principalType: "user",
+            tenantId: schedule.tenantId,
+            roles: []
+          };
+        } catch (e) {
+          if (e instanceof PermissionDeniedError) {
+            // Skip this fire; surface as paused_no_grant so the admin UI
+            // can show the schedule as effectively-paused-but-still-enabled.
+            logger?.warn("scheduler.paused_no_grant", {
+              scheduleId: schedule.id,
+              tenantId: schedule.tenantId,
+              pipelineId: schedule.pipelineId,
+              environment: schedule.environment,
+              createdBy: schedule.createdBy,
+              reason: e.message
+            });
+            // Still advance next_run_at so the cadence isn't lost.
+            await deps.schedules.markRun(
+              schedule.id,
+              schedule.lastRunAt as string,
+              nextIso
+            );
+            continue;
+          }
+          throw e;
+        }
+      }
+
+      const payload = runPipelinePayload(schedule);
+      if (enqueuedBy) payload.enqueuedBy = enqueuedBy;
       const job: QueueJob<RunPipelineJob> = {
         id: randomUUID(),
         type: "run_pipeline",
-        payload: runPipelinePayload(schedule)
+        payload
       };
       await deps.queue.enqueue(job);
       await deps.schedules.markRun(schedule.id, at.toISOString(), nextIso);

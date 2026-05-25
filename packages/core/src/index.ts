@@ -119,6 +119,19 @@ export interface PipelineStage {
   label: string;
 }
 
+/**
+ * How a pipeline is invoked at runtime (Phase 8 of dataset/RBAC/retrieval
+ * refactor). The default `batch` mode is the historical behaviour:
+ * `/api/pipelines/:id/run` enqueues a `RunPipelineJob` onto BullMQ and a
+ * worker drains it. `synchronous` pipelines run in-process on the API
+ * pod via `/api/pipelines/:id/invoke` (and stream node progress over
+ * `/api/pipelines/:id/stream`) so chat-style retrieval can answer in a
+ * single HTTP round-trip. Mode is a metadata flag (not the apiVersion
+ * `kind` which is reserved for the Kubernetes-style resource type) so
+ * existing seeded specs need no edit — `undefined` reads as `batch`.
+ */
+export type PipelineExecutionKind = "batch" | "synchronous";
+
 export interface PipelineSpec {
   apiVersion: "rag-platform/v1";
   kind: "Pipeline";
@@ -129,6 +142,18 @@ export interface PipelineSpec {
     annotations?: Record<string, string>;
     /** Ordered list of Builder stage sections. */
     stages?: PipelineStage[];
+    /**
+     * Execution mode (Phase 8). `undefined` → `batch` for back-compat.
+     */
+    executionKind?: PipelineExecutionKind;
+    /**
+     * When true on a synchronous pipeline, the MCP server auto-registers
+     * the pipeline as a callable tool. Tool name defaults to the
+     * pipeline slug; input/output schemas come from the spec's I/O
+     * nodes. No-op on batch pipelines (MCP tools are call-and-wait by
+     * contract).
+     */
+    mcpExpose?: boolean;
   };
   spec: {
     parameters?: ConfigDefinition[];
@@ -143,6 +168,16 @@ export interface PipelineNode {
   plugin?: PluginRef;
   config?: Record<string, unknown>;
   secrets?: Record<string, SecretRef>;
+  /**
+   * Optional Dataset reference (Phase 5 of dataset/RBAC/retrieval
+   * refactor). When set on a storage-touching node, the runtime
+   * resolves the `slug` (+ optional `alias`, defaults to `stable`)
+   * against scope inheritance at execute time and either hands a
+   * v2 plugin a {@link ResolvedDataset} OR splices the resolved
+   * backend collection names into the v1 plugin's
+   * `config.collection` / `config.index` via the compatibility shim.
+   */
+  dataset?: { slug: string; alias?: string };
   ui?: Record<string, unknown>;
 }
 
@@ -151,6 +186,100 @@ export interface PipelineEdge {
   to: string;
   fromPort?: string;
   toPort?: string;
+}
+
+// ---------------------------------------------------------------------------
+// Dataset (Phase 4 of dataset/RBAC/retrieval refactor)
+// ---------------------------------------------------------------------------
+
+/**
+ * Scope at which a Dataset is defined. Resolution at reference time walks
+ * `environment -> tenant -> global`, first match wins; cross-scope writes
+ * require explicit opt-in by the caller.
+ */
+export type DatasetScope = "global" | "tenant" | "environment";
+
+/**
+ * A named, schema'd container of vector / keyword / structured data that
+ * pipelines reference *by id* rather than by raw collection name. The
+ * platform owns the physical naming and backend selection; plugins only
+ * see the resolved {@link DatasetVersion} the runtime hands them.
+ *
+ * Multiple pipelines can ingest into and retrieve from the same Dataset —
+ * that's the whole point of the abstraction, and the reason a tenant
+ * with N ingestion pipelines plus M retrieval pipelines doesn't get
+ * N×M coupled collections anymore.
+ */
+export interface Dataset {
+  id: UUID;
+  scope: DatasetScope;
+  /** NULL when scope === 'global'. */
+  tenantId?: string;
+  /** Free-text env name (mirrors environments.name); set only when scope === 'environment'. */
+  environmentId?: string;
+  slug: string;
+  displayName: string;
+  description?: string;
+  embeddingProfile: EmbeddingProfile;
+  /** JSON-schema-like record shape every chunk written here must conform to. */
+  chunkSchema: Record<string, unknown>;
+  /** Which modalities the dataset is provisioned for. */
+  modalities: DatasetModality[];
+  /** Backend selection per modality. */
+  backends: DatasetBackends;
+  /** Currently-ready version id; pipelines pin to an alias unless otherwise. */
+  currentVersionId?: string;
+  archivedAt?: string;
+  createdAt: string;
+  createdBy?: string;
+  updatedAt: string;
+}
+
+export type DatasetModality = "vector" | "keyword";
+
+/**
+ * Backend declaration: which provider holds which modality. v1 supports
+ * one provider per modality; multi-backend layered storage lands in a
+ * later phase.
+ */
+export interface DatasetBackends {
+  vector?: { provider: "qdrant" | "pgvector" | "opensearch"; config?: Record<string, unknown> };
+  keyword?: { provider: "opensearch" | "postgres_fts"; config?: Record<string, unknown> };
+  hybrid?: { strategy: "rrf" | "weighted_sum"; config?: Record<string, unknown> };
+}
+
+/**
+ * Immutable snapshot of a Dataset's schema + the physical collection
+ * names where its data lives. Pipelines pin to a version (or to a
+ * moveable alias that resolves to one). Changing the schema requires a
+ * new version because the existing data was indexed under the old one.
+ */
+export interface DatasetVersion {
+  id: UUID;
+  datasetId: UUID;
+  versionLabel: string;
+  schemaSpec: Record<string, unknown>;
+  /** `{ vector: "rag_acme_prod_supportkb_v2", keyword: "..." }` */
+  backendCollections: Record<string, string>;
+  status: "building" | "ready" | "archived";
+  docCount: number;
+  sizeBytes: number;
+  createdAt: string;
+  readyAt?: string;
+}
+
+/**
+ * Moveable pointer (`stable`, `staging`, `canary`) into a Dataset's
+ * version timeline. Pipelines pin to an alias so the platform can swap
+ * the underlying version atomically.
+ */
+export interface DatasetAlias {
+  id: UUID;
+  datasetId: UUID;
+  alias: string;
+  versionId: UUID;
+  updatedAt: string;
+  updatedBy?: string;
 }
 
 export interface SecretRef {
@@ -180,6 +309,18 @@ export interface RuntimeContext {
   resolvedConfig: ResolvedConfig;
   deadline?: Date;
   signal?: AbortSignal;
+  /**
+   * Defense-in-depth permission check, populated by the worker when it has
+   * both an authorizer wired AND an `enqueuedBy` block on the job. Called
+   * once at executor entry; if it returns `false`, the run is recorded as
+   * `denied` and the DAG never executes. Untyped permission/resource here
+   * to keep `core` dependency-free; the worker passes `pipeline:run` plus
+   * the current run's tenant/pipeline/environment.
+   */
+  principalAuthorize?: (
+    permission: string,
+    resource?: { tenantId?: string; environment?: string; pipelineId?: string }
+  ) => boolean;
 }
 
 export interface Actor {

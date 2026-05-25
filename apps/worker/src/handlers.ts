@@ -44,6 +44,15 @@ import type { Tracer, Meter } from "../../../packages/observability/src/index.ts
 import { NoopTracer, NoopMeter } from "../../../packages/observability/src/index.ts";
 import type { StructuredLogger } from "../../../packages/observability/src/index.ts";
 import type { ChangeBus } from "../../../packages/events/src/index.ts";
+import {
+  PermissionDeniedError,
+  requirePermission,
+  type Permission,
+  type Principal,
+  type PrincipalType,
+  type Resource
+} from "../../../packages/auth/src/index.ts";
+import type { Authorizer } from "../../../packages/authz/src/index.ts";
 import type {
   PipelineVersionRepository,
   ConfigDefinitionRepository,
@@ -55,6 +64,9 @@ import type {
   UsageRecordRepository,
   PipelineRepository,
   PipelineActivationRepository,
+  DatasetRepository,
+  DatasetVersionRepository,
+  DatasetAliasRepository,
   PipelineVersionRow,
   ConfigValueRow,
   ProviderModelRow,
@@ -90,6 +102,15 @@ export interface WorkerRepositories {
    * `pipelineVersionId` (i.e. schedule-originated runs).
    */
   activations?: PipelineActivationRepository;
+  /**
+   * Optional dataset repositories (Phase 5). When all three are wired
+   * the executor resolves `node.dataset` refs against them; without
+   * them the resolver hook never fires and pipelines see only their
+   * literal `config.collection` / `config.index` exactly as before.
+   */
+  datasets?: DatasetRepository;
+  datasetVersions?: DatasetVersionRepository;
+  datasetAliases?: DatasetAliasRepository;
 }
 
 export interface WorkerDeps {
@@ -146,6 +167,41 @@ export interface WorkerDeps {
    * — the wrapper is bypassed and no broadcasts occur.
    */
   changeBus?: ChangeBus;
+  /**
+   * Optional Authorizer. When provided AND a job payload carries an
+   * `enqueuedBy` block, the worker re-checks the enqueuer's grants at
+   * dequeue and refuses to run if the grant has been revoked. Without an
+   * authorizer the worker dispatches every job as it does today —
+   * preserves the install-free unit-test path.
+   */
+  authorizer?: Authorizer;
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Captured-enqueuer block (Phase 2 RBAC refactor)                          */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Snapshot of the principal that enqueued a job. Captured at the API
+ * boundary (`request.principal`) and serialized into the BullMQ payload.
+ * The worker uses it to re-check authorization at dequeue time so a
+ * principal whose grant was revoked between enqueue and dequeue cannot
+ * keep firing pipelines through previously-queued work.
+ *
+ * `roles` is the snapshot the API saw at enqueue. For session users this
+ * is `[]` (their roles come from `rbac_grants`, which we re-resolve via
+ * the authorizer); for API keys / dev / service principals the carried
+ * roles are authoritative.
+ *
+ * `requestId` lets the audit log tie the dequeue-time denial back to the
+ * original HTTP request that enqueued the job.
+ */
+export interface EnqueuedBy {
+  principalId: string;
+  principalType: PrincipalType;
+  tenantId?: string;
+  roles: string[];
+  requestId?: string;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -173,6 +229,8 @@ export interface RunPipelineJob {
   deadlineMs?: number;
   /** Provenance marker; `"schedule"` for scheduler-enqueued runs. */
   source?: string;
+  /** Snapshot of the enqueuing principal. See {@link EnqueuedBy}. */
+  enqueuedBy?: EnqueuedBy;
 }
 
 export interface IngestDatasourceJob {
@@ -198,6 +256,8 @@ export interface IngestDatasourceJob {
   runtimeOverrides?: Record<string, unknown>;
   requestId?: string;
   executionId?: string;
+  /** Snapshot of the enqueuing principal. See {@link EnqueuedBy}. */
+  enqueuedBy?: EnqueuedBy;
 }
 
 export interface ReindexTenantJob {
@@ -206,6 +266,8 @@ export interface ReindexTenantJob {
   /** When omitted, every datasource connection for the tenant is reingested. */
   datasourceConnectionIds?: string[];
   pipelineId?: string;
+  /** Snapshot of the enqueuing principal. See {@link EnqueuedBy}. */
+  enqueuedBy?: EnqueuedBy;
 }
 
 export interface EvaluatePipelineJob {
@@ -216,6 +278,8 @@ export interface EvaluatePipelineJob {
   version?: string;
   dataset: Array<{ input: Record<string, unknown>; expected?: unknown }>;
   runtimeOverrides?: Record<string, unknown>;
+  /** Snapshot of the enqueuing principal. See {@link EnqueuedBy}. */
+  enqueuedBy?: EnqueuedBy;
 }
 
 export interface BatchRunJob {
@@ -226,12 +290,16 @@ export interface BatchRunJob {
   version?: string;
   inputs: Array<Record<string, unknown>>;
   runtimeOverrides?: Record<string, unknown>;
+  /** Snapshot of the enqueuing principal. See {@link EnqueuedBy}. */
+  enqueuedBy?: EnqueuedBy;
 }
 
 export interface DeleteTenantVectorDataJob {
   tenantId: string;
   /** When omitted, every collection registered for the tenant is purged. */
   collections?: string[];
+  /** Snapshot of the enqueuing principal. See {@link EnqueuedBy}. */
+  enqueuedBy?: EnqueuedBy;
 }
 
 export interface RotateProviderModelMetadataJob {
@@ -366,11 +434,15 @@ class PublishingExecutionStore implements ExecutionStore {
   private bus: ChangeBus;
   private logger?: StructuredLogger;
   /**
-   * Node records carry no tenantId; the parent execution does. Cache the
-   * mapping from `start()` so node events can be scoped correctly, and drop
-   * it on `complete()` to keep the map bounded.
+   * Node records carry neither tenant nor actor; the parent execution does.
+   * Cache both from `start()` so node events can be scoped correctly and
+   * the live broadcast carries the enqueuing principal's id. Cleared on
+   * `complete()` to keep the map bounded.
    */
-  private tenantByExecution = new Map<string, string>();
+  private metaByExecution = new Map<
+    string,
+    { tenantId: string; actorId: string | null }
+  >();
 
   constructor(
     inner: ExecutionStore,
@@ -386,6 +458,7 @@ class PublishingExecutionStore implements ExecutionStore {
     action: string,
     targetId: string,
     tenantId: string | null | undefined,
+    actorId: string | null,
     payload?: Record<string, unknown>
   ): Promise<void> {
     try {
@@ -395,7 +468,7 @@ class PublishingExecutionStore implements ExecutionStore {
         targetType: "execution",
         targetId,
         tenantId: tenantId ?? null,
-        actorId: null,
+        actorId,
         at: new Date().toISOString(),
         payload
       });
@@ -409,13 +482,23 @@ class PublishingExecutionStore implements ExecutionStore {
 
   async start(record: ExecutionRecord): Promise<void> {
     await this.inner.start(record);
-    this.tenantByExecution.set(record.executionId, record.tenantId);
-    await this.fire("execution.started", record.executionId, record.tenantId, {
-      pipelineId: record.pipelineId,
-      pipelineVersionId: record.pipelineVersionId,
-      status: record.status,
-      startedAt: record.startedAt
+    const actorId = record.actorId ?? null;
+    this.metaByExecution.set(record.executionId, {
+      tenantId: record.tenantId,
+      actorId
     });
+    await this.fire(
+      "execution.started",
+      record.executionId,
+      record.tenantId,
+      actorId,
+      {
+        pipelineId: record.pipelineId,
+        pipelineVersionId: record.pipelineVersionId,
+        status: record.status,
+        startedAt: record.startedAt
+      }
+    );
   }
 
   async complete(record: ExecutionRecord): Promise<void> {
@@ -425,22 +508,33 @@ class PublishingExecutionStore implements ExecutionStore {
         ? "execution.completed"
         : record.status === "failed"
           ? "execution.failed"
-          : "execution.updated";
-    await this.fire(action, record.executionId, record.tenantId, {
-      pipelineId: record.pipelineId,
-      pipelineVersionId: record.pipelineVersionId,
-      status: record.status,
-      completedAt: record.completedAt
-    });
-    this.tenantByExecution.delete(record.executionId);
+          : record.status === "denied"
+            ? "execution.denied"
+            : "execution.updated";
+    const meta = this.metaByExecution.get(record.executionId);
+    await this.fire(
+      action,
+      record.executionId,
+      record.tenantId,
+      record.actorId ?? meta?.actorId ?? null,
+      {
+        pipelineId: record.pipelineId,
+        pipelineVersionId: record.pipelineVersionId,
+        status: record.status,
+        completedAt: record.completedAt
+      }
+    );
+    this.metaByExecution.delete(record.executionId);
   }
 
   async startNode(record: ExecutionNodeRecord): Promise<void> {
     await this.inner.startNode(record);
+    const meta = this.metaByExecution.get(record.executionId);
     await this.fire(
       "execution.node.started",
       record.executionId,
-      this.tenantByExecution.get(record.executionId) ?? null,
+      meta?.tenantId ?? null,
+      meta?.actorId ?? null,
       {
         nodeId: record.nodeId,
         status: record.status,
@@ -451,10 +545,12 @@ class PublishingExecutionStore implements ExecutionStore {
 
   async completeNode(record: ExecutionNodeRecord): Promise<void> {
     await this.inner.completeNode(record);
+    const meta = this.metaByExecution.get(record.executionId);
     await this.fire(
       "execution.node.completed",
       record.executionId,
-      this.tenantByExecution.get(record.executionId) ?? null,
+      meta?.tenantId ?? null,
+      meta?.actorId ?? null,
       {
         nodeId: record.nodeId,
         status: record.status,
@@ -599,12 +695,64 @@ export function createWorker(deps: WorkerDeps): Worker {
     ? new PublishingExecutionStore(usageMirrored, deps.changeBus, deps.logger)
     : usageMirrored;
 
+  // Phase 5: build a DatasetResolver from the wired repos. When any of
+  // the three is missing we leave it undefined so the executor falls
+  // back to "no dataset refs are resolvable" (and the v1 shim never
+  // runs) — preserves the legacy harness exactly.
+  const datasetResolver =
+    deps.repositories.datasets &&
+    deps.repositories.datasetVersions &&
+    deps.repositories.datasetAliases
+      ? {
+          async resolve(args: {
+            ref: { slug: string; alias?: string };
+            tenantId?: string;
+            environmentId?: string;
+          }) {
+            const dsRepo = deps.repositories.datasets!;
+            const verRepo = deps.repositories.datasetVersions!;
+            const aliasRepo = deps.repositories.datasetAliases!;
+            const ds = await dsRepo.resolveSlug({
+              slug: args.ref.slug,
+              tenantId: args.tenantId,
+              environmentId: args.environmentId
+            });
+            if (!ds) return undefined;
+            // alias default = "stable". When the alias points at a version,
+            // use that; otherwise fall back to `current_version_id`.
+            const aliasName = args.ref.alias ?? "stable";
+            const aliasRow = await aliasRepo.resolve(ds.id, aliasName);
+            const versionId = aliasRow?.versionId ?? ds.currentVersionId;
+            if (!versionId) return undefined;
+            const ver = await verRepo.get(versionId);
+            if (!ver) return undefined;
+            return {
+              id: ds.id,
+              slug: ds.slug,
+              scope: ds.scope,
+              tenantId: ds.tenantId ?? undefined,
+              environmentId: ds.environmentId ?? undefined,
+              modalities: ds.modalities,
+              embeddingProfile: ds.embeddingProfile,
+              chunkSchema: ds.chunkSchema,
+              version: {
+                id: ver.id,
+                versionLabel: ver.versionLabel,
+                status: ver.status
+              },
+              backendCollections: ver.backendCollections
+            };
+          }
+        }
+      : undefined;
+
   function executor(): DagExecutor {
     return new DagExecutor({
       pluginRegistry: deps.plugins,
       secretProvider: deps.secretProvider,
       store: runtimeStore,
       ingestStateRepository: deps.ingestStateRepository,
+      datasetResolver,
       maxRetries: deps.maxRetries ?? 1,
       tracer
     });
@@ -724,6 +872,10 @@ export function createWorker(deps: WorkerDeps): Worker {
     resolvedConfig: ResolvedConfig;
     deadlineMs?: number;
     signal?: AbortSignal;
+    /** Set by the dequeue auth check so the executor entry-check fires. */
+    principalAuthorize?: RuntimeContext["principalAuthorize"];
+    /** Snapshot of the enqueuing actor so the audit + bus carry it. */
+    actor?: { id: string; type: "user" | "service" | "api_key"; roles?: string[] };
   }): RuntimeContext {
     return {
       requestId: args.requestId ?? randomUUID(),
@@ -734,8 +886,105 @@ export function createWorker(deps: WorkerDeps): Worker {
       environment: args.environment,
       resolvedConfig: args.resolvedConfig,
       deadline: args.deadlineMs ? new Date(args.deadlineMs) : undefined,
-      signal: args.signal
+      signal: args.signal,
+      actor: args.actor,
+      principalAuthorize: args.principalAuthorize
     };
+  }
+
+  /* ----- Phase 2: re-enforce the enqueuer's grants at dequeue time ------ */
+
+  /**
+   * When `deps.authorizer` AND the job's `enqueuedBy` are both present,
+   * resolve the enqueuer's CURRENT scoped authorize closure and call
+   * {@link requirePermission} against the run's scope. If the grant has
+   * been revoked since enqueue, a {@link PermissionDeniedError} is thrown
+   * — the caller records a `denied` execution and propagates the error
+   * to BullMQ so the job is not retried (`status: "denied"` is terminal,
+   * distinct from `failed`).
+   *
+   * Returns the closure + the actor block so the caller can wire both
+   * into {@link RuntimeContext}: the executor's defense-in-depth entry
+   * check re-uses the same closure, and the actor lands on
+   * `ExecutionRecord.actorId` so "who ran this?" is answerable from
+   * the audit trail.
+   *
+   * Without either dependency, returns the empty object — preserves the
+   * install-free unit-test path and the legacy harness exactly.
+   */
+  async function authorizeEnqueuer(
+    enqueuedBy: EnqueuedBy | undefined,
+    permission: Permission,
+    scope: Resource
+  ): Promise<{
+    principalAuthorize?: RuntimeContext["principalAuthorize"];
+    actor?: { id: string; type: PrincipalType; roles: string[] };
+  }> {
+    if (!deps.authorizer || !enqueuedBy) return {};
+    const principal: Principal = {
+      id: enqueuedBy.principalId,
+      type: enqueuedBy.principalType,
+      tenantId: enqueuedBy.tenantId,
+      // EnqueuedBy.roles is a free string[] (no compile-time coupling to
+      // the auth Role union, which would force every job-payload writer
+      // to import @ragdoll/auth). At authorize time, unknown role names
+      // simply produce zero permissions — same fail-closed semantics.
+      roles: enqueuedBy.roles as Principal["roles"]
+    };
+    const closure = await deps.authorizer.authorizeClosure(principal, {
+      defaultTenantId: scope.tenantId ?? enqueuedBy.tenantId
+    });
+    principal.authorize = closure;
+    requirePermission(principal, permission, scope, {
+      requestId: enqueuedBy.requestId
+    });
+    return {
+      principalAuthorize: (perm, resource) => closure(perm, resource ?? {}),
+      actor: {
+        id: enqueuedBy.principalId,
+        type: enqueuedBy.principalType,
+        roles: enqueuedBy.roles
+      }
+    };
+  }
+
+  /**
+   * Persist a `denied` execution row when the dequeue check rejects. The
+   * row carries the original enqueuer's id so the UI / audit log can
+   * answer "this run was denied because principal X lost permission".
+   */
+  async function recordDenied(args: {
+    executionId: string;
+    tenantId: string;
+    pipelineId: string;
+    pipelineVersionId?: string;
+    enqueuedBy?: EnqueuedBy;
+    error: string;
+  }): Promise<void> {
+    const startedAt = new Date().toISOString();
+    const base: ExecutionRecord = {
+      executionId: args.executionId,
+      tenantId: args.tenantId,
+      pipelineId: args.pipelineId,
+      pipelineVersionId: args.pipelineVersionId ?? "denied",
+      status: "running",
+      startedAt,
+      actorId: args.enqueuedBy?.principalId ?? null
+    };
+    try {
+      await deps.store.start(base);
+      await deps.store.complete({
+        ...base,
+        status: "denied",
+        completedAt: new Date().toISOString(),
+        error: args.error
+      });
+    } catch (e) {
+      deps.logger?.warn?.("denied_execution_persist_failed", {
+        executionId: args.executionId,
+        error: e instanceof Error ? e.message : String(e)
+      });
+    }
   }
 
   /* ---------------------------- run_pipeline ----------------------------- */
@@ -744,6 +993,38 @@ export function createWorker(deps: WorkerDeps): Worker {
     payload: RunPipelineJob,
     signal?: AbortSignal
   ): Promise<RunPipelineResult> {
+    // Dequeue-time authorization re-check (Phase 2 of dataset/RBAC refactor).
+    // Runs BEFORE version resolution so a denied job never touches the
+    // pipeline_versions table. Throws PermissionDeniedError when the enqueuer
+    // has lost pipeline:run since enqueue; we record a `denied` execution
+    // and rethrow so BullMQ treats the job as terminally rejected.
+    const executionId = payload.executionId ?? randomUUID();
+    let principalAuthorize: RuntimeContext["principalAuthorize"];
+    let actor: { id: string; type: PrincipalType; roles?: string[] } | undefined;
+    try {
+      const auth = await authorizeEnqueuer(
+        payload.enqueuedBy,
+        "pipeline:run" as Permission,
+        {
+          tenantId: payload.tenantId,
+          pipelineId: payload.pipelineId,
+          environment: payload.environment
+        }
+      );
+      principalAuthorize = auth.principalAuthorize;
+      actor = auth.actor;
+    } catch (e) {
+      if (e instanceof PermissionDeniedError) {
+        await recordDenied({
+          executionId,
+          tenantId: payload.tenantId,
+          pipelineId: payload.pipelineId,
+          enqueuedBy: payload.enqueuedBy,
+          error: e.message
+        });
+      }
+      throw e;
+    }
     // Resolve the effective version: explicit pin (API-resolved) > org
     // activation (schedule-originated) > undefined => legacy deployment
     // selection inside selectVersion. `version` (string) overrides are only
@@ -766,7 +1047,6 @@ export function createWorker(deps: WorkerDeps): Worker {
         `pipeline validation failed: ${validation.errors.map((e) => e.message).join("; ")}`
       );
     }
-    const executionId = payload.executionId ?? randomUUID();
     const resolvedConfig = await resolveConfig({
       pipelineId: payload.pipelineId,
       pipelineVersionId: versionRow.id,
@@ -783,7 +1063,9 @@ export function createWorker(deps: WorkerDeps): Worker {
       environment: payload.environment,
       resolvedConfig,
       deadlineMs: payload.deadlineMs,
-      signal
+      signal,
+      actor,
+      principalAuthorize
     });
     const startNs = process.hrtime.bigint();
     let metricStatus: "succeeded" | "failed" = "succeeded";

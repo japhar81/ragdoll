@@ -53,11 +53,18 @@ export type Permission =
   | "pipeline:run"
   | "plugin:manage"
   | "provider:manage"
-  // Access-control administration (new).
+  // Access-control administration.
   | "user:manage"
   | "role:manage"
   | "idp:manage"
-  | "auth:settings";
+  | "auth:settings"
+  // Dataset lifecycle (Phase 4 of dataset/RBAC/retrieval refactor).
+  // `read` = list / get / search; `write` = upsert chunks; `admin` =
+  // change schema / manage versions / delete. Scope mirrors every other
+  // permission: global / tenant / env.
+  | "dataset:read"
+  | "dataset:write"
+  | "dataset:admin";
 
 export interface Principal {
   id: string;
@@ -83,15 +90,16 @@ export const DEFAULT_ROLE_PERMISSIONS: Record<Role, Permission[]> = {
     "config:edit_global", "config:edit_pipeline", "config:edit_tenant",
     "secret:manage_tenant", "execution:view_logs", "execution:view_sensitive",
     "audit:view", "pipeline:run", "plugin:manage", "provider:manage",
-    "user:manage", "role:manage", "idp:manage", "auth:settings"
+    "user:manage", "role:manage", "idp:manage", "auth:settings",
+    "dataset:read", "dataset:write", "dataset:admin"
   ],
-  environment_admin: ["pipeline:deploy", "config:edit_pipeline", "execution:view_logs", "audit:view", "pipeline:run"],
-  pipeline_admin: ["pipeline:create", "pipeline:update", "pipeline:delete", "pipeline:deploy", "config:edit_pipeline", "execution:view_logs", "pipeline:run"],
-  pipeline_editor: ["pipeline:create", "pipeline:update", "config:edit_pipeline", "pipeline:run"],
-  tenant_admin: ["config:edit_tenant", "secret:manage_tenant", "execution:view_logs", "pipeline:run", "user:manage"],
-  tenant_operator: ["execution:view_logs", "pipeline:run"],
-  viewer: ["execution:view_logs"],
-  auditor: ["audit:view", "execution:view_logs"]
+  environment_admin: ["pipeline:deploy", "config:edit_pipeline", "execution:view_logs", "audit:view", "pipeline:run", "dataset:read", "dataset:write"],
+  pipeline_admin: ["pipeline:create", "pipeline:update", "pipeline:delete", "pipeline:deploy", "config:edit_pipeline", "execution:view_logs", "pipeline:run", "dataset:read", "dataset:write", "dataset:admin"],
+  pipeline_editor: ["pipeline:create", "pipeline:update", "config:edit_pipeline", "pipeline:run", "dataset:read", "dataset:write"],
+  tenant_admin: ["config:edit_tenant", "secret:manage_tenant", "execution:view_logs", "pipeline:run", "user:manage", "dataset:read", "dataset:write", "dataset:admin"],
+  tenant_operator: ["execution:view_logs", "pipeline:run", "dataset:read"],
+  viewer: ["execution:view_logs", "dataset:read"],
+  auditor: ["audit:view", "execution:view_logs", "dataset:read"]
 };
 
 /** Back-compat alias (was the only exported catalog before scopes existed). */
@@ -315,6 +323,13 @@ export interface AuthorizablePrincipal {
   id: string;
   type: PrincipalKind;
   tenantId?: string;
+  /**
+   * Optional environment scope; when set together with `tenantId` the
+   * principal's synthesized grants live at `t/<tenant>/e/<env>`. Used by
+   * env-scoped API keys (Phase 3) so a key cannot act outside its
+   * environment regardless of the role permissions it carries.
+   */
+  environment?: string;
   roles: Role[];
 }
 
@@ -362,7 +377,10 @@ export class Authorizer {
 
   /** Grants a non-user principal carries, mapped onto its scope. */
   private synthesizeGrants(p: AuthorizablePrincipal): Grant[] {
-    const scope = p.tenantId ? `t/${p.tenantId}` : GLOBAL_SCOPE;
+    const scope = scopeToString({
+      tenantId: p.tenantId,
+      environment: p.environment
+    });
     return p.roles.map((role) => ({ role, scope }));
   }
 
@@ -389,6 +407,28 @@ export class Authorizer {
     return grants;
   }
 
+  /**
+   * Owner's CURRENT live grants from the policy store. Used by the
+   * API-key permission-intersection branch in `authorizeClosure`.
+   * Cached under the owner's id so an owner whose session grants are
+   * cached doesn't pay a second store hit.
+   */
+  private async ownerLiveGrants(userId: string): Promise<Grant[]> {
+    if (!this.store) return [];
+    const cached = this.grantCache.get(userId);
+    if (cached) return cached;
+    try {
+      const grants = (await this.store.listGrantsForUser(userId)).map((g) => ({
+        role: g.role,
+        scope: g.scope
+      }));
+      this.grantCache.set(userId, grants);
+      return grants;
+    } catch {
+      return [];
+    }
+  }
+
   /** Effective grants for display/debugging (no caching guarantees). */
   async resolveGrants(p: AuthorizablePrincipal): Promise<Grant[]> {
     return this.grantsFor(p);
@@ -405,6 +445,29 @@ export class Authorizer {
     const catalog = await this.loadCatalog();
     const grants = await this.grantsFor(p);
     const decider = await this.engine.prepare(grants, catalog);
+    // Phase 13 follow-up: API-key permission intersection.
+    //
+    // The snapshot-at-mint behaviour is fine for the UPPER bound (a
+    // key never grants more than its owner had), but if the owner
+    // later loses authority the key shouldn't keep operating. We
+    // build a SECOND decider over the owner's CURRENT live grants
+    // and intersect at decision time: the key is allowed iff the
+    // snapshot says yes AND the owner still holds a grant that
+    // covers the action.
+    //
+    // Why permission-level (intersect the deciders) rather than role-
+    // level (intersect the grant lists): the owner may hold a BROADER
+    // role than the key carries (platform_admin vs tenant_admin). A
+    // pure role match would lock out the key in that case; the
+    // permission-level intersection correctly says "yes the owner
+    // can still grant tenant_admin's perms here".
+    let ownerDecider:
+      | ((permission: string, scope: string) => boolean)
+      | undefined;
+    if (p.type === "api_key" && this.store) {
+      const ownerGrants = await this.ownerLiveGrants(p.id);
+      ownerDecider = await this.engine.prepare(ownerGrants, catalog);
+    }
     // Mirror the legacy `tenantId ?? principal.tenantId` merge: when a route
     // does not name a tenant, fall back to the request's tenant context (the
     // selected `x-tenant-id`, else the principal's own tenant). This keeps the
@@ -412,14 +475,16 @@ export class Authorizer {
     // gating instance-wide permissions, which only `platform_admin` (granted
     // at `*`) holds regardless of the scope the request runs in.
     const fallbackTenant = options.defaultTenantId ?? p.tenantId;
-    return (permission: string, resource: Resource = {}) =>
-      decider(
-        permission,
-        scopeToString({
-          tenantId: resource.tenantId ?? fallbackTenant,
-          environment: resource.environment,
-          pipelineId: resource.pipelineId
-        })
-      );
+    return (permission: string, resource: Resource = {}) => {
+      const scope = scopeToString({
+        tenantId: resource.tenantId ?? fallbackTenant,
+        environment: resource.environment,
+        pipelineId: resource.pipelineId
+      });
+      const snapshotOk = decider(permission, scope);
+      if (!snapshotOk) return false;
+      if (ownerDecider && !ownerDecider(permission, scope)) return false;
+      return true;
+    };
   }
 }

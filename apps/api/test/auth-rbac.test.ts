@@ -145,7 +145,12 @@ test("signup mode open_default_role grants the configured role", async () => {
     path: "/api/auth/me",
     headers: { authorization: `Bearer ${res.body.token}` }
   });
-  assert.deepEqual(me.body.permissions, ["execution:view_logs"]);
+  // viewer = execution:view_logs + dataset:read (Phase 4: every role with
+  // any read scope gains dataset:read so the Datasets tab is visible).
+  assert.deepEqual(me.body.permissions.sort(), [
+    "dataset:read",
+    "execution:view_logs"
+  ]);
 });
 
 // --- scoped grants ---------------------------------------------------------

@@ -236,6 +236,120 @@ test("a tenant-scoped user only receives events for their tenant", async () => {
   await srv.close();
 });
 
+test("events tagged with requiredPermission are dropped for subscribers lacking it", async () => {
+  // Phase 2 of the dataset/RBAC/retrieval refactor: sensitive events
+  // (secret.*, user.grants.*, role.*, idp.*) are tagged at publish time
+  // with a required permission. The WS fan-out drops the event for any
+  // subscriber whose scoped authorize closure does not grant that
+  // permission at the event's tenant. Untagged events still pass the
+  // existing tenant filter.
+  const bus = new InMemoryChangeBus();
+  const h = buildHarness({ withAuth: true, changeBus: bus });
+  const tenantId = randomUUID();
+  const now = new Date().toISOString();
+  await h.deps.tenants.create({
+    id: tenantId,
+    slug: "t",
+    name: "T",
+    status: "active",
+    metadata: {},
+    createdAt: now,
+    updatedAt: now
+  });
+  // A reader-only role exists in the catalog with only audit:view +
+  // execution:view_logs — no secret:manage_tenant. tenant_admin has
+  // secret:manage_tenant.
+  const admin = await seedUser(h, {
+    email: "admin@t.io",
+    grants: [{ role: "tenant_admin", scope: `t/${tenantId}` }]
+  });
+  const viewer = await seedUser(h, {
+    email: "viewer@t.io",
+    grants: [{ role: "viewer", scope: `t/${tenantId}` }]
+  });
+  const srv = await startWsServer(h, bus);
+
+  const adminWs = new WS(srv.url);
+  const viewerWs = new WS(srv.url);
+  await Promise.all([waitOpen(adminWs), waitOpen(viewerWs)]);
+  adminWs.send(JSON.stringify({ type: "auth", token: admin.token }));
+  viewerWs.send(JSON.stringify({ type: "auth", token: viewer.token }));
+  await Promise.all([
+    nextFrame(adminWs, (m) => m.type === "ready"),
+    nextFrame(viewerWs, (m) => m.type === "ready")
+  ]);
+
+  try {
+    // Attach the wait-for-frame listeners on BOTH sockets BEFORE
+    // publishing. Otherwise the second nextFrame() races with WS
+    // delivery: by the time it attaches its listener, the message
+    // frame may have already fired with no subscriber, and the await
+    // sits until timeout. Bug surfaced as ~40% intermittent failures
+    // under suite-level backlog.
+    const adminFirstP = nextFrame(adminWs, (m) => m.type === "event");
+    const viewerFirstP = nextFrame(viewerWs, (m) => m.type === "event");
+
+    // Publish a tagged secret rotation and an untagged pipeline update.
+    await bus.publish({
+      id: randomUUID(),
+      action: "secret.rotate",
+      targetType: "secret",
+      targetId: "s-1",
+      tenantId,
+      actorId: admin.id,
+      requiredPermission: "secret:manage_tenant",
+      at: new Date().toISOString()
+    });
+    await bus.publish({
+      id: randomUUID(),
+      action: "pipeline.update",
+      targetType: "pipeline",
+      targetId: "p-1",
+      tenantId,
+      actorId: admin.id,
+      at: new Date().toISOString()
+    });
+
+    // Admin receives the secret event first.
+    const adminFirst = await adminFirstP;
+    assert.equal(adminFirst.type, "event");
+    if (adminFirst.type === "event") {
+      assert.equal(adminFirst.event.action, "secret.rotate");
+    }
+    // Viewer skips the secret event and receives the untagged pipeline
+    // event. If the tagged event leaked through, the next event frame
+    // on the viewer's socket would be `secret.rotate`.
+    const viewerFirst = await viewerFirstP;
+    assert.equal(viewerFirst.type, "event");
+    if (viewerFirst.type === "event") {
+      assert.equal(
+        viewerFirst.event.action,
+        "pipeline.update",
+        "viewer received the tagged secret.rotate event — per-event filter is broken"
+      );
+    }
+  } finally {
+    // Always tear down: an assertion failure above must not leak open
+    // sockets / a listening Fastify instance — open handles can stall
+    // process exit far past the per-test timeout.
+    try {
+      adminWs.close();
+    } catch {
+      /* best-effort */
+    }
+    try {
+      viewerWs.close();
+    } catch {
+      /* best-effort */
+    }
+    await Promise.allSettled([
+      new Promise((r) => adminWs.once("close", () => r(undefined))),
+      new Promise((r) => viewerWs.once("close", () => r(undefined)))
+    ]);
+    await srv.close();
+  }
+});
+
 // --- WebSocket: Builder room ----------------------------------------------
 
 test("Builder room broadcasts edits to peers but not the sender", async () => {

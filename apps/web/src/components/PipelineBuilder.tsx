@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { useBuilderRoom } from "../events/EventsProvider.tsx";
 import { BuilderRoster } from "../events/BuilderRoster.tsx";
 import { BuilderTree } from "./builder/BuilderTree.tsx";
@@ -20,7 +21,7 @@ import ReactFlow, {
   type ReactFlowInstance
 } from "reactflow";
 import "reactflow/dist/style.css";
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, ApiError, type PluginInfo } from "../lib/api.ts";
 import { stringifyYaml } from "../lib/yaml.ts";
 import {
@@ -43,6 +44,7 @@ import {
 import {
   decodePaletteDrag,
   newNodeFromPlugin,
+  defaultDatasetForNewNode,
   type PaletteDragItem
 } from "../lib/palette.ts";
 import { PalettePanel } from "./PalettePanel.tsx";
@@ -54,6 +56,7 @@ import {
 } from "./FlowNodeCard.tsx";
 import { PluginEditorSlot } from "./PluginEditorSlot.tsx";
 import { SecretsEditor } from "./SecretsEditor.tsx";
+import { DeployModal } from "./DeployModal.tsx";
 import { NodeDocsTab } from "./builder/NodeDocsTab.tsx";
 import { BuilderConsole, useConsoleLog } from "./BuilderConsole.tsx";
 import { TenantSelect, useSelectedTenant } from "./useTenants.tsx";
@@ -65,6 +68,7 @@ import {
 } from "../../../../packages/pipeline-spec/src/layouts.ts";
 import {
   validatePipelineSpec,
+  isStorageCategory,
   type ValidationIssue
 } from "../../../../packages/pipeline-spec/src/index.ts";
 import { hasRealPipeline } from "../lib/consoleLog.ts";
@@ -228,6 +232,131 @@ function LayoutMenu({ onApply }: { onApply: (kind: LayoutKind) => void }) {
   );
 }
 
+/**
+ * Inline Dataset picker shown above the Config section for storage-touching
+ * nodes. The builder operates on dataset SLUGS only — a slug is the pipeline-
+ * portable identity; the runtime resolves (slug, alias) → ResolvedDataset at
+ * execute time using the (tenant, env) the deploy was bound to.
+ *
+ * The picker therefore lists DISTINCT slugs only — never env- or tenant-
+ * scoped variants. The "+ New dataset" button always creates the slug at
+ * GLOBAL scope so the same pipeline template can run across tenants; per-
+ * tenant / per-env overrides happen at deploy time (Deploy modal) and on
+ * the Datasets screen.
+ *
+ * Clearing the picker removes `node.dataset`. The validator then surfaces a
+ * `missing_required_dataset` error and the canvas badge lights up red.
+ */
+function DatasetPickerSection(props: {
+  node: PipelineNode;
+  pipelineSlug: string;
+  onChange: (dataset: { slug: string; alias?: string } | undefined) => void;
+}) {
+  const qc = useQueryClient();
+  // Cross-scope visible slugs. Pass no tenant/env so the API returns the
+  // operator's full visible set; we then collapse to distinct slugs.
+  const datasets = useQuery({
+    queryKey: ["datasets-slugs"],
+    queryFn: () => api.listDatasets({})
+  });
+  const distinctSlugs = useMemo(() => {
+    const seen = new Map<string, { slug: string; displayName?: string; variants: number }>();
+    for (const d of datasets.data?.datasets ?? []) {
+      const entry = seen.get(d.slug);
+      if (entry) entry.variants += 1;
+      else
+        seen.set(d.slug, {
+          slug: d.slug,
+          displayName: d.displayName ?? undefined,
+          variants: 1
+        });
+    }
+    return [...seen.values()].sort((a, b) => a.slug.localeCompare(b.slug));
+  }, [datasets.data]);
+  const current = props.node.dataset as
+    | { slug: string; alias?: string }
+    | undefined;
+  const suggestedSlug = props.pipelineSlug?.trim() || "";
+  const create = useMutation({
+    mutationFn: async (slug: string): Promise<{ slug: string }> => {
+      // Always create at GLOBAL scope from the builder — pipelines are
+      // tenant-/env-agnostic templates. Tenant / env overrides happen at
+      // deploy time, where the operator picks the target context.
+      const res = await api.createDataset({
+        scope: "global",
+        slug,
+        displayName: slug,
+        modalities: ["vector"]
+      });
+      return { slug: res.dataset.slug };
+    },
+    onSuccess: (res) => {
+      qc.invalidateQueries({ queryKey: ["datasets-slugs"] });
+      qc.invalidateQueries({ queryKey: ["datasets"] });
+      qc.invalidateQueries({ queryKey: ["datasets-all"] });
+      props.onChange({ slug: res.slug, alias: "stable" });
+    }
+  });
+  return (
+    <div className="settings-card" style={{ padding: 8, marginBottom: 8 }}>
+      <h3 style={{ margin: 0 }}>Dataset</h3>
+      <p className="muted" style={{ marginTop: 2, fontSize: "0.85em" }}>
+        Pin this node to a dataset <strong>slug</strong>. The runtime resolves
+        the (tenant, env) variant at deploy time — no need to choose a scope
+        here.
+      </p>
+      <div className="inline-form" style={{ gap: 6, flexWrap: "wrap" }}>
+        <select
+          value={current?.slug ?? ""}
+          onChange={(e) => {
+            const slug = e.target.value;
+            props.onChange(
+              slug ? { slug, alias: current?.alias ?? "stable" } : undefined
+            );
+          }}
+          disabled={datasets.isLoading}
+        >
+          <option value="">(no dataset — pick a slug)</option>
+          {distinctSlugs.map((d) => (
+            <option key={d.slug} value={d.slug}>
+              {d.slug}
+              {d.variants > 1 ? ` · ${d.variants} scope variants` : ""}
+            </option>
+          ))}
+        </select>
+        {!current?.slug && (
+          <button
+            type="button"
+            className="link-btn"
+            disabled={!suggestedSlug || create.isPending}
+            title={
+              suggestedSlug
+                ? `Create a new global dataset slug "${suggestedSlug}"`
+                : "Save the pipeline first so we can suggest a slug"
+            }
+            onClick={() => suggestedSlug && create.mutate(suggestedSlug)}
+          >
+            {create.isPending
+              ? "Creating…"
+              : `+ New global dataset "${suggestedSlug || "—"}"`}
+          </button>
+        )}
+        {current?.slug && (
+          <input
+            value={current.alias ?? "stable"}
+            onChange={(e) =>
+              props.onChange({ slug: current.slug, alias: e.target.value || "stable" })
+            }
+            placeholder="alias (stable)"
+            style={{ width: 100 }}
+            title="Alias to pin (defaults to 'stable')"
+          />
+        )}
+      </div>
+    </div>
+  );
+}
+
 function download(name: string, text: string, mime: string): void {
   const blob = new Blob([text], { type: mime });
   const url = URL.createObjectURL(blob);
@@ -247,6 +376,24 @@ export function PipelineBuilder(props: {
   const [pipelineName, setPipelineName] = useState("support-rag");
   const [pipelineSlug, setPipelineSlug] = useState("support-rag");
   const [pipelineDescription, setPipelineDescription] = useState("");
+  // Phase 11.3: execution mode + MCP exposure are pipeline-level metadata
+  // on the spec. Default to "batch" (the historical kind) so nothing
+  // changes for existing pipelines until the operator flips this here.
+  const [executionKind, setExecutionKind] = useState<"batch" | "synchronous">(
+    "batch"
+  );
+  const [mcpExpose, setMcpExpose] = useState<boolean>(false);
+  // Sample input + last result for the Invoke panel that appears on
+  // synchronous pipelines.
+  const [invokeInput, setInvokeInput] = useState<string>(
+    '{ "question": "hello" }'
+  );
+  const [invokeBusy, setInvokeBusy] = useState(false);
+  const [invokeResult, setInvokeResult] = useState<
+    | { ok: true; output: unknown; executionId: string }
+    | { ok: false; error: string }
+    | null
+  >(null);
   // The identifier used for every API call: the slug until the pipeline row
   // exists, then its real UUID (set on create / open-from-tree).
   const [pipelineId, setPipelineId] = useState("support-rag");
@@ -268,6 +415,22 @@ export function PipelineBuilder(props: {
   const [environment, setEnvironment] = useState("dev");
   const envs = useEnvironments(tenantId);
   const [selectedId, setSelectedId] = useState<string | undefined>();
+  // Deep-link from Datasets ("open in builder"): /builder/:id?node=<nodeId>
+  // selects the requested node once it appears in the graph, then strips
+  // the query param so subsequent edits don't keep re-selecting it.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const requestedNodeId = searchParams.get("node") ?? undefined;
+  useEffect(() => {
+    if (!requestedNodeId) return;
+    const present = (nodes as unknown as { id: string }[]).some(
+      (n) => n.id === requestedNodeId
+    );
+    if (!present) return;
+    setSelectedId(requestedNodeId);
+    const next = new URLSearchParams(searchParams);
+    next.delete("node");
+    setSearchParams(next, { replace: true });
+  }, [requestedNodeId, nodes, searchParams, setSearchParams]);
   const [testInput, setTestInput] = useState('{ "question": "How do I reset my password?" }');
   const [openedViaTree, setOpenedViaTree] = useState(false);
   const clog = useConsoleLog();
@@ -427,9 +590,11 @@ export function PipelineBuilder(props: {
       graphToSpec(nodes as unknown as FlowNode[], edges as unknown as FlowEdge[], {
         name: pipelineName,
         description: pipelineDescription.trim() || undefined,
-        stages: stages.length > 0 ? stages : undefined
+        stages: stages.length > 0 ? stages : undefined,
+        executionKind,
+        mcpExpose
       }),
-    [nodes, edges, pipelineName, pipelineDescription, stages]
+    [nodes, edges, pipelineName, pipelineDescription, stages, executionKind, mcpExpose]
   );
 
   // Stage management — pipeline-level CRUD that mutates the local
@@ -742,11 +907,16 @@ export function PipelineBuilder(props: {
     };
   }, [pluginList]);
 
-  const validationByNode = useMemo(() => {
+  const validation = useMemo(() => {
     // Skip validation while the plugin list is still loading — otherwise
     // every plugin ref looks "missing" for the first render.
     if (pluginList.length === 0) {
-      return new Map<string, NodeValidationBuckets>();
+      return {
+        byNode: new Map<string, NodeValidationBuckets>(),
+        errors: [] as ValidationIssue[],
+        warnings: [] as ValidationIssue[],
+        datasetSlots: [] as Array<{ nodeId: string; slug: string; alias: string }>
+      };
     }
     const result = validatePipelineSpec(
       spec as unknown as Parameters<typeof validatePipelineSpec>[0],
@@ -774,8 +944,21 @@ export function PipelineBuilder(props: {
       }
       if (ids.length > 0) push(issue, ids);
     }
-    return byNode;
+    return {
+      byNode,
+      errors: result.errors,
+      warnings: result.warnings,
+      datasetSlots: result.datasetSlots ?? []
+    };
   }, [spec, clientPluginRegistry, pluginList.length]);
+  const validationByNode = validation.byNode;
+  const blockingErrors = validation.errors;
+  const runDisabled = blockingErrors.length > 0;
+  const runDisabledTitle = runDisabled
+    ? `Fix ${blockingErrors.length} validation error${
+        blockingErrors.length === 1 ? "" : "s"
+      } before running (see badges on the canvas).`
+    : undefined;
 
   const resolved = useQuery({
     queryKey: ["resolved-config", pipelineId, tenantId, environment],
@@ -965,6 +1148,15 @@ export function PipelineBuilder(props: {
           const loadedStages = (loaded.metadata as { stages?: PipelineStage[] } | undefined)
             ?.stages;
           setStages(Array.isArray(loadedStages) ? loadedStages : []);
+          // Phase 11.3: restore executionKind + mcpExpose so opening a
+          // synchronous pipeline lights up the Invoke panel without the
+          // user re-flipping anything.
+          const loadedMeta = (loaded.metadata ?? {}) as {
+            executionKind?: "batch" | "synchronous";
+            mcpExpose?: boolean;
+          };
+          setExecutionKind(loadedMeta.executionKind ?? "batch");
+          setMcpExpose(loadedMeta.mcpExpose === true);
           setNodes(toFlowNodes(loaded));
           setEdges(toFlowEdges(loaded));
           setVersion(latest.version);
@@ -1037,6 +1229,20 @@ export function PipelineBuilder(props: {
             },
             id
           );
+          // Phase 7+ UX: if the new node touches a backend (qdrant_* /
+          // opensearch_* / vector_upsert) and the pipeline already
+          // has a sibling node wired to a dataset in the same family,
+          // copy that dataset onto the new node. Saves the operator
+          // a click in the overwhelmingly common case where one
+          // pipeline talks to one corpus.
+          const siblingNodes = current
+            .map((flow) => (flow.data as { node?: PipelineNode } | undefined)?.node)
+            .filter((n): n is PipelineNode => !!n);
+          const inheritedDataset = defaultDatasetForNewNode(
+            item.id,
+            siblingNodes
+          );
+          if (inheritedDataset) pipelineNode.dataset = inheritedDataset;
         }
         const flow = specToGraph({
           ...STARTER_SPEC,
@@ -1083,6 +1289,14 @@ export function PipelineBuilder(props: {
             },
             id
           );
+          const siblingNodes = current
+            .map((flow) => (flow.data as { node?: PipelineNode } | undefined)?.node)
+            .filter((n): n is PipelineNode => !!n);
+          const inheritedDataset = defaultDatasetForNewNode(
+            item.id,
+            siblingNodes
+          );
+          if (inheritedDataset) pipelineNode.dataset = inheritedDataset;
         }
         const flow = specToGraph({
           ...STARTER_SPEC,
@@ -1395,7 +1609,23 @@ export function PipelineBuilder(props: {
     });
   }
 
+  // Errored drafts can save, but publish / deploy / run are blocked. The
+  // toolbar buttons re-check this before opening the deploy modal so the
+  // user gets one clear console line per blocked action.
+  function blockIfInvalid(action: string): boolean {
+    if (blockingErrors.length === 0) return false;
+    clog.log(
+      "warn",
+      `${action} blocked — ${blockingErrors.length} validation error${
+        blockingErrors.length === 1 ? "" : "s"
+      } on the canvas. Fix the red badges and try again.`,
+      { errors: blockingErrors.map((e) => ({ code: e.code, nodeId: e.nodeId })) }
+    );
+    return true;
+  }
+
   async function publish() {
+    if (blockIfInvalid("Publish")) return;
     const layoutSpec = specWithLayout();
     await withLog("Published", "Publish failed", {
       method: "POST",
@@ -1406,7 +1636,36 @@ export function PipelineBuilder(props: {
     });
   }
 
-  async function deploy() {
+  // The Deploy / Run buttons open this modal first so the operator wires
+  // each dataset slug to a concrete (scope, tenant?, env?) variant for the
+  // target. Holding the next action in state lets one modal serve both
+  // entry points without duplicating the dataset-wiring UI.
+  const [deployModal, setDeployModal] = useState<{
+    mode: "run" | "deploy";
+  } | null>(null);
+
+  function openDeployModal(mode: "run" | "deploy") {
+    if (blockIfInvalid(mode === "run" ? "Run" : "Deploy")) return;
+    if (mode === "run" && !tenantReady) {
+      clog.log(
+        "warn",
+        tenantsLoading
+          ? "Run unavailable — still loading tenants. Pick a tenant once the list loads."
+          : "Run unavailable — select a tenant first (no tenant context to scope the request).",
+        { tenantId, tenantsLoading }
+      );
+      return;
+    }
+    if (validation.datasetSlots.length === 0) {
+      // Nothing to wire — skip the modal entirely.
+      if (mode === "run") void doRun();
+      else void doDeploy();
+      return;
+    }
+    setDeployModal({ mode });
+  }
+
+  async function doDeploy() {
     await withLog("Deployed", "Deploy failed", {
       method: "POST",
       path: `/api/pipelines/${pipelineId}/deployments`,
@@ -1479,7 +1738,7 @@ export function PipelineBuilder(props: {
       .catch((e) => clog.failure("Resolve config failed", e, { method: "GET", path }));
   }
 
-  async function run() {
+  async function doRun() {
     // Tenant-scoped route: without an x-tenant-id (UUID) the API 422s with
     // "tenant context required". Surface a console hint instead of firing a
     // doomed request.
@@ -1710,7 +1969,13 @@ export function PipelineBuilder(props: {
             />
           </label>
           <div className="tb-menu-divider" />
-          <button onClick={deploy}>Deploy</button>
+          <button
+            onClick={() => openDeployModal("deploy")}
+            disabled={runDisabled}
+            title={runDisabledTitle ?? "Deploy this version to this target"}
+          >
+            Deploy
+          </button>
         </ToolbarMenu>
 
         <ToolbarMenu label="Import / Export">
@@ -1721,14 +1986,16 @@ export function PipelineBuilder(props: {
         </ToolbarMenu>
 
         <button
-          onClick={run}
-          disabled={!tenantReady}
+          onClick={() => openDeployModal("run")}
+          disabled={!tenantReady || runDisabled}
           title={
-            tenantReady
-              ? "Run this pipeline"
-              : tenantsLoading
-                ? "Loading tenants…"
-                : "Select a tenant first (no tenant context)"
+            runDisabled
+              ? runDisabledTitle
+              : tenantReady
+                ? "Run this pipeline"
+                : tenantsLoading
+                  ? "Loading tenants…"
+                  : "Select a tenant first (no tenant context)"
           }
         >
           Run
@@ -1771,6 +2038,7 @@ export function PipelineBuilder(props: {
           isLoading={plugins.isLoading}
           isError={plugins.isError}
           onAdd={(item) => addNode(item)}
+          executionKind={executionKind}
         />
         <div
           className="col-resizer"
@@ -1978,6 +2246,21 @@ export function PipelineBuilder(props: {
                       }
                     }}
                   />
+                  {/* Phase 5/7: dataset picker for storage-touching nodes.
+                      The runtime resolves the chosen ref at execute time
+                      and either hands a v2 plugin a ResolvedDataset OR
+                      shims the backend collection names into a v1
+                      plugin's config. */}
+                  {selectedPlugin.data &&
+                    isStorageCategory(selectedPlugin.data.category) && (
+                      <DatasetPickerSection
+                        node={selectedNode}
+                        pipelineSlug={pipelineSlug}
+                        onChange={(dataset) =>
+                          updateSelectedNode((n) => ({ ...n, dataset }))
+                        }
+                      />
+                    )}
                   <h3>Config</h3>
                   {selectedPlugin.isLoading && (
                     <p className="muted">Loading plugin schema…</p>
@@ -2007,9 +2290,112 @@ export function PipelineBuilder(props: {
                 <button onClick={deleteSelected}>Delete node</button>
               )}
               {!selectedNode && (
-                <p className="muted">
-                  Click a node on the canvas to edit it.
-                </p>
+                <>
+                  {/* Phase 11.3: pipeline-level settings live in the
+                      Inspector's Config tab when no node is selected.
+                      They drive metadata.executionKind + mcpExpose on
+                      the spec, which the API reads to decide between
+                      /run (BullMQ) and /invoke (in-process). */}
+                  <div className="settings-card" style={{ padding: 8 }}>
+                    <h3 style={{ margin: 0 }}>Pipeline kind</h3>
+                    <p className="muted" style={{ fontSize: "0.85em" }}>
+                      <strong>Batch</strong> pipelines run via the worker queue
+                      (the historical default). <strong>Synchronous</strong>{" "}
+                      pipelines run in-process on the API and return the output
+                      in a single HTTP round-trip — required for chat-style
+                      retrieval and MCP tool exposure.
+                    </p>
+                    <select
+                      value={executionKind}
+                      onChange={(e) =>
+                        setExecutionKind(e.target.value as "batch" | "synchronous")
+                      }
+                    >
+                      <option value="batch">batch (queue-driven)</option>
+                      <option value="synchronous">synchronous (in-process)</option>
+                    </select>
+                    {executionKind === "synchronous" && (
+                      <label
+                        style={{ display: "block", marginTop: 8, fontSize: "0.9em" }}
+                        title="Expose this pipeline as a callable MCP tool"
+                      >
+                        <input
+                          type="checkbox"
+                          checked={mcpExpose}
+                          onChange={(e) => setMcpExpose(e.target.checked)}
+                        />
+                        {" "}Expose as MCP tool
+                      </label>
+                    )}
+                  </div>
+
+                  {executionKind === "synchronous" && (
+                    <div className="settings-card" style={{ padding: 8, marginTop: 8 }}>
+                      <h3 style={{ margin: 0 }}>Invoke</h3>
+                      <p className="muted" style={{ fontSize: "0.85em" }}>
+                        Run this pipeline against the deployed version in{" "}
+                        <code>{environment}</code> and see the output here.
+                        Saves a round-trip vs. opening a terminal.
+                      </p>
+                      <textarea
+                        value={invokeInput}
+                        onChange={(e) => setInvokeInput(e.target.value)}
+                        rows={4}
+                        style={{ width: "100%", fontFamily: "monospace" }}
+                        placeholder='{ "question": "..." }'
+                      />
+                      <button
+                        className="primary"
+                        disabled={invokeBusy || !pipelineId}
+                        onClick={async () => {
+                          setInvokeBusy(true);
+                          setInvokeResult(null);
+                          try {
+                            let parsed: unknown;
+                            try {
+                              parsed = JSON.parse(invokeInput);
+                            } catch {
+                              throw new Error(
+                                "Invoke input must be valid JSON (e.g. {\"question\": \"...\"})"
+                              );
+                            }
+                            const res = await api.invokePipeline(
+                              pipelineId,
+                              { input: parsed, environment }
+                            );
+                            setInvokeResult({
+                              ok: true,
+                              output: res.output,
+                              executionId: res.executionId
+                            });
+                          } catch (e) {
+                            setInvokeResult({
+                              ok: false,
+                              error: e instanceof Error ? e.message : String(e)
+                            });
+                          } finally {
+                            setInvokeBusy(false);
+                          }
+                        }}
+                      >
+                        {invokeBusy ? "Invoking…" : "Invoke"}
+                      </button>
+                      {invokeResult && invokeResult.ok && (
+                        <pre className="codeblock" style={{ marginTop: 8 }}>
+                          {JSON.stringify(invokeResult.output, null, 2)}
+                        </pre>
+                      )}
+                      {invokeResult && !invokeResult.ok && (
+                        <p className="error" style={{ marginTop: 8 }}>
+                          {invokeResult.error}
+                        </p>
+                      )}
+                    </div>
+                  )}
+                  <p className="muted" style={{ marginTop: 8 }}>
+                    Click a node on the canvas to edit it.
+                  </p>
+                </>
               )}
             </div>
           )}
@@ -2071,6 +2457,22 @@ export function PipelineBuilder(props: {
       </div>
       <BuilderConsole log={clog} />
       </div>
+      <DeployModal
+        open={deployModal !== null}
+        mode={deployModal?.mode ?? "deploy"}
+        tenantId={tenantId}
+        tenantSlug={selectedTenant?.slug}
+        environment={environment}
+        pipelineSlug={pipelineSlug || pipelineId}
+        slots={validation.datasetSlots}
+        onClose={() => setDeployModal(null)}
+        onConfirm={() => {
+          const mode = deployModal?.mode;
+          setDeployModal(null);
+          if (mode === "run") void doRun();
+          else if (mode === "deploy") void doDeploy();
+        }}
+      />
     </section>
   );
 }

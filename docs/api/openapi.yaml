@@ -227,6 +227,56 @@ components:
           type: [string, "null"]
           description: Computed via nextAfter(cron, now) on create / cron change.
         createdAt: { type: string }
+    Dataset:
+      type: object
+      description: >-
+        First-class corpus resource (Phase 4). Scope = global | tenant
+        | environment. Resolution at reference time walks
+        env → tenant → global, narrowest match wins.
+      required: [id, scope, slug, displayName, modalities, backends, createdAt, updatedAt]
+      properties:
+        id: { type: string }
+        scope: { type: string, enum: [global, tenant, environment] }
+        tenantId: { type: [string, "null"] }
+        environmentId: { type: [string, "null"] }
+        slug: { type: string }
+        displayName: { type: string }
+        description: { type: [string, "null"] }
+        embeddingProfile: { type: object }
+        chunkSchema: { type: object }
+        modalities:
+          type: array
+          items: { type: string }
+        backends: { type: object }
+        currentVersionId: { type: [string, "null"] }
+        archivedAt: { type: [string, "null"] }
+        createdAt: { type: string }
+        createdBy: { type: [string, "null"] }
+        updatedAt: { type: string }
+    DatasetVersion:
+      type: object
+      required: [id, datasetId, versionLabel, status, createdAt]
+      properties:
+        id: { type: string }
+        datasetId: { type: string }
+        versionLabel: { type: string }
+        schemaSpec: { type: object }
+        backendCollections: { type: object, additionalProperties: { type: string } }
+        status: { type: string, enum: [building, ready, archived] }
+        docCount: { type: [integer, string] }
+        sizeBytes: { type: [integer, string] }
+        createdAt: { type: string }
+        readyAt: { type: [string, "null"] }
+    DatasetAlias:
+      type: object
+      required: [id, datasetId, alias, versionId, updatedAt]
+      properties:
+        id: { type: string }
+        datasetId: { type: string }
+        alias: { type: string, description: "e.g. stable, staging, canary" }
+        versionId: { type: string }
+        updatedAt: { type: string }
+        updatedBy: { type: [string, "null"] }
   securitySchemes:
     bearerAuth:
       type: http
@@ -668,23 +718,172 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/PipelineNotFound" }
         "409": { $ref: "#/components/responses/Conflict" }
+  /api/pipelines/{pipeline_id}/invoke:
+    parameters:
+      - $ref: "#/components/parameters/PipelineRef"
+    post:
+      summary: >-
+        Synchronous in-process execution (Phase 8). Runs the DAG on the
+        API pod and returns the terminal output in one HTTP round-trip
+        — required for chat-style retrieval and MCP tool exposure.
+        Pipelines SHOULD declare `metadata.executionKind: "synchronous"`
+        to be invoked here; batch pipelines aren't rejected but are
+        unusual on this surface.
+      responses:
+        "200":
+          description: Pipeline ran to completion; output in the response body.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  executionId: { type: string }
+                  pipelineId: { type: string }
+                  pipelineVersionId: { type: string }
+                  version: { type: string }
+                  status: { type: string, const: succeeded }
+                  output: { type: object }
+        "400": { $ref: "#/components/responses/InvalidIdentifier" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/PipelineNotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "500":
+          description: Execution failed (plugin error, missing dataset, etc.)
   /api/pipelines/{pipeline_id}/stream:
     parameters:
       - $ref: "#/components/parameters/PipelineRef"
     post:
       summary: >-
-        SSE endpoint (pipeline by id or slug). The control plane has no
-        streaming-capable provider, so it honestly emits a
-        `status: not_enabled` event then `done`. Token streaming is delivered
-        by a streaming provider in the worker.
+        Server-Sent Events wrapper for synchronous execution (Phase 8 +
+        Phase 13). Emits `execution.started` immediately, runs the DAG
+        in-process, then yields `execution.completed`, `output`, and
+        `done` (or `execution.failed` + `error` on error). Real
+        chunked delivery — frames stream as they're produced.
       responses:
         "200":
-          description: text/event-stream with a not_enabled status event
+          description: text/event-stream of lifecycle frames.
           content:
             text/event-stream: {}
         "400": { $ref: "#/components/responses/InvalidIdentifier" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/PipelineNotFound" }
         "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+
+  # --- Datasets (Phase 4 of the dataset/RBAC/retrieval refactor) ---
+  /api/datasets:
+    get:
+      summary: >-
+        List Datasets visible at the request scope (`x-tenant-id` +
+        `x-environment` headers). Returns the union of: globals,
+        tenant-scoped (for the given tenant), env-scoped (for the
+        given tenant + env).
+      responses:
+        "200":
+          description: List of datasets.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  datasets:
+                    type: array
+                    items: { $ref: "#/components/schemas/Dataset" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      summary: >-
+        Create a Dataset at one of three scopes (global / tenant /
+        environment). Caller needs `dataset:admin` at the target scope.
+      responses:
+        "201": { description: Created }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+  /api/datasets/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
+    get:
+      summary: Fetch a single Dataset by id.
+      responses:
+        "200":
+          description: Dataset
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Dataset" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    patch:
+      summary: >-
+        Update Dataset metadata (displayName / description / schema /
+        backends) or toggle archived. Caller needs `dataset:admin` at
+        the dataset's scope.
+      responses:
+        "200": { description: Updated }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+    delete:
+      summary: Remove a Dataset (refuses if non-archived pipelines reference it — a future tightening).
+      responses:
+        "204": { description: Removed }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /api/datasets/{id}/versions:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
+    get:
+      summary: List the dataset's versions + aliases.
+      responses:
+        "200":
+          description: Versions + aliases
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  versions:
+                    type: array
+                    items: { $ref: "#/components/schemas/DatasetVersion" }
+                  aliases:
+                    type: array
+                    items: { $ref: "#/components/schemas/DatasetAlias" }
+    post:
+      summary: >-
+        Cut a new version. First version auto-pins `currentVersionId`
+        and creates the `stable` alias.
+      responses:
+        "201": { description: Version created }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /api/datasets/{id}/aliases/{alias}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
+      - name: alias
+        in: path
+        required: true
+        schema: { type: string }
+    patch:
+      summary: >-
+        Atomically retarget an alias to a different version of the
+        same dataset (canary rollout).
+      responses:
+        "200": { description: Alias retargeted }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
 
   /api/tenants/{id}/pipelines:
     parameters:

@@ -80,6 +80,15 @@ import {
   InMemoryScheduleRepository,
   InMemoryTenantPipelineRepository,
   InMemoryEnvironmentRepository,
+  InMemoryDatasetRepository,
+  InMemoryDatasetVersionRepository,
+  InMemoryDatasetAliasRepository,
+  type DatasetRepository,
+  type DatasetRow,
+  type DatasetVersionRepository,
+  type DatasetVersionRow,
+  type DatasetAliasRepository,
+  type DatasetAliasRow,
   InMemoryUserRepository,
   InMemoryUserIdentityRepository,
   InMemoryIdentityProviderRepository,
@@ -135,6 +144,8 @@ import type {
   ExecutionRecord,
   ExecutionNodeRecord
 } from "../../../packages/runtime/src/index.ts";
+import { DagExecutor } from "../../../packages/runtime/src/index.ts";
+import type { DatasetResolver } from "../../../packages/plugin-sdk/src/index.ts";
 import type { SecretProvider } from "../../../packages/secrets/src/index.ts";
 import { SecretNotFoundError, SecretAccessDeniedError } from "../../../packages/secrets/src/index.ts";
 import type {
@@ -212,6 +223,14 @@ export interface AppDeps {
   schedules?: ScheduleRepository;
   tenantPipelines?: TenantPipelineRepository;
   environments?: EnvironmentRepository;
+  /**
+   * Datasets / dataset versions / dataset aliases (Phase 4). Optional so
+   * the legacy harness still constructs a valid AppDeps; when omitted
+   * createApp falls back to fresh InMemory instances.
+   */
+  datasets?: DatasetRepository;
+  datasetVersions?: DatasetVersionRepository;
+  datasetAliases?: DatasetAliasRepository;
   configDefinitions: ConfigDefinitionRepository;
   configValues: ConfigValueRepository;
   auditLogs: AuditLogRepository;
@@ -398,6 +417,12 @@ export function createApp(deps: AppDeps): App {
     deps.tenantPipelines ?? new InMemoryTenantPipelineRepository();
   const environments: EnvironmentRepository =
     deps.environments ?? new InMemoryEnvironmentRepository();
+  const datasets: DatasetRepository =
+    deps.datasets ?? new InMemoryDatasetRepository();
+  const datasetVersions: DatasetVersionRepository =
+    deps.datasetVersions ?? new InMemoryDatasetVersionRepository();
+  const datasetAliases: DatasetAliasRepository =
+    deps.datasetAliases ?? new InMemoryDatasetAliasRepository();
 
   // ---- auth / RBAC stores -------------------------------------------------
   const users: UserRepository =
@@ -442,6 +467,35 @@ export function createApp(deps: AppDeps): App {
   const SSO_STATE_TTL_MS = 10 * 60 * 1000;
 
   // ---- audit helper -------------------------------------------------------
+  /**
+   * Per-action permission required to receive the live `ChangeEvent` for
+   * that action. The WebSocket fan-out drops tagged events for subscribers
+   * that lack the permission at the event's tenant scope, so a tenant
+   * `viewer` no longer sees `secret.*` rotations or `user.grants.*`
+   * mutations even though those events ARE published into the bus. The
+   * audit row itself is unaffected — system-of-record records every
+   * mutation regardless of subscriber visibility. Untagged actions remain
+   * visible to every subscriber the tenant filter admits (the bulk of
+   * `pipeline.*` / `execution.*` traffic).
+   */
+  const SENSITIVE_ACTIONS: Record<string, string> = {
+    "secret.create": "secret:manage_tenant",
+    "secret.rotate": "secret:manage_tenant",
+    "secret.delete": "secret:manage_tenant",
+    "user.create": "user:manage",
+    "user.update": "user:manage",
+    "user.delete": "user:manage",
+    "user.grant": "user:manage",
+    "user.revoke": "user:manage",
+    "role.create": "role:manage",
+    "role.delete": "role:manage",
+    "role.set_permissions": "role:manage",
+    "idp.create": "idp:manage",
+    "idp.update": "idp:manage",
+    "idp.delete": "idp:manage",
+    "auth_settings.update": "auth:settings"
+  };
+
   async function audit(
     ctx: RouteContext,
     action: string,
@@ -471,6 +525,7 @@ export function createApp(deps: AppDeps): App {
     // mutation or roll back an audit row. The audit table is the system of
     // record; the bus is the "live UI" channel on top.
     try {
+      const requiredPermission = SENSITIVE_ACTIONS[action];
       await changeBus.publish({
         id: randomUUID(),
         action,
@@ -479,6 +534,7 @@ export function createApp(deps: AppDeps): App {
         tenantId,
         actorId,
         at,
+        ...(requiredPermission ? { requiredPermission } : {}),
         payload:
           after === undefined
             ? undefined
@@ -704,6 +760,205 @@ export function createApp(deps: AppDeps): App {
       resolvedVia,
       ...(resolvedLabel !== undefined ? { activationLabel: resolvedLabel } : {})
     };
+  }
+
+  // ---- Phase 8: synchronous in-process execution -------------------------
+  // The DatasetResolver mirrors what the worker wires up but lives inside
+  // the API process so synchronous /invoke runs don't need a worker hop.
+  // When any of the three repositories is missing (e.g. legacy harness)
+  // we leave the resolver undefined and the executor falls back to
+  // plain config.collection / config.index — same v1 path the shim
+  // protects.
+  const apiDatasetResolver: DatasetResolver | undefined =
+    deps.datasets && deps.datasetVersions && deps.datasetAliases
+      ? {
+          async resolve(args) {
+            const ds = await datasets.resolveSlug({
+              slug: args.ref.slug,
+              tenantId: args.tenantId,
+              environmentId: args.environmentId
+            });
+            if (!ds) return undefined;
+            const aliasName = args.ref.alias ?? "stable";
+            const aliasRow = await datasetAliases.resolve(ds.id, aliasName);
+            const versionId = aliasRow?.versionId ?? ds.currentVersionId;
+            if (!versionId) return undefined;
+            const ver = await datasetVersions.get(versionId);
+            if (!ver) return undefined;
+            return {
+              id: ds.id,
+              slug: ds.slug,
+              scope: ds.scope,
+              tenantId: ds.tenantId ?? undefined,
+              environmentId: ds.environmentId ?? undefined,
+              modalities: ds.modalities,
+              embeddingProfile: ds.embeddingProfile,
+              chunkSchema: ds.chunkSchema,
+              version: {
+                id: ver.id,
+                versionLabel: ver.versionLabel,
+                status: ver.status
+              },
+              backendCollections: ver.backendCollections
+            };
+          }
+        }
+      : undefined;
+
+  /**
+   * Run a pipeline version in-process and return its terminal output.
+   * Skips the queue entirely — the API pod does the whole DAG execution
+   * itself, so chat-style retrieval can return in one HTTP round-trip.
+   *
+   * Reuses the same DagExecutor the worker uses, including the Phase 5
+   * dataset resolver, so v2 plugins behave identically on both paths.
+   * Per-node usage records + execution lifecycle events still flow
+   * through the shared executionStore + changeBus so observability is
+   * uniform.
+   */
+  /**
+   * Max depth for synchronous pipeline_call chains. Pipeline A → B → A
+   * deadlocks otherwise; a hard cap of 8 is conservative for real RAG
+   * compositions (you'd normally see 2-3 levels: planner → retriever
+   * → answer-shaper) and trips fast on accidental cycles.
+   */
+  const MAX_SYNC_DEPTH = 8;
+
+  async function runSyncPipeline(args: {
+    tenantId: string;
+    pipeline: PipelineRow;
+    versionRow: PipelineVersionRow;
+    environment: string;
+    input: unknown;
+    actorId?: string;
+    requestId?: string;
+    deadlineMs?: number;
+    /** Slugs already on the call stack — propagated by nested invocations. */
+    callStack?: string[];
+    /** Phase 13 token streaming. When set, the executor passes it to
+     *  streaming-capable plugins (provider_chat etc.) which call it
+     *  per emitted token. /stream forwards each token as an SSE frame. */
+    onToken?: (event: { nodeId: string; token: string }) => void;
+  }): Promise<{ executionId: string; output: Record<string, unknown> }> {
+    const { tenantId, pipeline, versionRow, environment, input } = args;
+    const callStack = args.callStack ?? [];
+    if (callStack.length >= MAX_SYNC_DEPTH) {
+      throw new Error(
+        `pipeline_call depth limit (${MAX_SYNC_DEPTH}) exceeded: ${callStack.join(" → ")} → ${pipeline.slug}`
+      );
+    }
+    if (callStack.includes(pipeline.slug)) {
+      throw new Error(
+        `pipeline_call cycle detected: ${callStack.join(" → ")} → ${pipeline.slug}`
+      );
+    }
+    // Resolve config (provides ${config.*} template expansion in node
+    // configs + secret references through the same precedence the worker
+    // uses).
+    const definitionRows = await deps.configDefinitions.list();
+    const valueRows = await deps.configValues.listConfigValues();
+    const resolver = new ConfigResolver(
+      definitionRows.map((row) => ({
+        key: row.key,
+        type: row.type,
+        defaultValue: row.defaultValue,
+        allowedScopes: row.allowedScopes,
+        required: row.required,
+        secret: row.secret,
+        sensitive: row.sensitive,
+        overridable: row.overridable,
+        inherited: row.inherited,
+        nullable: row.nullable,
+        tenantOverridable: row.tenantOverridable,
+        runtimeOverridable: row.runtimeOverridable,
+        description: row.description ?? undefined
+      }))
+    );
+    const values: ConfigValue[] = valueRows.map((row) => ({
+      key: row.key,
+      value: row.value,
+      scope: row.scope,
+      scopeId: row.scopeId ?? undefined,
+      locked: row.locked,
+      createdBy: row.createdBy ?? undefined,
+      createdAt: row.createdAt
+    }));
+    const resolvedConfig = resolver.resolve(
+      {
+        pipelineId: pipeline.id,
+        pipelineVersionId: versionRow.id,
+        tenantId,
+        environment,
+        values
+      },
+      { redactSecrets: false }
+    );
+    const executionId = randomUUID();
+    // Phase 9 Round 2: nested sync invocations. The closure captures
+    // tenantId + the call stack so cycle detection works across
+    // arbitrary depths, and the target pipeline's deployment lookup
+    // is done at the moment of the call (so a target redeployed
+    // mid-run picks up the new version on the next nested call).
+    const runPipelineByRef = async (sub: {
+      slug: string;
+      input: unknown;
+      environment?: string;
+    }): Promise<{ output: Record<string, unknown> }> => {
+      const target = await deps.pipelines.findBySlug(sub.slug);
+      if (!target) {
+        throw new Error(`pipeline_call: unknown pipeline slug "${sub.slug}"`);
+      }
+      const subEnv = sub.environment ?? environment;
+      const subVersion = await resolveDeployedVersion(
+        deps,
+        target.id,
+        subEnv,
+        tenantId
+      );
+      if (!subVersion) {
+        throw new Error(
+          `pipeline_call: pipeline "${sub.slug}" has no active deployment in ${subEnv}`
+        );
+      }
+      const nested = await runSyncPipeline({
+        tenantId,
+        pipeline: target,
+        versionRow: subVersion,
+        environment: subEnv,
+        input: sub.input,
+        actorId: args.actorId,
+        requestId: args.requestId,
+        callStack: [...callStack, pipeline.slug]
+      });
+      return { output: nested.output };
+    };
+    const executor = new DagExecutor({
+      pluginRegistry: deps.pluginRegistry,
+      secretProvider: deps.secretProvider,
+      store: deps.executionStore,
+      datasetResolver: apiDatasetResolver,
+      runPipelineByRef,
+      onToken: args.onToken,
+      maxRetries: 1
+    });
+    const output = await executor.execute({
+      spec: versionRow.spec as PipelineSpec,
+      context: {
+        requestId: args.requestId ?? randomUUID(),
+        executionId,
+        tenantId,
+        pipelineId: pipeline.id,
+        pipelineVersionId: versionRow.id,
+        environment,
+        resolvedConfig,
+        actor: args.actorId
+          ? { id: args.actorId, type: "user" }
+          : undefined,
+        deadline: args.deadlineMs ? new Date(args.deadlineMs) : undefined
+      },
+      input: (isObject(input) ? input : {}) as Record<string, unknown>
+    });
+    return { executionId, output };
   }
 
   // ---- health -------------------------------------------------------------
@@ -2106,6 +2361,317 @@ export function createApp(deps: AppDeps): App {
     return ok(resolved);
   });
 
+  // ---- datasets -----------------------------------------------------------
+  // Phase 4 of the dataset/RBAC/retrieval refactor. Datasets are the
+  // first-class corpus a pipeline reads from / writes into; they decouple
+  // ingestion from retrieval (multiple pipelines can share one dataset)
+  // and the platform owns the physical collection naming. This commit
+  // ships the metadata + lifecycle; the plugin contract switch to "go
+  // through the dataset" is Phase 5.
+
+  function datasetScopeResource(row: {
+    scope: DatasetRow["scope"];
+    tenantId?: string | null;
+    environmentId?: string | null;
+  }): { tenantId?: string; environment?: string } {
+    if (row.scope === "tenant") return { tenantId: row.tenantId ?? undefined };
+    if (row.scope === "environment") {
+      return {
+        tenantId: row.tenantId ?? undefined,
+        environment: row.environmentId ?? undefined
+      };
+    }
+    return {}; // global -> *
+  }
+
+  function publicDataset(row: DatasetRow): Record<string, unknown> {
+    return {
+      id: row.id,
+      scope: row.scope,
+      tenantId: row.tenantId ?? null,
+      environmentId: row.environmentId ?? null,
+      slug: row.slug,
+      displayName: row.displayName,
+      description: row.description ?? null,
+      embeddingProfile: row.embeddingProfile,
+      chunkSchema: row.chunkSchema,
+      modalities: row.modalities,
+      backends: row.backends,
+      currentVersionId: row.currentVersionId ?? null,
+      archivedAt: row.archivedAt ?? null,
+      createdAt: row.createdAt,
+      createdBy: row.createdBy ?? null,
+      updatedAt: row.updatedAt
+    };
+  }
+
+  function publicDatasetVersion(row: DatasetVersionRow): Record<string, unknown> {
+    return {
+      id: row.id,
+      datasetId: row.datasetId,
+      versionLabel: row.versionLabel,
+      schemaSpec: row.schemaSpec,
+      backendCollections: row.backendCollections,
+      status: row.status,
+      docCount: row.docCount,
+      sizeBytes: row.sizeBytes,
+      createdAt: row.createdAt,
+      readyAt: row.readyAt ?? null
+    };
+  }
+
+  function publicDatasetAlias(row: DatasetAliasRow): Record<string, unknown> {
+    return {
+      id: row.id,
+      datasetId: row.datasetId,
+      alias: row.alias,
+      versionId: row.versionId,
+      updatedAt: row.updatedAt,
+      updatedBy: row.updatedBy ?? null
+    };
+  }
+
+  route("GET", "/api/datasets", async (ctx) => {
+    // Anyone with dataset:read at SOME scope can list; the response is
+    // filtered to what they can actually see (tenant-coarse — Phase 4
+    // doesn't yet model "dataset granted to a specific user" beyond the
+    // existing tenant/env scoping, so listing everything in-scope and
+    // letting RBAC reject individual gets is the right trade-off).
+    enforce(ctx.principal, "dataset:read");
+    const headerTenant = tenantScope(ctx);
+    const headerEnv = headerValue(ctx.request.headers, "x-environment");
+    const rows = await datasets.listVisibleAt({
+      tenantId: headerTenant ?? undefined,
+      environmentId: headerEnv ?? undefined
+    });
+    return ok({ datasets: rows.map(publicDataset) });
+  });
+
+  route("GET", "/api/datasets/:id", async (ctx) => {
+    const row = await datasets.get(ctx.params.id);
+    if (!row) return error(404, "not_found", { message: "dataset not found" });
+    enforce(ctx.principal, "dataset:read", datasetScopeResource(row));
+    return ok({ dataset: publicDataset(row) });
+  });
+
+  route("POST", "/api/datasets", async (ctx) => {
+    const body = ctx.request.body;
+    if (!isObject(body)) {
+      return error(422, "validation_failed", { issues: [{ message: "body required" }] });
+    }
+    const scope = body.scope as DatasetRow["scope"];
+    if (scope !== "global" && scope !== "tenant" && scope !== "environment") {
+      return error(422, "validation_failed", {
+        issues: [{ path: "scope", message: "scope must be global | tenant | environment" }]
+      });
+    }
+    if (typeof body.slug !== "string" || !/^[a-z0-9][a-z0-9_-]{0,62}$/.test(body.slug)) {
+      return error(422, "validation_failed", {
+        issues: [{ path: "slug", message: "slug must be lowercase alphanumeric + _- (1..63 chars)" }]
+      });
+    }
+    if (typeof body.displayName !== "string" || !body.displayName.trim()) {
+      return error(422, "validation_failed", {
+        issues: [{ path: "displayName", message: "displayName required" }]
+      });
+    }
+    const tenantId =
+      typeof body.tenantId === "string" && body.tenantId ? body.tenantId : undefined;
+    const environmentId =
+      typeof body.environmentId === "string" && body.environmentId
+        ? body.environmentId
+        : undefined;
+    if (scope === "global" && (tenantId || environmentId)) {
+      return error(422, "validation_failed", {
+        issues: [{ message: "global datasets cannot carry a tenantId or environmentId" }]
+      });
+    }
+    if (scope === "tenant" && (!tenantId || environmentId)) {
+      return error(422, "validation_failed", {
+        issues: [{ message: "tenant datasets require tenantId and no environmentId" }]
+      });
+    }
+    if (scope === "environment" && (!tenantId || !environmentId)) {
+      return error(422, "validation_failed", {
+        issues: [{ message: "environment datasets require both tenantId and environmentId" }]
+      });
+    }
+    if (tenantId) {
+      const t = await deps.tenants.get(tenantId);
+      if (!t) {
+        return error(422, "validation_failed", {
+          issues: [{ path: "tenantId", message: "unknown tenant" }]
+        });
+      }
+    }
+    if (environmentId && tenantId) {
+      const envs = await environments.listByTenant(tenantId);
+      if (!envs.find((e) => e.name === environmentId)) {
+        return error(422, "validation_failed", {
+          issues: [{ path: "environmentId", message: `unknown environment: ${environmentId}` }]
+        });
+      }
+    }
+    // The creator needs dataset:admin at the target scope to create.
+    enforce(ctx.principal, "dataset:admin", { tenantId, environment: environmentId });
+
+    const now = nowIso();
+    const created = await datasets.create({
+      id: randomUUID(),
+      scope,
+      tenantId,
+      environmentId,
+      slug: body.slug,
+      displayName: body.displayName.trim(),
+      description: typeof body.description === "string" ? body.description : null,
+      embeddingProfile: isObject(body.embeddingProfile) ? body.embeddingProfile : {},
+      chunkSchema: isObject(body.chunkSchema) ? body.chunkSchema : {},
+      modalities: Array.isArray(body.modalities) && body.modalities.length > 0
+        ? (body.modalities.filter((m) => typeof m === "string") as string[])
+        : ["vector"],
+      backends: isObject(body.backends) ? body.backends : {},
+      currentVersionId: null,
+      archivedAt: null,
+      createdAt: now,
+      createdBy: ctx.principal.id,
+      updatedAt: now
+    });
+    await audit(ctx, "dataset.create", "dataset", created.id, undefined, publicDataset(created));
+    return ok({ dataset: publicDataset(created) }, 201);
+  });
+
+  route("PATCH", "/api/datasets/:id", async (ctx) => {
+    const before = await datasets.get(ctx.params.id);
+    if (!before) return error(404, "not_found", { message: "dataset not found" });
+    enforce(ctx.principal, "dataset:admin", datasetScopeResource(before));
+    const body = ctx.request.body;
+    if (!isObject(body)) {
+      return error(422, "validation_failed", { issues: [{ message: "body required" }] });
+    }
+    const patch: Partial<DatasetRow> = {};
+    if (typeof body.displayName === "string") patch.displayName = body.displayName.trim();
+    if (typeof body.description === "string" || body.description === null) {
+      patch.description = body.description as string | null;
+    }
+    if (isObject(body.chunkSchema)) patch.chunkSchema = body.chunkSchema;
+    if (isObject(body.embeddingProfile)) patch.embeddingProfile = body.embeddingProfile;
+    if (isObject(body.backends)) patch.backends = body.backends;
+    if (Array.isArray(body.modalities) && body.modalities.length > 0) {
+      patch.modalities = body.modalities.filter((m) => typeof m === "string") as string[];
+    }
+    if (body.archived === true) patch.archivedAt = nowIso();
+    if (body.archived === false) patch.archivedAt = null;
+    patch.updatedAt = nowIso();
+    const updated = await datasets.update(before.id, patch);
+    await audit(ctx, "dataset.update", "dataset", updated.id, publicDataset(before), publicDataset(updated));
+    return ok({ dataset: publicDataset(updated) });
+  });
+
+  route("DELETE", "/api/datasets/:id", async (ctx) => {
+    const before = await datasets.get(ctx.params.id);
+    if (!before) return error(404, "not_found", { message: "dataset not found" });
+    enforce(ctx.principal, "dataset:admin", datasetScopeResource(before));
+    await datasets.delete(before.id);
+    await audit(ctx, "dataset.delete", "dataset", before.id, publicDataset(before), undefined);
+    return { status: 204, body: undefined, headers: {} };
+  });
+
+  // --- versions + aliases ---
+
+  route("GET", "/api/datasets/:id/versions", async (ctx) => {
+    const ds = await datasets.get(ctx.params.id);
+    if (!ds) return error(404, "not_found", { message: "dataset not found" });
+    enforce(ctx.principal, "dataset:read", datasetScopeResource(ds));
+    const versions = await datasetVersions.listByDataset(ds.id);
+    const aliases = await datasetAliases.listByDataset(ds.id);
+    return ok({
+      versions: versions.map(publicDatasetVersion),
+      aliases: aliases.map(publicDatasetAlias)
+    });
+  });
+
+  route("POST", "/api/datasets/:id/versions", async (ctx) => {
+    const ds = await datasets.get(ctx.params.id);
+    if (!ds) return error(404, "not_found", { message: "dataset not found" });
+    enforce(ctx.principal, "dataset:admin", datasetScopeResource(ds));
+    const body = ctx.request.body;
+    if (!isObject(body)) {
+      return error(422, "validation_failed", { issues: [{ message: "body required" }] });
+    }
+    // Auto-number the version label as `v<N+1>` unless the caller passed
+    // an explicit one (used by the migration script to mark imports `v1`).
+    const existing = await datasetVersions.listByDataset(ds.id);
+    const nextLabel =
+      typeof body.versionLabel === "string" && body.versionLabel
+        ? body.versionLabel
+        : `v${existing.length + 1}`;
+    const created = await datasetVersions.create({
+      id: randomUUID(),
+      datasetId: ds.id,
+      versionLabel: nextLabel,
+      schemaSpec: isObject(body.schemaSpec) ? body.schemaSpec : ds.chunkSchema,
+      backendCollections: isObject(body.backendCollections)
+        ? (body.backendCollections as Record<string, string>)
+        : {},
+      status: (body.status as DatasetVersionRow["status"]) ?? "building",
+      docCount: 0,
+      sizeBytes: 0,
+      createdAt: nowIso(),
+      readyAt: body.status === "ready" ? nowIso() : null
+    });
+    // If this is the dataset's first version and no `current_version_id`
+    // is set yet, pin it and create the `stable` alias.
+    if (!ds.currentVersionId) {
+      await datasets.update(ds.id, { currentVersionId: created.id, updatedAt: nowIso() });
+      await datasetAliases.upsert({
+        id: randomUUID(),
+        datasetId: ds.id,
+        alias: "stable",
+        versionId: created.id,
+        updatedAt: nowIso(),
+        updatedBy: ctx.principal.id
+      });
+    }
+    await audit(ctx, "dataset_version.create", "dataset_version", created.id, undefined, publicDatasetVersion(created));
+    return ok({ version: publicDatasetVersion(created) }, 201);
+  });
+
+  route("PATCH", "/api/datasets/:id/aliases/:alias", async (ctx) => {
+    const ds = await datasets.get(ctx.params.id);
+    if (!ds) return error(404, "not_found", { message: "dataset not found" });
+    enforce(ctx.principal, "dataset:admin", datasetScopeResource(ds));
+    const body = ctx.request.body;
+    if (!isObject(body) || typeof body.versionId !== "string") {
+      return error(422, "validation_failed", {
+        issues: [{ path: "versionId", message: "versionId required" }]
+      });
+    }
+    const version = await datasetVersions.get(body.versionId);
+    if (!version || version.datasetId !== ds.id) {
+      return error(422, "validation_failed", {
+        issues: [{ path: "versionId", message: "version does not belong to this dataset" }]
+      });
+    }
+    const before = await datasetAliases.resolve(ds.id, ctx.params.alias);
+    const row = await datasetAliases.upsert({
+      id: before?.id ?? randomUUID(),
+      datasetId: ds.id,
+      alias: ctx.params.alias,
+      versionId: version.id,
+      updatedAt: nowIso(),
+      updatedBy: ctx.principal.id
+    });
+    await audit(
+      ctx,
+      "dataset_alias.set",
+      "dataset_alias",
+      row.id,
+      before ? publicDatasetAlias(before) : undefined,
+      publicDatasetAlias(row)
+    );
+    return ok({ alias: publicDatasetAlias(row) });
+  });
+
   // ---- secrets ------------------------------------------------------------
   route("GET", "/api/secrets", async (ctx) => {
     enforce(ctx.principal, "secret:manage_tenant");
@@ -2633,14 +3199,20 @@ export function createApp(deps: AppDeps): App {
     );
   });
 
-  // ---- stream (SSE) -------------------------------------------------------
-  route("POST", "/api/pipelines/:id/stream", async (ctx) => {
+  // ---- Phase 8: synchronous /invoke ---------------------------------------
+  // The synchronous companion to /run. Runs the pipeline in-process and
+  // returns the terminal output JSON in the response body. Pipelines
+  // SHOULD declare `metadata.executionKind: "synchronous"` to be invoked
+  // here; legacy / batch pipelines aren't rejected but are warned about
+  // (operators sometimes deliberately invoke a batch spec synchronously
+  // when iterating). pipeline:run RBAC + dataset resolution + Phase 2
+  // executor entry-check all behave exactly as the worker path.
+  route("POST", "/api/pipelines/:id/invoke", async (ctx) => {
     const pipeline = await resolvePipelineRef(ctx.params.id);
     if (isAppResponse(pipeline)) return pipeline;
-    const pipelineId = pipeline.id;
     enforce(ctx.principal, "pipeline:run", {
       tenantId: ctx.principal.tenantId,
-      pipelineId
+      pipelineId: pipeline.id
     });
     const tenantId = tenantScope(ctx);
     if (!tenantId) {
@@ -2648,33 +3220,200 @@ export function createApp(deps: AppDeps): App {
         issues: [{ message: "tenant context required" }]
       });
     }
+    const body = isObject(ctx.request.body) ? ctx.request.body : {};
     const environment =
-      (isObject(ctx.request.body) && typeof ctx.request.body.environment === "string"
-        ? ctx.request.body.environment
-        : undefined) ||
+      (typeof body.environment === "string" && body.environment) ||
       ctx.request.query.environment ||
       "dev";
-    const resolved = await resolveDeployedVersion(deps, pipelineId, environment, tenantId);
+    const resolved = await resolveDeployedVersion(deps, pipeline.id, environment, tenantId);
     if (!resolved) {
       return error(409, "no_active_deployment", {
-        message: `no active deployment for pipeline ${pipelineId} in ${environment}`
+        message: `no active deployment for pipeline ${pipeline.id} in ${environment}`
       });
     }
-    // Honest scaffold: no streaming-capable provider wired in the API process.
-    // We return a small, well-formed SSE event sequence so clients can
-    // integrate, while clearly documenting that token streaming arrives via a
-    // streaming provider in the worker. The body is the raw SSE text.
-    const events = [
-      `event: status\ndata: ${JSON.stringify({ status: "not_enabled", reason: "streaming provider not configured in control-plane; use /run via worker" })}\n\n`,
-      `event: done\ndata: ${JSON.stringify({ pipelineId, pipelineVersionId: resolved.id })}\n\n`
-    ];
+    const validation = validatePipelineSpec(
+      resolved.spec as PipelineSpec,
+      deps.pluginRegistry
+    );
+    if (!validation.valid) {
+      return error(422, "validation_failed", { issues: validation.errors });
+    }
+    try {
+      const { executionId, output } = await runSyncPipeline({
+        tenantId,
+        pipeline,
+        versionRow: resolved,
+        environment,
+        input: body.input,
+        actorId: ctx.principal.id,
+        requestId: headerValue(ctx.request.headers, "x-request-id") ?? undefined,
+        deadlineMs:
+          typeof body.deadlineMs === "number" ? body.deadlineMs : undefined
+      });
+      await audit(ctx, "pipeline.invoke", "execution", executionId, undefined, {
+        pipelineId: pipeline.id,
+        version: resolved.version,
+        kind: "synchronous",
+        input: redactValue(body.input)
+      });
+      return ok({
+        executionId,
+        pipelineId: pipeline.id,
+        pipelineVersionId: resolved.id,
+        version: resolved.version,
+        status: "succeeded",
+        output
+      });
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      return error(500, "execution_failed", { message });
+    }
+  });
+
+  // ---- stream (SSE) -------------------------------------------------------
+  // Real chunked SSE (Phase 13). Returns an async generator that yields
+  // frames as they're produced; the Fastify layer detects an
+  // AsyncIterable body and pipes it via reply.raw.write() so each
+  // frame goes over the wire the instant it's ready. The previous
+  // not_enabled stub is gone — see ADR-0018.
+  route("POST", "/api/pipelines/:id/stream", async (ctx) => {
+    const pipeline = await resolvePipelineRef(ctx.params.id);
+    if (isAppResponse(pipeline)) return pipeline;
+    enforce(ctx.principal, "pipeline:run", {
+      tenantId: ctx.principal.tenantId,
+      pipelineId: pipeline.id
+    });
+    const tenantId = tenantScope(ctx);
+    if (!tenantId) {
+      return error(422, "validation_failed", {
+        issues: [{ message: "tenant context required" }]
+      });
+    }
+    const body = isObject(ctx.request.body) ? ctx.request.body : {};
+    const environment =
+      (typeof body.environment === "string" && body.environment) ||
+      ctx.request.query.environment ||
+      "dev";
+    const resolved = await resolveDeployedVersion(deps, pipeline.id, environment, tenantId);
+    if (!resolved) {
+      return error(409, "no_active_deployment", {
+        message: `no active deployment for pipeline ${pipeline.id} in ${environment}`
+      });
+    }
+    const validation = validatePipelineSpec(
+      resolved.spec as PipelineSpec,
+      deps.pluginRegistry
+    );
+    if (!validation.valid) {
+      return error(422, "validation_failed", { issues: validation.errors });
+    }
+    // Phase 13: real chunked SSE. Returns an async generator that yields
+    // frames in real time so the client can render progress instead of
+    // waiting for the whole run. The Fastify layer detects an
+    // AsyncIterable body and pipes it via reply.raw.write().
+    //
+    // Capture the narrowed locals before the generator closes over them
+    // so TS doesn't widen `pipeline` back to (PipelineRow | AppResponse)
+    // or `tenantId` back to `string | undefined` inside the closure.
+    const pipelineForStream = pipeline;
+    const resolvedForStream = resolved;
+    const tenantIdForStream = tenantId;
+    async function* streamFrames(): AsyncGenerator<string> {
+      function f(event: string, data: unknown): string {
+        return `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+      }
+      // Producer/consumer pattern: the run executes in the background
+      // and pushes token frames into the queue via onToken; the
+      // generator drains the queue between yield points. When the run
+      // resolves, we push the terminal output + done frames and let
+      // the loop exit.
+      const queue: string[] = [];
+      let resolveNext: (() => void) | undefined;
+      let done = false;
+      function push(frame: string): void {
+        queue.push(frame);
+        resolveNext?.();
+        resolveNext = undefined;
+      }
+      yield f("execution.started", {
+        pipelineId: pipelineForStream.id,
+        pipelineVersionId: resolvedForStream.id
+      });
+      const runPromise = runSyncPipeline({
+        tenantId: tenantIdForStream,
+        pipeline: pipelineForStream,
+        versionRow: resolvedForStream,
+        environment,
+        input: body.input,
+        actorId: ctx.principal.id,
+        requestId: headerValue(ctx.request.headers, "x-request-id") ?? undefined,
+        deadlineMs:
+          typeof body.deadlineMs === "number" ? body.deadlineMs : undefined,
+        onToken: ({ nodeId, token }) => push(f("token", { nodeId, token }))
+      })
+        .then(async (result) => {
+          push(
+            f("execution.completed", {
+              executionId: result.executionId,
+              status: "succeeded"
+            })
+          );
+          push(f("output", { output: result.output }));
+          push(
+            f("done", {
+              executionId: result.executionId,
+              pipelineId: pipelineForStream.id,
+              pipelineVersionId: resolvedForStream.id
+            })
+          );
+          await audit(
+            ctx,
+            "pipeline.invoke",
+            "execution",
+            result.executionId,
+            undefined,
+            {
+              pipelineId: pipelineForStream.id,
+              version: resolvedForStream.version,
+              kind: "stream",
+              input: redactValue(body.input)
+            }
+          );
+        })
+        .catch((e) => {
+          const message = e instanceof Error ? e.message : String(e);
+          push(f("execution.failed", { error: message }));
+          push(f("error", { message }));
+        })
+        .finally(() => {
+          done = true;
+          resolveNext?.();
+          resolveNext = undefined;
+        });
+      try {
+        while (true) {
+          while (queue.length > 0) {
+            yield queue.shift()!;
+          }
+          if (done) break;
+          await new Promise<void>((resolve) => {
+            resolveNext = resolve;
+          });
+        }
+      } finally {
+        // If the consumer hung up early, let the run finish so the
+        // audit log + execution record stay consistent.
+        await runPromise.catch(() => undefined);
+      }
+    }
     return {
       status: 200,
-      body: events.join(""),
+      body: streamFrames(),
       headers: {
         "content-type": "text/event-stream",
         "cache-control": "no-cache",
-        connection: "keep-alive"
+        connection: "keep-alive",
+        "x-accel-buffering": "no"
       }
     };
   });
@@ -2758,17 +3497,28 @@ export function createApp(deps: AppDeps): App {
    * which is not a credential on its own.
    */
   function publicApiKey(r: ApiKeyRecord): Record<string, unknown> {
+    const expired =
+      !!r.expiresAt && new Date(r.expiresAt).getTime() <= Date.now();
     return {
       id: r.id,
       name: r.name,
       prefix: r.prefix,
       roles: r.roles,
       tenantId: r.tenantId ?? null,
-      scope: r.tenantId ? `t/${r.tenantId}` : "*",
+      environmentId: r.environmentId ?? null,
+      scope: scopeToString({
+        tenantId: r.tenantId,
+        environment: r.environmentId
+      }),
       createdAt: r.createdAt,
       lastUsedAt: r.lastUsedAt ?? null,
       revokedAt: r.revokedAt ?? null,
-      status: r.revokedAt ? "revoked" : "active"
+      expiresAt: r.expiresAt ?? null,
+      status: r.revokedAt
+        ? "revoked"
+        : expired
+          ? "expired"
+          : "active"
     };
   }
 
@@ -3016,6 +3766,32 @@ export function createApp(deps: AppDeps): App {
     const role = body.role;
     const tenantId =
       typeof body.tenantId === "string" && body.tenantId ? body.tenantId : undefined;
+    // Phase 3: optional env + expiration. env is a string that must match a
+    // configured tenant environment when both tenant and env are provided.
+    const environmentId =
+      typeof body.environmentId === "string" && body.environmentId
+        ? body.environmentId.trim()
+        : undefined;
+    let expiresAt: string | undefined;
+    if (body.expiresAt !== undefined && body.expiresAt !== null) {
+      if (typeof body.expiresAt !== "string") {
+        return error(422, "validation_failed", {
+          issues: [{ path: "expiresAt", message: "expiresAt must be an ISO 8601 string" }]
+        });
+      }
+      const parsed = new Date(body.expiresAt);
+      if (Number.isNaN(parsed.getTime())) {
+        return error(422, "validation_failed", {
+          issues: [{ path: "expiresAt", message: "expiresAt is not a valid date" }]
+        });
+      }
+      if (parsed.getTime() <= Date.now()) {
+        return error(422, "validation_failed", {
+          issues: [{ path: "expiresAt", message: "expiresAt must be in the future" }]
+        });
+      }
+      expiresAt = parsed.toISOString();
+    }
 
     const catalog = await effectiveCatalog();
     if (!catalog.has(role)) {
@@ -3031,11 +3807,26 @@ export function createApp(deps: AppDeps): App {
         });
       }
     }
+    if (environmentId) {
+      if (!tenantId) {
+        return error(422, "validation_failed", {
+          issues: [{ path: "environmentId", message: "environmentId requires tenantId" }]
+        });
+      }
+      const envs = await environments.listByTenant(tenantId);
+      if (!envs.find((e) => e.name === environmentId)) {
+        return error(422, "validation_failed", {
+          issues: [{ path: "environmentId", message: `unknown environment: ${environmentId}` }]
+        });
+      }
+    }
 
     // Cap the key at its creator's authority: reuse the exact scoped decision
     // the rest of the API uses. `enforce` throws AuthorizationError (-> 403)
     // for any permission of `role` the creator does not hold at this scope.
-    const resource = scopeResource(tenantId ? `t/${tenantId}` : "*");
+    const resource = scopeResource(
+      scopeToString({ tenantId, environment: environmentId })
+    );
     for (const permission of catalog.get(role) ?? []) {
       enforce(p, permission as Permission, resource);
     }
@@ -3043,8 +3834,10 @@ export function createApp(deps: AppDeps): App {
     const issued = await apiKeys.issue({
       principalId: p.id,
       tenantId,
+      environmentId,
       name: body.name.trim(),
-      roles: [role] as ApiKeyRecord["roles"]
+      roles: [role] as ApiKeyRecord["roles"],
+      expiresAt
     });
     await audit(
       ctx,
@@ -3540,7 +4333,13 @@ export function createApp(deps: AppDeps): App {
             : principal.tenantId;
         try {
           principal.authorize = await authorizer.authorizeClosure(
-            { id: principal.id, type: principal.type, tenantId: principal.tenantId, roles: principal.roles },
+            {
+              id: principal.id,
+              type: principal.type,
+              tenantId: principal.tenantId,
+              environment: principal.environment,
+              roles: principal.roles
+            },
             { defaultTenantId }
           );
           // Session tokens carry NO roles/tenant (grants live in the policy

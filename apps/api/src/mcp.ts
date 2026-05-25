@@ -1567,18 +1567,98 @@ export function buildServer(app: App, req: IncomingMessage): Server {
     { capabilities: { tools: {}, resources: {} } }
   );
 
-  server.setRequestHandler(ListToolsRequestSchema, async () => ({
-    tools: tools.map((t) => ({
-      name: t.name,
-      description: t.description,
-      inputSchema: t.inputSchema,
-      annotations: t.annotations
-    }))
-  }));
+  /**
+   * Phase 8: every synchronous pipeline with `metadata.mcpExpose: true`
+   * shows up as an MCP tool. Lookup is dynamic per request so the
+   * caller's RBAC filter on /api/pipelines is honored — a viewer's
+   * MCP session only sees tools they could call via REST.
+   *
+   * Tool name = pipeline slug (already URL-safe). Tool handler POSTs
+   * to /api/pipelines/<slug>/invoke so the same auth + dataset
+   * resolution + executor entry-check apply.
+   */
+  async function autoExposedPipelineTools(): Promise<
+    Array<{ name: string; description: string; inputSchema: Record<string, unknown> }>
+  > {
+    const res = await callApi(app, {
+      method: "GET",
+      path: "/api/pipelines",
+      headers: baseHeaders
+    });
+    if (res.status >= 400) return [];
+    const pipelines =
+      (res.body as {
+        pipelines?: Array<{
+          id: string;
+          slug: string;
+          name: string;
+          latestSpec?: { metadata?: { executionKind?: string; mcpExpose?: boolean; description?: string } };
+        }>;
+      }).pipelines ?? [];
+    return pipelines
+      .filter(
+        (p) =>
+          p.latestSpec?.metadata?.executionKind === "synchronous" &&
+          p.latestSpec?.metadata?.mcpExpose === true
+      )
+      .map((p) => ({
+        name: p.slug,
+        description:
+          p.latestSpec?.metadata?.description ??
+          `Invoke the ${p.name} pipeline synchronously`,
+        inputSchema: obj(
+          {
+            input: anyType("payload passed to the pipeline's input node"),
+            environment: opt("environment to invoke against; defaults to dev"),
+            tenant: tenantArg
+          },
+          []
+        )
+      }));
+  }
+
+  async function invokePipelineByName(
+    name: string,
+    args: Record<string, unknown>,
+    headers: Record<string, string>
+  ): Promise<AppResponse> {
+    return callApi(app, {
+      method: "POST",
+      path: `/api/pipelines/${encodeURIComponent(name)}/invoke`,
+      headers,
+      body: {
+        input: args.input,
+        ...(typeof args.environment === "string"
+          ? { environment: args.environment }
+          : {})
+      }
+    });
+  }
+
+  server.setRequestHandler(ListToolsRequestSchema, async () => {
+    const dynamic = await autoExposedPipelineTools();
+    return {
+      tools: [
+        ...tools.map((t) => ({
+          name: t.name,
+          description: t.description,
+          inputSchema: t.inputSchema,
+          annotations: t.annotations
+        })),
+        ...dynamic.map((d) => ({
+          name: d.name,
+          description: d.description,
+          inputSchema: d.inputSchema,
+          // Synchronous pipelines run the DAG; conservatively flag as
+          // non-readOnly (most do touch storage), non-destructive
+          // (idempotency depends on the spec).
+          annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false }
+        }))
+      ]
+    };
+  });
 
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
-    const def = byName.get(request.params.name);
-    if (!def) return errorResult(`unknown tool: ${request.params.name}`);
     const args = (request.params.arguments ?? {}) as Record<string, unknown>;
     // Per-call tenant override: tools that accept `tenant` in their args
     // also accept a global x-tenant-id header. The arg wins.
@@ -1587,8 +1667,21 @@ export function buildServer(app: App, req: IncomingMessage): Server {
     const headers = tenantOverride
       ? { ...baseHeaders, "x-tenant-id": tenantOverride }
       : baseHeaders;
+    const def = byName.get(request.params.name);
     try {
-      const res = await def.handler(args, headers);
+      let res: AppResponse;
+      if (def) {
+        res = await def.handler(args, headers);
+      } else {
+        // Phase 8: try the dynamic synchronous-pipeline namespace before
+        // giving up. autoExposedPipelineTools() is the source of truth
+        // for what's exposed, but calling it here too lets a tool list
+        // refresh and an immediate call work without a round-trip.
+        const dynamic = await autoExposedPipelineTools();
+        const match = dynamic.find((d) => d.name === request.params.name);
+        if (!match) return errorResult(`unknown tool: ${request.params.name}`);
+        res = await invokePipelineByName(request.params.name, args, headers);
+      }
       if (res.status >= 400) {
         return errorResult(
           `HTTP ${res.status}: ${

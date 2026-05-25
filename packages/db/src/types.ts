@@ -226,6 +226,14 @@ export interface ScheduleRow {
   lastRunAt?: string | null;
   nextRunAt?: string | null;
   createdAt: string;
+  /**
+   * Identifier of the principal that created the schedule. The scheduler
+   * re-resolves their grants at fire time so a creator who lost
+   * `pipeline:run` can't keep firing runs through schedules they made.
+   * Optional for backward-compat with pre-Phase-2 rows; absent means the
+   * legacy "trust the schedule" behaviour (no re-check).
+   */
+  createdBy?: UUID | null;
 }
 
 export interface PipelineDeploymentRow {
@@ -383,6 +391,15 @@ export interface VectorCollectionRow {
 export interface ApiKeyRow {
   id: string;
   tenantId?: string;
+  /**
+   * Optional environment scope (free string matching
+   * `tenant_environments.name`). When set, the key's grants are synthesized
+   * at scope `t/<tenant>/e/<environment>` so it cannot act outside that
+   * environment — sibling-scope rules of {@link scopeCovers} apply.
+   * `undefined` means "every environment in the tenant", which is the
+   * back-compat behaviour for keys minted before this column existed.
+   */
+  environmentId?: string;
   principalId: string;
   name: string;
   prefix: string;
@@ -391,6 +408,12 @@ export interface ApiKeyRow {
   createdAt: string;
   lastUsedAt?: string;
   revokedAt?: string;
+  /**
+   * Optional expiration. When set, {@link ApiKeyService.verify} rejects
+   * the key once `now()` is past it — same constant-time error shape as
+   * a revoked key. `undefined` means "no expiration".
+   */
+  expiresAt?: string;
 }
 
 // --- Repository interfaces -----------------------------------------------------------
@@ -424,6 +447,98 @@ export interface TenantGitConfigRepository {
 export interface EnvironmentRepository
   extends CrudRepository<EnvironmentRow> {
   listByTenant(tenantId: UUID): Promise<EnvironmentRow[]>;
+}
+
+// --- Datasets (Phase 4 of dataset/RBAC/retrieval refactor) ---
+
+export interface DatasetRow {
+  id: UUID;
+  scope: "global" | "tenant" | "environment";
+  tenantId?: string | null;
+  environmentId?: string | null;
+  slug: string;
+  displayName: string;
+  description?: string | null;
+  embeddingProfile: Record<string, unknown>;
+  chunkSchema: Record<string, unknown>;
+  modalities: string[];
+  backends: Record<string, unknown>;
+  currentVersionId?: string | null;
+  archivedAt?: string | null;
+  createdAt: string;
+  createdBy?: string | null;
+  updatedAt: string;
+}
+
+export interface DatasetVersionRow {
+  id: UUID;
+  datasetId: UUID;
+  versionLabel: string;
+  schemaSpec: Record<string, unknown>;
+  backendCollections: Record<string, string>;
+  status: "building" | "ready" | "archived";
+  docCount: number;
+  sizeBytes: number;
+  createdAt: string;
+  readyAt?: string | null;
+}
+
+export interface DatasetAliasRow {
+  id: UUID;
+  datasetId: UUID;
+  alias: string;
+  versionId: UUID;
+  updatedAt: string;
+  updatedBy?: string | null;
+}
+
+/**
+ * Dataset persistence. Lifecycle is a small handful of well-defined
+ * operations rather than the generic CRUD shape because Datasets have
+ * structural invariants that the repository enforces: the scope-shape
+ * check; slug uniqueness within scope; and (later) the "delete refuses
+ * if non-archived pipelines reference it" rule. See the corresponding
+ * SQL migration `010_datasets.sql` for the matching CHECKs.
+ */
+export interface DatasetRepository {
+  create(row: DatasetRow): Promise<DatasetRow>;
+  get(id: UUID): Promise<DatasetRow | undefined>;
+  /** Throws NotFoundError when id is unknown. */
+  require(id: UUID): Promise<DatasetRow>;
+  update(id: UUID, patch: Partial<DatasetRow>): Promise<DatasetRow>;
+  delete(id: UUID): Promise<void>;
+  /**
+   * Resolve a slug at a scope. Walks env -> tenant -> global, first
+   * match wins. tenantId/environmentId are the *request* scope, not the
+   * dataset's defining scope — they parametrise the search.
+   */
+  resolveSlug(args: {
+    slug: string;
+    tenantId?: string;
+    environmentId?: string;
+  }): Promise<DatasetRow | undefined>;
+  /** Every dataset visible at a scope, after env -> tenant -> global resolution. */
+  listVisibleAt(args: {
+    tenantId?: string;
+    environmentId?: string;
+  }): Promise<DatasetRow[]>;
+  /** Raw filter — admin use. */
+  listAll(filter?: { scope?: DatasetRow["scope"]; tenantId?: string; environmentId?: string; includeArchived?: boolean }): Promise<DatasetRow[]>;
+}
+
+export interface DatasetVersionRepository {
+  create(row: DatasetVersionRow): Promise<DatasetVersionRow>;
+  get(id: UUID): Promise<DatasetVersionRow | undefined>;
+  listByDataset(datasetId: UUID): Promise<DatasetVersionRow[]>;
+  update(id: UUID, patch: Partial<DatasetVersionRow>): Promise<DatasetVersionRow>;
+  delete(id: UUID): Promise<void>;
+}
+
+export interface DatasetAliasRepository {
+  upsert(row: DatasetAliasRow): Promise<DatasetAliasRow>;
+  resolve(datasetId: UUID, alias: string): Promise<DatasetAliasRow | undefined>;
+  listByDataset(datasetId: UUID): Promise<DatasetAliasRow[]>;
+  delete(datasetId: UUID, alias: string): Promise<void>;
 }
 
 export interface UserRepository extends CrudRepository<UserRow> {

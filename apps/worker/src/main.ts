@@ -23,6 +23,7 @@ import {
   type ChangeBus
 } from "../../../packages/events/src/index.ts";
 import { createScheduler } from "./scheduler.ts";
+import { startOllamaWarmer } from "./ollama-warmer.ts";
 import { loadRegistries } from "../../../packages/plugin-loader/src/index.ts";
 import { createVectorStore } from "../../../packages/vector/src/index.ts";
 import {
@@ -39,6 +40,7 @@ import {
   StaticKeyProvider,
   type SecretProvider
 } from "../../../packages/secrets/src/index.ts";
+import * as db from "../../../packages/db/src/index.ts";
 import {
   InMemoryExecutionStore,
   InMemoryPipelineRepository,
@@ -93,7 +95,6 @@ async function buildDeps(): Promise<BuiltDeps> {
     // Postgres-backed execution store + control-plane repositories so the
     // worker resolves the SAME seeded pipeline versions / config / providers
     // the API serves. Migrations are owned by db-init / the API.
-    const db = await import("../../../packages/db/src/index.ts");
     const pool = await db.createPool({
       connectionString: process.env.DATABASE_URL
     });
@@ -112,7 +113,11 @@ async function buildDeps(): Promise<BuiltDeps> {
       usageRecords: new db.PostgresUsageRecordRepository(pool),
       // Org-versioning resolution for schedule-originated run_pipeline jobs.
       pipelines: new db.PostgresPipelineRepository(pool),
-      activations: new db.PostgresPipelineActivationRepository(pool)
+      activations: new db.PostgresPipelineActivationRepository(pool),
+      // Phase 5: dataset resolution at executor time.
+      datasets: new db.PostgresDatasetRepository(pool),
+      datasetVersions: new db.PostgresDatasetVersionRepository(pool),
+      datasetAliases: new db.PostgresDatasetAliasRepository(pool)
     };
     schedules = new db.PostgresScheduleRepository(pool);
     secretProvider = new DatabaseEncryptedSecretProvider(
@@ -133,7 +138,11 @@ async function buildDeps(): Promise<BuiltDeps> {
       usageRecords: new InMemoryUsageRecordRepository(),
       // Org-versioning resolution for schedule-originated run_pipeline jobs.
       pipelines: new InMemoryPipelineRepository(),
-      activations: new InMemoryPipelineActivationRepository()
+      activations: new InMemoryPipelineActivationRepository(),
+      // Phase 5: dataset resolution at executor time.
+      datasets: new db.InMemoryDatasetRepository(),
+      datasetVersions: new db.InMemoryDatasetVersionRepository(),
+      datasetAliases: new db.InMemoryDatasetAliasRepository()
     };
     schedules = new InMemoryScheduleRepository();
     secretProvider = new DatabaseEncryptedSecretProvider(
@@ -211,9 +220,26 @@ export async function main(): Promise<void> {
       Number(process.env.SCHEDULER_INTERVAL_MS ?? 60000)
     );
     logger.info("scheduler started (BullMQ enqueue)");
+    // Phase 13: optional Ollama warm-model heartbeat. Mitigates the
+    // 30-60s cold-start that hits the first chat request after a
+    // model has been idle. No-op when OLLAMA_WARM_MODELS is unset.
+    const warmModels = (process.env.OLLAMA_WARM_MODELS ?? "")
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+    const stopWarmer = startOllamaWarmer({
+      models: warmModels,
+      baseUrl: process.env.OLLAMA_BASE_URL ?? "http://ollama:11434",
+      intervalMs: Number(process.env.OLLAMA_WARM_INTERVAL_MS ?? 300_000),
+      logger
+    });
+    if (warmModels.length > 0) {
+      logger.info("ollama_warmer_started", { models: warmModels });
+    }
     const shutdown = async (): Promise<void> => {
       logger.info("worker shutting down");
       stopScheduler?.();
+      stopWarmer();
       await consumer.close();
       // Flush metric + log batches before the process dies so the last
       // few seconds of telemetry actually reach the collector.

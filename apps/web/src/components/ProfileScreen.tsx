@@ -1,9 +1,10 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, ApiError } from "../lib/api.ts";
 import type { ApiKeyView, GrantView } from "../lib/api.ts";
 import { useAuth } from "../auth/AuthContext.tsx";
 import { Screen, Table } from "./Screen.tsx";
+import { DataGrid, type DataGridColumn } from "./DataGrid.tsx";
 
 function errText(e: unknown): string {
   if (e instanceof ApiError) {
@@ -220,35 +221,113 @@ function ApiKeysCard() {
   const auth = useAuth();
   const qc = useQueryClient();
   const [name, setName] = useState("");
-  const [grantIdx, setGrantIdx] = useState(0);
+  const [role, setRole] = useState<string>("");
+  // "" === platform-wide (no tenant scope); a UUID === a specific tenant.
+  const [tenantId, setTenantId] = useState<string>("");
+  const [environmentId, setEnvironmentId] = useState<string>("");
+  const [expiresPreset, setExpiresPreset] = useState<string>("never");
   const [issued, setIssued] = useState<{ key: ApiKeyView; plaintext: string } | null>(
     null
   );
 
-  // A key cannot exceed its issuer, and an API key is scoped globally or to a
-  // whole tenant — so only the user's global / tenant-level grants are
-  // delegable. Environment- and pipeline-scoped grants are excluded.
-  const eligible = useMemo(
-    () => auth.grants.filter((g) => !g.environment && !g.pipelineId),
+  // Anything the user can ASSIGN at some scope, they can mint a key for.
+  // The server enforces issuer-cap (it walks every permission of the chosen
+  // role and calls enforce() against the picked scope, returning 403/422
+  // when the user lacks one). So the UI's job is just to surface every
+  // option the user *might* have authority for — let the server decide.
+  //
+  // A platform-wide grant (`g.scope === "*"`) covers every tenant; a
+  // tenant-scoped grant (`t/<T>`) covers that tenant and its envs. Anything
+  // narrower (env- or pipeline-scoped) cannot back a key at all because
+  // env-scope grants are siblings under a tenant and the smallest scope
+  // a key carries is `t/<T>` or `t/<T>/e/<E>`.
+  const hasPlatformGrant = useMemo(
+    () => auth.grants.some((g) => g.scope === "*"),
     [auth.grants]
   );
+  const tenantsWithTenantGrant = useMemo(() => {
+    const ids = new Set<string>();
+    for (const g of auth.grants) {
+      if (g.tenantId && !g.environment && !g.pipelineId) ids.add(g.tenantId);
+    }
+    return ids;
+  }, [auth.grants]);
+
+  // Roles come from the policy catalog; the user can pick any of them and
+  // the server rejects with 403 if they can't actually grant it at the
+  // chosen scope. We show all of them (rather than guessing client-side)
+  // so a platform_admin sees the full menu without us re-implementing the
+  // role/permission walk in the browser.
+  const roles = useQuery({
+    queryKey: ["roles-mintable"],
+    queryFn: () => api.listRoles()
+  });
+  const tenants = useQuery({
+    queryKey: ["tenants-mintable"],
+    queryFn: () => api.listTenants()
+  });
+
+  // Once roles load, default to the first one the user clearly already
+  // holds at some scope (so most users don't have to touch the dropdown).
+  // Falls back to the first role in the catalog otherwise.
+  const ownedRoleNames = useMemo(
+    () => new Set(auth.grants.map((g) => g.role)),
+    [auth.grants]
+  );
+  useEffect(() => {
+    if (role || !roles.data) return;
+    const owned = roles.data.roles.find((r) => ownedRoleNames.has(r.name));
+    setRole(owned?.name ?? roles.data.roles[0]?.name ?? "");
+  }, [role, roles.data, ownedRoleNames]);
+
+  // Tenants we let the user pick from: every tenant they hold any covering
+  // grant for. A platform-wide grant covers every tenant the API returns;
+  // a per-tenant grant covers just that tenant. Sorted by name for the UI.
+  const mintableTenants = useMemo(() => {
+    const all = tenants.data?.tenants ?? [];
+    return all
+      .filter((t) => hasPlatformGrant || tenantsWithTenantGrant.has(t.id))
+      .sort((a, b) => (a.name ?? a.slug).localeCompare(b.name ?? b.slug));
+  }, [tenants.data, hasPlatformGrant, tenantsWithTenantGrant]);
+
+  // Env dropdown only matters when a specific tenant is picked.
+  const envs = useQuery({
+    queryKey: ["tenant-environments", tenantId || "none"],
+    queryFn: () =>
+      tenantId
+        ? api.listEnvironments(tenantId)
+        : Promise.resolve({ environments: [] }),
+    enabled: Boolean(tenantId)
+  });
 
   const keys = useQuery({
     queryKey: ["api-keys"],
     queryFn: () => api.listApiKeys()
   });
 
+  function resolveExpiresAt(): string | undefined {
+    if (expiresPreset === "never") return undefined;
+    const m = /^(\d+)([dhm])$/.exec(expiresPreset);
+    if (!m) return undefined;
+    const n = Number(m[1]);
+    const ms =
+      m[2] === "d" ? n * 86_400_000 : m[2] === "h" ? n * 3_600_000 : n * 60_000;
+    return new Date(Date.now() + ms).toISOString();
+  }
+
   const create = useMutation({
-    mutationFn: () => {
-      const g = eligible[grantIdx];
-      return api.createApiKey({
+    mutationFn: () =>
+      api.createApiKey({
         name: name.trim(),
-        role: g.role,
-        tenantId: g.tenantId
-      });
-    },
+        role,
+        tenantId: tenantId || undefined,
+        environmentId: environmentId || undefined,
+        expiresAt: resolveExpiresAt()
+      }),
     onSuccess: (res) => {
       setName("");
+      setEnvironmentId("");
+      setExpiresPreset("never");
       setIssued({ key: res.apiKey, plaintext: res.plaintext });
       qc.invalidateQueries({ queryKey: ["api-keys"] });
     }
@@ -274,7 +353,7 @@ function ApiKeysCard() {
           scripts). It carries one role you already hold; revoke it anytime.
         </p>
 
-        {eligible.length === 0 ? (
+        {!hasPlatformGrant && mintableTenants.length === 0 ? (
           <p className="error">
             You hold no global or tenant-level role, so there is nothing an API
             key could be scoped to. Ask an administrator for a grant.
@@ -294,19 +373,75 @@ function ApiKeysCard() {
               required
             />
             <select
-              value={grantIdx}
-              onChange={(e) => setGrantIdx(Number(e.target.value))}
+              value={role}
+              onChange={(e) => setRole(e.target.value)}
+              title="Role the key will carry"
             >
-              {eligible.map((g, i) => (
-                <option key={g.id} value={i}>
-                  {g.role} · {scopeLabel(g)}
+              {(roles.data?.roles ?? []).map((r) => (
+                <option key={r.name} value={r.name}>
+                  role · {r.name}
                 </option>
               ))}
+            </select>
+            <select
+              value={tenantId}
+              onChange={(e) => {
+                setTenantId(e.target.value);
+                // Switching tenants invalidates the previously-selected env.
+                setEnvironmentId("");
+              }}
+              title="Tenant scope — pick 'platform' for an unscoped key"
+            >
+              {hasPlatformGrant && (
+                <option value="">platform (global)</option>
+              )}
+              {mintableTenants.map((t) => (
+                <option key={t.id} value={t.id}>
+                  tenant · {t.name ?? t.slug}
+                </option>
+              ))}
+            </select>
+            <select
+              value={environmentId}
+              onChange={(e) => setEnvironmentId(e.target.value)}
+              disabled={!tenantId || (envs.data?.environments ?? []).length === 0}
+              title={
+                !tenantId
+                  ? "Pick a tenant first to restrict to one of its environments"
+                  : (envs.data?.environments ?? []).length === 0
+                    ? "This tenant has no environments configured"
+                    : "Restrict the key to a single environment"
+              }
+            >
+              <option value="">
+                {!tenantId
+                  ? "env · (pick a tenant first)"
+                  : (envs.data?.environments ?? []).length === 0
+                    ? "env · (tenant has none)"
+                    : "all envs"}
+              </option>
+              {(envs.data?.environments ?? []).map((env) => (
+                <option key={env.id} value={env.name}>
+                  env · {env.name}
+                </option>
+              ))}
+            </select>
+            <select
+              value={expiresPreset}
+              onChange={(e) => setExpiresPreset(e.target.value)}
+              title="Optional expiration"
+            >
+              <option value="never">no expiration</option>
+              <option value="1h">expires in 1 hour</option>
+              <option value="24h">expires in 24 hours</option>
+              <option value="7d">expires in 7 days</option>
+              <option value="30d">expires in 30 days</option>
+              <option value="90d">expires in 90 days</option>
             </select>
             <button
               type="submit"
               className="primary"
-              disabled={create.isPending}
+              disabled={create.isPending || !role}
             >
               {create.isPending ? "Creating…" : "Create key"}
             </button>
@@ -316,39 +451,105 @@ function ApiKeysCard() {
           </form>
         )}
 
-        <Table
-          columns={["Name", "Prefix", "Role", "Scope", "Last used", "Status", ""]}
-          rows={(keys.data?.apiKeys ?? []).map((k) => [
-            k.name,
-            <code key="p">rgd_{k.prefix}_…</code>,
-            k.roles.join(", ") || "—",
-            <span key="sc" className="status">
-              {k.scope === "*" ? "global" : `tenant ${k.tenantId?.slice(0, 8)}…`}
-            </span>,
-            k.lastUsedAt ? new Date(k.lastUsedAt).toLocaleString() : "never",
-            <span
-              key="st"
-              className={`status ${
-                k.status === "active" ? "status-succeeded" : "status-failed"
-              }`}
-            >
-              {k.status}
-            </span>,
-            k.status === "active" ? (
-              <button
-                key="x"
-                className="link-btn danger"
-                onClick={() => revoke.mutate(k.id)}
-                disabled={revoke.isPending}
-              >
-                revoke
-              </button>
-            ) : (
-              <span key="x" className="muted">
-                —
-              </span>
-            )
-          ])}
+        <DataGrid<ApiKeyView>
+          columns={
+            [
+              { key: "name", header: "Name", accessor: (k) => k.name, width: "18%" },
+              {
+                key: "prefix",
+                header: "Prefix",
+                accessor: (k) => k.prefix,
+                cell: (k) => <code>rgd_{k.prefix}_…</code>,
+                width: "14%"
+              },
+              {
+                key: "role",
+                header: "Role",
+                accessor: (k) => k.roles.join(", "),
+                filter: "select",
+                width: "12%"
+              },
+              {
+                key: "scope",
+                header: "Scope",
+                accessor: (k) =>
+                  k.scope === "*"
+                    ? "global"
+                    : k.environmentId
+                      ? `${k.tenantId?.slice(0, 8)}/${k.environmentId}`
+                      : `${k.tenantId?.slice(0, 8)}`,
+                cell: (k) => (
+                  <span className="status">
+                    {k.scope === "*"
+                      ? "global"
+                      : k.environmentId
+                        ? `tenant ${k.tenantId?.slice(0, 8)}… · ${k.environmentId}`
+                        : `tenant ${k.tenantId?.slice(0, 8)}…`}
+                  </span>
+                ),
+                width: "18%"
+              },
+              {
+                key: "lastUsedAt",
+                header: "Last used",
+                accessor: (k) => k.lastUsedAt ?? "",
+                cell: (k) =>
+                  k.lastUsedAt ? new Date(k.lastUsedAt).toLocaleString() : "never",
+                width: "14%"
+              },
+              {
+                key: "expiresAt",
+                header: "Expires",
+                accessor: (k) => k.expiresAt ?? "",
+                cell: (k) =>
+                  k.expiresAt ? new Date(k.expiresAt).toLocaleString() : "—",
+                width: "12%"
+              },
+              {
+                key: "status",
+                header: "Status",
+                accessor: (k) => k.status,
+                filter: "select",
+                cell: (k) => (
+                  <span
+                    className={`status ${
+                      k.status === "active"
+                        ? "status-succeeded"
+                        : k.status === "expired"
+                          ? "status-cancelled"
+                          : "status-failed"
+                    }`}
+                  >
+                    {k.status}
+                  </span>
+                ),
+                width: "8%"
+              },
+              {
+                key: "actions",
+                header: "",
+                accessor: () => "",
+                filter: "none",
+                sortable: false,
+                width: "4%",
+                cell: (k) =>
+                  k.status === "active" ? (
+                    <button
+                      className="link-btn danger"
+                      onClick={() => revoke.mutate(k.id)}
+                      disabled={revoke.isPending}
+                    >
+                      revoke
+                    </button>
+                  ) : (
+                    <span className="muted">—</span>
+                  )
+              }
+            ] satisfies DataGridColumn<ApiKeyView>[]
+          }
+          rows={keys.data?.apiKeys ?? []}
+          rowKey={(k) => k.id}
+          emptyMessage="No API keys yet."
         />
         {keys.isError && <p className="error">{errText(keys.error)}</p>}
       </div>

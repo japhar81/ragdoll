@@ -124,9 +124,27 @@ function tenantFromScope(scope: string): string | undefined {
 }
 
 function canSee(conn: ConnState, event: ChangeEvent): boolean {
-  if (conn.seesGlobal) return true;
-  if (event.tenantId === null) return false;
-  return conn.tenants.has(event.tenantId);
+  // First gate: tenant scope. Platform-scope subscribers see everything;
+  // tenant-scoped subscribers only see events for tenants they hold any
+  // grant in; global (`tenantId === null`) events are platform-only.
+  if (!conn.seesGlobal) {
+    if (event.tenantId === null) return false;
+    if (!conn.tenants.has(event.tenantId)) return false;
+  }
+  // Second gate: per-event permission filter. Untagged events pass; tagged
+  // ones require the subscriber to hold the permission at the event's
+  // tenant scope. Without `principal.authorize` (older session paths where
+  // the closure was never attached) we fall closed on tagged events —
+  // tagged events are inherently sensitive.
+  if (event.requiredPermission && conn.principal) {
+    const authorize = conn.principal.authorize;
+    if (!authorize) return false;
+    return authorize(
+      event.requiredPermission as Permission,
+      event.tenantId ? { tenantId: event.tenantId } : {}
+    );
+  }
+  return true;
 }
 
 export async function mountWebsocket(
@@ -471,6 +489,7 @@ async function handleAuth(
           id: principal.id,
           type: principal.type,
           tenantId: principal.tenantId,
+          environment: principal.environment,
           roles: principal.roles
         },
         { defaultTenantId: principal.tenantId }
