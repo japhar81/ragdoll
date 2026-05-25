@@ -109,6 +109,7 @@ export function ExecutionsScreen() {
     () => executions.data?.pages.flatMap((p) => p.executions) ?? [],
     [executions.data]
   );
+  const totalExecutions = executions.data?.pages[0]?.total;
 
   const trace = useQuery({
     queryKey: ["trace", selected],
@@ -197,6 +198,7 @@ export function ExecutionsScreen() {
         height={selected ? 360 : undefined}
         emptyMessage="No executions yet."
         rowNoun="execution"
+        totalRows={totalExecutions}
         hasMore={executions.hasNextPage}
         isLoadingMore={executions.isFetchingNextPage}
         onLoadMore={() => {

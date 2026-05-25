@@ -148,34 +148,45 @@ export class PostgresExecutionStore implements ExecutionStore {
     tenantId?: string;
     limit: number;
     cursor?: string;
-  }): Promise<{ rows: ExecutionRecord[]; nextCursor: string | null }> {
+  }): Promise<{ rows: ExecutionRecord[]; nextCursor: string | null; total: number }> {
     const parsed = parseCursor(args.cursor);
-    const where: string[] = [];
-    const params: unknown[] = [];
+    const filterClauses: string[] = [];
+    const filterParams: unknown[] = [];
     if (args.tenantId !== undefined) {
-      params.push(args.tenantId);
-      where.push(`tenant_id = $${params.length}`);
+      filterParams.push(args.tenantId);
+      filterClauses.push(`tenant_id = $${filterParams.length}`);
     }
+    const countWhere = filterClauses.length
+      ? `WHERE ${filterClauses.join(" AND ")}`
+      : "";
+    // Page query layers the cursor predicate on top of the filter.
+    const pageClauses = [...filterClauses];
+    const pageParams = [...filterParams];
     if (parsed) {
-      // (started_at, id) < (cursor.t, cursor.i) for stable pagination across
-      // ties — the composite tuple comparison fans out into a form Postgres
-      // can index against on (started_at, id).
-      params.push(parsed.timestamp);
-      params.push(parsed.id);
-      where.push(
-        `(started_at, id) < ($${params.length - 1}::timestamptz, $${params.length}::uuid)`
+      pageParams.push(parsed.timestamp);
+      pageParams.push(parsed.id);
+      pageClauses.push(
+        `(started_at, id) < ($${pageParams.length - 1}::timestamptz, $${pageParams.length}::uuid)`
       );
     }
-    const whereClause = where.length ? `WHERE ${where.join(" AND ")}` : "";
-    // Fetch one extra so we can decide if there's a next page without a
-    // separate COUNT — same trick the public APIs use elsewhere.
-    params.push(args.limit + 1);
-    const result = await this.pool.query<Record<string, unknown>>(
-      `SELECT * FROM executions ${whereClause}
-       ORDER BY started_at DESC, id DESC
-       LIMIT $${params.length}`,
-      params
-    );
+    const pageWhere = pageClauses.length
+      ? `WHERE ${pageClauses.join(" AND ")}`
+      : "";
+    pageParams.push(args.limit + 1);
+    // Total uses the filter WITHOUT the cursor predicate so the UI
+    // footer reflects the whole result set across all pages.
+    const [result, countResult] = await Promise.all([
+      this.pool.query<Record<string, unknown>>(
+        `SELECT * FROM executions ${pageWhere}
+         ORDER BY started_at DESC, id DESC
+         LIMIT $${pageParams.length}`,
+        pageParams
+      ),
+      this.pool.query<{ total: string }>(
+        `SELECT COUNT(*)::text AS total FROM executions ${countWhere}`,
+        filterParams
+      )
+    ]);
     const allRows = result.rows.map(rowToExecutionRecord);
     const overflow = allRows.length > args.limit;
     const rows = overflow ? allRows.slice(0, args.limit) : allRows;
@@ -188,7 +199,11 @@ export class PostgresExecutionStore implements ExecutionStore {
         String(lastRow.id ?? lastRow.execution_id)
       );
     }
-    return { rows, nextCursor };
+    return {
+      rows,
+      nextCursor,
+      total: Number(countResult.rows[0]?.total ?? 0)
+    };
   }
 
   async getExecution(

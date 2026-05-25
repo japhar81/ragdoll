@@ -502,10 +502,11 @@ export const api = {
       cursor?: string;
     } = {}
   ) =>
-    request<{ executions: ExecutionRecord[]; nextCursor?: string | null }>(
-      "GET",
-      `/api/executions${qs(params)}`
-    ),
+    request<{
+      executions: ExecutionRecord[];
+      nextCursor?: string | null;
+      total?: number;
+    }>("GET", `/api/executions${qs(params)}`),
   getExecution: (executionId: string) =>
     request<{ execution: ExecutionRecord }>(
       "GET",
@@ -529,10 +530,11 @@ export const api = {
   listAudit: (
     params: { tenant_id?: string; limit?: number; cursor?: string } = {}
   ) =>
-    request<{ logs: AuditRow[]; nextCursor?: string | null }>(
-      "GET",
-      `/api/audit${qs(params)}`
-    ),
+    request<{
+      logs: AuditRow[];
+      nextCursor?: string | null;
+      total?: number;
+    }>("GET", `/api/audit${qs(params)}`),
   usage: (
     params: {
       tenant_id?: string;
@@ -545,6 +547,7 @@ export const api = {
       summary: UsageSummary;
       records: UsageRow[];
       nextCursor?: string | null;
+      total?: number;
     }>("GET", `/api/usage${qs(params)}`),
   listPlugins: () => request<{ plugins: PluginInfo[] }>("GET", "/api/plugins"),
 

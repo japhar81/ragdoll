@@ -21,6 +21,7 @@ export function UsageScreen() {
     () => usage.data?.pages.flatMap((p) => p.records) ?? [],
     [usage.data]
   );
+  const totalUsage = usage.data?.pages[0]?.total;
   // Summary across all loaded pages. The API returns a per-page summary
   // (paginated path), so we re-fold rows here as new pages arrive.
   const s = useMemo(
@@ -118,6 +119,7 @@ export function UsageScreen() {
         }
         emptyMessage="No usage records yet."
         rowNoun="usage record"
+        totalRows={totalUsage}
         hasMore={usage.hasNextPage}
         isLoadingMore={usage.isFetchingNextPage}
         onLoadMore={() => {

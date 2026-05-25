@@ -21,6 +21,9 @@ export function AuditScreen() {
     () => audit.data?.pages.flatMap((p) => p.logs) ?? [],
     [audit.data]
   );
+  // The total is the same for every page (filter doesn't change with
+  // the cursor), so pluck it off the first one.
+  const totalRows = audit.data?.pages[0]?.total;
 
   const columns: SvarColumn<AuditRow>[] = [
     {
@@ -62,6 +65,7 @@ export function AuditScreen() {
         rowKey={(l) => `${l.createdAt}-${l.targetId}`}
         emptyMessage="No audit entries."
         rowNoun="audit entry"
+        totalRows={totalRows}
         hasMore={audit.hasNextPage}
         isLoadingMore={audit.isFetchingNextPage}
         onLoadMore={() => {

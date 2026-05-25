@@ -50,6 +50,10 @@ export interface SvarDataGridProps<Row> {
   /** Singular noun for the footer row-count summary (e.g. "execution",
    *  "audit entry"). Defaults to "row". */
   rowNoun?: string;
+  /** Total rows the API reports under the same filter. When set the
+   *  footer reads "N of M <noun>"; when omitted it falls back to the
+   *  loaded slice count. */
+  totalRows?: number;
   /** Pixel height the grid claims. Defaults to letting the surrounding
    *  flex container size it. Use a fixed number on screens where the
    *  grid is the entire content (executions / audit). */
@@ -67,8 +71,17 @@ export function SvarDataGrid<Row>(props: SvarDataGridProps<Row>) {
   // receives ICellProps with `.row` typed loosely — wrap with our
   // typed `cell` callback so column definitions stay type-safe.
   const rowNoun = props.rowNoun ?? "row";
+  // Footer text logic:
+  //   - if the API gave us a total AND it differs from the loaded
+  //     slice (i.e. more pages exist), show "N of M …";
+  //   - if total == loaded, just show "N …" (no point repeating);
+  //   - if no total was passed, fall back to the slice count.
+  const loadedFmt = rows.length.toLocaleString();
+  const noun = rows.length === 1 ? rowNoun : `${rowNoun}s`;
   const footerLabel =
-    rows.length === 1 ? `1 ${rowNoun}` : `${rows.length.toLocaleString()} ${rowNoun}s`;
+    props.totalRows !== undefined && props.totalRows !== rows.length
+      ? `${loadedFmt} of ${props.totalRows.toLocaleString()} ${rowNoun}s`
+      : `${loadedFmt} ${noun}`;
   const svarColumns = useMemo<IColumnConfig[]>(
     () =>
       columns.map((c, idx) => {
