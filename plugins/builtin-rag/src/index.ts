@@ -773,7 +773,29 @@ export const vectorUpsertPlugin: InProcessPlugin = {
     if (vectors.length === 0) {
       return { outputs: { upserted: 0 } };
     }
-    const dimensions = Number(config.dimensions ?? vectors[0]?.length ?? 0);
+    // Mirror qdrant_vector_store's dim guards: surface mismatches as
+    // explicit messages instead of letting the backend 400 with no detail.
+    const firstDim = vectors[0]?.length ?? 0;
+    if (firstDim === 0) {
+      throw new Error(
+        `vector_upsert: first vector has length 0 — upstream embedder produced empty vectors`
+      );
+    }
+    const ragged = vectors.findIndex(
+      (v) => !Array.isArray(v) || v.length !== firstDim
+    );
+    if (ragged >= 0) {
+      throw new Error(
+        `vector_upsert: vectors[${ragged}] has length ${vectors[ragged]?.length ?? 0} but vectors[0] has length ${firstDim} — embedder output is ragged`
+      );
+    }
+    const configuredDim = Number(config.dimensions ?? firstDim);
+    if (configuredDim !== firstDim) {
+      throw new Error(
+        `vector_upsert: config.dimensions=${configuredDim} but vectors carry ${firstDim} — re-embed or update the dimension`
+      );
+    }
+    const dimensions = configuredDim;
     await store.ensureCollection(collection, { dimensions, distance });
 
     const idPrefix = String(config.idPrefix ?? context.executionId ?? "doc");
@@ -1050,7 +1072,31 @@ export const qdrantVectorStorePlugin: InProcessPlugin = {
     if (vectors.length === 0) {
       return { outputs: { upserted: 0, collection } };
     }
-    const dimensions = Number(config.dimensions ?? vectors[0]?.length ?? 0);
+    // Dimensions guard. Qdrant returns "Bad Request" (no detail) when a
+    // batch's vectors have mismatched lengths or differ from the
+    // collection's configured dim. Catch both upfront so the error is
+    // diagnosable instead of a wall of 400s.
+    const firstDim = vectors[0]?.length ?? 0;
+    if (firstDim === 0) {
+      throw new Error(
+        `qdrant_vector_store: first vector has length 0 — upstream embedder produced empty vectors`
+      );
+    }
+    const ragged = vectors.findIndex(
+      (v) => !Array.isArray(v) || v.length !== firstDim
+    );
+    if (ragged >= 0) {
+      throw new Error(
+        `qdrant_vector_store: vectors[${ragged}] has length ${vectors[ragged]?.length ?? 0} but vectors[0] has length ${firstDim} — embedder output is ragged`
+      );
+    }
+    const configuredDim = Number(config.dimensions ?? firstDim);
+    if (configuredDim !== firstDim) {
+      throw new Error(
+        `qdrant_vector_store: config.dimensions=${configuredDim} but vectors carry ${firstDim} — re-embed or update the dimension`
+      );
+    }
+    const dimensions = configuredDim;
     await store.ensureCollection(collection, { dimensions, distance });
 
     const points: VectorPoint[] = vectors.map((vector, index) => {

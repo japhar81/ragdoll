@@ -136,7 +136,21 @@ const DEFAULT_EXCLUDE = [
   "**/.venv/**",
   "**/.idea/**",
   "**/.vscode/**",
-  "**/.DS_Store"
+  "**/.DS_Store",
+  // Common binary file extensions — these don't decode to useful text and
+  // were the source of the "unsupported Unicode escape sequence" failures
+  // when the include glob (e.g. "**/*") swept them in. The byte-NUL filter
+  // below catches what survives this, but excluding them up front is
+  // faster + avoids the failed open.
+  "**/*.{png,jpg,jpeg,gif,ico,webp,bmp,tiff,avif}",
+  "**/*.{mp3,mp4,mov,avi,webm,wav,flac,ogg}",
+  "**/*.{zip,tar,gz,tgz,bz2,xz,7z,rar}",
+  "**/*.{so,dylib,dll,exe,a,lib,o,bin}",
+  "**/*.{pyc,pyo,class,jar,war}",
+  "**/*.{pdf,doc,docx,xls,xlsx,ppt,pptx}",
+  "**/*.{woff,woff2,ttf,otf,eot}",
+  "**/*.{sqlite,db}",
+  "**/*.{pack,idx}"
 ];
 
 export const filesystemSourcePlugin: InProcessPlugin = {
@@ -240,20 +254,35 @@ export const filesystemSourcePlugin: InProcessPlugin = {
       } catch {
         continue;
       }
-      // Postgres jsonb cannot store the U+0000 (NUL) character — the
-      // executions store would 22P02 on insert and the whole run would fail
-      // with "unsupported Unicode escape sequence". Quietly skip any file
-      // that decodes to text containing NUL: those are typically binary
-      // assets (.so / .pyc / git pack files) misclassified by the include
-      // glob, not source we want to index.
-      if (content.includes("\u0000")) continue;
+      // If NULs make up a non-trivial slice of the bytes the file is
+      // almost certainly a binary misclassified by the include glob (.so,
+      // .pyc, git pack) — skip it. Below that threshold we have ASCII
+      // text with a stray NUL in a comment or a string literal; scrub
+      // those (and any NUL the OS allowed in the path) so the row stores
+      // cleanly. Without this any later JSONB write would 22P02 with
+      // "unsupported Unicode escape sequence" and fail the whole run.
+      const nulMatches = content.match(/\u0000/g);
+      const nulCount = nulMatches ? nulMatches.length : 0;
+      if (nulCount > Math.max(8, content.length * 0.01)) continue;
+      const sanitizedContent =
+        nulCount > 0 ? content.replace(/\u0000/g, "\uFFFD") : content;
+      const sanitizedRel = entry.relPath.includes("\u0000")
+        ? entry.relPath.replace(/\u0000/g, "\uFFFD")
+        : entry.relPath;
       const doc = {
-        docId: entry.relPath,
-        path: entry.relPath,
-        content,
+        docId: sanitizedRel,
+        path: sanitizedRel,
+        content: sanitizedContent,
         mtime: new Date(entry.stat.mtimeMs).toISOString(),
         size: entry.stat.size,
-        ...(computeHash ? { sha256: crypto.createHash("sha256").update(content).digest("hex") } : {})
+        ...(computeHash
+          ? {
+              sha256: crypto
+                .createHash("sha256")
+                .update(sanitizedContent)
+                .digest("hex")
+            }
+          : {})
       };
       documents.push(doc);
     }
