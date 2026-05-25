@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { useBuilderRoom } from "../events/EventsProvider.tsx";
 import { BuilderRoster } from "../events/BuilderRoster.tsx";
 import { BuilderTree } from "./builder/BuilderTree.tsx";
@@ -55,6 +56,7 @@ import {
 } from "./FlowNodeCard.tsx";
 import { PluginEditorSlot } from "./PluginEditorSlot.tsx";
 import { SecretsEditor } from "./SecretsEditor.tsx";
+import { DeployModal } from "./DeployModal.tsx";
 import { NodeDocsTab } from "./builder/NodeDocsTab.tsx";
 import { BuilderConsole, useConsoleLog } from "./BuilderConsole.tsx";
 import { TenantSelect, useSelectedTenant } from "./useTenants.tsx";
@@ -66,6 +68,7 @@ import {
 } from "../../../../packages/pipeline-spec/src/layouts.ts";
 import {
   validatePipelineSpec,
+  isStorageCategory,
   type ValidationIssue
 } from "../../../../packages/pipeline-spec/src/index.ts";
 import { hasRealPipeline } from "../lib/consoleLog.ts";
@@ -229,67 +232,58 @@ function LayoutMenu({ onApply }: { onApply: (kind: LayoutKind) => void }) {
   );
 }
 
-/** Categories whose plugins touch a backend collection / index — the
- *  ones a Dataset reference is meaningful for. Kept as a flat list here
- *  (instead of in plugin-sdk) because it's pure UI-level filtering. */
-const STORAGE_CATEGORIES = new Set([
-  "vector_store",
-  "retriever",
-  "sink",
-  "loader"
-]);
-function isStorageCategory(category: string | undefined): boolean {
-  return !!category && STORAGE_CATEGORIES.has(category);
-}
-
 /**
- * Inline Dataset picker shown above the Config section for
- * storage-touching nodes. Lists Datasets visible at the builder's
- * (tenantId, environment), and binds the chosen one onto
- * `node.dataset = { slug, alias? }`. Defaults the alias to "stable"
- * since pipelines pin to aliases for atomic version swaps; advanced
- * users can edit the alias inline.
+ * Inline Dataset picker shown above the Config section for storage-touching
+ * nodes. The builder operates on dataset SLUGS only — a slug is the pipeline-
+ * portable identity; the runtime resolves (slug, alias) → ResolvedDataset at
+ * execute time using the (tenant, env) the deploy was bound to.
  *
- * Setting both fields to empty clears `node.dataset`, which puts the
- * node back on the legacy "name your own collection" path.
+ * The picker therefore lists DISTINCT slugs only — never env- or tenant-
+ * scoped variants. The "+ New dataset" button always creates the slug at
+ * GLOBAL scope so the same pipeline template can run across tenants; per-
+ * tenant / per-env overrides happen at deploy time (Deploy modal) and on
+ * the Datasets screen.
+ *
+ * Clearing the picker removes `node.dataset`. The validator then surfaces a
+ * `missing_required_dataset` error and the canvas badge lights up red.
  */
 function DatasetPickerSection(props: {
   node: PipelineNode;
-  tenantId: string | undefined;
-  environment: string;
   pipelineSlug: string;
   onChange: (dataset: { slug: string; alias?: string } | undefined) => void;
 }) {
   const qc = useQueryClient();
+  // Cross-scope visible slugs. Pass no tenant/env so the API returns the
+  // operator's full visible set; we then collapse to distinct slugs.
   const datasets = useQuery({
-    queryKey: ["datasets-picker", props.tenantId, props.environment],
-    queryFn: () =>
-      api.listDatasets({
-        tenantId: props.tenantId,
-        environmentId: props.environment
-      }),
-    enabled: !!props.tenantId
+    queryKey: ["datasets-slugs"],
+    queryFn: () => api.listDatasets({})
   });
-  const visible = datasets.data?.datasets ?? [];
+  const distinctSlugs = useMemo(() => {
+    const seen = new Map<string, { slug: string; displayName?: string; variants: number }>();
+    for (const d of datasets.data?.datasets ?? []) {
+      const entry = seen.get(d.slug);
+      if (entry) entry.variants += 1;
+      else
+        seen.set(d.slug, {
+          slug: d.slug,
+          displayName: d.displayName ?? undefined,
+          variants: 1
+        });
+    }
+    return [...seen.values()].sort((a, b) => a.slug.localeCompare(b.slug));
+  }, [datasets.data]);
   const current = props.node.dataset as
     | { slug: string; alias?: string }
     | undefined;
-  // Suggest a sensible new dataset slug derived from the pipeline:
-  // `<pipelineSlug>` for a single-store pipeline; same shape the auto-
-  // synthesize script uses. Operators can override before clicking
-  // Create. Empty pipelineSlug means we don't yet know what to call
-  // it — disable the create button until the pipeline has a slug.
   const suggestedSlug = props.pipelineSlug?.trim() || "";
   const create = useMutation({
     mutationFn: async (slug: string): Promise<{ slug: string }> => {
-      // Create at env scope when both tenant + env are known, else
-      // tenant scope. Either way the user can promote / re-scope from
-      // the Datasets screen later.
+      // Always create at GLOBAL scope from the builder — pipelines are
+      // tenant-/env-agnostic templates. Tenant / env overrides happen at
+      // deploy time, where the operator picks the target context.
       const res = await api.createDataset({
-        scope: props.environment && props.tenantId ? "environment" : "tenant",
-        tenantId: props.tenantId,
-        environmentId:
-          props.environment && props.tenantId ? props.environment : undefined,
+        scope: "global",
         slug,
         displayName: slug,
         modalities: ["vector"]
@@ -297,10 +291,9 @@ function DatasetPickerSection(props: {
       return { slug: res.dataset.slug };
     },
     onSuccess: (res) => {
-      qc.invalidateQueries({
-        queryKey: ["datasets-picker", props.tenantId, props.environment]
-      });
+      qc.invalidateQueries({ queryKey: ["datasets-slugs"] });
       qc.invalidateQueries({ queryKey: ["datasets"] });
+      qc.invalidateQueries({ queryKey: ["datasets-all"] });
       props.onChange({ slug: res.slug, alias: "stable" });
     }
   });
@@ -308,9 +301,9 @@ function DatasetPickerSection(props: {
     <div className="settings-card" style={{ padding: 8, marginBottom: 8 }}>
       <h3 style={{ margin: 0 }}>Dataset</h3>
       <p className="muted" style={{ marginTop: 2, fontSize: "0.85em" }}>
-        Pin this node to a managed Dataset so the runtime resolves the
-        backend collection at execute time. Leaving this blank falls
-        back to whatever the plugin's own config says.
+        Pin this node to a dataset <strong>slug</strong>. The runtime resolves
+        the (tenant, env) variant at deploy time — no need to choose a scope
+        here.
       </p>
       <div className="inline-form" style={{ gap: 6, flexWrap: "wrap" }}>
         <select
@@ -321,29 +314,31 @@ function DatasetPickerSection(props: {
               slug ? { slug, alias: current?.alias ?? "stable" } : undefined
             );
           }}
-          disabled={!props.tenantId || datasets.isLoading}
+          disabled={datasets.isLoading}
         >
-          <option value="">(no dataset)</option>
-          {visible.map((d) => (
-            <option key={d.id} value={d.slug}>
-              {d.slug} · {d.scope}
-              {d.environmentId ? `/${d.environmentId}` : ""}
+          <option value="">(no dataset — pick a slug)</option>
+          {distinctSlugs.map((d) => (
+            <option key={d.slug} value={d.slug}>
+              {d.slug}
+              {d.variants > 1 ? ` · ${d.variants} scope variants` : ""}
             </option>
           ))}
         </select>
-        {!current?.slug && props.tenantId && (
+        {!current?.slug && (
           <button
             type="button"
             className="link-btn"
             disabled={!suggestedSlug || create.isPending}
             title={
               suggestedSlug
-                ? `Create a new dataset "${suggestedSlug}" at this scope`
+                ? `Create a new global dataset slug "${suggestedSlug}"`
                 : "Save the pipeline first so we can suggest a slug"
             }
             onClick={() => suggestedSlug && create.mutate(suggestedSlug)}
           >
-            {create.isPending ? "Creating…" : `+ New dataset "${suggestedSlug || "—"}"`}
+            {create.isPending
+              ? "Creating…"
+              : `+ New global dataset "${suggestedSlug || "—"}"`}
           </button>
         )}
         {current?.slug && (
@@ -420,6 +415,22 @@ export function PipelineBuilder(props: {
   const [environment, setEnvironment] = useState("dev");
   const envs = useEnvironments(tenantId);
   const [selectedId, setSelectedId] = useState<string | undefined>();
+  // Deep-link from Datasets ("open in builder"): /builder/:id?node=<nodeId>
+  // selects the requested node once it appears in the graph, then strips
+  // the query param so subsequent edits don't keep re-selecting it.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const requestedNodeId = searchParams.get("node") ?? undefined;
+  useEffect(() => {
+    if (!requestedNodeId) return;
+    const present = (nodes as unknown as { id: string }[]).some(
+      (n) => n.id === requestedNodeId
+    );
+    if (!present) return;
+    setSelectedId(requestedNodeId);
+    const next = new URLSearchParams(searchParams);
+    next.delete("node");
+    setSearchParams(next, { replace: true });
+  }, [requestedNodeId, nodes, searchParams, setSearchParams]);
   const [testInput, setTestInput] = useState('{ "question": "How do I reset my password?" }');
   const [openedViaTree, setOpenedViaTree] = useState(false);
   const clog = useConsoleLog();
@@ -896,11 +907,16 @@ export function PipelineBuilder(props: {
     };
   }, [pluginList]);
 
-  const validationByNode = useMemo(() => {
+  const validation = useMemo(() => {
     // Skip validation while the plugin list is still loading — otherwise
     // every plugin ref looks "missing" for the first render.
     if (pluginList.length === 0) {
-      return new Map<string, NodeValidationBuckets>();
+      return {
+        byNode: new Map<string, NodeValidationBuckets>(),
+        errors: [] as ValidationIssue[],
+        warnings: [] as ValidationIssue[],
+        datasetSlots: [] as Array<{ nodeId: string; slug: string; alias: string }>
+      };
     }
     const result = validatePipelineSpec(
       spec as unknown as Parameters<typeof validatePipelineSpec>[0],
@@ -928,8 +944,21 @@ export function PipelineBuilder(props: {
       }
       if (ids.length > 0) push(issue, ids);
     }
-    return byNode;
+    return {
+      byNode,
+      errors: result.errors,
+      warnings: result.warnings,
+      datasetSlots: result.datasetSlots ?? []
+    };
   }, [spec, clientPluginRegistry, pluginList.length]);
+  const validationByNode = validation.byNode;
+  const blockingErrors = validation.errors;
+  const runDisabled = blockingErrors.length > 0;
+  const runDisabledTitle = runDisabled
+    ? `Fix ${blockingErrors.length} validation error${
+        blockingErrors.length === 1 ? "" : "s"
+      } before running (see badges on the canvas).`
+    : undefined;
 
   const resolved = useQuery({
     queryKey: ["resolved-config", pipelineId, tenantId, environment],
@@ -1580,7 +1609,23 @@ export function PipelineBuilder(props: {
     });
   }
 
+  // Errored drafts can save, but publish / deploy / run are blocked. The
+  // toolbar buttons re-check this before opening the deploy modal so the
+  // user gets one clear console line per blocked action.
+  function blockIfInvalid(action: string): boolean {
+    if (blockingErrors.length === 0) return false;
+    clog.log(
+      "warn",
+      `${action} blocked — ${blockingErrors.length} validation error${
+        blockingErrors.length === 1 ? "" : "s"
+      } on the canvas. Fix the red badges and try again.`,
+      { errors: blockingErrors.map((e) => ({ code: e.code, nodeId: e.nodeId })) }
+    );
+    return true;
+  }
+
   async function publish() {
+    if (blockIfInvalid("Publish")) return;
     const layoutSpec = specWithLayout();
     await withLog("Published", "Publish failed", {
       method: "POST",
@@ -1591,7 +1636,36 @@ export function PipelineBuilder(props: {
     });
   }
 
-  async function deploy() {
+  // The Deploy / Run buttons open this modal first so the operator wires
+  // each dataset slug to a concrete (scope, tenant?, env?) variant for the
+  // target. Holding the next action in state lets one modal serve both
+  // entry points without duplicating the dataset-wiring UI.
+  const [deployModal, setDeployModal] = useState<{
+    mode: "run" | "deploy";
+  } | null>(null);
+
+  function openDeployModal(mode: "run" | "deploy") {
+    if (blockIfInvalid(mode === "run" ? "Run" : "Deploy")) return;
+    if (mode === "run" && !tenantReady) {
+      clog.log(
+        "warn",
+        tenantsLoading
+          ? "Run unavailable — still loading tenants. Pick a tenant once the list loads."
+          : "Run unavailable — select a tenant first (no tenant context to scope the request).",
+        { tenantId, tenantsLoading }
+      );
+      return;
+    }
+    if (validation.datasetSlots.length === 0) {
+      // Nothing to wire — skip the modal entirely.
+      if (mode === "run") void doRun();
+      else void doDeploy();
+      return;
+    }
+    setDeployModal({ mode });
+  }
+
+  async function doDeploy() {
     await withLog("Deployed", "Deploy failed", {
       method: "POST",
       path: `/api/pipelines/${pipelineId}/deployments`,
@@ -1664,7 +1738,7 @@ export function PipelineBuilder(props: {
       .catch((e) => clog.failure("Resolve config failed", e, { method: "GET", path }));
   }
 
-  async function run() {
+  async function doRun() {
     // Tenant-scoped route: without an x-tenant-id (UUID) the API 422s with
     // "tenant context required". Surface a console hint instead of firing a
     // doomed request.
@@ -1895,7 +1969,13 @@ export function PipelineBuilder(props: {
             />
           </label>
           <div className="tb-menu-divider" />
-          <button onClick={deploy}>Deploy</button>
+          <button
+            onClick={() => openDeployModal("deploy")}
+            disabled={runDisabled}
+            title={runDisabledTitle ?? "Deploy this version to this target"}
+          >
+            Deploy
+          </button>
         </ToolbarMenu>
 
         <ToolbarMenu label="Import / Export">
@@ -1906,14 +1986,16 @@ export function PipelineBuilder(props: {
         </ToolbarMenu>
 
         <button
-          onClick={run}
-          disabled={!tenantReady}
+          onClick={() => openDeployModal("run")}
+          disabled={!tenantReady || runDisabled}
           title={
-            tenantReady
-              ? "Run this pipeline"
-              : tenantsLoading
-                ? "Loading tenants…"
-                : "Select a tenant first (no tenant context)"
+            runDisabled
+              ? runDisabledTitle
+              : tenantReady
+                ? "Run this pipeline"
+                : tenantsLoading
+                  ? "Loading tenants…"
+                  : "Select a tenant first (no tenant context)"
           }
         >
           Run
@@ -2173,8 +2255,6 @@ export function PipelineBuilder(props: {
                     isStorageCategory(selectedPlugin.data.category) && (
                       <DatasetPickerSection
                         node={selectedNode}
-                        tenantId={tenantId}
-                        environment={environment}
                         pipelineSlug={pipelineSlug}
                         onChange={(dataset) =>
                           updateSelectedNode((n) => ({ ...n, dataset }))
@@ -2377,6 +2457,22 @@ export function PipelineBuilder(props: {
       </div>
       <BuilderConsole log={clog} />
       </div>
+      <DeployModal
+        open={deployModal !== null}
+        mode={deployModal?.mode ?? "deploy"}
+        tenantId={tenantId}
+        tenantSlug={selectedTenant?.slug}
+        environment={environment}
+        pipelineSlug={pipelineSlug || pipelineId}
+        slots={validation.datasetSlots}
+        onClose={() => setDeployModal(null)}
+        onConfirm={() => {
+          const mode = deployModal?.mode;
+          setDeployModal(null);
+          if (mode === "run") void doRun();
+          else if (mode === "deploy") void doDeploy();
+        }}
+      />
     </section>
   );
 }

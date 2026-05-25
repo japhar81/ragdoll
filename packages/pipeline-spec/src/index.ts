@@ -1,4 +1,9 @@
-import type { PipelineSpec, PipelineNode, PluginRef } from "../../core/src/index.ts";
+import type {
+  PipelineSpec,
+  PipelineNode,
+  PluginCategory,
+  PluginRef
+} from "../../core/src/index.ts";
 import { pluginKey, type PluginRegistry } from "../../plugin-sdk/src/index.ts";
 import { applyLayout } from "./layouts.ts";
 import { projectStages } from "./stagesProjection.ts";
@@ -7,6 +12,26 @@ export * from "./yaml.ts";
 export * from "./lifecycle.ts";
 export * from "./layouts.ts";
 export * from "./stagesProjection.ts";
+
+/**
+ * Categories whose plugins touch a backend collection / index — the ones a
+ * Dataset reference is meaningful for. A node with one of these categories
+ * MUST carry `node.dataset = { slug, ... }` so the runtime can resolve the
+ * scoped backend collection at execute time.
+ *
+ * Exposed from pipeline-spec so the validator and the Builder UI agree on
+ * which nodes are "storage-touching".
+ */
+export const STORAGE_CATEGORIES: ReadonlySet<PluginCategory> = new Set<PluginCategory>([
+  "vector_store",
+  "retriever",
+  "sink",
+  "loader"
+]);
+
+export function isStorageCategory(category: string | undefined): boolean {
+  return !!category && STORAGE_CATEGORIES.has(category as PluginCategory);
+}
 
 /**
  * Apply a left-to-right Sugiyama layout to a pipeline spec, writing
@@ -129,6 +154,12 @@ export interface ValidationIssue {
   edge?: { from: string; to: string };
 }
 
+export interface DatasetSlotRef {
+  nodeId: string;
+  slug: string;
+  alias: string;
+}
+
 export interface PipelineValidationResult {
   valid: boolean;
   errors: ValidationIssue[];
@@ -136,6 +167,11 @@ export interface PipelineValidationResult {
   requiredSecrets: string[];
   requiredConfig: string[];
   missingPlugins: PluginRef[];
+  /** Every node currently binding a dataset slug (storage-touching nodes
+   *  with a `node.dataset.slug`). Drives the Deploy modal: each entry is
+   *  one "slot" the operator must resolve to a concrete dataset for the
+   *  target (tenant, env). */
+  datasetSlots: DatasetSlotRef[];
 }
 
 export function validatePipelineSpec(spec: PipelineSpec, registry?: PluginRegistry): PipelineValidationResult {
@@ -143,6 +179,7 @@ export function validatePipelineSpec(spec: PipelineSpec, registry?: PluginRegist
   const requiredSecrets = new Set<string>();
   const requiredConfig = new Set<string>();
   const missingPlugins: PluginRef[] = [];
+  const datasetSlots: DatasetSlotRef[] = [];
 
   if (spec.apiVersion !== "rag-platform/v1") {
     issues.push({ level: "error", code: "invalid_api_version", message: "apiVersion must be rag-platform/v1" });
@@ -164,6 +201,38 @@ export function validatePipelineSpec(spec: PipelineSpec, registry?: PluginRegist
     if (node.plugin && registry && !registry.get(node.plugin)) {
       missingPlugins.push(node.plugin);
       issues.push({ level: "error", code: "missing_plugin_ref", message: `plugin ${pluginKey(node.plugin)} is not registered`, nodeId: node.id });
+    }
+    // Storage-touching nodes (vector_store / retriever / sink / loader) MUST
+    // pin a dataset slug. The runtime resolves the (tenant, env)-scoped
+    // dataset at execute time; without a slug the worker has nowhere to read
+    // / write. Pipelines that fail this check can still SAVE — operators may
+    // want to stash a draft — but Run / Publish / Deploy are blocked.
+    const dataset = node.dataset as { slug?: string; alias?: string } | undefined;
+    // Storage-touching nodes only need a dataset binding when the plugin
+    // declares contract v2 (the dataset-aware contract). Legacy v1 plugins
+    // still name their own collection via `config.collection` / `config.index`
+    // and don't need a Dataset row — flagging them here would break every
+    // pre-Dataset pipeline.
+    if (node.plugin && isStorageCategory(node.plugin.category) && !dataset?.slug) {
+      const manifest = registry?.get(node.plugin)?.manifest as
+        | { contract?: number }
+        | undefined;
+      const contract = manifest?.contract ?? 1;
+      if (contract >= 2) {
+        issues.push({
+          level: "error",
+          code: "missing_required_dataset",
+          message: `node "${node.id}" (${node.plugin.category}) needs a dataset binding — pick a slug in the Inspector`,
+          nodeId: node.id
+        });
+      }
+    }
+    if (dataset?.slug) {
+      datasetSlots.push({
+        nodeId: node.id,
+        slug: dataset.slug,
+        alias: dataset.alias ?? "stable"
+      });
     }
     collectRefs(node, requiredConfig, requiredSecrets);
   }
@@ -223,7 +292,8 @@ export function validatePipelineSpec(spec: PipelineSpec, registry?: PluginRegist
     warnings: issues.filter((issue) => issue.level === "warning"),
     requiredSecrets: [...requiredSecrets],
     requiredConfig: [...requiredConfig],
-    missingPlugins
+    missingPlugins,
+    datasetSlots
   };
 }
 

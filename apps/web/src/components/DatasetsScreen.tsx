@@ -176,21 +176,20 @@ function DatasetDetail(props: { dataset: DatasetView; canAdmin: boolean }) {
       />
       {aliasSwap.isError && <p className="error">{errText(aliasSwap.error)}</p>}
 
+      {props.canAdmin && <CreateVariantForm slug={props.dataset.slug} />}
       <DatasetPipelinesSection dataset={props.dataset} />
     </div>
   );
 }
 
 /**
- * Phase 13: inverse view. "Which pipelines reference this dataset?"
- * derived client-side from listPipelines + listVersions so we don't
- * need a new REST endpoint. Each visible pipeline's latest spec is
- * scanned for `node.dataset.slug === <our slug>`.
+ * Inverse view: every pipeline node that pins this slug, with a deep-link
+ * back to the Builder so the operator can re-wire from one click. The
+ * Builder reads `?node=<id>` and selects that node in the Inspector on
+ * mount, so rewiring is a slug-change away.
  *
- * Cost-aware: one versions call per visible pipeline. React Query
- * dedupes against the Pipelines screen's own cache (same
- * `pipeline-versions` key), so opening a dataset detail after
- * browsing the Pipelines list usually hits warm cache.
+ * Derived client-side from listPipelines + listVersions; React Query
+ * dedupes against the Pipelines screen's own `pipeline-versions` cache.
  */
 function DatasetPipelinesSection(props: { dataset: DatasetView }) {
   const pipelines = useQuery({
@@ -200,10 +199,10 @@ function DatasetPipelinesSection(props: { dataset: DatasetView }) {
   const rows = pipelines.data?.pipelines ?? [];
   return (
     <>
-      <h4 style={{ marginTop: 16 }}>Pipelines</h4>
+      <h4 style={{ marginTop: 16 }}>Pipelines wiring slug "{props.dataset.slug}"</h4>
       <p className="muted" style={{ fontSize: "0.85em" }}>
-        Pipelines whose latest spec references{" "}
-        <code>{props.dataset.slug}</code>.
+        Each row is one node that pins this slug. Click <em>open in builder</em>
+        {" "}to rewire it.
       </p>
       {pipelines.isLoading && <p className="muted">Loading…</p>}
       <DatasetPipelineList
@@ -214,84 +213,240 @@ function DatasetPipelinesSection(props: { dataset: DatasetView }) {
   );
 }
 
-/**
- * Streams DatasetPipelineRow probes for each visible pipeline; only
- * the ones whose latest spec references the target dataset slug
- * actually render. When NONE match, we surface a hint so the section
- * isn't silently empty.
- */
+interface PipelineBinding {
+  pipelineId: string;
+  pipelineSlug: string;
+  pipelineName: string;
+  nodeId: string;
+  alias: string;
+}
+
 function DatasetPipelineList(props: {
   rows: Array<{ id: string; name: string; slug: string }>;
   datasetSlug: string;
 }) {
-  const [hits, setHits] = useState<Record<string, boolean>>({});
-  const allChecked = props.rows.every((r) => hits[r.id] !== undefined);
-  const anyHit = Object.values(hits).some(Boolean);
+  const [bindings, setBindings] = useState<Record<string, PipelineBinding[]>>({});
+  const allChecked = props.rows.every((r) => bindings[r.id] !== undefined);
+  const flat = useMemo(
+    () => Object.values(bindings).flat(),
+    [bindings]
+  );
   return (
     <>
       {props.rows.map((p) => (
-        <DatasetPipelineRow
+        <DatasetPipelineProbe
           key={p.id}
           pipelineId={p.id}
-          name={p.name}
-          slug={p.slug}
+          pipelineName={p.name}
+          pipelineSlug={p.slug}
           datasetSlug={props.datasetSlug}
-          onChecked={(hit) =>
-            setHits((prev) =>
-              prev[p.id] === hit ? prev : { ...prev, [p.id]: hit }
+          onResolved={(found) =>
+            setBindings((prev) =>
+              prev[p.id] !== undefined
+                ? prev
+                : { ...prev, [p.id]: found }
             )
           }
         />
       ))}
-      {allChecked && !anyHit && (
-        <p className="muted">No pipelines reference this dataset yet.</p>
+      {allChecked && flat.length === 0 && (
+        <p className="muted">No pipelines reference this slug yet.</p>
       )}
+      {flat.length > 0 && <BindingTable bindings={flat} />}
     </>
   );
 }
 
+function BindingTable(props: { bindings: PipelineBinding[] }) {
+  const navigate = useNavigate();
+  return (
+    <table className="grid" style={{ marginTop: 8 }}>
+      <thead>
+        <tr>
+          <th>Pipeline</th>
+          <th>Node</th>
+          <th>Alias</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody>
+        {props.bindings.map((b) => (
+          <tr key={`${b.pipelineId}-${b.nodeId}`}>
+            <td>
+              <code>{b.pipelineSlug}</code>
+              <br />
+              <span className="muted">{b.pipelineName}</span>
+            </td>
+            <td>
+              <code>{b.nodeId}</code>
+            </td>
+            <td>
+              <code>{b.alias}</code>
+            </td>
+            <td>
+              <button
+                className="link-btn"
+                onClick={() =>
+                  navigate(
+                    `/builder/${encodeURIComponent(b.pipelineId)}?node=${encodeURIComponent(b.nodeId)}`
+                  )
+                }
+                title="Jump to this node in the Builder"
+              >
+                open in builder
+              </button>
+            </td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+}
+
 /**
- * Renders a single pipeline row IFF its latest version references the
- * target dataset slug. Doing the filter at the row level instead of
- * batching keeps each lookup memoised in React Query and matches the
- * PipelinesScreen's own caching key.
+ * Probes one pipeline's latest version for nodes pinning the target slug.
+ * Reports the full list of bindings (potentially several per pipeline) to
+ * the parent so the BindingTable can render every wired node.
  */
-function DatasetPipelineRow(props: {
+function DatasetPipelineProbe(props: {
   pipelineId: string;
-  name: string;
-  slug: string;
+  pipelineName: string;
+  pipelineSlug: string;
   datasetSlug: string;
-  onChecked: (hit: boolean) => void;
+  onResolved: (found: PipelineBinding[]) => void;
 }) {
   const versions = useQuery({
     queryKey: ["pipeline-versions", props.pipelineId],
     queryFn: () => api.listVersions(props.pipelineId),
     staleTime: 30_000
   });
-  const hit = useMemo(() => {
+  const found = useMemo<PipelineBinding[]>(() => {
     const all = versions.data?.versions ?? [];
     const latestId = versions.data?.latestVersionId;
     const target = latestId
       ? all.find((v) => v.id === latestId) ?? all[0]
       : all[0];
-    if (!target?.spec) return false;
-    for (const node of (target.spec as { spec?: { nodes?: Array<{ dataset?: { slug?: string } }> } })?.spec?.nodes ?? []) {
-      if (node.dataset?.slug === props.datasetSlug) return true;
+    if (!target?.spec) return [];
+    const out: PipelineBinding[] = [];
+    const nodes =
+      (target.spec as {
+        spec?: { nodes?: Array<{ id: string; dataset?: { slug?: string; alias?: string } }> };
+      })?.spec?.nodes ?? [];
+    for (const node of nodes) {
+      if (node.dataset?.slug === props.datasetSlug) {
+        out.push({
+          pipelineId: props.pipelineId,
+          pipelineSlug: props.pipelineSlug,
+          pipelineName: props.pipelineName,
+          nodeId: node.id,
+          alias: node.dataset.alias ?? "stable"
+        });
+      }
     }
-    return false;
-  }, [versions.data, props.datasetSlug]);
-  // Report whether this pipeline references the dataset so the parent
-  // can decide whether the whole list is empty. We only call back when
-  // the result is settled (versions.data loaded) to avoid flicker.
+    return out;
+  }, [
+    versions.data,
+    props.datasetSlug,
+    props.pipelineId,
+    props.pipelineName,
+    props.pipelineSlug
+  ]);
   useEffect(() => {
-    if (versions.data) props.onChecked(hit);
-  }, [versions.data, hit, props]);
-  if (!hit) return null;
+    if (versions.data) props.onResolved(found);
+    // intentional: only report once per data refresh
+  }, [versions.data, found, props]);
+  return null;
+}
+
+/**
+ * Inline "create another scope variant of this slug" form. Lets operators
+ * spawn a tenant- or env-scoped override without leaving the Datasets
+ * screen. Uses the same {scope, slug, …} createDataset call the deploy
+ * modal does, so the resulting variant lights up everywhere.
+ */
+function CreateVariantForm(props: { slug: string }) {
+  const auth = useAuth();
+  const qc = useQueryClient();
+  const { tenants } = useTenants();
+  const [scope, setScope] = useState<"global" | "tenant" | "environment">("tenant");
+  const [tenantId, setTenantId] = useState("");
+  const [environmentId, setEnvironmentId] = useState("");
+  const { environments } = useEnvironments(tenantId || undefined);
+  const hasGlobalAdmin = useMemo(
+    () => auth.grants.some((g) => g.scope === "*"),
+    [auth.grants]
+  );
+  const create = useMutation({
+    mutationFn: () =>
+      api.createDataset({
+        scope,
+        slug: props.slug,
+        displayName: props.slug,
+        tenantId: scope === "global" ? undefined : tenantId || undefined,
+        environmentId:
+          scope === "environment" ? environmentId || undefined : undefined,
+        modalities: ["vector"]
+      }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["datasets-all"] });
+      qc.invalidateQueries({ queryKey: ["datasets-slugs"] });
+      qc.invalidateQueries({ queryKey: ["datasets-deploy"] });
+    }
+  });
   return (
-    <div style={{ padding: "2px 0" }}>
-      <code>{props.slug}</code>{" "}
-      <span className="muted">— {props.name}</span>
-    </div>
+    <form
+      className="inline-form"
+      onSubmit={(e) => {
+        e.preventDefault();
+        create.mutate();
+      }}
+      style={{ flexWrap: "wrap", gap: 8, marginTop: 8 }}
+    >
+      <span className="muted">
+        New variant of <code>{props.slug}</code> at:
+      </span>
+      <select value={scope} onChange={(e) => setScope(e.target.value as typeof scope)}>
+        {hasGlobalAdmin && <option value="global">global</option>}
+        <option value="tenant">tenant</option>
+        <option value="environment">environment</option>
+      </select>
+      {scope !== "global" && (
+        <select
+          value={tenantId}
+          onChange={(e) => {
+            setTenantId(e.target.value);
+            setEnvironmentId("");
+          }}
+          required
+        >
+          <option value="">— tenant —</option>
+          {tenants.map((t) => (
+            <option key={t.id} value={t.id}>
+              {t.name}
+            </option>
+          ))}
+        </select>
+      )}
+      {scope === "environment" && (
+        <select
+          value={environmentId}
+          onChange={(e) => setEnvironmentId(e.target.value)}
+          disabled={!tenantId}
+          required
+        >
+          <option value="">— env —</option>
+          {environments.map((env) => (
+            <option key={env.id} value={env.name}>
+              {env.name}
+            </option>
+          ))}
+        </select>
+      )}
+      <button type="submit" className="primary" disabled={create.isPending}>
+        {create.isPending ? "Creating…" : "Create variant"}
+      </button>
+      {create.isError && <span className="error">{errText(create.error)}</span>}
+    </form>
   );
 }
 

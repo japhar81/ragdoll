@@ -115,6 +115,12 @@ export interface ValidationIssue {
   edge?: { from: string; to: string };
 }
 
+export interface DatasetSlotRef {
+  nodeId: string;
+  slug: string;
+  alias: string;
+}
+
 export interface PipelineValidationResult {
   valid: boolean;
   errors: ValidationIssue[];
@@ -122,6 +128,7 @@ export interface PipelineValidationResult {
   requiredSecrets: string[];
   requiredConfig: string[];
   missingPlugins: PluginRef[];
+  datasetSlots: DatasetSlotRef[];
 }
 
 /** Minimal React Flow node/edge shapes the converter understands. */
