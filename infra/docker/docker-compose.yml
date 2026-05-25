@@ -101,6 +101,12 @@ services:
       DISABLE_INSTALL_DEMO_CONFIG: "true"
       bootstrap.memory_lock: "true"
       OPENSEARCH_JAVA_OPTS: "-Xms512m -Xmx512m"
+      # Local dev: don't block writes when the host's Docker disk is
+      # tight. With the default 85% high watermark a half-full laptop
+      # silently flips every index to read-only-allow-delete and the
+      # codebase-ingest-docs demo crashes at the OpenSearch write step
+      # with HTTP 403 / index_create_block_exception.
+      cluster.routing.allocation.disk.threshold_enabled: "false"
     ulimits:
       memlock:
         soft: -1

@@ -26,10 +26,10 @@ spec:
       ref: main
       include: ["**/*.md", "src/**/*.{ts,js,py}"]
       computeHash: true
-    secrets:
-      token:
-        scope: tenant
-        key: github.token
+    # No `secrets:` block: github_source treats `token` as optional and
+    # falls back to unauthenticated requests, which is fine for public
+    # repos. Re-add `token: { scope: tenant, key: github.token }` here
+    # to ingest private repos or to raise the rate limit.
   - id: chunk
     plugin:
       category: chunker

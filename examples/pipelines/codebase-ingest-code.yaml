@@ -29,6 +29,12 @@ spec:
       - "**/*.{ts,tsx,js,jsx,py,go,rs,java,kt,c,h,cpp,cc,hpp,cs,rb,php,sh}"
       exclude:
       - "docs/**"
+      - "**/node_modules/**"
+      - "**/dist/**"
+      - "**/build/**"
+      - "**/.next/**"
+      - "**/.git/**"
+      - "**/coverage/**"
       maxFileSize: 524288
       computeHash: false
     ui:
