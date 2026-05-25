@@ -40,6 +40,8 @@ import type {
   PipelineVersionRow,
   ScheduleRepository,
   ScheduleRow,
+  RetentionSettingRow,
+  RetentionSettingsRepository,
   PluginRepository,
   PluginRow,
   PluginVersionRepository,
@@ -942,6 +944,33 @@ export class InMemoryUsageRecordRepository implements UsageRecordRepository {
         return true;
       })
       .map((row) => structuredClone(row));
+  }
+}
+
+export class InMemoryRetentionSettingsRepository
+  implements RetentionSettingsRepository
+{
+  private rows = new Map<string, RetentionSettingRow>();
+
+  async list(): Promise<RetentionSettingRow[]> {
+    return [...this.rows.values()].map((r) => structuredClone(r));
+  }
+
+  async upsert(input: {
+    resource: RetentionSettingRow["resource"];
+    maxCount: number | null;
+    maxAgeDays: number | null;
+    updatedBy?: string;
+  }): Promise<RetentionSettingRow> {
+    const stored: RetentionSettingRow = {
+      resource: input.resource,
+      maxCount: input.maxCount,
+      maxAgeDays: input.maxAgeDays,
+      updatedAt: new Date().toISOString(),
+      updatedBy: input.updatedBy ?? null
+    };
+    this.rows.set(input.resource, structuredClone(stored));
+    return structuredClone(stored);
   }
 }
 

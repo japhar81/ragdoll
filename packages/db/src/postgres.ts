@@ -138,6 +138,59 @@ export class PostgresExecutionStore implements ExecutionStore {
     return result.rows.map(rowToExecutionRecord);
   }
 
+  /**
+   * Cursor-paginated executions list ordered by (started_at DESC, id DESC).
+   * Cursor decodes to a `{timestamp, id}` from the last row of the previous
+   * page; the WHERE clause selects rows strictly older than that anchor.
+   * `limit` is clamped 1..200 by the caller (the API route).
+   */
+  async listExecutionsPage(args: {
+    tenantId?: string;
+    limit: number;
+    cursor?: string;
+  }): Promise<{ rows: ExecutionRecord[]; nextCursor: string | null }> {
+    const parsed = parseCursor(args.cursor);
+    const where: string[] = [];
+    const params: unknown[] = [];
+    if (args.tenantId !== undefined) {
+      params.push(args.tenantId);
+      where.push(`tenant_id = $${params.length}`);
+    }
+    if (parsed) {
+      // (started_at, id) < (cursor.t, cursor.i) for stable pagination across
+      // ties — the composite tuple comparison fans out into a form Postgres
+      // can index against on (started_at, id).
+      params.push(parsed.timestamp);
+      params.push(parsed.id);
+      where.push(
+        `(started_at, id) < ($${params.length - 1}::timestamptz, $${params.length}::uuid)`
+      );
+    }
+    const whereClause = where.length ? `WHERE ${where.join(" AND ")}` : "";
+    // Fetch one extra so we can decide if there's a next page without a
+    // separate COUNT — same trick the public APIs use elsewhere.
+    params.push(args.limit + 1);
+    const result = await this.pool.query<Record<string, unknown>>(
+      `SELECT * FROM executions ${whereClause}
+       ORDER BY started_at DESC, id DESC
+       LIMIT $${params.length}`,
+      params
+    );
+    const allRows = result.rows.map(rowToExecutionRecord);
+    const overflow = allRows.length > args.limit;
+    const rows = overflow ? allRows.slice(0, args.limit) : allRows;
+    let nextCursor: string | null = null;
+    if (overflow && rows.length > 0) {
+      const last = rows[rows.length - 1];
+      const lastRow = result.rows[args.limit - 1];
+      nextCursor = encodeCursorRaw(
+        last.startedAt,
+        String(lastRow.id ?? lastRow.execution_id)
+      );
+    }
+    return { rows, nextCursor };
+  }
+
   async getExecution(
     executionId: string
   ): Promise<ExecutionRecord | undefined> {
@@ -162,6 +215,31 @@ export class PostgresExecutionStore implements ExecutionStore {
 function toIso(value: unknown): string | undefined {
   if (value instanceof Date) return value.toISOString();
   return typeof value === "string" ? value : undefined;
+}
+
+/** Decode an opaque {timestamp, id} cursor token; returns null when the
+ *  caller passed nothing or the token was malformed. Mirror of the
+ *  encode helper below so server-side pagination cursors round-trip. */
+export function parseCursor(
+  raw: string | undefined
+): { timestamp: string; id: string } | null {
+  if (!raw) return null;
+  try {
+    const decoded = Buffer.from(raw, "base64url").toString("utf-8");
+    const parsed = JSON.parse(decoded) as { t?: unknown; i?: unknown };
+    if (typeof parsed.t === "string" && typeof parsed.i === "string") {
+      return { timestamp: parsed.t, id: parsed.i };
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/** Encode a `(timestamp, id)` tuple into the opaque base64url token the
+ *  next page request echoes back. */
+export function encodeCursorRaw(timestamp: string, id: string): string {
+  return Buffer.from(JSON.stringify({ t: timestamp, i: id })).toString("base64url");
 }
 
 function rowToExecutionRecord(

@@ -16,7 +16,12 @@ export type QueueJobType =
   | "delete_tenant_vector_data"
   | "rotate_provider_model_metadata"
   | "plugin_health_check"
-  | "run_pipeline";
+  | "run_pipeline"
+  // System sweep jobs — enqueued by the scheduler on un-deletable rows. The
+  // worker picks them up through the same BullMQ concurrency pool, so they
+  // run alongside pipelines without blocking either side.
+  | "stale_exec_sweep"
+  | "retention_sweep";
 
 export type QueueJobStatus =
   | "queued"

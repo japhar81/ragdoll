@@ -493,8 +493,19 @@ export const api = {
   // other route — these add no special-casing. The worker writes the trace to
   // Postgres and the API reads it, so the Builder/Executions screens *poll*
   // these (1–1.5s) until the execution is terminal; see lib/execTrace.ts.
-  listExecutions: (params: { pipeline_id?: string; tenant_id?: string; status?: string; limit?: number } = {}) =>
-    request<{ executions: ExecutionRecord[] }>("GET", `/api/executions${qs(params)}`),
+  listExecutions: (
+    params: {
+      pipeline_id?: string;
+      tenant_id?: string;
+      status?: string;
+      limit?: number;
+      cursor?: string;
+    } = {}
+  ) =>
+    request<{ executions: ExecutionRecord[]; nextCursor?: string | null }>(
+      "GET",
+      `/api/executions${qs(params)}`
+    ),
   getExecution: (executionId: string) =>
     request<{ execution: ExecutionRecord }>(
       "GET",
@@ -515,14 +526,40 @@ export const api = {
     }>("GET", `/api/executions/${encodeURIComponent(executionId)}/trace`),
 
   // ---- audit / usage / plugins -----------------------------------------
-  listAudit: (params: { tenant_id?: string; limit?: number } = {}) =>
-    request<{ logs: AuditRow[] }>("GET", `/api/audit${qs(params)}`),
-  usage: (params: { tenant_id?: string; execution_id?: string } = {}) =>
-    request<{ summary: UsageSummary; records: UsageRow[] }>(
+  listAudit: (
+    params: { tenant_id?: string; limit?: number; cursor?: string } = {}
+  ) =>
+    request<{ logs: AuditRow[]; nextCursor?: string | null }>(
       "GET",
-      `/api/usage${qs(params)}`
+      `/api/audit${qs(params)}`
     ),
+  usage: (
+    params: {
+      tenant_id?: string;
+      execution_id?: string;
+      limit?: number;
+      cursor?: string;
+    } = {}
+  ) =>
+    request<{
+      summary: UsageSummary;
+      records: UsageRow[];
+      nextCursor?: string | null;
+    }>("GET", `/api/usage${qs(params)}`),
   listPlugins: () => request<{ plugins: PluginInfo[] }>("GET", "/api/plugins"),
+
+  // ---- retention --------------------------------------------------------
+  listRetention: () =>
+    request<{ settings: RetentionSetting[] }>("GET", "/api/retention"),
+  updateRetention: (
+    resource: "executions" | "usage" | "audit",
+    patch: { maxCount?: number | null; maxAgeDays?: number | null }
+  ) =>
+    request<{ setting: RetentionSetting }>(
+      "PATCH",
+      `/api/retention/${encodeURIComponent(resource)}`,
+      patch
+    ),
 
   /**
    * Fetch a single plugin's full metadata (incl. config/secrets schema + ui).
@@ -877,9 +914,12 @@ export interface TenantPipelineRow {
 
 export interface ScheduleRow {
   id: string;
-  tenantId: string;
-  pipelineId: string;
-  environment: string;
+  /** Null for system schedules (no tenant/pipeline scope). */
+  tenantId: string | null;
+  /** Null for system schedules. */
+  pipelineId: string | null;
+  /** Null for system schedules. */
+  environment: string | null;
   activationLabel?: string | null;
   cron: string;
   timezone: string;
@@ -888,6 +928,14 @@ export interface ScheduleRow {
   lastRunAt?: string | null;
   nextRunAt?: string | null;
   createdAt: string;
+  /** Job type the scheduler enqueues. Defaults to "run_pipeline". */
+  jobType?: string;
+  /** Un-deletable platform schedule (retention sweep, stale-exec sweep, …). */
+  system?: boolean;
+  /** Display name for system schedules. */
+  name?: string | null;
+  /** Job-specific parameters. */
+  params?: Record<string, unknown>;
 }
 
 export interface DeploymentRow {
@@ -948,6 +996,14 @@ export interface SecretMeta {
   updatedAt?: string;
   metadata?: unknown;
   value: string;
+}
+
+export interface RetentionSetting {
+  resource: "executions" | "usage" | "audit";
+  maxCount: number | null;
+  maxAgeDays: number | null;
+  updatedAt: string;
+  updatedBy?: string | null;
 }
 
 export interface AuditRow {

@@ -215,9 +215,12 @@ export interface PipelineActivationRow {
 
 export interface ScheduleRow {
   id: UUID;
-  tenantId: UUID;
-  pipelineId: UUID;
-  environment: string;
+  /** Null for `system` schedules — those have no tenant/pipeline scope. */
+  tenantId: UUID | null;
+  /** Null for `system` schedules — those have no tenant/pipeline scope. */
+  pipelineId: UUID | null;
+  /** Null for `system` schedules. */
+  environment: string | null;
   activationLabel?: string | null;
   cron: string;
   timezone: string;
@@ -234,6 +237,22 @@ export interface ScheduleRow {
    * legacy "trust the schedule" behaviour (no re-check).
    */
   createdBy?: UUID | null;
+  /**
+   * Type of queue job this schedule enqueues. Defaults to `run_pipeline`
+   * (the only kind pre-Phase-12). Platform sweepers use `stale_exec_sweep`
+   * and `retention_sweep` and carry tenant/pipeline/environment NULL.
+   */
+  jobType?: string;
+  /**
+   * Un-deletable platform schedule. The UI hides delete on these rows;
+   * cadence is still editable.
+   */
+  system?: boolean;
+  /** Display name for the schedule. Required on `system` rows so the UI
+   *  has something to render in lieu of a pipeline link. */
+  name?: string | null;
+  /** Job-specific parameters merged onto the enqueued payload. */
+  params?: Record<string, unknown>;
 }
 
 export interface PipelineDeploymentRow {
@@ -702,14 +721,44 @@ export interface ConfigValueRepository {
   listConfigValues(filter?: ConfigValueScopeFilter): Promise<ConfigValueRow[]>;
 }
 
+export interface RetentionSettingRow {
+  resource: "executions" | "usage" | "audit";
+  maxCount: number | null;
+  maxAgeDays: number | null;
+  updatedAt: string;
+  updatedBy?: string | null;
+}
+
+export interface RetentionSettingsRepository {
+  list(): Promise<RetentionSettingRow[]>;
+  upsert(input: {
+    resource: RetentionSettingRow["resource"];
+    maxCount: number | null;
+    maxAgeDays: number | null;
+    updatedBy?: string;
+  }): Promise<RetentionSettingRow>;
+}
+
 export interface AuditLogRepository {
   append(row: Omit<AuditLogRow, "id">): Promise<AuditLogRow>;
   list(filter?: { tenantId?: UUID; actorId?: UUID; limit?: number }): Promise<AuditLogRow[]>;
+  /** Cursor-paginated list ordered by (created_at DESC, id DESC). */
+  listPage?(args: {
+    tenantId?: UUID;
+    limit: number;
+    cursor?: string;
+  }): Promise<{ rows: AuditLogRow[]; nextCursor: string | null }>;
 }
 
 export interface UsageRecordRepository {
   append(row: Omit<UsageRecordRow, "id" | "createdAt">): Promise<UsageRecordRow>;
   list(filter?: { tenantId?: UUID; executionId?: string }): Promise<UsageRecordRow[]>;
+  /** Cursor-paginated list ordered by (created_at DESC, id DESC). */
+  listPage?(args: {
+    tenantId?: UUID;
+    limit: number;
+    cursor?: string;
+  }): Promise<{ rows: UsageRecordRow[]; nextCursor: string | null }>;
 }
 
 export interface PluginRepository extends CrudRepository<PluginRow> {

@@ -83,6 +83,7 @@ import {
   InMemoryDatasetRepository,
   InMemoryDatasetVersionRepository,
   InMemoryDatasetAliasRepository,
+  InMemoryRetentionSettingsRepository,
   type DatasetRepository,
   type DatasetRow,
   type DatasetVersionRepository,
@@ -123,6 +124,7 @@ import {
   type ConfigValueRepository,
   type AuditLogRepository,
   type UsageRecordRepository,
+  type RetentionSettingsRepository,
   type PluginRepository,
   type ProviderRepository,
   type DatasourceConnectionRepository,
@@ -198,13 +200,51 @@ export interface AppResponse {
  * optional sync `executions`/`nodes` for tests); a Postgres-backed reader
  * queries the executions / execution_nodes tables.
  */
+export interface CursorPage<T> {
+  rows: T[];
+  /** Opaque continuation token, or null when there are no more rows. */
+  nextCursor: string | null;
+}
+
 export interface ReadableExecutionStore extends ExecutionStore {
   listExecutions(tenantId?: string): Promise<ExecutionRecord[]>;
+  /**
+   * Cursor-paginated list ordered by (started_at DESC, id DESC). Optional
+   * on the interface so the in-memory test store can fall back to the
+   * full `listExecutions` slicing — Postgres-backed deployments override.
+   */
+  listExecutionsPage?(args: {
+    tenantId?: string;
+    limit: number;
+    cursor?: string;
+  }): Promise<CursorPage<ExecutionRecord>>;
   getExecution(executionId: string): Promise<ExecutionRecord | undefined>;
   listNodes(executionId: string): Promise<ExecutionNodeRecord[]>;
   /** Optional sync arrays kept by the InMemory store for tests. */
   executions?: ExecutionRecord[];
   nodes?: ExecutionNodeRecord[];
+}
+
+/** Decode a `{timestamp, id}` cursor; returns null on any parse failure
+ *  so callers fall back to "start from the top". */
+export function decodeCursor(
+  raw: string | undefined
+): { timestamp: string; id: string } | null {
+  if (!raw) return null;
+  try {
+    const decoded = Buffer.from(raw, "base64url").toString("utf-8");
+    const parsed = JSON.parse(decoded) as { t?: string; i?: string };
+    if (typeof parsed.t === "string" && typeof parsed.i === "string") {
+      return { timestamp: parsed.t, id: parsed.i };
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+export function encodeCursor(timestamp: string, id: string): string {
+  return Buffer.from(JSON.stringify({ t: timestamp, i: id })).toString("base64url");
 }
 
 export interface AppDeps {
@@ -235,6 +275,9 @@ export interface AppDeps {
   configValues: ConfigValueRepository;
   auditLogs: AuditLogRepository;
   usageRecords: UsageRecordRepository;
+  /** Retention caps for executions/usage/audit. Optional so legacy harnesses
+   *  still build a valid AppDeps; createApp falls back to an InMemory impl. */
+  retentionSettings?: RetentionSettingsRepository;
   plugins: PluginRepository;
   providers: ProviderRepository;
   datasources: DatasourceConnectionRepository;
@@ -423,6 +466,8 @@ export function createApp(deps: AppDeps): App {
     deps.datasetVersions ?? new InMemoryDatasetVersionRepository();
   const datasetAliases: DatasetAliasRepository =
     deps.datasetAliases ?? new InMemoryDatasetAliasRepository();
+  const retentionSettings: RetentionSettingsRepository =
+    deps.retentionSettings ?? new InMemoryRetentionSettingsRepository();
 
   // ---- auth / RBAC stores -------------------------------------------------
   const users: UserRepository =
@@ -2150,7 +2195,16 @@ export function createApp(deps: AppDeps): App {
   route("PUT", "/api/schedules/:id", async (ctx) => {
     const before = await schedules.get(ctx.params.id);
     if (!before) return error(404, "not_found");
-    enforce(ctx.principal, "config:edit_tenant", { tenantId: before.tenantId });
+    // System schedules (un-deletable platform sweepers) bypass the
+    // tenant-scoped grant check — they're platform-wide config. Only
+    // global config admins (config:edit_global) can edit cadence.
+    if (before.system) {
+      enforce(ctx.principal, "config:edit_global", {});
+    } else {
+      enforce(ctx.principal, "config:edit_tenant", {
+        tenantId: before.tenantId ?? undefined
+      });
+    }
     const body = ctx.request.body;
     if (!isObject(body)) return error(422, "validation_failed", { issues: [] });
     const patch: Partial<ScheduleRow> = {};
@@ -2182,7 +2236,13 @@ export function createApp(deps: AppDeps): App {
   route("PATCH", "/api/schedules/:id", async (ctx) => {
     const before = await schedules.get(ctx.params.id);
     if (!before) return error(404, "not_found");
-    enforce(ctx.principal, "config:edit_tenant", { tenantId: before.tenantId });
+    if (before.system) {
+      enforce(ctx.principal, "config:edit_global", {});
+    } else {
+      enforce(ctx.principal, "config:edit_tenant", {
+        tenantId: before.tenantId ?? undefined
+      });
+    }
     const body = ctx.request.body;
     if (!isObject(body) || typeof body.enabled !== "boolean") {
       return error(422, "validation_failed", {
@@ -2197,7 +2257,18 @@ export function createApp(deps: AppDeps): App {
   route("DELETE", "/api/schedules/:id", async (ctx) => {
     const before = await schedules.get(ctx.params.id);
     if (!before) return error(404, "not_found");
-    enforce(ctx.principal, "config:edit_tenant", { tenantId: before.tenantId });
+    // System schedules are un-deletable — the worker can't run without
+    // its stale-exec / retention sweepers, and re-creating the row would
+    // lose the operator-tuned cadence.
+    if (before.system) {
+      return error(403, "system_schedule_undeletable", {
+        message:
+          "System schedules cannot be deleted. Disable or edit the cadence instead."
+      });
+    }
+    enforce(ctx.principal, "config:edit_tenant", {
+      tenantId: before.tenantId ?? undefined
+    });
     await schedules.delete(ctx.params.id);
     await audit(ctx, "schedule.delete", "schedule", ctx.params.id, before, undefined);
     return { status: 204, body: undefined, headers: {} };
@@ -2770,6 +2841,22 @@ export function createApp(deps: AppDeps): App {
       ctx.principal.roles.includes("platform_admin") || !tenantId
         ? undefined
         : tenantId;
+    // Cursor pagination: `?limit=<1..200>&cursor=<base64>`. When neither is
+    // supplied the legacy "all rows" path runs to preserve back-compat for
+    // existing API clients (and the test suite). The web Executions screen
+    // always passes a limit so it hits the paginated path.
+    const rawLimit = ctx.request.query.limit;
+    if (rawLimit !== undefined && deps.executionStore.listExecutionsPage) {
+      const limit = Math.max(1, Math.min(200, Number(rawLimit) || 50));
+      const page = await deps.executionStore.listExecutionsPage({
+        tenantId: scope,
+        limit,
+        cursor: typeof ctx.request.query.cursor === "string"
+          ? ctx.request.query.cursor
+          : undefined
+      });
+      return ok({ executions: page.rows, nextCursor: page.nextCursor });
+    }
     const executions = await deps.executionStore.listExecutions(scope);
     return ok({ executions });
   });
@@ -2809,6 +2896,18 @@ export function createApp(deps: AppDeps): App {
     const tenantId = ctx.principal.roles.includes("platform_admin")
       ? (ctx.request.query.tenant_id ?? undefined)
       : ctx.principal.tenantId;
+    const cursor =
+      typeof ctx.request.query.cursor === "string"
+        ? ctx.request.query.cursor
+        : undefined;
+    // When the caller passes `?limit=`, use cursor pagination; otherwise the
+    // legacy "all rows" path runs unchanged for back-compat with API clients
+    // that haven't migrated.
+    if (ctx.request.query.limit !== undefined && deps.auditLogs.listPage) {
+      const limit = Math.max(1, Math.min(200, Number(ctx.request.query.limit) || 50));
+      const page = await deps.auditLogs.listPage({ tenantId, limit, cursor });
+      return ok({ logs: page.rows, nextCursor: page.nextCursor });
+    }
     const limit = ctx.request.query.limit ? Number(ctx.request.query.limit) : undefined;
     const logs = await deps.auditLogs.list({ tenantId, limit });
     return ok({ logs });
@@ -2820,6 +2919,33 @@ export function createApp(deps: AppDeps): App {
     const tenantId = ctx.principal.roles.includes("platform_admin")
       ? (ctx.request.query.tenant_id ?? undefined)
       : ctx.principal.tenantId;
+    const cursor =
+      typeof ctx.request.query.cursor === "string"
+        ? ctx.request.query.cursor
+        : undefined;
+    if (
+      ctx.request.query.limit !== undefined &&
+      deps.usageRecords.listPage &&
+      ctx.request.query.execution_id === undefined
+    ) {
+      // Cursor path: paginated records, plus a summary that's local to the
+      // returned page only. The web Usage screen recomputes summary across
+      // pages client-side; deep aggregates use the non-paginated /api/usage.
+      const limit = Math.max(1, Math.min(200, Number(ctx.request.query.limit) || 50));
+      const page = await deps.usageRecords.listPage({ tenantId, limit, cursor });
+      const summary = page.rows.reduce(
+        (acc, record) => {
+          acc.inputTokens += record.inputTokens;
+          acc.outputTokens += record.outputTokens;
+          acc.embeddingTokens += record.embeddingTokens;
+          acc.estimatedCostUsd += record.estimatedCostUsd;
+          acc.count += 1;
+          return acc;
+        },
+        { inputTokens: 0, outputTokens: 0, embeddingTokens: 0, estimatedCostUsd: 0, count: 0 }
+      );
+      return ok({ summary, records: page.rows, nextCursor: page.nextCursor });
+    }
     const records = await deps.usageRecords.list({
       tenantId,
       executionId: ctx.request.query.execution_id
@@ -2836,6 +2962,75 @@ export function createApp(deps: AppDeps): App {
       { inputTokens: 0, outputTokens: 0, embeddingTokens: 0, estimatedCostUsd: 0, count: 0 }
     );
     return ok({ summary, records });
+  });
+
+  // ---- retention settings -------------------------------------------------
+  // Global-only platform config that drives the un-deletable retention sweep
+  // worker job (see migration 012). Three rows, one per resource type.
+  route("GET", "/api/retention", async (ctx) => {
+    enforce(ctx.principal, "config:edit_global");
+    const settings = await retentionSettings.list();
+    return ok({ settings });
+  });
+
+  route("PATCH", "/api/retention/:resource", async (ctx) => {
+    enforce(ctx.principal, "config:edit_global");
+    const resource = ctx.params.resource;
+    if (resource !== "executions" && resource !== "usage" && resource !== "audit") {
+      return error(404, "not_found");
+    }
+    const body = ctx.request.body;
+    if (!isObject(body)) {
+      return error(422, "validation_failed", {
+        issues: [{ message: "body required" }]
+      });
+    }
+    // null clears a cap, omitted means "leave the existing value alone".
+    // Read current to merge with patch so partial updates don't wipe the
+    // unspecified column.
+    const current = (await retentionSettings.list()).find(
+      (r) => r.resource === resource
+    );
+    const maxCount =
+      "maxCount" in body
+        ? body.maxCount === null
+          ? null
+          : Number(body.maxCount)
+        : (current?.maxCount ?? null);
+    const maxAgeDays =
+      "maxAgeDays" in body
+        ? body.maxAgeDays === null
+          ? null
+          : Number(body.maxAgeDays)
+        : (current?.maxAgeDays ?? null);
+    if (maxCount !== null && (!Number.isFinite(maxCount) || maxCount < 0)) {
+      return error(422, "validation_failed", {
+        issues: [{ path: "maxCount", message: "non-negative number or null" }]
+      });
+    }
+    if (
+      maxAgeDays !== null &&
+      (!Number.isFinite(maxAgeDays) || maxAgeDays < 0)
+    ) {
+      return error(422, "validation_failed", {
+        issues: [{ path: "maxAgeDays", message: "non-negative integer or null" }]
+      });
+    }
+    const updated = await retentionSettings.upsert({
+      resource,
+      maxCount,
+      maxAgeDays: maxAgeDays === null ? null : Math.floor(maxAgeDays),
+      updatedBy: ctx.principal.id
+    });
+    await audit(
+      ctx,
+      "retention.update",
+      "retention",
+      resource,
+      current ?? undefined,
+      updated
+    );
+    return ok({ setting: updated });
   });
 
   // ---- plugins ------------------------------------------------------------

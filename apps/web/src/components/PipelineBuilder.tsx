@@ -497,6 +497,11 @@ export function PipelineBuilder(props: {
     "batch"
   );
   const [mcpExpose, setMcpExpose] = useState<boolean>(false);
+  // Per-pipeline execution timeout. Persisted in spec.metadata.timeoutMs;
+  // the worker's stale-exec sweep marks any run exceeding this (or the
+  // platform default of 60 min when blank) as failed. Storing minutes in
+  // the input + converting to ms on save keeps the UI tidy.
+  const [timeoutMinutes, setTimeoutMinutes] = useState<number>(60);
   // Sample input + last result for the Invoke panel that appears on
   // synchronous pipelines.
   const [invokeInput, setInvokeInput] = useState<string>(
@@ -706,9 +711,22 @@ export function PipelineBuilder(props: {
         description: pipelineDescription.trim() || undefined,
         stages: stages.length > 0 ? stages : undefined,
         executionKind,
-        mcpExpose
+        mcpExpose,
+        timeoutMs:
+          timeoutMinutes > 0 && timeoutMinutes !== 60
+            ? timeoutMinutes * 60 * 1000
+            : undefined
       }),
-    [nodes, edges, pipelineName, pipelineDescription, stages, executionKind, mcpExpose]
+    [
+      nodes,
+      edges,
+      pipelineName,
+      pipelineDescription,
+      stages,
+      executionKind,
+      mcpExpose,
+      timeoutMinutes
+    ]
   );
 
   // Stage management — pipeline-level CRUD that mutates the local
@@ -1292,9 +1310,15 @@ export function PipelineBuilder(props: {
           const loadedMeta = (loaded.metadata ?? {}) as {
             executionKind?: "batch" | "synchronous";
             mcpExpose?: boolean;
+            timeoutMs?: number;
           };
           setExecutionKind(loadedMeta.executionKind ?? "batch");
           setMcpExpose(loadedMeta.mcpExpose === true);
+          setTimeoutMinutes(
+            typeof loadedMeta.timeoutMs === "number" && loadedMeta.timeoutMs > 0
+              ? Math.round(loadedMeta.timeoutMs / 60000)
+              : 60
+          );
           setNodes(toFlowNodes(loaded));
           setEdges(toFlowEdges(loaded));
           setVersion(latest.version);
@@ -2061,6 +2085,21 @@ export function PipelineBuilder(props: {
               value={pipelineDescription}
               placeholder="optional"
               onChange={(e) => setPipelineDescription(e.target.value)}
+            />
+          </label>
+          <label
+            title="Per-pipeline run timeout in minutes. The platform sweep marks executions running past this as failed. Default 60 min."
+          >
+            Timeout (min)
+            <input
+              type="number"
+              min="1"
+              step="1"
+              value={timeoutMinutes}
+              onChange={(e) => {
+                const n = Number(e.target.value);
+                if (Number.isFinite(n) && n > 0) setTimeoutMinutes(n);
+              }}
             />
           </label>
         </ToolbarMenu>

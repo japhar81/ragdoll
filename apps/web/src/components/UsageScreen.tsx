@@ -1,5 +1,5 @@
-import React from "react";
-import { useQuery } from "@tanstack/react-query";
+import React, { useMemo } from "react";
+import { useInfiniteQuery } from "@tanstack/react-query";
 import { api } from "../lib/api.ts";
 import type { UsageRow } from "../lib/api.ts";
 import { Screen } from "./Screen.tsx";
@@ -7,12 +7,49 @@ import { DataGrid, type DataGridColumn } from "./DataGrid.tsx";
 
 /** Usage admin. GET /api/usage returns an aggregated summary + raw records. */
 export function UsageScreen() {
-  const usage = useQuery({
-    queryKey: ["usage"],
-    queryFn: () => api.usage()
+  const usage = useInfiniteQuery({
+    queryKey: ["usage", "page"],
+    queryFn: ({ pageParam }) =>
+      api.usage({
+        limit: 50,
+        ...(typeof pageParam === "string" ? { cursor: pageParam } : {})
+      }),
+    initialPageParam: undefined as string | undefined,
+    getNextPageParam: (last) => last.nextCursor ?? undefined
   });
-
-  const s = usage.data?.summary;
+  const records = useMemo(
+    () => usage.data?.pages.flatMap((p) => p.records) ?? [],
+    [usage.data]
+  );
+  // Summary across all loaded pages. The API returns a per-page summary
+  // (paginated path), so we re-fold rows here as new pages arrive.
+  const s = useMemo(
+    () =>
+      records.reduce<{
+        count: number;
+        inputTokens: number;
+        outputTokens: number;
+        embeddingTokens: number;
+        estimatedCostUsd: number;
+      }>(
+        (acc, r) => {
+          acc.count += 1;
+          acc.inputTokens += r.inputTokens;
+          acc.outputTokens += r.outputTokens;
+          acc.embeddingTokens += r.embeddingTokens;
+          acc.estimatedCostUsd += r.estimatedCostUsd;
+          return acc;
+        },
+        {
+          count: 0,
+          inputTokens: 0,
+          outputTokens: 0,
+          embeddingTokens: 0,
+          estimatedCostUsd: 0
+        }
+      ),
+    [records]
+  );
 
   return (
     <Screen title="Usage & Cost" isLoading={usage.isLoading} error={usage.error}>
@@ -76,9 +113,16 @@ export function UsageScreen() {
             }
           ] satisfies DataGridColumn<UsageRow>[]
         }
-        rows={usage.data?.records ?? []}
+        rows={records}
         rowKey={(r, i) => `${r.executionId ?? "no-exec"}-${i}`}
         emptyMessage="No usage records yet."
+        hasMore={usage.hasNextPage}
+        isLoadingMore={usage.isFetchingNextPage}
+        onLoadMore={() => {
+          if (usage.hasNextPage && !usage.isFetchingNextPage) {
+            void usage.fetchNextPage();
+          }
+        }}
       />
     </Screen>
   );

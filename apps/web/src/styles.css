@@ -2639,6 +2639,21 @@ kbd {
   color: #334155;
   vertical-align: middle;
 }
+.datagrid-load-more {
+  padding: 8px;
+  text-align: center;
+  font-size: 0.85em;
+  color: #64748b;
+  font-style: italic;
+}
+.row-system {
+  background: #f8fafc;
+}
+.row-system td:first-child::before {
+  content: "🔒 ";
+  font-size: 0.8em;
+  opacity: 0.7;
+}
 .pipeline-datasets-panel .grid th,
 .pipeline-datasets-panel .grid td { padding: 4px 6px; }
 .pipeline-datasets-panel .grid input { padding: 2px 6px; font-size: inherit; }

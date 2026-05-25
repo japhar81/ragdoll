@@ -1,4 +1,5 @@
-import { useQuery } from "@tanstack/react-query";
+import { useMemo } from "react";
+import { useInfiniteQuery } from "@tanstack/react-query";
 import { api } from "../lib/api.ts";
 import type { AuditRow } from "../lib/api.ts";
 import { Screen } from "./Screen.tsx";
@@ -6,10 +7,20 @@ import { DataGrid, type DataGridColumn } from "./DataGrid.tsx";
 
 /** Audit admin. GET /api/audit returns the redacted audit log list. */
 export function AuditScreen() {
-  const audit = useQuery({
-    queryKey: ["audit"],
-    queryFn: () => api.listAudit({ limit: 200 })
+  const audit = useInfiniteQuery({
+    queryKey: ["audit", "page"],
+    queryFn: ({ pageParam }) =>
+      api.listAudit({
+        limit: 50,
+        ...(typeof pageParam === "string" ? { cursor: pageParam } : {})
+      }),
+    initialPageParam: undefined as string | undefined,
+    getNextPageParam: (last) => last.nextCursor ?? undefined
   });
+  const rows = useMemo(
+    () => audit.data?.pages.flatMap((p) => p.logs) ?? [],
+    [audit.data]
+  );
 
   const columns: DataGridColumn<AuditRow>[] = [
     {
@@ -54,9 +65,16 @@ export function AuditScreen() {
     <Screen title="Audit Log" isLoading={audit.isLoading} error={audit.error}>
       <DataGrid
         columns={columns}
-        rows={audit.data?.logs ?? []}
+        rows={rows}
         rowKey={(l, i) => `${l.createdAt}-${l.targetId}-${i}`}
         emptyMessage="No audit entries."
+        hasMore={audit.hasNextPage}
+        isLoadingMore={audit.isFetchingNextPage}
+        onLoadMore={() => {
+          if (audit.hasNextPage && !audit.isFetchingNextPage) {
+            void audit.fetchNextPage();
+          }
+        }}
       />
     </Screen>
   );

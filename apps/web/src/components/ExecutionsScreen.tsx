@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useMemo, useState } from "react";
+import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import { api } from "../lib/api.ts";
 import type { ExecutionRecord } from "../lib/types.ts";
 import { Screen } from "./Screen.tsx";
@@ -92,10 +92,23 @@ export function ExecutionsScreen() {
   // Fall back to polling only while disconnected.
   const liveConnected = events.status === "connected";
 
-  const executions = useQuery({
-    queryKey: ["executions"],
-    queryFn: () => api.listExecutions()
+  // Cursor-paginated executions list. Page size 50 keeps the first paint
+  // snappy on accounts with thousands of rows; the sentinel at the
+  // bottom of the DataGrid loads the next page as the user scrolls.
+  const executions = useInfiniteQuery({
+    queryKey: ["executions", "page"],
+    queryFn: ({ pageParam }) =>
+      api.listExecutions({
+        limit: 50,
+        ...(typeof pageParam === "string" ? { cursor: pageParam } : {})
+      }),
+    initialPageParam: undefined as string | undefined,
+    getNextPageParam: (last) => last.nextCursor ?? undefined
   });
+  const executionRows = useMemo(
+    () => executions.data?.pages.flatMap((p) => p.executions) ?? [],
+    [executions.data]
+  );
 
   const trace = useQuery({
     queryKey: ["trace", selected],
@@ -173,7 +186,14 @@ export function ExecutionsScreen() {
             width: "18%"
           }
         ]}
-        rows={executions.data?.executions ?? []}
+        rows={executionRows}
+        hasMore={executions.hasNextPage}
+        isLoadingMore={executions.isFetchingNextPage}
+        onLoadMore={() => {
+          if (executions.hasNextPage && !executions.isFetchingNextPage) {
+            void executions.fetchNextPage();
+          }
+        }}
         rowKey={(e) => e.executionId}
         emptyMessage="No executions yet."
       />
