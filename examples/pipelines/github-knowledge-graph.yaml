@@ -1,0 +1,70 @@
+apiVersion: rag-platform/v1
+kind: Pipeline
+metadata:
+  name: github-knowledge-graph
+  description: "Pulls a GitHub repo, extracts entities + relations into a Dgraph graph. Pair with the github-kg-query pipeline to retrieve via DQL."
+  labels:
+    demo: graph
+spec:
+  parameters:
+  - key: repo
+    type: string
+    defaultValue: "octocat/Hello-World"
+    allowedScopes: [pipeline, tenant_pipeline, runtime]
+    runtimeOverridable: true
+    description: "owner/name of the GitHub repository to ingest."
+  nodes:
+  - id: input
+    type: input
+  - id: github
+    plugin:
+      category: datasource
+      id: github_source
+      version: 1.0.0
+    config:
+      repo: "${config.repo}"
+      ref: main
+      include: ["**/*.md", "src/**/*.{ts,js,py}"]
+      computeHash: true
+    secrets:
+      token:
+        scope: tenant
+        key: github.token
+  - id: chunk
+    plugin:
+      category: chunker
+      id: basic_text_chunker
+      version: 1.0.0
+    config:
+      chunkSize: 1500
+      overlap: 100
+  - id: upsert
+    plugin:
+      category: sink
+      id: dgraph_upsert
+      version: 1.0.0
+    dataset:
+      slug: github-knowledge-graph
+      alias: stable
+    config:
+      # Predicate types + indexes the queries downstream rely on. Set
+      # this on first deploy; Dgraph is idempotent on /alter so the
+      # statement is safe to re-apply on every run.
+      schema: "tenant_id: string @index(exact) . path: string @index(exact) . text: string @index(fulltext) . repo: string @index(exact) . chunk_of: uid @reverse . dgraph.type: [string] @index(exact) ."
+  - id: output
+    type: output
+  edges:
+  - from: input
+    to: github
+    fromPort: question
+    toPort: question
+  - from: github
+    to: chunk
+    fromPort: documents
+    toPort: documents
+  - from: chunk
+    to: upsert
+    fromPort: chunks
+    toPort: nodes
+  - from: upsert
+    to: output

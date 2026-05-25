@@ -71,6 +71,25 @@ services:
     volumes:
       - qdrant-data:/qdrant/storage
 
+  # Dgraph standalone (zero + alpha in one container) for the graph
+  # modality — used by the dgraph_upsert / dgraph_query plugins.
+  # The standalone image is intentionally dev-only; production
+  # deployments split zero / alpha across nodes for HA.
+  # HTTP API on :8080 (mutate / query / alter); gRPC on :9080.
+  dgraph:
+    image: dgraph/standalone:v23.1.0
+    ports:
+      - "8081:8080"
+      - "9081:9080"
+    volumes:
+      - dgraph-data:/dgraph
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8080/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+
   # Single-node OpenSearch for the opensearch_* plugins (BM25 / kNN / hybrid
   # retrievers + input/output). Security plugin disabled for local dev so the
   # client can talk plain HTTP with no credentials.
@@ -254,6 +273,7 @@ services:
       # an API key from Profile → API keys for non-interactive clients.
       QDRANT_URL: http://qdrant:6333
       OPENSEARCH_URL: http://opensearch:9200
+      DGRAPH_URL: http://dgraph:8080
       # Phase 6: which vector backend createVectorStore picks when a
       # plugin hasn't been pointed at a specific Dataset. Default
       # `qdrant` keeps every existing pipeline working unchanged; flip
@@ -301,6 +321,7 @@ services:
       SECRET_ENCRYPTION_KEY: local-dev-only-change-me-32-bytes-min
       QDRANT_URL: http://qdrant:6333
       OPENSEARCH_URL: http://opensearch:9200
+      DGRAPH_URL: http://dgraph:8080
       # Phase 6: which vector backend createVectorStore picks when a
       # plugin hasn't been pointed at a specific Dataset. Default
       # `qdrant` keeps every existing pipeline working unchanged; flip
@@ -378,5 +399,6 @@ volumes:
   postgres-data:
   qdrant-data:
   opensearch-data:
+  dgraph-data:
   ollama-data:
   lgtm-data:

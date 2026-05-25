@@ -38,6 +38,14 @@ export {
   opensearchDeletePlugin,
   pathClassifierPlugin
 } from "./ingest.ts";
+// GitHub datasource — emits one document per file in a repo tree at a
+// given ref. Mirrors filesystem_source's output shape so the rest of
+// the ingest path (delta_filter, code_chunker, …) works unchanged.
+export { githubSourcePlugin } from "./github.ts";
+// Dgraph plugins for the `graph` modality. Sink + retriever, both
+// contract: 2 and declare datasetModalities: ["graph"] so the
+// Builder picker filters to graph-enabled datasets.
+export { dgraphUpsertPlugin, dgraphQueryPlugin } from "./dgraph.ts";
 // Data-shaping plugins (JSONata/JMESPath transform + XML codec) live in their
 // own module; re-exported so the plugin-loader's namespace scan registers
 // them alongside the rest.

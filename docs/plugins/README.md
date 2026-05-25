@@ -56,6 +56,9 @@ treatment as long as their `id` matches a bundled markdown filename.
 | delta_filter | transformer | [delta_filter.md](delta_filter.md) |
 | field_router | router | [field_router.md](field_router.md) |
 | filesystem_source | datasource | [filesystem_source.md](filesystem_source.md) |
+| github_source | datasource | [github_source.md](github_source.md) |
+| dgraph_upsert | sink | [dgraph_upsert.md](dgraph_upsert.md) |
+| dgraph_query | retriever | [dgraph_query.md](dgraph_query.md) |
 | for_loop | control | [for_loop.md](for_loop.md) |
 | foreach | control | [foreach.md](foreach.md) |
 | if_then | control | [if_then.md](if_then.md) |
