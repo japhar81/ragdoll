@@ -194,3 +194,88 @@ test("query_fanout: manifest declares contract: 2 and outputs `queries`", () => 
   assert.equal(queryFanoutPlugin.manifest.contract, 2);
   assert.ok(queryFanoutPlugin.manifest.outputPorts?.some((p) => p.name === "queries"));
 });
+
+// ---- schema validation ----------------------------------------------------
+
+test("dataset_upsert: rejects records that violate the dataset's chunk_schema", async () => {
+  // Dataset declares text as required + source_id as a required string.
+  // First chunk is fine; second chunk is missing source_id and has the
+  // wrong type for chunkIndex.
+  const dataset = fakeDataset({
+    chunkSchema: {
+      type: "object",
+      required: ["text", "source_id"],
+      properties: {
+        text: { type: "string" },
+        source_id: { type: "string" },
+        chunkIndex: { type: "integer" }
+      },
+      additionalProperties: true
+    }
+  });
+  await assert.rejects(
+    () =>
+      runPlugin({
+        plugin: datasetUpsertPlugin,
+        inputs: {
+          chunks: [
+            { text: "ok", source_id: "doc-1" },
+            { text: "missing source_id" }
+          ],
+          vectors: [
+            [1, 0, 0],
+            [0, 1, 0]
+          ]
+        },
+        config: { dimensions: 3 },
+        dataset
+      }),
+    /chunk_schema validation failed/
+  );
+});
+
+test("dataset_upsert: passes records that conform to chunk_schema", async () => {
+  resetInMemoryVectorStore();
+  const dataset = fakeDataset({
+    chunkSchema: {
+      type: "object",
+      required: ["text"],
+      properties: {
+        text: { type: "string" },
+        source_id: { type: "string" }
+      }
+    }
+  });
+  const result = await runPlugin({
+    plugin: datasetUpsertPlugin,
+    inputs: {
+      chunks: [
+        { text: "alpha", source_id: "d1" },
+        { text: "beta", source_id: "d2" }
+      ],
+      vectors: [
+        [1, 0, 0],
+        [0, 1, 0]
+      ]
+    },
+    config: { dimensions: 3 },
+    dataset
+  });
+  assert.equal(result.outputs.upserted, 2);
+});
+
+test("dataset_upsert: empty / missing chunk_schema accepts any record", async () => {
+  // Back-compat: existing pipelines that didn't declare a schema must
+  // keep working through dataset_upsert with no change.
+  resetInMemoryVectorStore();
+  const result = await runPlugin({
+    plugin: datasetUpsertPlugin,
+    inputs: {
+      chunks: [{ text: "x", arbitrary: { nested: true } }],
+      vectors: [[1, 0, 0]]
+    },
+    config: { dimensions: 3 },
+    dataset: fakeDataset() // chunkSchema: {}
+  });
+  assert.equal(result.outputs.upserted, 1);
+});

@@ -34,6 +34,7 @@ import {
 import { createVectorStore, type VectorPoint } from "../../../packages/vector/src/index.ts";
 import { createOpenSearchClient } from "../../../packages/opensearch/src/index.ts";
 import { pickBackendName } from "./dataset-binding.ts";
+import { validateAgainstSchema } from "./schema-validate.ts";
 
 function buildProviderRegistry(): ProviderRegistry {
   const providers = new ProviderRegistry();
@@ -348,16 +349,37 @@ export const datasetUpsertPlugin: InProcessPlugin = {
     const idPrefix = config.idPrefix
       ? String(config.idPrefix)
       : `${context.executionId}:`;
+    // Phase 13 follow-up: strict schema validation on writes when the
+    // Dataset declares a chunk_schema. Empty / no-schema datasets pass
+    // every record (back-compat with everything minted before this
+    // existed). Errors are aggregated across the whole batch so the
+    // caller sees every offending record at once, not just the first.
+    const chunkSchema = dataset.chunkSchema as unknown;
+    const schemaErrors: string[] = [];
     const points: VectorPoint[] = vectors.map((vector, i) => {
       const chunk = chunks[i] ?? {};
       const { text, index: _idx, ...rest } = chunk;
+      const payload = { text: text ?? "", chunkIndex: i, ...rest };
+      if (chunkSchema) {
+        const errs = validateAgainstSchema(payload, chunkSchema);
+        for (const e of errs) {
+          schemaErrors.push(`chunks[${i}]${e.path}: ${e.message}`);
+        }
+      }
       return {
         id: `${idPrefix}${i}`,
         vector,
         tenantId: context.tenantId,
-        payload: { text: text ?? "", chunkIndex: i, ...rest }
+        payload
       };
     });
+    if (schemaErrors.length > 0) {
+      throw new Error(
+        `dataset_upsert: chunk_schema validation failed for ${schemaErrors.length} field(s):\n` +
+          schemaErrors.slice(0, 20).join("\n") +
+          (schemaErrors.length > 20 ? `\n…and ${schemaErrors.length - 20} more` : "")
+      );
+    }
     await store.upsert(collection, points);
     return { outputs: { upserted: points.length } };
   }

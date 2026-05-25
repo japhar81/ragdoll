@@ -14,6 +14,7 @@
  * enforces — this is just cosmetic UI.
  */
 import { useEffect, useMemo, useState } from "react";
+import { useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, ApiError } from "../lib/api.ts";
 import type { DatasetView, DatasetVersionView, DatasetAliasView } from "../lib/api.ts";
@@ -408,9 +409,13 @@ function CreateDatasetForm(props: { onCreated: (d: DatasetView) => void }) {
 export function DatasetsScreen() {
   const auth = useAuth();
   const { tenants } = useTenants();
+  const navigate = useNavigate();
+  // Stable per-dataset URL: /datasets/:datasetId selects that row on
+  // mount and on navigation; clicking "details" / "hide" updates the
+  // URL via navigate(). Bookmarking a dataset works as expected.
+  const { datasetId: routeId } = useParams<{ datasetId?: string }>();
   const [tenantFilter, setTenantFilter] = useState<string>("");
   const [environmentFilter, setEnvironmentFilter] = useState<string>("");
-  const [selectedId, setSelectedId] = useState<string | null>(null);
   const { environments } = useEnvironments(tenantFilter || undefined);
 
   const canAdmin = auth.can("dataset:admin");
@@ -425,7 +430,23 @@ export function DatasetsScreen() {
   });
 
   const visible = datasets.data?.datasets ?? [];
-  const selected = visible.find((d) => d.id === selectedId) ?? null;
+  // When the URL names a dataset that's NOT in the current filter view
+  // (e.g. deep-link to a tenant-scoped dataset while the filter is on
+  // a different tenant), fall back to fetching that one record so the
+  // detail panel still renders rather than silently 404'ing.
+  const fallbackDataset = useQuery({
+    queryKey: ["dataset", routeId],
+    queryFn: () => api.getDataset(routeId as string),
+    enabled: !!routeId && !visible.some((d) => d.id === routeId)
+  });
+  const selected =
+    visible.find((d) => d.id === routeId) ??
+    fallbackDataset.data?.dataset ??
+    null;
+  const setSelectedId = (id: string | null): void => {
+    navigate(id ? `/datasets/${encodeURIComponent(id)}` : "/datasets");
+  };
+  const selectedId = routeId ?? null;
 
   return (
     <Screen title="Datasets">

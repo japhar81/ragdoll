@@ -407,6 +407,28 @@ export class Authorizer {
     return grants;
   }
 
+  /**
+   * Owner's CURRENT live grants from the policy store. Used by the
+   * API-key permission-intersection branch in `authorizeClosure`.
+   * Cached under the owner's id so an owner whose session grants are
+   * cached doesn't pay a second store hit.
+   */
+  private async ownerLiveGrants(userId: string): Promise<Grant[]> {
+    if (!this.store) return [];
+    const cached = this.grantCache.get(userId);
+    if (cached) return cached;
+    try {
+      const grants = (await this.store.listGrantsForUser(userId)).map((g) => ({
+        role: g.role,
+        scope: g.scope
+      }));
+      this.grantCache.set(userId, grants);
+      return grants;
+    } catch {
+      return [];
+    }
+  }
+
   /** Effective grants for display/debugging (no caching guarantees). */
   async resolveGrants(p: AuthorizablePrincipal): Promise<Grant[]> {
     return this.grantsFor(p);
@@ -423,6 +445,29 @@ export class Authorizer {
     const catalog = await this.loadCatalog();
     const grants = await this.grantsFor(p);
     const decider = await this.engine.prepare(grants, catalog);
+    // Phase 13 follow-up: API-key permission intersection.
+    //
+    // The snapshot-at-mint behaviour is fine for the UPPER bound (a
+    // key never grants more than its owner had), but if the owner
+    // later loses authority the key shouldn't keep operating. We
+    // build a SECOND decider over the owner's CURRENT live grants
+    // and intersect at decision time: the key is allowed iff the
+    // snapshot says yes AND the owner still holds a grant that
+    // covers the action.
+    //
+    // Why permission-level (intersect the deciders) rather than role-
+    // level (intersect the grant lists): the owner may hold a BROADER
+    // role than the key carries (platform_admin vs tenant_admin). A
+    // pure role match would lock out the key in that case; the
+    // permission-level intersection correctly says "yes the owner
+    // can still grant tenant_admin's perms here".
+    let ownerDecider:
+      | ((permission: string, scope: string) => boolean)
+      | undefined;
+    if (p.type === "api_key" && this.store) {
+      const ownerGrants = await this.ownerLiveGrants(p.id);
+      ownerDecider = await this.engine.prepare(ownerGrants, catalog);
+    }
     // Mirror the legacy `tenantId ?? principal.tenantId` merge: when a route
     // does not name a tenant, fall back to the request's tenant context (the
     // selected `x-tenant-id`, else the principal's own tenant). This keeps the
@@ -430,14 +475,16 @@ export class Authorizer {
     // gating instance-wide permissions, which only `platform_admin` (granted
     // at `*`) holds regardless of the scope the request runs in.
     const fallbackTenant = options.defaultTenantId ?? p.tenantId;
-    return (permission: string, resource: Resource = {}) =>
-      decider(
-        permission,
-        scopeToString({
-          tenantId: resource.tenantId ?? fallbackTenant,
-          environment: resource.environment,
-          pipelineId: resource.pipelineId
-        })
-      );
+    return (permission: string, resource: Resource = {}) => {
+      const scope = scopeToString({
+        tenantId: resource.tenantId ?? fallbackTenant,
+        environment: resource.environment,
+        pipelineId: resource.pipelineId
+      });
+      const snapshotOk = decider(permission, scope);
+      if (!snapshotOk) return false;
+      if (ownerDecider && !ownerDecider(permission, scope)) return false;
+      return true;
+    };
   }
 }

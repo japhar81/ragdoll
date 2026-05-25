@@ -265,6 +265,7 @@ function Shell() {
         />
         <Route path="/pipelines" element={<PipelinesRoute />} />
         <Route path="/datasets" element={<DatasetsScreen />} />
+        <Route path="/datasets/:datasetId" element={<DatasetsScreen />} />
         <Route path="/builder" element={<BuilderRoute />} />
         <Route path="/builder/:pipelineId" element={<BuilderRoute />} />
         <Route path="/scheduler" element={<SchedulerScreen />} />

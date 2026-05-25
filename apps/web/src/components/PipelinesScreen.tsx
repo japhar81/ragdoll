@@ -1,4 +1,5 @@
 import React, { useMemo, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, ApiError } from "../lib/api.ts";
 import {
@@ -25,13 +26,22 @@ import { datasetColor } from "../lib/datasetColor.ts";
  * detail page once that route gains stable URLs (TODO).
  */
 function PipelineDatasetPills(props: { pipelineId: string }) {
+  const navigate = useNavigate();
   const versions = useQuery({
     queryKey: ["pipeline-versions", props.pipelineId],
     queryFn: () => api.listVersions(props.pipelineId),
     staleTime: 30_000
   });
+  // We need the dataset IDs (not just slugs) to deep-link. Cross-reference
+  // the spec's slug+alias against the live datasets list so the pill knows
+  // which dataset row to navigate to.
+  const visibleDatasets = useQuery({
+    queryKey: ["datasets-for-pills"],
+    queryFn: () => api.listDatasets(),
+    staleTime: 60_000
+  });
   const refs = useMemo(() => {
-    const out = new Map<string, string | undefined>();
+    const out: Array<{ slug: string; alias?: string; datasetId?: string }> = [];
     const all = versions.data?.versions ?? [];
     const latestId = versions.data?.latestVersionId;
     const target = latestId
@@ -39,30 +49,61 @@ function PipelineDatasetPills(props: { pipelineId: string }) {
       : all[0];
     if (!target?.spec) return out;
     const spec = target.spec as PipelineSpec;
+    const datasets = visibleDatasets.data?.datasets ?? [];
+    const seen = new Set<string>();
     for (const node of spec.spec?.nodes ?? []) {
-      if (node.dataset?.slug) {
-        out.set(node.dataset.slug, node.dataset.alias);
-      }
+      const slug = node.dataset?.slug;
+      if (!slug || seen.has(slug)) continue;
+      seen.add(slug);
+      // Pick the narrowest-scoped dataset that matches the slug: env >
+      // tenant > global. The resolver does the same at runtime, so the
+      // pill points at the same row the executor would resolve to.
+      const env = datasets.find(
+        (d) => d.slug === slug && d.scope === "environment"
+      );
+      const tenant = datasets.find(
+        (d) => d.slug === slug && d.scope === "tenant"
+      );
+      const global = datasets.find(
+        (d) => d.slug === slug && d.scope === "global"
+      );
+      out.push({
+        slug,
+        alias: node.dataset?.alias,
+        datasetId: (env ?? tenant ?? global)?.id
+      });
     }
     return out;
-  }, [versions.data]);
-  if (refs.size === 0) return null;
+  }, [versions.data, visibleDatasets.data]);
+  if (refs.length === 0) return null;
   return (
     <span style={{ display: "inline-flex", gap: 4, marginLeft: 8 }}>
-      {[...refs.entries()].map(([slug, alias]) => {
+      {refs.map(({ slug, alias, datasetId }) => {
         const c = datasetColor(slug);
-        return (
-          <span
+        const common = {
+          title: `Dataset: ${slug}${alias ? ` @ ${alias}` : ""}${datasetId ? "" : " (not visible)"}`,
+          style: {
+            background: c.bg,
+            color: c.fg,
+            padding: "1px 6px",
+            borderRadius: 8,
+            fontSize: "0.8em"
+          } as const
+        };
+        return datasetId ? (
+          <button
             key={slug}
-            title={`Dataset: ${slug}${alias ? ` @ ${alias}` : ""}`}
-            style={{
-              background: c.bg,
-              color: c.fg,
-              padding: "1px 6px",
-              borderRadius: 8,
-              fontSize: "0.8em"
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              navigate(`/datasets/${encodeURIComponent(datasetId)}`);
             }}
+            {...common}
           >
+            {slug}
+          </button>
+        ) : (
+          <span key={slug} {...common}>
             {slug}
           </span>
         );

@@ -229,6 +229,81 @@ test("API key mint rejects a past expiresAt", async () => {
   assert.equal(res.status, 422);
 });
 
+// --- permission intersection at request time -----------------------------
+
+test("API key authorization shrinks when the owner loses a grant", async () => {
+  // The intersection happens at the principal.authorize(...) decision
+  // layer (where enforce(...) actually checks permissions), not in
+  // the informational me.permissions field. We assert against a route
+  // that requires `config:edit_tenant` — POST /api/configs.
+  const h = buildHarness({ withAuth: true });
+  const { tenantId } = await seedTenantAndEnv(h, "acme", "prod");
+  const owner = await seedUser(h, {
+    email: "owner@x.io",
+    grants: [{ role: "tenant_admin", scope: `t/${tenantId}` }]
+  });
+  // Owner mints a tenant_admin@t/T key for themselves.
+  const minted = await h.request({
+    method: "POST",
+    path: "/api/api-keys",
+    headers: owner.bearer,
+    body: { name: "ci", role: "tenant_admin", tenantId }
+  });
+  if (minted.status !== 201) {
+    throw new Error(
+      `expected 201 from mint, got ${minted.status}: ${JSON.stringify(minted.body)}`
+    );
+  }
+  const plaintext = minted.body.plaintext as string;
+
+  // Resolve the principal + closure ourselves so we exercise the
+  // authorizer directly, without going through a fragile REST mutation
+  // path that may also need other prereqs to land.
+  function checkConfigEdit(): boolean {
+    return new Promise<boolean>((resolve) =>
+      h.deps.auth
+        .resolve({ headers: { authorization: `ApiKey ${plaintext}` } })
+        .then(async (principal) => {
+          principal.authorize = await h.deps.authorizer!.authorizeClosure({
+            id: principal.id,
+            type: principal.type,
+            tenantId: principal.tenantId,
+            environment: principal.environment,
+            roles: principal.roles
+          });
+          resolve(principal.authorize("config:edit_tenant", { tenantId }));
+        })
+        .catch(() => resolve(false))
+    ) as unknown as boolean;
+  }
+
+  // Before revoke: the key authorizes a tenant_admin action.
+  const before = await (checkConfigEdit() as unknown as Promise<boolean>);
+  assert.equal(
+    before,
+    true,
+    "key should authorize tenant_admin actions before the owner's grant is revoked"
+  );
+
+  // Revoke the owner's tenant_admin grant.
+  const grantsList = await h.deps.rbacPolicies!.listGrantsForUser(owner.id);
+  const tenantAdminGrant = grantsList.find(
+    (g) => g.role === "tenant_admin" && g.scope === `t/${tenantId}`
+  );
+  if (!tenantAdminGrant) throw new Error("seeded grant missing");
+  await h.deps.rbacPolicies!.removeGrant(tenantAdminGrant.id);
+  h.deps.authorizer!.invalidate(owner.id);
+
+  // After revoke: the closure rebuilt on the next call sees an owner
+  // with no covering grant → intersection blocks the action.
+  const after = await (checkConfigEdit() as unknown as Promise<boolean>);
+  assert.equal(
+    after,
+    false,
+    "key should NOT authorize tenant_admin actions after the owner's grant is revoked"
+  );
+});
+
 test("API key past its expiresAt is rejected at verify (and listed as expired)", async () => {
   // Mint directly against the service so we can backdate the stored row;
   // the REST validator (correctly) refuses past expiration on mint.
