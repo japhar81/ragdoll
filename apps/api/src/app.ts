@@ -204,6 +204,9 @@ export interface CursorPage<T> {
   rows: T[];
   /** Opaque continuation token, or null when there are no more rows. */
   nextCursor: string | null;
+  /** Total rows under the same filter (NOT the cursor slice). Drives
+   *  the SVAR grid footer "N of M" display. */
+  total: number;
 }
 
 export interface ReadableExecutionStore extends ExecutionStore {
@@ -2855,7 +2858,11 @@ export function createApp(deps: AppDeps): App {
           ? ctx.request.query.cursor
           : undefined
       });
-      return ok({ executions: page.rows, nextCursor: page.nextCursor });
+      return ok({
+        executions: page.rows,
+        nextCursor: page.nextCursor,
+        total: page.total
+      });
     }
     const executions = await deps.executionStore.listExecutions(scope);
     return ok({ executions });
@@ -2906,7 +2913,11 @@ export function createApp(deps: AppDeps): App {
     if (ctx.request.query.limit !== undefined && deps.auditLogs.listPage) {
       const limit = Math.max(1, Math.min(200, Number(ctx.request.query.limit) || 50));
       const page = await deps.auditLogs.listPage({ tenantId, limit, cursor });
-      return ok({ logs: page.rows, nextCursor: page.nextCursor });
+      return ok({
+        logs: page.rows,
+        nextCursor: page.nextCursor,
+        total: page.total
+      });
     }
     const limit = ctx.request.query.limit ? Number(ctx.request.query.limit) : undefined;
     const logs = await deps.auditLogs.list({ tenantId, limit });
@@ -2944,7 +2955,12 @@ export function createApp(deps: AppDeps): App {
         },
         { inputTokens: 0, outputTokens: 0, embeddingTokens: 0, estimatedCostUsd: 0, count: 0 }
       );
-      return ok({ summary, records: page.rows, nextCursor: page.nextCursor });
+      return ok({
+        summary,
+        records: page.rows,
+        nextCursor: page.nextCursor,
+        total: page.total
+      });
     }
     const records = await deps.usageRecords.list({
       tenantId,

@@ -1286,27 +1286,44 @@ export class PostgresAuditLogRepository implements AuditLogRepository {
     tenantId?: UUID;
     limit: number;
     cursor?: string;
-  }): Promise<{ rows: AuditLogRow[]; nextCursor: string | null }> {
+  }): Promise<{ rows: AuditLogRow[]; nextCursor: string | null; total: number }> {
     const parsed = parseCursorRaw(args.cursor);
-    const conditions: string[] = [];
-    const params: unknown[] = [];
+    const filterConditions: string[] = [];
+    const filterParams: unknown[] = [];
     if (args.tenantId !== undefined) {
-      params.push(args.tenantId);
-      conditions.push(`tenant_id = $${params.length}`);
+      filterParams.push(args.tenantId);
+      filterConditions.push(`tenant_id = $${filterParams.length}`);
     }
+    const countWhere = filterConditions.length
+      ? `WHERE ${filterConditions.join(" AND ")}`
+      : "";
+    // Page query carries the same filter PLUS the cursor predicate.
+    const pageConditions = [...filterConditions];
+    const pageParams = [...filterParams];
     if (parsed) {
-      params.push(parsed.timestamp);
-      params.push(parsed.id);
-      conditions.push(
-        `(created_at, id) < ($${params.length - 1}::timestamptz, $${params.length}::uuid)`
+      pageParams.push(parsed.timestamp);
+      pageParams.push(parsed.id);
+      pageConditions.push(
+        `(created_at, id) < ($${pageParams.length - 1}::timestamptz, $${pageParams.length}::uuid)`
       );
     }
-    const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
-    params.push(args.limit + 1);
-    const result = await this.pool.query<Record<string, unknown>>(
-      `SELECT * FROM audit_logs ${where} ORDER BY created_at DESC, id DESC LIMIT $${params.length}`,
-      params
-    );
+    const pageWhere = pageConditions.length
+      ? `WHERE ${pageConditions.join(" AND ")}`
+      : "";
+    pageParams.push(args.limit + 1);
+    // Issue the page + count in parallel — the COUNT(*) uses the filter
+    // WITHOUT the cursor predicate so the footer reflects the entire
+    // result set, not just the slice past the current cursor.
+    const [result, countResult] = await Promise.all([
+      this.pool.query<Record<string, unknown>>(
+        `SELECT * FROM audit_logs ${pageWhere} ORDER BY created_at DESC, id DESC LIMIT $${pageParams.length}`,
+        pageParams
+      ),
+      this.pool.query<{ total: string }>(
+        `SELECT COUNT(*)::text AS total FROM audit_logs ${countWhere}`,
+        filterParams
+      )
+    ]);
     const allRows = result.rows.map(mapAuditLog);
     const overflow = allRows.length > args.limit;
     const rows = overflow ? allRows.slice(0, args.limit) : allRows;
@@ -1314,7 +1331,11 @@ export class PostgresAuditLogRepository implements AuditLogRepository {
       overflow && rows.length > 0
         ? encodeCursorRaw(rows[rows.length - 1].createdAt, rows[rows.length - 1].id)
         : null;
-    return { rows, nextCursor };
+    return {
+      rows,
+      nextCursor,
+      total: Number(countResult.rows[0]?.total ?? 0)
+    };
   }
 }
 
@@ -1398,27 +1419,40 @@ export class PostgresUsageRecordRepository implements UsageRecordRepository {
     tenantId?: UUID;
     limit: number;
     cursor?: string;
-  }): Promise<{ rows: UsageRecordRow[]; nextCursor: string | null }> {
+  }): Promise<{ rows: UsageRecordRow[]; nextCursor: string | null; total: number }> {
     const parsed = parseCursorRaw(args.cursor);
-    const conditions: string[] = [];
-    const params: unknown[] = [];
+    const filterConditions: string[] = [];
+    const filterParams: unknown[] = [];
     if (args.tenantId !== undefined) {
-      params.push(args.tenantId);
-      conditions.push(`tenant_id = $${params.length}`);
+      filterParams.push(args.tenantId);
+      filterConditions.push(`tenant_id = $${filterParams.length}`);
     }
+    const countWhere = filterConditions.length
+      ? `WHERE ${filterConditions.join(" AND ")}`
+      : "";
+    const pageConditions = [...filterConditions];
+    const pageParams = [...filterParams];
     if (parsed) {
-      params.push(parsed.timestamp);
-      params.push(parsed.id);
-      conditions.push(
-        `(created_at, id) < ($${params.length - 1}::timestamptz, $${params.length}::uuid)`
+      pageParams.push(parsed.timestamp);
+      pageParams.push(parsed.id);
+      pageConditions.push(
+        `(created_at, id) < ($${pageParams.length - 1}::timestamptz, $${pageParams.length}::uuid)`
       );
     }
-    const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
-    params.push(args.limit + 1);
-    const result = await this.pool.query<Record<string, unknown>>(
-      `SELECT * FROM usage_records ${where} ORDER BY created_at DESC, id DESC LIMIT $${params.length}`,
-      params
-    );
+    const pageWhere = pageConditions.length
+      ? `WHERE ${pageConditions.join(" AND ")}`
+      : "";
+    pageParams.push(args.limit + 1);
+    const [result, countResult] = await Promise.all([
+      this.pool.query<Record<string, unknown>>(
+        `SELECT * FROM usage_records ${pageWhere} ORDER BY created_at DESC, id DESC LIMIT $${pageParams.length}`,
+        pageParams
+      ),
+      this.pool.query<{ total: string }>(
+        `SELECT COUNT(*)::text AS total FROM usage_records ${countWhere}`,
+        filterParams
+      )
+    ]);
     const allRows = result.rows.map(mapUsageRecord);
     const overflow = allRows.length > args.limit;
     const rows = overflow ? allRows.slice(0, args.limit) : allRows;
@@ -1426,7 +1460,11 @@ export class PostgresUsageRecordRepository implements UsageRecordRepository {
       overflow && rows.length > 0
         ? encodeCursorRaw(rows[rows.length - 1].createdAt, rows[rows.length - 1].id)
         : null;
-    return { rows, nextCursor };
+    return {
+      rows,
+      nextCursor,
+      total: Number(countResult.rows[0]?.total ?? 0)
+    };
   }
 
   async list(

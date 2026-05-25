@@ -742,12 +742,14 @@ export interface RetentionSettingsRepository {
 export interface AuditLogRepository {
   append(row: Omit<AuditLogRow, "id">): Promise<AuditLogRow>;
   list(filter?: { tenantId?: UUID; actorId?: UUID; limit?: number }): Promise<AuditLogRow[]>;
-  /** Cursor-paginated list ordered by (created_at DESC, id DESC). */
+  /** Cursor-paginated list ordered by (created_at DESC, id DESC). The
+   *  `total` is the COUNT(*) under the same filter — surfaced so the
+   *  UI footer can render "N of M" instead of just the loaded slice. */
   listPage?(args: {
     tenantId?: UUID;
     limit: number;
     cursor?: string;
-  }): Promise<{ rows: AuditLogRow[]; nextCursor: string | null }>;
+  }): Promise<{ rows: AuditLogRow[]; nextCursor: string | null; total: number }>;
 }
 
 export interface UsageRecordRepository {
@@ -758,7 +760,7 @@ export interface UsageRecordRepository {
     tenantId?: UUID;
     limit: number;
     cursor?: string;
-  }): Promise<{ rows: UsageRecordRow[]; nextCursor: string | null }>;
+  }): Promise<{ rows: UsageRecordRow[]; nextCursor: string | null; total: number }>;
 }
 
 export interface PluginRepository extends CrudRepository<PluginRow> {
