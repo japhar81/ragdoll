@@ -52,7 +52,12 @@ export function UsageScreen() {
   );
 
   return (
-    <Screen title="Usage & Cost" isLoading={usage.isLoading} error={usage.error}>
+    <Screen
+      title="Usage & Cost"
+      isLoading={usage.isLoading}
+      error={usage.error}
+      fill
+    >
       <div className="metric-row">
         <Metric label="Executions" value={s?.count ?? 0} />
         <Metric label="Input tokens" value={s?.inputTokens ?? 0} />
@@ -108,8 +113,9 @@ export function UsageScreen() {
           ] satisfies SvarColumn<UsageRow>[]
         }
         rows={records}
-        rowKey={(r) => `${r.executionId ?? "no-exec"}-${r.id ?? ""}`}
-        height="calc(100vh - 320px)"
+        rowKey={(r) =>
+          `${r.executionId ?? "no-exec"}-${r.inputTokens}-${r.outputTokens}`
+        }
         emptyMessage="No usage records yet."
         hasMore={usage.hasNextPage}
         isLoadingMore={usage.isFetchingNextPage}

@@ -951,6 +951,33 @@ pre {
   margin-bottom: 16px;
 }
 
+/* Fill mode — used by screens whose primary content is a virtualized
+   grid. Flex column so the grid host can `flex: 1` and consume all
+   remaining vertical space without nested 100vh math. `overflow: hidden`
+   on the body lets the grid manage its own scroll. */
+.screen-body--fill {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  overflow: hidden;
+  padding: 20px;
+  background: white;
+  min-height: 0;
+  height: 100%;
+  box-sizing: border-box;
+}
+.screen-body--fill > .svar-grid-wrap {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+/* When the executions grid is sharing space with a detail panel, the
+   grid is pinned to a fixed height and the detail panel takes the
+   rest. Detail scrolls internally so the whole screen doesn't reflow. */
+.screen-body--fill > .exec-detail {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+}
 .screen-body {
   overflow: auto;
   padding: 20px;

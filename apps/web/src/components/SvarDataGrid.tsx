@@ -100,17 +100,22 @@ export function SvarDataGrid<Row>(props: SvarDataGridProps<Row>) {
     });
   }, [rows, props.rowKey]);
 
+  // Default: stretch to whatever the parent flex column allots us. A
+  // numeric / string height is honored when the caller pins the grid
+  // (e.g. ExecutionsScreen shrinks to 360px when a trace is open).
   const heightStyle =
-    typeof props.height === "number"
-      ? `${props.height}px`
-      : (props.height ?? "100%");
+    props.height === undefined
+      ? undefined
+      : typeof props.height === "number"
+        ? `${props.height}px`
+        : props.height;
 
   return (
     <div className="svar-grid-wrap">
       <Willow>
         <div
           className="svar-grid-host"
-          style={{ height: heightStyle, minHeight: 200 }}
+          style={heightStyle ? { height: heightStyle, minHeight: 200 } : undefined}
         >
           {rows.length === 0 ? (
             <div className="svar-grid-empty">

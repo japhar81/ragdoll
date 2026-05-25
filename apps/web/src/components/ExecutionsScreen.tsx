@@ -132,6 +132,7 @@ export function ExecutionsScreen() {
       title="Executions"
       isLoading={executions.isLoading}
       error={executions.error}
+      fill
     >
       <SvarDataGrid<ExecutionRecord>
         columns={
@@ -142,7 +143,17 @@ export function ExecutionsScreen() {
               sort: false,
               width: 110,
               cell: (e) => (
-                <button onClick={() => setSelected(e.executionId)}>
+                <button
+                  // SVAR's row-click handler fires on mousedown, before
+                  // React's `click` event runs. We hook the same earlier
+                  // phase and stop propagation so the button wins the
+                  // event and the row selection doesn't pre-empt us.
+                  onMouseDown={(ev) => {
+                    ev.stopPropagation();
+                    setSelected(e.executionId);
+                  }}
+                  onClick={(ev) => ev.stopPropagation()}
+                >
                   {selected === e.executionId ? "Viewing" : "View trace"}
                 </button>
               )
@@ -183,7 +194,7 @@ export function ExecutionsScreen() {
         }
         rows={executionRows}
         rowKey={(e) => e.executionId}
-        height={selected ? 360 : "calc(100vh - 220px)"}
+        height={selected ? 360 : undefined}
         emptyMessage="No executions yet."
         hasMore={executions.hasNextPage}
         isLoadingMore={executions.isFetchingNextPage}
