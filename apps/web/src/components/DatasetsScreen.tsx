@@ -19,6 +19,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, ApiError } from "../lib/api.ts";
 import type { DatasetView, DatasetVersionView, DatasetAliasView } from "../lib/api.ts";
 import { Screen, Table } from "./Screen.tsx";
+import { DataGrid, type DataGridColumn } from "./DataGrid.tsx";
 import { useAuth } from "../auth/AuthContext.tsx";
 import { useTenants } from "./useTenants.tsx";
 import { useEnvironments } from "./useEnvironments.tsx";
@@ -410,30 +411,47 @@ export function DatasetsScreen() {
   const auth = useAuth();
   const { tenants } = useTenants();
   const navigate = useNavigate();
-  // Stable per-dataset URL: /datasets/:datasetId selects that row on
-  // mount and on navigation; clicking "details" / "hide" updates the
-  // URL via navigate(). Bookmarking a dataset works as expected.
   const { datasetId: routeId } = useParams<{ datasetId?: string }>();
-  const [tenantFilter, setTenantFilter] = useState<string>("");
-  const [environmentFilter, setEnvironmentFilter] = useState<string>("");
-  const { environments } = useEnvironments(tenantFilter || undefined);
-
   const canAdmin = auth.can("dataset:admin");
 
+  // Phase 13 follow-up #2: ONE grid showing everything the user can
+  // see — global + every tenant + every env — with column-level
+  // filters. The previous tenant/env dropdowns gated which rows the
+  // API returned; the new grid asks for everything at once
+  // (server-side RBAC still filters by what the principal can read).
   const datasets = useQuery({
-    queryKey: ["datasets", tenantFilter, environmentFilter],
-    queryFn: () =>
-      api.listDatasets({
-        tenantId: tenantFilter || undefined,
-        environmentId: environmentFilter || undefined
-      })
+    queryKey: ["datasets-all"],
+    queryFn: async () => {
+      // Without `x-tenant-id` the server returns globals + any
+      // tenant-scoped rows the principal can read. We also fetch
+      // per-tenant lists for tenant + env scopes — the API filters
+      // those by `x-tenant-id` so we walk the principal's visible
+      // tenants and merge. Cheap with React Query dedup.
+      const baseline = await api.listDatasets();
+      const merged = new Map<string, (typeof baseline.datasets)[number]>();
+      for (const d of baseline.datasets) merged.set(d.id, d);
+      for (const tenant of tenants) {
+        try {
+          const res = await api.listDatasets({ tenantId: tenant.id });
+          for (const d of res.datasets) merged.set(d.id, d);
+        } catch {
+          /* skip tenants the principal can't read; keep going */
+        }
+      }
+      return { datasets: [...merged.values()] };
+    },
+    enabled: tenants.length > 0 || !canAdmin
   });
 
   const visible = datasets.data?.datasets ?? [];
-  // When the URL names a dataset that's NOT in the current filter view
-  // (e.g. deep-link to a tenant-scoped dataset while the filter is on
-  // a different tenant), fall back to fetching that one record so the
-  // detail panel still renders rather than silently 404'ing.
+  // Index tenant + env names so the grid can show them without forcing
+  // every row through another tenant lookup.
+  const tenantName = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const t of tenants) m.set(t.id, t.name ?? t.slug);
+    return m;
+  }, [tenants]);
+
   const fallbackDataset = useQuery({
     queryKey: ["dataset", routeId],
     queryFn: () => api.getDataset(routeId as string),
@@ -454,44 +472,22 @@ export function DatasetsScreen() {
         <p className="muted">
           Named, schema'd corpora that pipelines read from and write
           into. One Dataset can back many pipelines — ingest in one,
-          retrieve in others. Scope is global, tenant, or environment;
-          resolution walks env → tenant → global at reference time.
+          retrieve in others. Filter or sort any column; click a row
+          to open its versions + aliases.
         </p>
 
-        <div className="inline-form" style={{ gap: 8, marginBottom: 12, flexWrap: "wrap" }}>
-          <select
-            value={tenantFilter}
-            onChange={(e) => {
-              setTenantFilter(e.target.value);
-              setEnvironmentFilter("");
-            }}
-          >
-            <option value="">— all tenants —</option>
-            {tenants.map((t) => (
-              <option key={t.id} value={t.id}>
-                tenant · {t.name}
-              </option>
-            ))}
-          </select>
-          <select
-            value={environmentFilter}
-            onChange={(e) => setEnvironmentFilter(e.target.value)}
-            disabled={!tenantFilter || environments.length === 0}
-          >
-            <option value="">— all envs —</option>
-            {environments.map((env) => (
-              <option key={env.id} value={env.name}>
-                env · {env.name}
-              </option>
-            ))}
-          </select>
-          {canAdmin && <CreateDatasetForm onCreated={(d) => setSelectedId(d.id)} />}
-        </div>
+        {canAdmin && (
+          <div style={{ marginBottom: 12 }}>
+            <CreateDatasetForm onCreated={(d) => setSelectedId(d.id)} />
+          </div>
+        )}
 
-        <DatasetsTable
+        <DatasetsGrid
           rows={visible}
+          tenantName={tenantName}
           canAdmin={canAdmin}
           highlightedId={selectedId ?? undefined}
+          onOpen={setSelectedId}
         />
         {datasets.isError && <p className="error">{errText(datasets.error)}</p>}
       </div>
@@ -505,76 +501,126 @@ export function DatasetsScreen() {
 }
 
 /**
- * Flat datasets table. One row per dataset; actions inline; RBAC
- * gates write actions (Archive / Delete) when the user lacks
- * `dataset:admin` at that scope. Display name is editable in-place
- * (admin only).
+ * Datasets grid. All visible datasets in one sortable + filterable
+ * table; columns for tenant + env + scope mean the operator picks
+ * which slice they want without a separate dropdown. RBAC gates
+ * archive / delete; rename happens in-place on the displayName cell.
  */
-function DatasetsTable(props: {
+function DatasetsGrid(props: {
   rows: DatasetView[];
+  tenantName: Map<string, string>;
   canAdmin: boolean;
   highlightedId?: string;
+  onOpen: (id: string | null) => void;
 }) {
   const qc = useQueryClient();
   const archive = useMutation({
     mutationFn: (args: { id: string; archive: boolean }) =>
       api.updateDataset(args.id, { archived: args.archive }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["datasets"] })
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["datasets-all"] })
   });
   const remove = useMutation({
     mutationFn: (id: string) => api.deleteDataset(id),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["datasets"] })
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["datasets-all"] })
   });
-  if (props.rows.length === 0) {
-    return <p className="muted">No datasets at this scope yet.</p>;
-  }
-  return (
-    <Table
-      columns={[
-        "Slug",
-        "Display name",
-        "Scope",
-        "Modalities",
-        "Backends",
-        "Current ver",
-        "Status",
-        ""
-      ]}
-      rows={props.rows.map((d) => [
-        <code key="sl" style={{
-          fontWeight: d.id === props.highlightedId ? "bold" : undefined
-        }}>{d.slug}</code>,
-        <EditableDisplayName key="dn" dataset={d} canAdmin={props.canAdmin} />,
-        <span key="sc" className="status">
-          {scopeLabel(d)}
-        </span>,
-        d.modalities.join(", ") || "—",
-        <span key="be" className="muted">
+  const columns: DataGridColumn<DatasetView>[] = [
+    {
+      key: "slug",
+      header: "Slug",
+      accessor: (d) => d.slug,
+      cell: (d) => <code>{d.slug}</code>,
+      width: "16%"
+    },
+    {
+      key: "displayName",
+      header: "Display name",
+      accessor: (d) => d.displayName,
+      cell: (d) => <EditableDisplayName dataset={d} canAdmin={props.canAdmin} />,
+      width: "18%"
+    },
+    {
+      key: "scope",
+      header: "Scope",
+      accessor: (d) => d.scope,
+      filter: "select",
+      width: "9%"
+    },
+    {
+      key: "tenant",
+      header: "Tenant",
+      accessor: (d) =>
+        d.tenantId ? props.tenantName.get(d.tenantId) ?? d.tenantId : "—",
+      filter: "select",
+      width: "12%"
+    },
+    {
+      key: "env",
+      header: "Env",
+      accessor: (d) => d.environmentId ?? "—",
+      filter: "select",
+      width: "9%"
+    },
+    {
+      key: "modalities",
+      header: "Modalities",
+      accessor: (d) => d.modalities.join(", "),
+      width: "11%"
+    },
+    {
+      key: "backends",
+      header: "Backends",
+      accessor: (d) =>
+        Object.entries(d.backends)
+          .map(
+            ([modality, cfg]) =>
+              `${modality}:${(cfg as { provider?: string })?.provider ?? "?"}`
+          )
+          .join(", "),
+      cell: (d) => (
+        <span className="muted">
           {Object.entries(d.backends)
             .map(
               ([modality, cfg]) =>
                 `${modality}:${(cfg as { provider?: string })?.provider ?? "?"}`
             )
             .join(", ") || "—"}
-        </span>,
-        d.currentVersionId ? (
-          <span key="cv" className="status status-running">
-            ready
-          </span>
-        ) : (
-          <span key="cv" className="muted">—</span>
-        ),
+        </span>
+      ),
+      width: "13%"
+    },
+    {
+      key: "status",
+      header: "Status",
+      accessor: (d) => (d.archivedAt ? "archived" : "active"),
+      cell: (d) =>
         d.archivedAt ? (
-          <span key="st" className="status status-cancelled">archived</span>
+          <span className="status status-cancelled">archived</span>
         ) : (
-          <span key="st" className="status status-succeeded">active</span>
+          <span className="status status-succeeded">active</span>
         ),
-        <span key="actions" style={{ display: "inline-flex", gap: 6 }}>
+      filter: "select",
+      width: "7%"
+    },
+    {
+      key: "actions",
+      header: "",
+      accessor: () => "",
+      filter: "none",
+      sortable: false,
+      cell: (d) => (
+        <span style={{ display: "inline-flex", gap: 6 }}>
+          <button
+            className="link-btn"
+            onClick={() => props.onOpen(d.id)}
+            title="Show versions, aliases, and pipelines referencing this dataset"
+          >
+            details
+          </button>
           {props.canAdmin && (
             <>
               <button
                 className="link-btn"
-                title={d.archivedAt ? "Restore from archive" : "Archive (hide from default lists)"}
+                title={d.archivedAt ? "Restore from archive" : "Archive"}
                 onClick={() => archive.mutate({ id: d.id, archive: !d.archivedAt })}
                 disabled={archive.isPending}
               >
@@ -582,7 +628,7 @@ function DatasetsTable(props: {
               </button>
               <button
                 className="link-btn danger"
-                title="Permanently delete (refuses if pipelines reference it once that check is wired)"
+                title="Permanently delete"
                 onClick={() => {
                   if (
                     window.confirm(
@@ -599,7 +645,19 @@ function DatasetsTable(props: {
             </>
           )}
         </span>
-      ])}
+      ),
+      width: "5%"
+    }
+  ];
+  return (
+    <DataGrid
+      columns={columns}
+      rows={props.rows}
+      rowKey={(d) => d.id}
+      rowClassName={(d) =>
+        d.id === props.highlightedId ? "row-highlighted" : undefined
+      }
+      emptyMessage="No datasets at any scope you can read. Create one above."
     />
   );
 }

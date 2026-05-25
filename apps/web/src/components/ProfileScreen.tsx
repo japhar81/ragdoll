@@ -4,6 +4,7 @@ import { api, ApiError } from "../lib/api.ts";
 import type { ApiKeyView, GrantView } from "../lib/api.ts";
 import { useAuth } from "../auth/AuthContext.tsx";
 import { Screen, Table } from "./Screen.tsx";
+import { DataGrid, type DataGridColumn } from "./DataGrid.tsx";
 
 function errText(e: unknown): string {
   if (e instanceof ApiError) {
@@ -450,57 +451,105 @@ function ApiKeysCard() {
           </form>
         )}
 
-        <Table
-          columns={[
-            "Name",
-            "Prefix",
-            "Role",
-            "Scope",
-            "Last used",
-            "Expires",
-            "Status",
-            ""
-          ]}
-          rows={(keys.data?.apiKeys ?? []).map((k) => [
-            k.name,
-            <code key="p">rgd_{k.prefix}_…</code>,
-            k.roles.join(", ") || "—",
-            <span key="sc" className="status">
-              {k.scope === "*"
-                ? "global"
-                : k.environmentId
-                  ? `tenant ${k.tenantId?.slice(0, 8)}… · ${k.environmentId}`
-                  : `tenant ${k.tenantId?.slice(0, 8)}…`}
-            </span>,
-            k.lastUsedAt ? new Date(k.lastUsedAt).toLocaleString() : "never",
-            k.expiresAt ? new Date(k.expiresAt).toLocaleString() : "—",
-            <span
-              key="st"
-              className={`status ${
-                k.status === "active"
-                  ? "status-succeeded"
-                  : k.status === "expired"
-                    ? "status-cancelled"
-                    : "status-failed"
-              }`}
-            >
-              {k.status}
-            </span>,
-            k.status === "active" ? (
-              <button
-                key="x"
-                className="link-btn danger"
-                onClick={() => revoke.mutate(k.id)}
-                disabled={revoke.isPending}
-              >
-                revoke
-              </button>
-            ) : (
-              <span key="x" className="muted">
-                —
-              </span>
-            )
-          ])}
+        <DataGrid<ApiKeyView>
+          columns={
+            [
+              { key: "name", header: "Name", accessor: (k) => k.name, width: "18%" },
+              {
+                key: "prefix",
+                header: "Prefix",
+                accessor: (k) => k.prefix,
+                cell: (k) => <code>rgd_{k.prefix}_…</code>,
+                width: "14%"
+              },
+              {
+                key: "role",
+                header: "Role",
+                accessor: (k) => k.roles.join(", "),
+                filter: "select",
+                width: "12%"
+              },
+              {
+                key: "scope",
+                header: "Scope",
+                accessor: (k) =>
+                  k.scope === "*"
+                    ? "global"
+                    : k.environmentId
+                      ? `${k.tenantId?.slice(0, 8)}/${k.environmentId}`
+                      : `${k.tenantId?.slice(0, 8)}`,
+                cell: (k) => (
+                  <span className="status">
+                    {k.scope === "*"
+                      ? "global"
+                      : k.environmentId
+                        ? `tenant ${k.tenantId?.slice(0, 8)}… · ${k.environmentId}`
+                        : `tenant ${k.tenantId?.slice(0, 8)}…`}
+                  </span>
+                ),
+                width: "18%"
+              },
+              {
+                key: "lastUsedAt",
+                header: "Last used",
+                accessor: (k) => k.lastUsedAt ?? "",
+                cell: (k) =>
+                  k.lastUsedAt ? new Date(k.lastUsedAt).toLocaleString() : "never",
+                width: "14%"
+              },
+              {
+                key: "expiresAt",
+                header: "Expires",
+                accessor: (k) => k.expiresAt ?? "",
+                cell: (k) =>
+                  k.expiresAt ? new Date(k.expiresAt).toLocaleString() : "—",
+                width: "12%"
+              },
+              {
+                key: "status",
+                header: "Status",
+                accessor: (k) => k.status,
+                filter: "select",
+                cell: (k) => (
+                  <span
+                    className={`status ${
+                      k.status === "active"
+                        ? "status-succeeded"
+                        : k.status === "expired"
+                          ? "status-cancelled"
+                          : "status-failed"
+                    }`}
+                  >
+                    {k.status}
+                  </span>
+                ),
+                width: "8%"
+              },
+              {
+                key: "actions",
+                header: "",
+                accessor: () => "",
+                filter: "none",
+                sortable: false,
+                width: "4%",
+                cell: (k) =>
+                  k.status === "active" ? (
+                    <button
+                      className="link-btn danger"
+                      onClick={() => revoke.mutate(k.id)}
+                      disabled={revoke.isPending}
+                    >
+                      revoke
+                    </button>
+                  ) : (
+                    <span className="muted">—</span>
+                  )
+              }
+            ] satisfies DataGridColumn<ApiKeyView>[]
+          }
+          rows={keys.data?.apiKeys ?? []}
+          rowKey={(k) => k.id}
+          emptyMessage="No API keys yet."
         />
         {keys.isError && <p className="error">{errText(keys.error)}</p>}
       </div>

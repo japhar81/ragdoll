@@ -976,6 +976,40 @@ table.grid th {
   background: #f1f5f9;
 }
 
+/* DataGrid additions — per-column filter input + sort affordance.
+   The base `table.grid` styling stays untouched so the existing
+   non-datagrid tables look identical. */
+table.datagrid th {
+  padding: 6px 8px 4px;
+  font-weight: 600;
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+table.datagrid input.datagrid-filter,
+table.datagrid select.datagrid-filter {
+  width: 100%;
+  margin-top: 4px;
+  padding: 2px 6px;
+  font-size: 12px;
+  font-weight: normal;
+  border: 1px solid #cbd5e1;
+  border-radius: 3px;
+  background: white;
+  box-sizing: border-box;
+}
+table.datagrid input.datagrid-filter:focus,
+table.datagrid select.datagrid-filter:focus {
+  outline: 2px solid #6366f1;
+  outline-offset: -1px;
+}
+table.datagrid tbody tr:hover {
+  background: #f8fafc;
+}
+table.datagrid tbody tr.row-highlighted {
+  background: #fef3c7;
+}
+
 .muted {
   color: #64748b;
   font-size: 13px;

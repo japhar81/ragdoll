@@ -1,10 +1,12 @@
-import React, { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../lib/api.ts";
+import type { SecretMeta } from "../lib/api.ts";
 import { buildScopeTree, findScopeNode } from "../lib/orgtree.ts";
 import { tenantIdFromScopeKey } from "../lib/tenantContext.ts";
 import { useTenants } from "./useTenants.tsx";
-import { Screen, Table } from "./Screen.tsx";
+import { Screen } from "./Screen.tsx";
+import { DataGrid, type DataGridColumn } from "./DataGrid.tsx";
 import { ScopeTree } from "./ConfigScreen.tsx";
 
 /**
@@ -70,14 +72,6 @@ export function SecretsScreen() {
     }
   });
 
-  const rows = (secrets.data?.secrets ?? []).map((s) => [
-    s.id,
-    s.provider ?? "-",
-    s.version ?? "-",
-    "REDACTED",
-    s.updatedAt ?? "-"
-  ]);
-
   return (
     <Screen title="Secrets" isLoading={secrets.isLoading} error={secrets.error}>
       <div className="scope-layout">
@@ -123,9 +117,46 @@ export function SecretsScreen() {
           </form>
 
           <h2>Stored secrets (values never displayed)</h2>
-          <Table
-            columns={["ID", "Provider", "Version", "Value", "Updated"]}
-            rows={rows}
+          <DataGrid<SecretMeta>
+            columns={
+              [
+                { key: "id", header: "ID", accessor: (s) => s.id, width: "30%" },
+                {
+                  key: "provider",
+                  header: "Provider",
+                  accessor: (s) => s.provider ?? "—",
+                  filter: "select",
+                  width: "16%"
+                },
+                {
+                  key: "version",
+                  header: "Version",
+                  accessor: (s) => s.version ?? "",
+                  cell: (s) => s.version ?? "—",
+                  align: "right",
+                  width: "10%"
+                },
+                {
+                  key: "value",
+                  header: "Value",
+                  accessor: () => "REDACTED",
+                  filter: "none",
+                  sortable: false,
+                  cell: () => <span className="muted">REDACTED</span>,
+                  width: "14%"
+                },
+                {
+                  key: "updatedAt",
+                  header: "Updated",
+                  accessor: (s) => s.updatedAt ?? "",
+                  cell: (s) => (s.updatedAt ? new Date(s.updatedAt).toLocaleString() : "—"),
+                  width: "30%"
+                }
+              ] satisfies DataGridColumn<SecretMeta>[]
+            }
+            rows={secrets.data?.secrets ?? []}
+            rowKey={(s) => s.id}
+            emptyMessage="No secrets stored yet."
           />
         </div>
       </div>

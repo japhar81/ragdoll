@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, ApiError } from "../lib/api.ts";
 import type { AccountUser, GrantView, RoleView } from "../lib/api.ts";
 import { Screen, Table } from "./Screen.tsx";
+import { DataGrid, type DataGridColumn } from "./DataGrid.tsx";
 import { useTenants } from "./useTenants.tsx";
 
 function errText(e: unknown): string {
@@ -200,33 +201,67 @@ export function UsersScreen() {
         {create.isError && <span className="error">{errText(create.error)}</span>}
       </form>
 
-      <Table
-        columns={["Email", "Name", "Auth", "Status", "Actions"]}
-        rows={(users.data?.users ?? []).map((u) => [
-          u.email,
-          u.displayName ?? "—",
-          <span key="a" className="status">{u.sso ? "SSO" : "password"}</span>,
-          <span
-            key="s"
-            className={`status ${u.status === "active" ? "status-succeeded" : "status-failed"}`}
-          >
-            {u.status}
-          </span>,
-          <span key="act" className="row-actions">
-            <button className="link-btn" onClick={() => setOpen(u.id)}>
-              grants
-            </button>
-            <button className="link-btn" onClick={() => toggle.mutate(u)}>
-              {u.status === "active" ? "disable" : "enable"}
-            </button>
-            <button
-              className="link-btn danger"
-              onClick={() => del.mutate(u.id)}
-            >
-              delete
-            </button>
-          </span>
-        ])}
+      <DataGrid<AccountUser>
+        columns={
+          [
+            { key: "email", header: "Email", accessor: (u) => u.email, width: "30%" },
+            {
+              key: "displayName",
+              header: "Name",
+              accessor: (u) => u.displayName ?? "",
+              cell: (u) => u.displayName ?? "—",
+              width: "20%"
+            },
+            {
+              key: "auth",
+              header: "Auth",
+              accessor: (u) => (u.sso ? "SSO" : "password"),
+              filter: "select",
+              cell: (u) => (
+                <span className="status">{u.sso ? "SSO" : "password"}</span>
+              ),
+              width: "10%"
+            },
+            {
+              key: "status",
+              header: "Status",
+              accessor: (u) => u.status,
+              filter: "select",
+              cell: (u) => (
+                <span
+                  className={`status ${u.status === "active" ? "status-succeeded" : "status-failed"}`}
+                >
+                  {u.status}
+                </span>
+              ),
+              width: "10%"
+            },
+            {
+              key: "actions",
+              header: "",
+              accessor: () => "",
+              filter: "none",
+              sortable: false,
+              width: "30%",
+              cell: (u) => (
+                <span className="row-actions">
+                  <button className="link-btn" onClick={() => setOpen(u.id)}>
+                    grants
+                  </button>
+                  <button className="link-btn" onClick={() => toggle.mutate(u)}>
+                    {u.status === "active" ? "disable" : "enable"}
+                  </button>
+                  <button className="link-btn danger" onClick={() => del.mutate(u.id)}>
+                    delete
+                  </button>
+                </span>
+              )
+            }
+          ] satisfies DataGridColumn<AccountUser>[]
+        }
+        rows={users.data?.users ?? []}
+        rowKey={(u) => u.id}
+        emptyMessage="No users yet."
       />
 
       {open && (

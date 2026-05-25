@@ -1,7 +1,9 @@
 import React from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../lib/api.ts";
-import { Screen, Table } from "./Screen.tsx";
+import type { UsageRow } from "../lib/api.ts";
+import { Screen } from "./Screen.tsx";
+import { DataGrid, type DataGridColumn } from "./DataGrid.tsx";
 
 /** Usage admin. GET /api/usage returns an aggregated summary + raw records. */
 export function UsageScreen() {
@@ -25,16 +27,58 @@ export function UsageScreen() {
         />
       </div>
       <h2>Records</h2>
-      <Table
-        columns={["Execution", "Tenant", "Input", "Output", "Embedding", "Cost"]}
-        rows={(usage.data?.records ?? []).map((r) => [
-          r.executionId ?? "-",
-          r.tenantId ?? "-",
-          r.inputTokens,
-          r.outputTokens,
-          r.embeddingTokens,
-          `$${r.estimatedCostUsd.toFixed(4)}`
-        ])}
+      <DataGrid<UsageRow>
+        columns={
+          [
+            {
+              key: "executionId",
+              header: "Execution",
+              accessor: (r) => r.executionId ?? "—",
+              cell: (r) =>
+                r.executionId ? <code>{r.executionId.slice(0, 12)}…</code> : "—",
+              width: "20%"
+            },
+            {
+              key: "tenantId",
+              header: "Tenant",
+              accessor: (r) => r.tenantId ?? "—",
+              filter: "select",
+              width: "20%"
+            },
+            {
+              key: "inputTokens",
+              header: "Input",
+              accessor: (r) => r.inputTokens,
+              align: "right",
+              width: "12%"
+            },
+            {
+              key: "outputTokens",
+              header: "Output",
+              accessor: (r) => r.outputTokens,
+              align: "right",
+              width: "12%"
+            },
+            {
+              key: "embeddingTokens",
+              header: "Embedding",
+              accessor: (r) => r.embeddingTokens,
+              align: "right",
+              width: "12%"
+            },
+            {
+              key: "cost",
+              header: "Cost",
+              accessor: (r) => r.estimatedCostUsd,
+              cell: (r) => `$${r.estimatedCostUsd.toFixed(4)}`,
+              align: "right",
+              width: "12%"
+            }
+          ] satisfies DataGridColumn<UsageRow>[]
+        }
+        rows={usage.data?.records ?? []}
+        rowKey={(r, i) => `${r.executionId ?? "no-exec"}-${i}`}
+        emptyMessage="No usage records yet."
       />
     </Screen>
   );

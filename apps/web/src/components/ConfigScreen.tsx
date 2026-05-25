@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../lib/api.ts";
+import type { ConfigDefinitionRow, ConfigValueRow } from "../lib/api.ts";
 import {
   buildScopeTree,
   findScopeNode,
@@ -8,7 +9,8 @@ import {
 } from "../lib/orgtree.ts";
 import { tenantIdFromScopeKey } from "../lib/tenantContext.ts";
 import { useTenants } from "./useTenants.tsx";
-import { Screen, Table } from "./Screen.tsx";
+import { Screen } from "./Screen.tsx";
+import { DataGrid, type DataGridColumn } from "./DataGrid.tsx";
 
 /**
  * Config admin with a left Global -> Tenant -> Pipeline scope navigator.
@@ -118,27 +120,81 @@ export function ConfigScreen() {
           {values.error && (
             <p className="error">{String(values.error)}</p>
           )}
-          <Table
-            columns={["Key", "Scope", "Scope ID", "Value", "Locked"]}
-            rows={(values.data?.values ?? []).map((v) => [
-              v.key,
-              v.scope,
-              v.scopeId ?? "-",
-              String(v.value),
-              v.locked ? "yes" : "no"
-            ])}
+          <DataGrid<ConfigValueRow>
+            columns={
+              [
+                { key: "key", header: "Key", accessor: (v) => v.key, width: "26%" },
+                {
+                  key: "scope",
+                  header: "Scope",
+                  accessor: (v) => v.scope,
+                  filter: "select",
+                  width: "14%"
+                },
+                {
+                  key: "scopeId",
+                  header: "Scope ID",
+                  accessor: (v) => v.scopeId ?? "",
+                  cell: (v) => v.scopeId ?? "—",
+                  width: "20%"
+                },
+                {
+                  key: "value",
+                  header: "Value",
+                  accessor: (v) => String(v.value ?? ""),
+                  width: "26%"
+                },
+                {
+                  key: "locked",
+                  header: "Locked",
+                  accessor: (v) => (v.locked ? "yes" : "no"),
+                  filter: "select",
+                  width: "14%"
+                }
+              ] satisfies DataGridColumn<ConfigValueRow>[]
+            }
+            rows={values.data?.values ?? []}
+            rowKey={(v) => v.id}
+            emptyMessage="No config values at this scope."
           />
 
           <h2>Definitions</h2>
-          <Table
-            columns={["Key", "Type", "Scopes", "Secret", "Required"]}
-            rows={(definitions.data?.definitions ?? []).map((d) => [
-              d.key,
-              d.type,
-              (d.allowedScopes ?? []).join(", "),
-              d.secret ? "yes" : "no",
-              d.required ? "yes" : "no"
-            ])}
+          <DataGrid<ConfigDefinitionRow>
+            columns={
+              [
+                { key: "key", header: "Key", accessor: (d) => d.key, width: "26%" },
+                {
+                  key: "type",
+                  header: "Type",
+                  accessor: (d) => d.type,
+                  filter: "select",
+                  width: "14%"
+                },
+                {
+                  key: "scopes",
+                  header: "Scopes",
+                  accessor: (d) => (d.allowedScopes ?? []).join(", "),
+                  width: "30%"
+                },
+                {
+                  key: "secret",
+                  header: "Secret",
+                  accessor: (d) => (d.secret ? "yes" : "no"),
+                  filter: "select",
+                  width: "14%"
+                },
+                {
+                  key: "required",
+                  header: "Required",
+                  accessor: (d) => (d.required ? "yes" : "no"),
+                  filter: "select",
+                  width: "14%"
+                }
+              ] satisfies DataGridColumn<ConfigDefinitionRow>[]
+            }
+            rows={definitions.data?.definitions ?? []}
+            rowKey={(d) => d.key}
+            emptyMessage="No definitions registered."
           />
         </div>
       </div>

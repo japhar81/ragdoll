@@ -1,7 +1,9 @@
-import React, { useState } from "react";
+import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../lib/api.ts";
-import { Screen, Table } from "./Screen.tsx";
+import type { ExecutionRecord } from "../lib/types.ts";
+import { Screen } from "./Screen.tsx";
+import { DataGrid } from "./DataGrid.tsx";
 import {
   isTerminalStatus,
   sampleForDisplay,
@@ -118,18 +120,62 @@ export function ExecutionsScreen() {
       isLoading={executions.isLoading}
       error={executions.error}
     >
-      <Table
-        columns={["", "Execution", "Pipeline", "Status", "Started", "Completed"]}
-        rows={(executions.data?.executions ?? []).map((e) => [
-          <button key={e.executionId} onClick={() => setSelected(e.executionId)}>
-            {selected === e.executionId ? "Viewing" : "View trace"}
-          </button>,
-          e.executionId,
-          e.pipelineId,
-          <span className={`status status-${e.status}`}>{e.status}</span>,
-          e.startedAt,
-          e.completedAt ?? "-"
-        ])}
+      <DataGrid<ExecutionRecord>
+        columns={[
+          {
+            key: "actions",
+            header: "",
+            accessor: () => "",
+            filter: "none",
+            sortable: false,
+            width: "8%",
+            cell: (e) => (
+              <button onClick={() => setSelected(e.executionId)}>
+                {selected === e.executionId ? "Viewing" : "View trace"}
+              </button>
+            )
+          },
+          {
+            key: "executionId",
+            header: "Execution",
+            accessor: (e) => e.executionId,
+            cell: (e) => <code>{e.executionId.slice(0, 12)}…</code>,
+            width: "16%"
+          },
+          {
+            key: "pipelineId",
+            header: "Pipeline",
+            accessor: (e) => e.pipelineId,
+            filter: "select",
+            width: "22%"
+          },
+          {
+            key: "status",
+            header: "Status",
+            accessor: (e) => e.status,
+            filter: "select",
+            cell: (e) => <span className={`status status-${e.status}`}>{e.status}</span>,
+            width: "10%"
+          },
+          {
+            key: "startedAt",
+            header: "Started",
+            accessor: (e) => e.startedAt,
+            cell: (e) => new Date(e.startedAt).toLocaleString(),
+            width: "18%"
+          },
+          {
+            key: "completedAt",
+            header: "Completed",
+            accessor: (e) => e.completedAt ?? "",
+            cell: (e) =>
+              e.completedAt ? new Date(e.completedAt).toLocaleString() : "—",
+            width: "18%"
+          }
+        ]}
+        rows={executions.data?.executions ?? []}
+        rowKey={(e) => e.executionId}
+        emptyMessage="No executions yet."
       />
 
       {selected && (
