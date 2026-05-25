@@ -206,13 +206,30 @@ export function buildHarness(options: BuildOptions = {}): Harness {
   async function request(
     req: Partial<AppRequest> & { method: string; path: string }
   ) {
-    return app.handle({
+    const res = await app.handle({
       method: req.method,
       path: req.path,
       query: req.query ?? {},
       headers: req.headers ?? {},
       body: req.body
     });
+    // Phase 13: /stream and friends return async-iterable bodies for real
+    // chunked SSE. Tests assert against a single string, so consume the
+    // stream here and join the chunks; the wire is exactly what the
+    // Fastify-driven stack would have piped.
+    const body = res.body as unknown;
+    if (
+      body &&
+      typeof body === "object" &&
+      typeof (body as AsyncIterable<string>)[Symbol.asyncIterator] === "function"
+    ) {
+      const chunks: string[] = [];
+      for await (const chunk of body as AsyncIterable<string>) {
+        chunks.push(chunk);
+      }
+      return { ...res, body: chunks.join("") };
+    }
+    return res;
   }
 
   return { app, deps, queue, request, sessions };

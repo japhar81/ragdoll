@@ -518,6 +518,39 @@ async function main(): Promise<void> {
 
     if (response.body === undefined) return reply.send();
     if (typeof response.body === "string") return reply.send(response.body);
+    // Phase 13: real chunked delivery for async-iterable bodies (the
+    // /stream SSE route uses this). Detection is duck-typed on
+    // Symbol.asyncIterator so any AsyncGenerator / AsyncIterable works
+    // without a separate response type.
+    if (
+      response.body &&
+      typeof response.body === "object" &&
+      typeof (response.body as AsyncIterable<unknown>)[Symbol.asyncIterator] === "function"
+    ) {
+      reply.hijack();
+      reply.raw.statusCode = response.status;
+      reply.raw.setHeader("x-request-id", requestId);
+      for (const [k, v] of Object.entries(response.headers)) {
+        reply.raw.setHeader(k, v);
+      }
+      try {
+        for await (const chunk of response.body as AsyncIterable<string>) {
+          if (!reply.raw.write(chunk)) {
+            // Respect backpressure: wait for the drain event so we don't
+            // pile up bytes in the kernel send buffer on slow consumers.
+            await new Promise<void>((resolve) => reply.raw.once("drain", resolve));
+          }
+        }
+      } catch (e) {
+        logger.error("stream_failed", {
+          error: e instanceof Error ? e.message : String(e),
+          requestId
+        });
+      } finally {
+        reply.raw.end();
+      }
+      return;
+    }
     return reply.send(response.body);
   });
 

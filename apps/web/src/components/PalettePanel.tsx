@@ -46,6 +46,39 @@ export interface PalettePanelProps {
   isError: boolean;
   /** Add a node at the default position (click path; drag uses onDrop). */
   onAdd: (item: PaletteDragItem) => void;
+  /**
+   * Phase 13: hide nodes that don't make sense for the pipeline's
+   * execution kind. webhook_trigger needs an async runtime; pipeline_call
+   * needs the sync runtime. When `executionKind` is undefined (legacy)
+   * everything shows.
+   */
+  executionKind?: "batch" | "synchronous";
+}
+
+/** Plugin ids that ONLY make sense for batch pipelines (or that don't
+ *  make sense for synchronous pipelines). Mutually exclusive with
+ *  {@link SYNC_ONLY_PLUGIN_IDS}; checked at render time so the lists
+ *  stay tiny + obvious. */
+const BATCH_ONLY_PLUGIN_IDS = new Set([
+  "webhook_trigger",
+  // Webhooks register their own external callbacks — meaningless inside
+  // a /invoke synchronous round-trip.
+  "webhook_output"
+]);
+const SYNC_ONLY_PLUGIN_IDS = new Set([
+  // pipeline_call needs runPipelineByRef on the execution input, which
+  // only the sync runtime populates.
+  "pipeline_call"
+]);
+
+function pluginAllowedForKind(
+  pluginId: string,
+  kind: "batch" | "synchronous" | undefined
+): boolean {
+  if (!kind) return true;
+  if (kind === "synchronous" && BATCH_ONLY_PLUGIN_IDS.has(pluginId)) return false;
+  if (kind === "batch" && SYNC_ONLY_PLUGIN_IDS.has(pluginId)) return false;
+  return true;
 }
 
 /**
@@ -59,15 +92,24 @@ export function PalettePanel({
   plugins,
   isLoading,
   isError,
-  onAdd
+  onAdd,
+  executionKind
 }: PalettePanelProps) {
   const [filter, setFilter] = useState("");
   // Collapsed groups (by name). Default: every group expanded.
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
 
+  // Filter by kind FIRST so the kind-incompatible plugins never enter
+  // the visible groups / counts; then the operator's text filter
+  // narrows further.
+  const kindFiltered = useMemo(
+    () => plugins.filter((p) => pluginAllowedForKind(p.id, executionKind)),
+    [plugins, executionKind]
+  );
+
   const groups = useMemo(
-    () => filterAndGroupPalette(plugins, filter),
-    [plugins, filter]
+    () => filterAndGroupPalette(kindFiltered, filter),
+    [kindFiltered, filter]
   );
 
   const toggle = (group: string) =>

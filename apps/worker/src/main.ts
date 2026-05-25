@@ -23,6 +23,7 @@ import {
   type ChangeBus
 } from "../../../packages/events/src/index.ts";
 import { createScheduler } from "./scheduler.ts";
+import { startOllamaWarmer } from "./ollama-warmer.ts";
 import { loadRegistries } from "../../../packages/plugin-loader/src/index.ts";
 import { createVectorStore } from "../../../packages/vector/src/index.ts";
 import {
@@ -219,9 +220,26 @@ export async function main(): Promise<void> {
       Number(process.env.SCHEDULER_INTERVAL_MS ?? 60000)
     );
     logger.info("scheduler started (BullMQ enqueue)");
+    // Phase 13: optional Ollama warm-model heartbeat. Mitigates the
+    // 30-60s cold-start that hits the first chat request after a
+    // model has been idle. No-op when OLLAMA_WARM_MODELS is unset.
+    const warmModels = (process.env.OLLAMA_WARM_MODELS ?? "")
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+    const stopWarmer = startOllamaWarmer({
+      models: warmModels,
+      baseUrl: process.env.OLLAMA_BASE_URL ?? "http://ollama:11434",
+      intervalMs: Number(process.env.OLLAMA_WARM_INTERVAL_MS ?? 300_000),
+      logger
+    });
+    if (warmModels.length > 0) {
+      logger.info("ollama_warmer_started", { models: warmModels });
+    }
     const shutdown = async (): Promise<void> => {
       logger.info("worker shutting down");
       stopScheduler?.();
+      stopWarmer();
       await consumer.close();
       // Flush metric + log batches before the process dies so the last
       // few seconds of telemetry actually reach the collector.

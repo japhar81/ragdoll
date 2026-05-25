@@ -3266,13 +3266,11 @@ export function createApp(deps: AppDeps): App {
   });
 
   // ---- stream (SSE) -------------------------------------------------------
-  // Real implementation: subscribes to the ChangeBus, kicks off the
-  // pipeline in-process, and forwards `execution.*` events tagged with
-  // the running executionId as SSE frames. Replaces the historical
-  // `not_enabled` stub. The HTTP response stays buffered (we wait for
-  // the run to complete then flush the accumulated frames) because the
-  // AppResponse contract is non-streaming; real over-the-wire chunked
-  // streaming is a Fastify-layer enhancement.
+  // Real chunked SSE (Phase 13). Returns an async generator that yields
+  // frames as they're produced; the Fastify layer detects an
+  // AsyncIterable body and pipes it via reply.raw.write() so each
+  // frame goes over the wire the instant it's ready. The previous
+  // not_enabled stub is gone — see ADR-0018.
   route("POST", "/api/pipelines/:id/stream", async (ctx) => {
     const pipeline = await resolvePipelineRef(ctx.params.id);
     if (isAppResponse(pipeline)) return pipeline;
@@ -3304,66 +3302,81 @@ export function createApp(deps: AppDeps): App {
     if (!validation.valid) {
       return error(422, "validation_failed", { issues: validation.errors });
     }
-    const frames: string[] = [];
-    function frame(event: string, data: unknown): void {
-      frames.push(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
-    }
-    // We emit lifecycle frames directly from this route (rather than
-    // subscribing to the ChangeBus) because the API's executionStore is
-    // not necessarily wrapped with the worker's PublishingExecutionStore,
-    // and we want /stream to work regardless of how the deployment
-    // chose to wire observability. Real per-node progress would require
-    // adding the wrapper here too; for v1 of /stream the started /
-    // completed / output / done sequence is enough for clients to draw
-    // a "running…" spinner that flips to the result.
-    frame("execution.started", {
-      pipelineId: pipeline.id,
-      pipelineVersionId: resolved.id
-    });
-    let executionId: string | undefined;
-    try {
-      const result = await runSyncPipeline({
-        tenantId,
-        pipeline,
-        versionRow: resolved,
-        environment,
-        input: body.input,
-        actorId: ctx.principal.id,
-        requestId: headerValue(ctx.request.headers, "x-request-id") ?? undefined,
-        deadlineMs:
-          typeof body.deadlineMs === "number" ? body.deadlineMs : undefined
+    // Phase 13: real chunked SSE. Returns an async generator that yields
+    // frames in real time so the client can render progress instead of
+    // waiting for the whole run. The Fastify layer detects an
+    // AsyncIterable body and pipes it via reply.raw.write().
+    //
+    // Capture the narrowed locals before the generator closes over them
+    // so TS doesn't widen `pipeline` back to (PipelineRow | AppResponse)
+    // or `tenantId` back to `string | undefined` inside the closure.
+    const pipelineForStream = pipeline;
+    const resolvedForStream = resolved;
+    const tenantIdForStream = tenantId;
+    async function* streamFrames(): AsyncGenerator<string> {
+      function f(event: string, data: unknown): string {
+        return `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+      }
+      // Lifecycle frame goes out before the executor work begins so the
+      // client renders a "running" state immediately. Real chunked
+      // delivery: the Fastify glue flushes this byte-by-byte instead of
+      // waiting for the whole response. Per-node progress events from
+      // PublishingExecutionStore would arrive between started + output
+      // when wired (deferred — needs the API to wrap its executionStore
+      // the way the worker does, factored out of apps/worker).
+      yield f("execution.started", {
+        pipelineId: pipelineForStream.id,
+        pipelineVersionId: resolvedForStream.id
       });
-      executionId = result.executionId;
-      frame("execution.completed", {
-        executionId: result.executionId,
-        status: "succeeded"
-      });
-      frame("output", { output: result.output });
-      frame("done", {
-        executionId: result.executionId,
-        pipelineId: pipeline.id,
-        pipelineVersionId: resolved.id
-      });
-      await audit(ctx, "pipeline.invoke", "execution", result.executionId, undefined, {
-        pipelineId: pipeline.id,
-        version: resolved.version,
-        kind: "stream",
-        input: redactValue(body.input)
-      });
-    } catch (e) {
-      frame("execution.failed", {
-        executionId,
-        error: e instanceof Error ? e.message : String(e)
-      });
-      frame("error", { message: e instanceof Error ? e.message : String(e) });
+      try {
+        const result = await runSyncPipeline({
+          tenantId: tenantIdForStream,
+          pipeline: pipelineForStream,
+          versionRow: resolvedForStream,
+          environment,
+          input: body.input,
+          actorId: ctx.principal.id,
+          requestId: headerValue(ctx.request.headers, "x-request-id") ?? undefined,
+          deadlineMs:
+            typeof body.deadlineMs === "number" ? body.deadlineMs : undefined
+        });
+        yield f("execution.completed", {
+          executionId: result.executionId,
+          status: "succeeded"
+        });
+        yield f("output", { output: result.output });
+        yield f("done", {
+          executionId: result.executionId,
+          pipelineId: pipelineForStream.id,
+          pipelineVersionId: resolvedForStream.id
+        });
+        await audit(
+          ctx,
+          "pipeline.invoke",
+          "execution",
+          result.executionId,
+          undefined,
+          {
+            pipelineId: pipelineForStream.id,
+            version: resolvedForStream.version,
+            kind: "stream",
+            input: redactValue(body.input)
+          }
+        );
+      } catch (e) {
+        const message = e instanceof Error ? e.message : String(e);
+        yield f("execution.failed", { error: message });
+        yield f("error", { message });
+      }
     }
     return {
       status: 200,
-      body: frames.join(""),
+      body: streamFrames(),
       headers: {
         "content-type": "text/event-stream",
         "cache-control": "no-cache",
-        connection: "keep-alive"
+        connection: "keep-alive",
+        "x-accel-buffering": "no"
       }
     };
   });

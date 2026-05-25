@@ -1908,6 +1908,7 @@ export function PipelineBuilder(props: {
           isLoading={plugins.isLoading}
           isError={plugins.isError}
           onAdd={(item) => addNode(item)}
+          executionKind={executionKind}
         />
         <div
           className="col-resizer"

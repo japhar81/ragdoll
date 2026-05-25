@@ -308,6 +308,13 @@ services:
       # optional). Per-Dataset backend selection lands in a follow-up
       # via dataset.backends.vector.provider.
       RAGDOLL_VECTOR_BACKEND: ${RAGDOLL_VECTOR_BACKEND:-qdrant}
+      # Phase 13: keep these Ollama models resident so the first chat
+      # request doesn't pay the 30-60s cold-start. Empty / unset is a
+      # no-op. Models must already be pulled (see the ollama-pull
+      # service above which pulls qwen2.5:0.5b + nomic-embed-text).
+      OLLAMA_BASE_URL: http://ollama:11434
+      OLLAMA_WARM_MODELS: ${OLLAMA_WARM_MODELS:-qwen2.5:0.5b,nomic-embed-text}
+      OLLAMA_WARM_INTERVAL_MS: ${OLLAMA_WARM_INTERVAL_MS:-300000}
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
       OTEL_SERVICE_NAME: ragdoll-worker
       OTEL_RESOURCE_ATTRIBUTES: "service.namespace=ragdoll,deployment.environment=local"

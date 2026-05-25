@@ -13,7 +13,7 @@
  * `pipeline_admin` within their own pipelines). The server still
  * enforces — this is just cosmetic UI.
  */
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, ApiError } from "../lib/api.ts";
 import type { DatasetView, DatasetVersionView, DatasetAliasView } from "../lib/api.ts";
@@ -173,6 +173,122 @@ function DatasetDetail(props: { dataset: DatasetView; canAdmin: boolean }) {
         })}
       />
       {aliasSwap.isError && <p className="error">{errText(aliasSwap.error)}</p>}
+
+      <DatasetPipelinesSection dataset={props.dataset} />
+    </div>
+  );
+}
+
+/**
+ * Phase 13: inverse view. "Which pipelines reference this dataset?"
+ * derived client-side from listPipelines + listVersions so we don't
+ * need a new REST endpoint. Each visible pipeline's latest spec is
+ * scanned for `node.dataset.slug === <our slug>`.
+ *
+ * Cost-aware: one versions call per visible pipeline. React Query
+ * dedupes against the Pipelines screen's own cache (same
+ * `pipeline-versions` key), so opening a dataset detail after
+ * browsing the Pipelines list usually hits warm cache.
+ */
+function DatasetPipelinesSection(props: { dataset: DatasetView }) {
+  const pipelines = useQuery({
+    queryKey: ["pipelines"],
+    queryFn: () => api.listPipelines()
+  });
+  const rows = pipelines.data?.pipelines ?? [];
+  return (
+    <>
+      <h4 style={{ marginTop: 16 }}>Pipelines</h4>
+      <p className="muted" style={{ fontSize: "0.85em" }}>
+        Pipelines whose latest spec references{" "}
+        <code>{props.dataset.slug}</code>.
+      </p>
+      {pipelines.isLoading && <p className="muted">Loading…</p>}
+      <DatasetPipelineList
+        rows={rows.map((p) => ({ id: p.id, name: p.name, slug: p.slug ?? p.id }))}
+        datasetSlug={props.dataset.slug}
+      />
+    </>
+  );
+}
+
+/**
+ * Streams DatasetPipelineRow probes for each visible pipeline; only
+ * the ones whose latest spec references the target dataset slug
+ * actually render. When NONE match, we surface a hint so the section
+ * isn't silently empty.
+ */
+function DatasetPipelineList(props: {
+  rows: Array<{ id: string; name: string; slug: string }>;
+  datasetSlug: string;
+}) {
+  const [hits, setHits] = useState<Record<string, boolean>>({});
+  const allChecked = props.rows.every((r) => hits[r.id] !== undefined);
+  const anyHit = Object.values(hits).some(Boolean);
+  return (
+    <>
+      {props.rows.map((p) => (
+        <DatasetPipelineRow
+          key={p.id}
+          pipelineId={p.id}
+          name={p.name}
+          slug={p.slug}
+          datasetSlug={props.datasetSlug}
+          onChecked={(hit) =>
+            setHits((prev) =>
+              prev[p.id] === hit ? prev : { ...prev, [p.id]: hit }
+            )
+          }
+        />
+      ))}
+      {allChecked && !anyHit && (
+        <p className="muted">No pipelines reference this dataset yet.</p>
+      )}
+    </>
+  );
+}
+
+/**
+ * Renders a single pipeline row IFF its latest version references the
+ * target dataset slug. Doing the filter at the row level instead of
+ * batching keeps each lookup memoised in React Query and matches the
+ * PipelinesScreen's own caching key.
+ */
+function DatasetPipelineRow(props: {
+  pipelineId: string;
+  name: string;
+  slug: string;
+  datasetSlug: string;
+  onChecked: (hit: boolean) => void;
+}) {
+  const versions = useQuery({
+    queryKey: ["pipeline-versions", props.pipelineId],
+    queryFn: () => api.listVersions(props.pipelineId),
+    staleTime: 30_000
+  });
+  const hit = useMemo(() => {
+    const all = versions.data?.versions ?? [];
+    const latestId = versions.data?.latestVersionId;
+    const target = latestId
+      ? all.find((v) => v.id === latestId) ?? all[0]
+      : all[0];
+    if (!target?.spec) return false;
+    for (const node of (target.spec as { spec?: { nodes?: Array<{ dataset?: { slug?: string } }> } })?.spec?.nodes ?? []) {
+      if (node.dataset?.slug === props.datasetSlug) return true;
+    }
+    return false;
+  }, [versions.data, props.datasetSlug]);
+  // Report whether this pipeline references the dataset so the parent
+  // can decide whether the whole list is empty. We only call back when
+  // the result is settled (versions.data loaded) to avoid flicker.
+  useEffect(() => {
+    if (versions.data) props.onChecked(hit);
+  }, [versions.data, hit, props]);
+  if (!hit) return null;
+  return (
+    <div style={{ padding: "2px 0" }}>
+      <code>{props.slug}</code>{" "}
+      <span className="muted">— {props.name}</span>
     </div>
   );
 }
