@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, ApiError } from "../lib/api.ts";
 import type { ApiKeyView, GrantView } from "../lib/api.ts";
@@ -220,34 +220,83 @@ function ApiKeysCard() {
   const auth = useAuth();
   const qc = useQueryClient();
   const [name, setName] = useState("");
-  const [grantIdx, setGrantIdx] = useState(0);
+  const [role, setRole] = useState<string>("");
+  // "" === platform-wide (no tenant scope); a UUID === a specific tenant.
+  const [tenantId, setTenantId] = useState<string>("");
   const [environmentId, setEnvironmentId] = useState<string>("");
   const [expiresPreset, setExpiresPreset] = useState<string>("never");
   const [issued, setIssued] = useState<{ key: ApiKeyView; plaintext: string } | null>(
     null
   );
 
-  // A key cannot exceed its issuer, and an API key is scoped globally or to a
-  // whole tenant — so only the user's global / tenant-level grants are
-  // delegable. Environment- and pipeline-scoped grants are excluded; an env
-  // scope, when wanted, is set on the key itself via the picker below.
-  const eligible = useMemo(
-    () => auth.grants.filter((g) => !g.environment && !g.pipelineId),
+  // Anything the user can ASSIGN at some scope, they can mint a key for.
+  // The server enforces issuer-cap (it walks every permission of the chosen
+  // role and calls enforce() against the picked scope, returning 403/422
+  // when the user lacks one). So the UI's job is just to surface every
+  // option the user *might* have authority for — let the server decide.
+  //
+  // A platform-wide grant (`g.scope === "*"`) covers every tenant; a
+  // tenant-scoped grant (`t/<T>`) covers that tenant and its envs. Anything
+  // narrower (env- or pipeline-scoped) cannot back a key at all because
+  // env-scope grants are siblings under a tenant and the smallest scope
+  // a key carries is `t/<T>` or `t/<T>/e/<E>`.
+  const hasPlatformGrant = useMemo(
+    () => auth.grants.some((g) => g.scope === "*"),
     [auth.grants]
   );
+  const tenantsWithTenantGrant = useMemo(() => {
+    const ids = new Set<string>();
+    for (const g of auth.grants) {
+      if (g.tenantId && !g.environment && !g.pipelineId) ids.add(g.tenantId);
+    }
+    return ids;
+  }, [auth.grants]);
 
-  const selectedGrant = eligible[grantIdx];
-  const selectedTenantId = selectedGrant?.tenantId;
+  // Roles come from the policy catalog; the user can pick any of them and
+  // the server rejects with 403 if they can't actually grant it at the
+  // chosen scope. We show all of them (rather than guessing client-side)
+  // so a platform_admin sees the full menu without us re-implementing the
+  // role/permission walk in the browser.
+  const roles = useQuery({
+    queryKey: ["roles-mintable"],
+    queryFn: () => api.listRoles()
+  });
+  const tenants = useQuery({
+    queryKey: ["tenants-mintable"],
+    queryFn: () => api.listTenants()
+  });
 
-  // Tenant environments only matter when a tenant grant is selected.
-  // Platform-wide grants (tenantId === undefined) can't carry an env scope.
+  // Once roles load, default to the first one the user clearly already
+  // holds at some scope (so most users don't have to touch the dropdown).
+  // Falls back to the first role in the catalog otherwise.
+  const ownedRoleNames = useMemo(
+    () => new Set(auth.grants.map((g) => g.role)),
+    [auth.grants]
+  );
+  useEffect(() => {
+    if (role || !roles.data) return;
+    const owned = roles.data.roles.find((r) => ownedRoleNames.has(r.name));
+    setRole(owned?.name ?? roles.data.roles[0]?.name ?? "");
+  }, [role, roles.data, ownedRoleNames]);
+
+  // Tenants we let the user pick from: every tenant they hold any covering
+  // grant for. A platform-wide grant covers every tenant the API returns;
+  // a per-tenant grant covers just that tenant. Sorted by name for the UI.
+  const mintableTenants = useMemo(() => {
+    const all = tenants.data?.tenants ?? [];
+    return all
+      .filter((t) => hasPlatformGrant || tenantsWithTenantGrant.has(t.id))
+      .sort((a, b) => (a.name ?? a.slug).localeCompare(b.name ?? b.slug));
+  }, [tenants.data, hasPlatformGrant, tenantsWithTenantGrant]);
+
+  // Env dropdown only matters when a specific tenant is picked.
   const envs = useQuery({
-    queryKey: ["tenant-environments", selectedTenantId ?? "none"],
+    queryKey: ["tenant-environments", tenantId || "none"],
     queryFn: () =>
-      selectedTenantId
-        ? api.listEnvironments(selectedTenantId)
+      tenantId
+        ? api.listEnvironments(tenantId)
         : Promise.resolve({ environments: [] }),
-    enabled: Boolean(selectedTenantId)
+    enabled: Boolean(tenantId)
   });
 
   const keys = useQuery({
@@ -266,16 +315,14 @@ function ApiKeysCard() {
   }
 
   const create = useMutation({
-    mutationFn: () => {
-      const g = eligible[grantIdx];
-      return api.createApiKey({
+    mutationFn: () =>
+      api.createApiKey({
         name: name.trim(),
-        role: g.role,
-        tenantId: g.tenantId,
+        role,
+        tenantId: tenantId || undefined,
         environmentId: environmentId || undefined,
         expiresAt: resolveExpiresAt()
-      });
-    },
+      }),
     onSuccess: (res) => {
       setName("");
       setEnvironmentId("");
@@ -305,7 +352,7 @@ function ApiKeysCard() {
           scripts). It carries one role you already hold; revoke it anytime.
         </p>
 
-        {eligible.length === 0 ? (
+        {!hasPlatformGrant && mintableTenants.length === 0 ? (
           <p className="error">
             You hold no global or tenant-level role, so there is nothing an API
             key could be scoped to. Ask an administrator for a grant.
@@ -325,21 +372,35 @@ function ApiKeysCard() {
               required
             />
             <select
-              value={grantIdx}
-              onChange={(e) => {
-                setGrantIdx(Number(e.target.value));
-                // Selecting a new grant clears the env — environments are
-                // tenant-scoped, so the choice may not be valid anymore.
-                setEnvironmentId("");
-              }}
+              value={role}
+              onChange={(e) => setRole(e.target.value)}
+              title="Role the key will carry"
             >
-              {eligible.map((g, i) => (
-                <option key={g.id} value={i}>
-                  {g.role} · {scopeLabel(g)}
+              {(roles.data?.roles ?? []).map((r) => (
+                <option key={r.name} value={r.name}>
+                  role · {r.name}
                 </option>
               ))}
             </select>
-            {selectedTenantId && (envs.data?.environments ?? []).length > 0 && (
+            <select
+              value={tenantId}
+              onChange={(e) => {
+                setTenantId(e.target.value);
+                // Switching tenants invalidates the previously-selected env.
+                setEnvironmentId("");
+              }}
+              title="Tenant scope — pick 'platform' for an unscoped key"
+            >
+              {hasPlatformGrant && (
+                <option value="">platform (global)</option>
+              )}
+              {mintableTenants.map((t) => (
+                <option key={t.id} value={t.id}>
+                  tenant · {t.name ?? t.slug}
+                </option>
+              ))}
+            </select>
+            {tenantId && (envs.data?.environments ?? []).length > 0 && (
               <select
                 value={environmentId}
                 onChange={(e) => setEnvironmentId(e.target.value)}
@@ -368,7 +429,7 @@ function ApiKeysCard() {
             <button
               type="submit"
               className="primary"
-              disabled={create.isPending}
+              disabled={create.isPending || !role}
             >
               {create.isPending ? "Creating…" : "Create key"}
             </button>
