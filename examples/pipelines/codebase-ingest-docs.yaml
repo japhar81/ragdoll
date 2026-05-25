@@ -70,10 +70,8 @@ spec:
     config:
       provider: "${config.embedding.provider}"
       model: "${config.embedding.model}"
-    secrets:
-      apiKey:
-        scope: tenant
-        key: embedding.api_key
+    # No `secrets:` block: the in-stack Ollama embedder needs no auth.
+    # For a paid embedder, re-add `apiKey: { scope: tenant, key: ... }`.
     ui:
       position:
         x: 1369.381181716919
@@ -93,13 +91,7 @@ spec:
       dimensions: 1536
       createKnnIndex: true
       idField: docId
-    secrets:
-      username:
-        scope: tenant
-        key: opensearch.username
-      password:
-        scope: tenant
-        key: opensearch.password
+    # No `secrets:` block: the dev OpenSearch instance has no auth.
     ui:
       position:
         x: 1829.1748056411743
@@ -115,13 +107,6 @@ spec:
       alias: stable
     config:
       index: codebase-docs
-    secrets:
-      username:
-        scope: tenant
-        key: opensearch.username
-      password:
-        scope: tenant
-        key: opensearch.password
     ui:
       position:
         x: 911.7939338684082

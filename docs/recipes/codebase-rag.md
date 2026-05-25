@@ -57,27 +57,23 @@ services:
 Without this the pipeline fails at the `fs` node with an empty document
 list (or ENOENT, depending on the host path).
 
-### 2. Seed the secret refs
+### 2. Switching to a paid provider (optional)
 
-Both YAMLs reference these per-tenant secret refs:
+The seeded specs and the YAMLs ship **without** `secrets:` blocks so the
+demo runs cleanly against the in-stack Ollama embedder + dev
+Qdrant/OpenSearch (no auth). If you swap in a paid embedder or a
+production Qdrant/OpenSearch that needs credentials, re-add the secret
+refs on the relevant nodes from the Builder:
 
-| Secret key            | Used by                                      |
+| Secret key            | Goes on…                                     |
 |-----------------------|----------------------------------------------|
 | `embedding.api_key`   | `provider_embeddings`                        |
 | `qdrant.api_key`      | `qdrant_vector_store` + `qdrant_delete`      |
 | `opensearch.username` | `opensearch_output` + `opensearch_delete`    |
 | `opensearch.password` | `opensearch_output` + `opensearch_delete`    |
 
-For the **in-stack defaults** (Ollama embedder + dev Qdrant/OpenSearch with
-no auth) the values are unused at runtime, but secret **resolution** still
-fires before the plugin runs and will fail when a ref points at a missing
-secret. Two options:
-
-- **Set placeholders** via `PUT /api/secrets` (or the Secrets screen) for
-  each of the four keys above. Any non-empty string works.
-- **Edit the spec in the builder** and drop the `secrets:` blocks
-  entirely. The plugins handle empty secrets fine when the upstream
-  endpoints don't need them.
+Then create the corresponding secrets at tenant scope via `PUT
+/api/secrets` (or the Secrets screen).
 
 ## Steady-state runs
 
