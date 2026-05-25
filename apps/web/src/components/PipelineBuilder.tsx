@@ -322,18 +322,48 @@ function DatasetPickerSection(props: {
   const suggestedSlug = props.pipelineSlug?.trim() || "";
   const modalityLabel =
     required.length === 0 ? "" : required.join(" + ");
+  const defaultProvider = (m: string): string =>
+    m === "vector" ? "qdrant" : m === "text" ? "opensearch" : m;
   const create = useMutation({
     mutationFn: async (slug: string): Promise<{ slug: string }> => {
       // Always create at GLOBAL scope from the builder — pipelines are
       // tenant-/env-agnostic templates. Tenant / env overrides happen at
       // deploy time, where the operator picks the target context.
-      // Seed modalities to whatever the plugin needs so the new dataset
-      // immediately satisfies the picker filter.
+      //
+      // Conflict-aware: if a global row with this slug already exists
+      // (typical when an operator previously created a vector-only
+      // `code_indexer` and is now wiring an opensearch sink), POST 409s.
+      // PATCH the missing modalities + backends onto the existing row
+      // instead — the new node wants the existing corpus to gain one
+      // more index, not a duplicate slug.
+      const modalities = required.length > 0 ? required : ["vector"];
+      const existingGlobal = (datasets.data?.datasets ?? []).find(
+        (d) => d.slug === slug && d.scope === "global"
+      );
+      if (existingGlobal) {
+        const nextModalities = [
+          ...new Set([...existingGlobal.modalities, ...modalities])
+        ];
+        const nextBackends: Record<string, unknown> = {
+          ...(existingGlobal.backends ?? {})
+        };
+        for (const m of modalities) {
+          if (!nextBackends[m]) nextBackends[m] = { provider: defaultProvider(m) };
+        }
+        await api.updateDataset(existingGlobal.id, {
+          modalities: nextModalities,
+          backends: nextBackends
+        });
+        return { slug: existingGlobal.slug };
+      }
+      const backends: Record<string, unknown> = {};
+      for (const m of modalities) backends[m] = { provider: defaultProvider(m) };
       const res = await api.createDataset({
         scope: "global",
         slug,
         displayName: slug,
-        modalities: required.length > 0 ? required : ["vector"]
+        modalities,
+        backends
       });
       return { slug: res.dataset.slug };
     },
@@ -411,6 +441,20 @@ function DatasetPickerSection(props: {
           />
         )}
       </div>
+      {create.isError && (
+        <p className="error" style={{ marginTop: 6, fontSize: "0.85em" }}>
+          {create.error instanceof ApiError
+            ? (() => {
+                const b = create.error.body as
+                  | { message?: string; error?: string }
+                  | undefined;
+                return `HTTP ${create.error.status}: ${
+                  b?.message ?? b?.error ?? "request failed"
+                }`;
+              })()
+            : String(create.error)}
+        </p>
+      )}
       {compatibleSlugs.length === 0 && distinctSlugs.length > 0 && required.length > 0 && (
         <p className="muted" style={{ marginTop: 6, fontSize: "0.85em" }}>
           No existing slug provides the <code>{modalityLabel}</code> backend.
