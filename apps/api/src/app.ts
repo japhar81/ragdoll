@@ -442,6 +442,35 @@ export function createApp(deps: AppDeps): App {
   const SSO_STATE_TTL_MS = 10 * 60 * 1000;
 
   // ---- audit helper -------------------------------------------------------
+  /**
+   * Per-action permission required to receive the live `ChangeEvent` for
+   * that action. The WebSocket fan-out drops tagged events for subscribers
+   * that lack the permission at the event's tenant scope, so a tenant
+   * `viewer` no longer sees `secret.*` rotations or `user.grants.*`
+   * mutations even though those events ARE published into the bus. The
+   * audit row itself is unaffected — system-of-record records every
+   * mutation regardless of subscriber visibility. Untagged actions remain
+   * visible to every subscriber the tenant filter admits (the bulk of
+   * `pipeline.*` / `execution.*` traffic).
+   */
+  const SENSITIVE_ACTIONS: Record<string, string> = {
+    "secret.create": "secret:manage_tenant",
+    "secret.rotate": "secret:manage_tenant",
+    "secret.delete": "secret:manage_tenant",
+    "user.create": "user:manage",
+    "user.update": "user:manage",
+    "user.delete": "user:manage",
+    "user.grant": "user:manage",
+    "user.revoke": "user:manage",
+    "role.create": "role:manage",
+    "role.delete": "role:manage",
+    "role.set_permissions": "role:manage",
+    "idp.create": "idp:manage",
+    "idp.update": "idp:manage",
+    "idp.delete": "idp:manage",
+    "auth_settings.update": "auth:settings"
+  };
+
   async function audit(
     ctx: RouteContext,
     action: string,
@@ -471,6 +500,7 @@ export function createApp(deps: AppDeps): App {
     // mutation or roll back an audit row. The audit table is the system of
     // record; the bus is the "live UI" channel on top.
     try {
+      const requiredPermission = SENSITIVE_ACTIONS[action];
       await changeBus.publish({
         id: randomUUID(),
         action,
@@ -479,6 +509,7 @@ export function createApp(deps: AppDeps): App {
         tenantId,
         actorId,
         at,
+        ...(requiredPermission ? { requiredPermission } : {}),
         payload:
           after === undefined
             ? undefined

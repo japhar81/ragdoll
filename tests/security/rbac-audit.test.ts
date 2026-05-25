@@ -147,9 +147,12 @@ test("DagExecutor entry path invokes a principal-authorize closure", async () =>
 
 test("ChangeEvent declares an optional requiredPermission field", async () => {
   const src = await read("packages/events/src/index.ts");
+  // Window large enough to include the interface body even with its
+  // (rich) per-field JSDoc; intent is "field appears in the ChangeEvent
+  // interface block", not a strict locality bound.
   assert.match(
     src,
-    /interface ChangeEvent[\s\S]{0,800}requiredPermission/,
+    /interface ChangeEvent[\s\S]{0,2000}requiredPermission/,
     "ChangeEvent has no requiredPermission field. Phase 2 must add one so sensitive events (secret.*, config.*, user.*, role.*) can be filtered at WebSocket fan-out instead of broadcast to every viewer in the tenant."
   );
 });
@@ -169,15 +172,17 @@ test("WebSocket canSee filter consults requiredPermission when present", async (
 /*  Group F — Sensitive event publishers tag the events                      */
 /* -------------------------------------------------------------------------- */
 
-test("secret value mutations publish events tagged with secret:manage_tenant", async () => {
+test("secret mutations publish events tagged with secret:manage_tenant", async () => {
   const src = await read("apps/api/src/app.ts");
-  // After Phase 2 the secret-value routes publish events with
-  // requiredPermission: "secret:manage_tenant". The grep is intentionally
-  // loose — any occurrence in the file means the publishers got tagged.
+  // Phase 2 publishes change events with a requiredPermission set per
+  // action (via a SENSITIVE_ACTIONS map inside the audit() helper). The
+  // exact wiring is "secret.<verb>" -> "secret:manage_tenant"; matching
+  // any one of those entries proves the tagging plumbing is wired AND
+  // the secret events are in the sensitive set.
   assert.match(
     src,
-    /requiredPermission:\s*"secret:manage_tenant"/,
-    "Secret-value mutations broadcast as plain tenant-scoped events; any tenant viewer can subscribe and learn that a secret rotated. Phase 2 must tag these events with requiredPermission: 'secret:manage_tenant'."
+    /"secret\.(create|rotate|delete)":\s*"secret:manage_tenant"/,
+    "Secret mutations broadcast as plain tenant-scoped events; any tenant viewer can subscribe and learn that a secret rotated. Phase 2 must tag these events with requiredPermission: 'secret:manage_tenant'."
   );
 });
 
@@ -185,7 +190,7 @@ test("user grant changes publish events tagged with user:manage", async () => {
   const src = await read("apps/api/src/app.ts");
   assert.match(
     src,
-    /requiredPermission:\s*"user:manage"/,
+    /"user\.(grant|revoke|create|update|delete)":\s*"user:manage"/,
     "User grant additions/removals broadcast as plain tenant events. Phase 2 must tag these with requiredPermission: 'user:manage'."
   );
 });
