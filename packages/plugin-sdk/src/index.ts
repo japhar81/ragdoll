@@ -73,6 +73,21 @@ export interface PortDef {
  */
 export type PluginContractVersion = 1 | 2;
 
+/**
+ * Which backend slot a plugin reads / writes inside a ResolvedDataset.
+ * Drives the Builder picker's "compatible slugs" filter and the validator's
+ * `dataset_modality_mismatch` check.
+ *
+ * - "vector" — dense vector index (qdrant, pgvector, weaviate, …)
+ * - "text"   — lexical / BM25 index (opensearch, elasticsearch, …)
+ * - "graph"  — graph store (future)
+ * - "image"  — image embedding index (future)
+ *
+ * Leave undeclared on plugins that don't bind a backend slot (chunkers,
+ * embedders, prompt templates, …); the picker / validator skip the check.
+ */
+export type DatasetModality = "vector" | "text" | "graph" | "image";
+
 export interface PluginManifest {
   id: string;
   name: string;
@@ -81,6 +96,16 @@ export interface PluginManifest {
   description: string;
   /** Defaults to 1 (legacy) when omitted. See {@link PluginContractVersion}. */
   contract?: PluginContractVersion;
+  /**
+   * Backend slots this plugin requires inside the bound dataset. The Builder
+   * hides slugs whose datasets don't include ALL of these modalities, and
+   * the validator emits `dataset_modality_mismatch` when a bound slug lacks
+   * any of them. Hybrid retrievers (e.g. opensearch_hybrid_retriever) list
+   * both `["vector", "text"]`; vector-only plugins list `["vector"]`. Leave
+   * undeclared on plugins that pick their modality from config at runtime
+   * (e.g. dataset_search) — those skip the gate.
+   */
+  datasetModalities?: DatasetModality[];
   configSchema?: JsonSchemaLike;
   secretsSchema?: JsonSchemaLike;
   inputSchema?: JsonSchemaLike;

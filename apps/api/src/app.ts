@@ -4466,6 +4466,7 @@ function projectPlugin(plugin: RegisteredPlugin): {
   version: string;
   category: string;
   contract?: number;
+  datasetModalities?: string[];
   description: string;
   mode: string;
   capabilities: string[];
@@ -4502,6 +4503,11 @@ function projectPlugin(plugin: RegisteredPlugin): {
     // must pin a slug. Without this on the wire, the client treats every
     // plugin as v1 and the badge never lights up.
     ...(m.contract !== undefined ? { contract: m.contract } : {}),
+    // datasetModalities drives the Builder's "compatible slugs" picker and
+    // the `dataset_modality_mismatch` validator — see PluginManifest doc.
+    ...(m.datasetModalities !== undefined
+      ? { datasetModalities: m.datasetModalities }
+      : {}),
     description: m.description,
     mode: plugin.mode,
     capabilities: m.capabilities ?? [],

@@ -580,6 +580,7 @@ export const qdrantRetrieverPlugin: InProcessPlugin = {
     version: "1.0.0",
     category: "retriever",
     contract: 2,
+    datasetModalities: ["vector"],
     description: "Queries a vector store (Qdrant or in-memory) for the top-K most similar documents.",
     configSchema: {
       type: "object",
@@ -700,6 +701,7 @@ export const vectorUpsertPlugin: InProcessPlugin = {
     version: "1.0.0",
     category: "sink",
     contract: 2,
+    datasetModalities: ["vector"],
     description: "Ensures a collection exists and upserts embedded chunks into the vector store.",
     configSchema: {
       type: "object",
@@ -969,6 +971,7 @@ export const qdrantVectorStorePlugin: InProcessPlugin = {
     version: "1.0.0",
     category: "vector_store",
     contract: 2,
+    datasetModalities: ["vector"],
     description:
       "Ensures a collection exists and upserts embedded chunks/vectors into the vector store (Qdrant or in-memory).",
     configSchema: {
@@ -1493,6 +1496,7 @@ export const openSearchOutputPlugin: InProcessPlugin = {
     version: "1.0.0",
     category: "sink",
     contract: 2,
+    datasetModalities: ["text"],
     description:
       "Bulk-indexes documents (or embedded chunks) into an OpenSearch index. Tags each doc with the tenant id and can provision a kNN index.",
     configSchema: {
@@ -1615,6 +1619,7 @@ export const openSearchBm25RetrieverPlugin: InProcessPlugin = {
     version: "1.0.0",
     category: "retriever",
     contract: 2,
+    datasetModalities: ["text"],
     description:
       "Lexical (BM25) retrieval over an OpenSearch index using multi_match, scoped to the execution tenant.",
     configSchema: {
@@ -1702,6 +1707,7 @@ export const openSearchVectorRetrieverPlugin: InProcessPlugin = {
     name: "OpenSearch Vector Retriever",
     version: "1.0.0",
     category: "retriever",
+    datasetModalities: ["vector"],
     contract: 2,
     description:
       "kNN vector retrieval over an OpenSearch knn_vector index. Embeds the question when no queryVector is supplied.",
@@ -1815,6 +1821,7 @@ export const openSearchHybridRetrieverPlugin: InProcessPlugin = {
     version: "1.0.0",
     category: "retriever",
     contract: 2,
+    datasetModalities: ["vector", "text"],
     description:
       "Hybrid retrieval: runs BM25 lexical and kNN vector search over one OpenSearch index and fuses them (RRF or weighted).",
     configSchema: {

@@ -755,6 +755,7 @@ export const qdrantDeletePlugin: InProcessPlugin = {
     version: "1.0.0",
     category: "sink",
     contract: 2,
+    datasetModalities: ["vector"],
     description:
       "Deletes points by id from a Qdrant collection. Pairs with `delta_filter.deleted` for delta-aware ingestion: when source documents disappear from disk, their vector rows go too.",
     configSchema: {
@@ -832,6 +833,7 @@ export const opensearchDeletePlugin: InProcessPlugin = {
     version: "1.0.0",
     category: "sink",
     contract: 2,
+    datasetModalities: ["text"],
     description:
       "Bulk delete-by-id against an OpenSearch index. Tenant-scoped: refuses to issue the request if the docs don't carry the executing tenant id (defence-in-depth against cross-tenant deletes).",
     configSchema: {

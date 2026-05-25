@@ -57,6 +57,7 @@ import {
 import { PluginEditorSlot } from "./PluginEditorSlot.tsx";
 import { SecretsEditor } from "./SecretsEditor.tsx";
 import { DeployModal } from "./DeployModal.tsx";
+import { PipelineDatasetsPanel } from "./PipelineDatasetsPanel.tsx";
 import { NodeDocsTab } from "./builder/NodeDocsTab.tsx";
 import { BuilderConsole, useConsoleLog } from "./BuilderConsole.tsx";
 import { TenantSelect, useSelectedTenant } from "./useTenants.tsx";
@@ -250,6 +251,11 @@ function LayoutMenu({ onApply }: { onApply: (kind: LayoutKind) => void }) {
 function DatasetPickerSection(props: {
   node: PipelineNode;
   pipelineSlug: string;
+  /** Modalities the plugin needs the bound dataset to declare. Hides
+   *  incompatible slugs from the picker and seeds the create form so a
+   *  fresh dataset starts with the right backend slots. Empty array =
+   *  no modality gating (e.g. dataset_search picks at config time). */
+  requiredModalities: string[];
   onChange: (dataset: { slug: string; alias?: string } | undefined) => void;
 }) {
   const qc = useQueryClient();
@@ -259,34 +265,75 @@ function DatasetPickerSection(props: {
     queryKey: ["datasets-slugs"],
     queryFn: () => api.listDatasets({})
   });
+  // Group by slug — one row per logical corpus. Track the union of
+  // modalities across all scope variants so we can decide compatibility
+  // even when only an env override carries the new backend.
   const distinctSlugs = useMemo(() => {
-    const seen = new Map<string, { slug: string; displayName?: string; variants: number }>();
+    const seen = new Map<
+      string,
+      {
+        slug: string;
+        displayName?: string;
+        variants: number;
+        modalities: Set<string>;
+      }
+    >();
     for (const d of datasets.data?.datasets ?? []) {
       const entry = seen.get(d.slug);
-      if (entry) entry.variants += 1;
-      else
+      if (entry) {
+        entry.variants += 1;
+        for (const m of d.modalities ?? []) entry.modalities.add(m);
+      } else {
         seen.set(d.slug, {
           slug: d.slug,
           displayName: d.displayName ?? undefined,
-          variants: 1
+          variants: 1,
+          modalities: new Set(d.modalities ?? [])
         });
+      }
     }
     return [...seen.values()].sort((a, b) => a.slug.localeCompare(b.slug));
   }, [datasets.data]);
+  const required = props.requiredModalities;
+  const compatibleSlugs = useMemo(() => {
+    if (required.length === 0) return distinctSlugs;
+    return distinctSlugs.filter((d) =>
+      required.every((m) => d.modalities.has(m))
+    );
+  }, [distinctSlugs, required]);
   const current = props.node.dataset as
     | { slug: string; alias?: string }
     | undefined;
+  // If the current pin is no longer compatible (e.g. plugin changed), still
+  // surface it in the dropdown so the user sees what's bound — the
+  // validator will badge it red.
+  const currentEntry = current?.slug
+    ? distinctSlugs.find((d) => d.slug === current.slug)
+    : undefined;
+  const visibleSlugs = useMemo(() => {
+    if (
+      currentEntry &&
+      !compatibleSlugs.some((d) => d.slug === currentEntry.slug)
+    ) {
+      return [currentEntry, ...compatibleSlugs];
+    }
+    return compatibleSlugs;
+  }, [compatibleSlugs, currentEntry]);
   const suggestedSlug = props.pipelineSlug?.trim() || "";
+  const modalityLabel =
+    required.length === 0 ? "" : required.join(" + ");
   const create = useMutation({
     mutationFn: async (slug: string): Promise<{ slug: string }> => {
       // Always create at GLOBAL scope from the builder — pipelines are
       // tenant-/env-agnostic templates. Tenant / env overrides happen at
       // deploy time, where the operator picks the target context.
+      // Seed modalities to whatever the plugin needs so the new dataset
+      // immediately satisfies the picker filter.
       const res = await api.createDataset({
         scope: "global",
         slug,
         displayName: slug,
-        modalities: ["vector"]
+        modalities: required.length > 0 ? required : ["vector"]
       });
       return { slug: res.dataset.slug };
     },
@@ -304,6 +351,12 @@ function DatasetPickerSection(props: {
         Pin this node to a dataset <strong>slug</strong>. The runtime resolves
         the (tenant, env) variant at deploy time — no need to choose a scope
         here.
+        {modalityLabel && (
+          <>
+            {" "}
+            This plugin needs the <code>{modalityLabel}</code> backend{required.length > 1 ? "s" : ""}.
+          </>
+        )}
       </p>
       <div className="inline-form" style={{ gap: 6, flexWrap: "wrap" }}>
         <select
@@ -317,10 +370,13 @@ function DatasetPickerSection(props: {
           disabled={datasets.isLoading}
         >
           <option value="">(no dataset — pick a slug)</option>
-          {distinctSlugs.map((d) => (
+          {visibleSlugs.map((d) => (
             <option key={d.slug} value={d.slug}>
               {d.slug}
-              {d.variants > 1 ? ` · ${d.variants} scope variants` : ""}
+              {d.modalities.size > 0
+                ? ` · ${[...d.modalities].join("/")}`
+                : ""}
+              {d.variants > 1 ? ` · ${d.variants} scopes` : ""}
             </option>
           ))}
         </select>
@@ -331,14 +387,16 @@ function DatasetPickerSection(props: {
             disabled={!suggestedSlug || create.isPending}
             title={
               suggestedSlug
-                ? `Create a new global dataset slug "${suggestedSlug}"`
+                ? `Create a new global dataset "${suggestedSlug}"${
+                    modalityLabel ? ` with ${modalityLabel} backend` : ""
+                  }`
                 : "Save the pipeline first so we can suggest a slug"
             }
             onClick={() => suggestedSlug && create.mutate(suggestedSlug)}
           >
             {create.isPending
               ? "Creating…"
-              : `+ New global dataset "${suggestedSlug || "—"}"`}
+              : `+ New ${modalityLabel || "vector"} dataset "${suggestedSlug || "—"}"`}
           </button>
         )}
         {current?.slug && (
@@ -353,6 +411,13 @@ function DatasetPickerSection(props: {
           />
         )}
       </div>
+      {compatibleSlugs.length === 0 && distinctSlugs.length > 0 && required.length > 0 && (
+        <p className="muted" style={{ marginTop: 6, fontSize: "0.85em" }}>
+          No existing slug provides the <code>{modalityLabel}</code> backend.
+          Create one above, or add a backend to an existing dataset from the
+          Datasets screen.
+        </p>
+      )}
     </div>
   );
 }
@@ -461,7 +526,7 @@ export function PipelineBuilder(props: {
   // keeps the previously-active tab so a "compare configs across nodes" flow
   // doesn't drop the user back on Config every time.
   const [inspectorTab, setInspectorTab] =
-    useState<"config" | "resolved" | "docs">("config");
+    useState<"config" | "datasets" | "resolved" | "docs">("config");
   // The pipeline id we last loaded a spec for, so the editing-load effect
   // only fires once per "Edit" hand-off from the Pipelines tree.
   const loadedFor = useRef<string | undefined>(undefined);
@@ -907,6 +972,29 @@ export function PipelineBuilder(props: {
     };
   }, [pluginList]);
 
+  // Slug → modalities lookup feeds the validator's
+  // dataset_modality_mismatch check. Built from the all-scopes dataset
+  // list so the picker filter and the validator agree on what counts as
+  // "compatible". The validator treats `undefined` as "skip the check",
+  // so while the list is loading the error doesn't briefly flash on.
+  const datasetsForValidation = useQuery({
+    queryKey: ["datasets-slugs"],
+    queryFn: () => api.listDatasets({})
+  });
+  const datasetModalityIndex = useMemo(() => {
+    if (!datasetsForValidation.data) return undefined;
+    const bySlug = new Map<string, Set<string>>();
+    for (const d of datasetsForValidation.data.datasets) {
+      const set = bySlug.get(d.slug) ?? new Set<string>();
+      for (const m of d.modalities ?? []) set.add(m);
+      bySlug.set(d.slug, set);
+    }
+    return (slug: string): string[] | undefined => {
+      const set = bySlug.get(slug);
+      return set ? [...set] : undefined;
+    };
+  }, [datasetsForValidation.data]);
+
   const validation = useMemo(() => {
     // Skip validation while the plugin list is still loading — otherwise
     // every plugin ref looks "missing" for the first render.
@@ -920,7 +1008,8 @@ export function PipelineBuilder(props: {
     }
     const result = validatePipelineSpec(
       spec as unknown as Parameters<typeof validatePipelineSpec>[0],
-      clientPluginRegistry as unknown as Parameters<typeof validatePipelineSpec>[1]
+      clientPluginRegistry as unknown as Parameters<typeof validatePipelineSpec>[1],
+      datasetModalityIndex
     );
     const byNode = new Map<string, NodeValidationBuckets>();
     const push = (issue: ValidationIssue, ids: string[]) => {
@@ -950,7 +1039,7 @@ export function PipelineBuilder(props: {
       warnings: result.warnings,
       datasetSlots: result.datasetSlots ?? []
     };
-  }, [spec, clientPluginRegistry, pluginList.length]);
+  }, [spec, clientPluginRegistry, pluginList.length, datasetModalityIndex]);
   const validationByNode = validation.byNode;
   const blockingErrors = validation.errors;
   const runDisabled = blockingErrors.length > 0;
@@ -2203,6 +2292,24 @@ export function PipelineBuilder(props: {
             <button
               role="tab"
               type="button"
+              aria-selected={inspectorTab === "datasets"}
+              className={
+                "inspector-tab" +
+                (inspectorTab === "datasets" ? " active" : "")
+              }
+              onClick={() => setInspectorTab("datasets")}
+              title="Slugs this pipeline references and where they bind"
+            >
+              Datasets
+              {validation.datasetSlots.length > 0 && (
+                <span className="inspector-tab-count">
+                  {new Set(validation.datasetSlots.map((s) => s.slug)).size}
+                </span>
+              )}
+            </button>
+            <button
+              role="tab"
+              type="button"
               aria-selected={inspectorTab === "resolved"}
               className={
                 "inspector-tab" +
@@ -2256,6 +2363,9 @@ export function PipelineBuilder(props: {
                       <DatasetPickerSection
                         node={selectedNode}
                         pipelineSlug={pipelineSlug}
+                        requiredModalities={
+                          selectedPlugin.data.datasetModalities ?? []
+                        }
                         onChange={(dataset) =>
                           updateSelectedNode((n) => ({ ...n, dataset }))
                         }
@@ -2397,6 +2507,30 @@ export function PipelineBuilder(props: {
                   </p>
                 </>
               )}
+            </div>
+          )}
+
+          {inspectorTab === "datasets" && (
+            <div className="inspector-tab-panel" role="tabpanel">
+              <PipelineDatasetsPanel
+                slots={validation.datasetSlots}
+                onSelectNode={setSelectedId}
+                onRebind={(nodeId, dataset) => {
+                  setNodes((current) =>
+                    (current as unknown as FlowNode[]).map((flow) =>
+                      flow.id !== nodeId
+                        ? flow
+                        : ({
+                            ...flow,
+                            data: {
+                              ...flow.data,
+                              node: { ...flow.data.node, dataset }
+                            }
+                          } as unknown as Node)
+                    ) as unknown as Node[]
+                  );
+                }}
+              />
             </div>
           )}
 

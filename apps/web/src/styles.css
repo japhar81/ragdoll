@@ -2628,6 +2628,20 @@ kbd {
 }
 .inspector-tab[aria-selected="true"] { font-weight: 600; }
 .inspector-tab-panel { display: flex; flex-direction: column; gap: 6px; }
+.inspector-tab-count {
+  display: inline-block;
+  margin-left: 4px;
+  padding: 0 6px;
+  border-radius: 9px;
+  font-size: 0.75em;
+  font-weight: 600;
+  background: #e2e8f0;
+  color: #334155;
+  vertical-align: middle;
+}
+.pipeline-datasets-panel .grid th,
+.pipeline-datasets-panel .grid td { padding: 4px 6px; }
+.pipeline-datasets-panel .grid input { padding: 2px 6px; font-size: inherit; }
 
 /* ---- Node docs tab (Builder inspector "Docs") --------------------------- */
 .node-docs {

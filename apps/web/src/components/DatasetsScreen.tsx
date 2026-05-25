@@ -100,6 +100,7 @@ function DatasetDetail(props: { dataset: DatasetView; canAdmin: boolean }) {
               .join(", ")
           : "no backends declared"}
       </div>
+      {props.canAdmin && <AddBackendForm dataset={props.dataset} />}
 
       <h4>Embedding profile</h4>
       <pre className="codeblock">
@@ -814,6 +815,116 @@ function DatasetsGrid(props: {
       }
       emptyMessage="No datasets at any scope you can read. Create one above."
     />
+  );
+}
+
+/**
+ * "+ Add backend" affordance on the dataset detail card. Lets an admin
+ * extend a single-modality dataset (e.g. vector-only `code_indexer`) with
+ * another backend (e.g. opensearch text) so a hybrid pipeline can pin the
+ * same slug across both nodes. The API's PATCH /api/datasets/:id already
+ * merges in `modalities` + `backends`, so this is a one-shot mutation.
+ */
+function AddBackendForm(props: { dataset: DatasetView }) {
+  const qc = useQueryClient();
+  const existingModalities = new Set(props.dataset.modalities);
+  const candidateModalities = ["vector", "text", "graph", "image"].filter(
+    (m) => !existingModalities.has(m)
+  );
+  const providersByModality: Record<string, string[]> = {
+    vector: ["qdrant", "pgvector"],
+    text: ["opensearch"],
+    graph: ["neo4j"],
+    image: ["qdrant"]
+  };
+  const [open, setOpen] = useState(false);
+  const [modality, setModality] = useState(candidateModalities[0] ?? "");
+  const [provider, setProvider] = useState(
+    providersByModality[candidateModalities[0] ?? ""]?.[0] ?? ""
+  );
+  const add = useMutation({
+    mutationFn: async () => {
+      const nextBackends = {
+        ...(props.dataset.backends ?? {}),
+        [modality]: { provider }
+      };
+      const nextModalities = [
+        ...new Set([...props.dataset.modalities, modality])
+      ];
+      return api.updateDataset(props.dataset.id, {
+        modalities: nextModalities,
+        backends: nextBackends
+      });
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["datasets"] });
+      qc.invalidateQueries({ queryKey: ["datasets-all"] });
+      qc.invalidateQueries({ queryKey: ["datasets-slugs"] });
+      setOpen(false);
+    }
+  });
+  if (candidateModalities.length === 0) {
+    return (
+      <p className="muted" style={{ fontSize: "0.85em" }}>
+        All known modalities are configured on this dataset.
+      </p>
+    );
+  }
+  if (!open) {
+    return (
+      <button
+        className="link-btn"
+        onClick={() => setOpen(true)}
+        style={{ marginTop: 4 }}
+      >
+        + Add backend
+      </button>
+    );
+  }
+  return (
+    <form
+      className="inline-form"
+      onSubmit={(e) => {
+        e.preventDefault();
+        add.mutate();
+      }}
+      style={{ gap: 6, marginTop: 6, flexWrap: "wrap" }}
+    >
+      <span className="muted">Add</span>
+      <select
+        value={modality}
+        onChange={(e) => {
+          const m = e.target.value;
+          setModality(m);
+          setProvider(providersByModality[m]?.[0] ?? "");
+        }}
+      >
+        {candidateModalities.map((m) => (
+          <option key={m} value={m}>
+            {m}
+          </option>
+        ))}
+      </select>
+      <span className="muted">via</span>
+      <select value={provider} onChange={(e) => setProvider(e.target.value)}>
+        {(providersByModality[modality] ?? []).map((p) => (
+          <option key={p} value={p}>
+            {p}
+          </option>
+        ))}
+      </select>
+      <button className="primary" type="submit" disabled={add.isPending || !provider}>
+        {add.isPending ? "Adding…" : "Add"}
+      </button>
+      <button
+        type="button"
+        className="link-btn"
+        onClick={() => setOpen(false)}
+      >
+        cancel
+      </button>
+      {add.isError && <span className="error">{errText(add.error)}</span>}
+    </form>
   );
 }
 
