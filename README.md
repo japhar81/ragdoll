@@ -271,6 +271,7 @@ The wrapper invokes `apps/cli/src/index.ts` directly via Node's
 
 ## Key docs
 
+- **Start here** (3-minute concepts read): `docs/users-guide.md`
 - Architecture: `docs/architecture/initial-design.md`,
   `docs/architecture/runtime.md`
 - ADRs: `docs/adr/0001`–`0019`
