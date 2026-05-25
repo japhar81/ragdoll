@@ -400,20 +400,31 @@ function ApiKeysCard() {
                 </option>
               ))}
             </select>
-            {tenantId && (envs.data?.environments ?? []).length > 0 && (
-              <select
-                value={environmentId}
-                onChange={(e) => setEnvironmentId(e.target.value)}
-                title="Restrict the key to a single environment"
-              >
-                <option value="">all envs</option>
-                {(envs.data?.environments ?? []).map((env) => (
-                  <option key={env.id} value={env.name}>
-                    env · {env.name}
-                  </option>
-                ))}
-              </select>
-            )}
+            <select
+              value={environmentId}
+              onChange={(e) => setEnvironmentId(e.target.value)}
+              disabled={!tenantId || (envs.data?.environments ?? []).length === 0}
+              title={
+                !tenantId
+                  ? "Pick a tenant first to restrict to one of its environments"
+                  : (envs.data?.environments ?? []).length === 0
+                    ? "This tenant has no environments configured"
+                    : "Restrict the key to a single environment"
+              }
+            >
+              <option value="">
+                {!tenantId
+                  ? "env · (pick a tenant first)"
+                  : (envs.data?.environments ?? []).length === 0
+                    ? "env · (tenant has none)"
+                    : "all envs"}
+              </option>
+              {(envs.data?.environments ?? []).map((env) => (
+                <option key={env.id} value={env.name}>
+                  env · {env.name}
+                </option>
+              ))}
+            </select>
             <select
               value={expiresPreset}
               onChange={(e) => setExpiresPreset(e.target.value)}
