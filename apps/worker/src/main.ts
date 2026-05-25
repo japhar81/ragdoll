@@ -206,6 +206,41 @@ export async function main(): Promise<void> {
 
   if (process.env.REDIS_URL) {
     const { startBullMqConsumer, BullMqQueue } = await import("./bullmq.ts");
+    // Start the Ollama warmer FIRST so we can gate the BullMQ consumer
+    // on the warmer's readiness promise. Without this gate, the worker
+    // would happily pick up a `run_pipeline` job while `ollama-pull` is
+    // still fetching weights — the first /api/embed comes back 404
+    // ("model not found") and the pipeline crashes. The warmer polls
+    // /api/generate (chat) and /api/embed (embedding-only) until each
+    // model responds 2xx, then resolves `ready`. The dequeue waits.
+    const warmModels = (process.env.OLLAMA_WARM_MODELS ?? "")
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+    const warmer = startOllamaWarmer({
+      models: warmModels,
+      baseUrl: process.env.OLLAMA_BASE_URL ?? "http://ollama:11434",
+      intervalMs: Number(process.env.OLLAMA_WARM_INTERVAL_MS ?? 300_000),
+      readyTimeoutMs: Number(
+        process.env.OLLAMA_WARM_READY_TIMEOUT_MS ?? 600_000
+      ),
+      logger
+    });
+    if (warmModels.length > 0) {
+      logger.info("ollama_warmer_started", { models: warmModels });
+      try {
+        await warmer.ready;
+      } catch (err) {
+        // A misconfigured Ollama or a hung pull shouldn't leave the
+        // worker silently dead. Log loudly and fall through so the
+        // worker still accepts non-Ollama jobs (transform-demo,
+        // xml-codec-demo, …); Ollama-dependent runs will still fail
+        // until the operator fixes the underlying problem.
+        logger.error("ollama_warmer_ready_timeout", {
+          error: err instanceof Error ? err.message : String(err)
+        });
+      }
+    }
     const consumer = await startBullMqConsumer(worker, {
       redisUrl: process.env.REDIS_URL,
       queueName: process.env.WORKER_QUEUE_NAME,
@@ -224,26 +259,10 @@ export async function main(): Promise<void> {
       Number(process.env.SCHEDULER_INTERVAL_MS ?? 60000)
     );
     logger.info("scheduler started (BullMQ enqueue)");
-    // Phase 13: optional Ollama warm-model heartbeat. Mitigates the
-    // 30-60s cold-start that hits the first chat request after a
-    // model has been idle. No-op when OLLAMA_WARM_MODELS is unset.
-    const warmModels = (process.env.OLLAMA_WARM_MODELS ?? "")
-      .split(",")
-      .map((s) => s.trim())
-      .filter(Boolean);
-    const stopWarmer = startOllamaWarmer({
-      models: warmModels,
-      baseUrl: process.env.OLLAMA_BASE_URL ?? "http://ollama:11434",
-      intervalMs: Number(process.env.OLLAMA_WARM_INTERVAL_MS ?? 300_000),
-      logger
-    });
-    if (warmModels.length > 0) {
-      logger.info("ollama_warmer_started", { models: warmModels });
-    }
     const shutdown = async (): Promise<void> => {
       logger.info("worker shutting down");
       stopScheduler?.();
-      stopWarmer();
+      warmer.stop();
       await consumer.close();
       // Flush metric + log batches before the process dies so the last
       // few seconds of telemetry actually reach the collector.
