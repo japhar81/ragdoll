@@ -831,8 +831,23 @@ export function createWorker(deps: WorkerDeps): Worker {
     tenantId: string;
     environment: string;
     runtimeOverrides?: Record<string, unknown>;
+    /**
+     * Parameters declared inline on `spec.spec.parameters`. Merged on top
+     * of the platform-wide config_definitions so a pipeline can ship its
+     * own knobs (defaults + allowedScopes) without requiring an operator
+     * to seed a separate config definition row first. A spec parameter
+     * overrides a platform definition with the same key (pipelines win
+     * because the spec is the version-pinned source of truth).
+     */
+    specParameters?: ConfigDefinition[];
   }): Promise<ResolvedConfig> {
-    const resolver = new ConfigResolver(await resolveDefinitions());
+    const platformDefinitions = await resolveDefinitions();
+    const specKeys = new Set((args.specParameters ?? []).map((p) => p.key));
+    const definitions = [
+      ...platformDefinitions.filter((d) => !specKeys.has(d.key)),
+      ...(args.specParameters ?? [])
+    ];
+    const resolver = new ConfigResolver(definitions);
     return resolver.resolve(
       {
         pipelineId: args.pipelineId,
@@ -1089,7 +1104,8 @@ export function createWorker(deps: WorkerDeps): Worker {
       pipelineVersionId: versionRow.id,
       tenantId: payload.tenantId,
       environment: payload.environment,
-      runtimeOverrides: payload.runtimeOverrides
+      runtimeOverrides: payload.runtimeOverrides,
+      specParameters: spec.spec.parameters
     });
     const context = buildContext({
       requestId: payload.requestId,
