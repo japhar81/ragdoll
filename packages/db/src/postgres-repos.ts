@@ -35,6 +35,8 @@ import type {
   PipelineVersionRow,
   ScheduleRepository,
   ScheduleRow,
+  RetentionSettingRow,
+  RetentionSettingsRepository,
   ProviderModelRepository,
   ProviderModelRow,
   ProviderRepository,
@@ -1092,7 +1094,7 @@ export class PostgresScheduleRepository
   implements ScheduleRepository
 {
   constructor(pool: PoolLike) {
-    super(pool, "schedules", "schedule", ["input"]);
+    super(pool, "schedules", "schedule", ["input", "params"]);
   }
 
   async listEnabled(): Promise<ScheduleRow[]> {
@@ -1277,6 +1279,64 @@ export class PostgresAuditLogRepository implements AuditLogRepository {
     );
     return result.rows.map(mapAuditLog);
   }
+
+  /** Cursor-paginated list. Mirror of executions: indexes on (created_at, id)
+   *  so tuple-comparison stays cheap; fetch limit+1 to detect more pages. */
+  async listPage(args: {
+    tenantId?: UUID;
+    limit: number;
+    cursor?: string;
+  }): Promise<{ rows: AuditLogRow[]; nextCursor: string | null }> {
+    const parsed = parseCursorRaw(args.cursor);
+    const conditions: string[] = [];
+    const params: unknown[] = [];
+    if (args.tenantId !== undefined) {
+      params.push(args.tenantId);
+      conditions.push(`tenant_id = $${params.length}`);
+    }
+    if (parsed) {
+      params.push(parsed.timestamp);
+      params.push(parsed.id);
+      conditions.push(
+        `(created_at, id) < ($${params.length - 1}::timestamptz, $${params.length}::uuid)`
+      );
+    }
+    const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
+    params.push(args.limit + 1);
+    const result = await this.pool.query<Record<string, unknown>>(
+      `SELECT * FROM audit_logs ${where} ORDER BY created_at DESC, id DESC LIMIT $${params.length}`,
+      params
+    );
+    const allRows = result.rows.map(mapAuditLog);
+    const overflow = allRows.length > args.limit;
+    const rows = overflow ? allRows.slice(0, args.limit) : allRows;
+    const nextCursor =
+      overflow && rows.length > 0
+        ? encodeCursorRaw(rows[rows.length - 1].createdAt, rows[rows.length - 1].id)
+        : null;
+    return { rows, nextCursor };
+  }
+}
+
+/** Cursor codec — kept local so audit/usage repos don't have to depend on
+ *  the same `postgres.ts` helper from a different package boundary. */
+function parseCursorRaw(
+  raw: string | undefined
+): { timestamp: string; id: string } | null {
+  if (!raw) return null;
+  try {
+    const decoded = Buffer.from(raw, "base64url").toString("utf-8");
+    const parsed = JSON.parse(decoded) as { t?: unknown; i?: unknown };
+    if (typeof parsed.t === "string" && typeof parsed.i === "string") {
+      return { timestamp: parsed.t, id: parsed.i };
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+function encodeCursorRaw(timestamp: string, id: string): string {
+  return Buffer.from(JSON.stringify({ t: timestamp, i: id })).toString("base64url");
 }
 
 function mapAuditLog(row: Record<string, unknown>): AuditLogRow {
@@ -1332,6 +1392,41 @@ export class PostgresUsageRecordRepository implements UsageRecordRepository {
       ]
     );
     return mapUsageRecord(result.rows[0]);
+  }
+
+  async listPage(args: {
+    tenantId?: UUID;
+    limit: number;
+    cursor?: string;
+  }): Promise<{ rows: UsageRecordRow[]; nextCursor: string | null }> {
+    const parsed = parseCursorRaw(args.cursor);
+    const conditions: string[] = [];
+    const params: unknown[] = [];
+    if (args.tenantId !== undefined) {
+      params.push(args.tenantId);
+      conditions.push(`tenant_id = $${params.length}`);
+    }
+    if (parsed) {
+      params.push(parsed.timestamp);
+      params.push(parsed.id);
+      conditions.push(
+        `(created_at, id) < ($${params.length - 1}::timestamptz, $${params.length}::uuid)`
+      );
+    }
+    const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
+    params.push(args.limit + 1);
+    const result = await this.pool.query<Record<string, unknown>>(
+      `SELECT * FROM usage_records ${where} ORDER BY created_at DESC, id DESC LIMIT $${params.length}`,
+      params
+    );
+    const allRows = result.rows.map(mapUsageRecord);
+    const overflow = allRows.length > args.limit;
+    const rows = overflow ? allRows.slice(0, args.limit) : allRows;
+    const nextCursor =
+      overflow && rows.length > 0
+        ? encodeCursorRaw(rows[rows.length - 1].createdAt, rows[rows.length - 1].id)
+        : null;
+    return { rows, nextCursor };
   }
 
   async list(
@@ -1857,4 +1952,57 @@ export class PostgresIngestStateRepository {
       }
     });
   }
+}
+
+export class PostgresRetentionSettingsRepository
+  implements RetentionSettingsRepository
+{
+  private pool: PoolLike;
+  constructor(pool: PoolLike) {
+    this.pool = pool;
+  }
+  async list(): Promise<RetentionSettingRow[]> {
+    const result = await this.pool.query<Record<string, unknown>>(
+      `SELECT resource, max_count, max_age_days, updated_at, updated_by
+       FROM retention_settings ORDER BY resource`
+    );
+    return result.rows.map(mapRetentionRow);
+  }
+  async upsert(input: {
+    resource: RetentionSettingRow["resource"];
+    maxCount: number | null;
+    maxAgeDays: number | null;
+    updatedBy?: string;
+  }): Promise<RetentionSettingRow> {
+    const result = await this.pool.query<Record<string, unknown>>(
+      `INSERT INTO retention_settings (resource, max_count, max_age_days, updated_by, updated_at)
+       VALUES ($1, $2, $3, $4, now())
+       ON CONFLICT (resource) DO UPDATE SET
+         max_count = EXCLUDED.max_count,
+         max_age_days = EXCLUDED.max_age_days,
+         updated_by = EXCLUDED.updated_by,
+         updated_at = now()
+       RETURNING resource, max_count, max_age_days, updated_at, updated_by`,
+      [
+        input.resource,
+        input.maxCount,
+        input.maxAgeDays,
+        toUuidOrNull(input.updatedBy)
+      ]
+    );
+    return mapRetentionRow(result.rows[0]);
+  }
+}
+
+function mapRetentionRow(row: Record<string, unknown>): RetentionSettingRow {
+  return {
+    resource: row.resource as RetentionSettingRow["resource"],
+    maxCount: row.max_count !== null ? Number(row.max_count) : null,
+    maxAgeDays: row.max_age_days as number | null,
+    updatedAt:
+      row.updated_at instanceof Date
+        ? row.updated_at.toISOString()
+        : (row.updated_at as string),
+    updatedBy: (row.updated_by as string | null) ?? null
+  };
 }

@@ -207,6 +207,10 @@ export function graphToSpec(
     executionKind?: "batch" | "synchronous";
     /** Phase 8 MCP auto-expose flag; omitted when false. */
     mcpExpose?: boolean;
+    /** Per-pipeline timeout (ms). Falls back to the platform default
+     *  (60 min) when undefined. Honored by the stale-exec sweep job
+     *  and by the runtime executor. */
+    timeoutMs?: number;
   }
 ): PipelineSpec {
   const specNodes: PipelineNode[] = nodes.map((flowNode) => {
@@ -237,7 +241,10 @@ export function graphToSpec(
       ...(metadata.executionKind && metadata.executionKind !== "batch"
         ? { executionKind: metadata.executionKind }
         : {}),
-      ...(metadata.mcpExpose ? { mcpExpose: true } : {})
+      ...(metadata.mcpExpose ? { mcpExpose: true } : {}),
+      ...(metadata.timeoutMs !== undefined && metadata.timeoutMs > 0
+        ? { timeoutMs: metadata.timeoutMs }
+        : {})
     },
     spec: { nodes: specNodes, edges: specEdges }
   };

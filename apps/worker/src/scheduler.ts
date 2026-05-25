@@ -82,10 +82,14 @@ const DEFAULT_INTERVAL_MS = 60_000;
  * runs so both paths resolve identically.
  */
 function runPipelinePayload(schedule: ScheduleRow): RunPipelineJob {
+  // Pipeline schedules always have tenant/pipeline/environment set (DB
+  // CHECK constraint). The non-null assertions are guarded at the call
+  // site below — we only enter this branch when `jobType` is the
+  // default `run_pipeline`, which forbids NULL on those columns.
   return {
-    tenantId: schedule.tenantId,
-    pipelineId: schedule.pipelineId,
-    environment: schedule.environment,
+    tenantId: schedule.tenantId as string,
+    pipelineId: schedule.pipelineId as string,
+    environment: schedule.environment as string,
     activationLabel: schedule.activationLabel ?? undefined,
     input: schedule.input ?? {},
     source: "schedule"
@@ -151,37 +155,61 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
         continue;
       }
 
+      // System schedules (job_type != 'run_pipeline') bypass the
+      // pipeline-specific grant re-check — they don't run pipelines. The
+      // enqueued payload carries the job-specific params directly.
+      const jobType = schedule.jobType ?? "run_pipeline";
+      if (jobType !== "run_pipeline") {
+        const sysJob: QueueJob = {
+          id: randomUUID(),
+          type: jobType as QueueJob["type"],
+          payload: schedule.params ?? {}
+        };
+        await deps.queue.enqueue(sysJob);
+        await deps.schedules.markRun(schedule.id, at.toISOString(), nextIso);
+        enqueued += 1;
+        logger?.info("scheduler enqueued system job", {
+          scheduleId: schedule.id,
+          jobId: sysJob.id,
+          jobType,
+          nextRunAt: nextIso
+        });
+        continue;
+      }
+
       // Phase 2 dataset/RBAC refactor: re-check the creator's grants at
       // fire time. A creator who lost `pipeline:run` between schedule
       // creation and now must NOT keep firing pipelines through this
       // schedule. We still advance `next_run_at` so the schedule keeps
       // its cadence and a single restored grant resumes runs cleanly.
+      // Below this point `jobType === 'run_pipeline'`, so tenant /
+      // pipeline / environment are guaranteed non-null by the DB
+      // CHECK constraint.
+      const tenantId = schedule.tenantId as string;
+      const pipelineId = schedule.pipelineId as string;
+      const environment = schedule.environment as string;
       let enqueuedBy: RunPipelineJob["enqueuedBy"];
       if (deps.authorizer && schedule.createdBy) {
         const principal: Principal = {
           id: schedule.createdBy,
           type: "user",
-          tenantId: schedule.tenantId,
+          tenantId,
           roles: []
         };
         try {
           const closure = await deps.authorizer.authorizeClosure(principal, {
-            defaultTenantId: schedule.tenantId
+            defaultTenantId: tenantId
           });
           principal.authorize = closure;
           requirePermission(
             principal,
             "pipeline:run" as Permission,
-            {
-              tenantId: schedule.tenantId,
-              pipelineId: schedule.pipelineId,
-              environment: schedule.environment
-            }
+            { tenantId, pipelineId, environment }
           );
           enqueuedBy = {
             principalId: schedule.createdBy,
             principalType: "user",
-            tenantId: schedule.tenantId,
+            tenantId,
             roles: []
           };
         } catch (e) {

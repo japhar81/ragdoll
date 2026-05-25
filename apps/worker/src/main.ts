@@ -23,6 +23,7 @@ import {
   type ChangeBus
 } from "../../../packages/events/src/index.ts";
 import { createScheduler } from "./scheduler.ts";
+import { createPostgresSystemSweeps } from "./systemSweeps.ts";
 import { startOllamaWarmer } from "./ollama-warmer.ts";
 import { loadRegistries } from "../../../packages/plugin-loader/src/index.ts";
 import { createVectorStore } from "../../../packages/vector/src/index.ts";
@@ -91,6 +92,7 @@ async function buildDeps(): Promise<BuiltDeps> {
   // reads, so mirroring there would double-insert. Off in Postgres mode keeps
   // exactly one usage write per (executionId, provider, model).
   let mirrorUsageToRepository = false;
+  let systemSweeps: ReturnType<typeof createPostgresSystemSweeps> | undefined;
   if (process.env.DATABASE_URL) {
     // Postgres-backed execution store + control-plane repositories so the
     // worker resolves the SAME seeded pipeline versions / config / providers
@@ -120,6 +122,7 @@ async function buildDeps(): Promise<BuiltDeps> {
       datasetAliases: new db.PostgresDatasetAliasRepository(pool)
     };
     schedules = new db.PostgresScheduleRepository(pool);
+    systemSweeps = createPostgresSystemSweeps(pool);
     secretProvider = new DatabaseEncryptedSecretProvider(
       new db.PostgresSecretRepository(pool),
       new StaticKeyProvider(process.env.SECRET_ENCRYPTION_KEY ?? "dev-secret")
@@ -178,7 +181,8 @@ async function buildDeps(): Promise<BuiltDeps> {
       maxRetries: Number(process.env.WORKER_MAX_RETRIES ?? 1),
       mirrorUsageToRepository,
       ingestStateRepository,
-      changeBus
+      changeBus,
+      systemSweeps
     },
     schedules
   };

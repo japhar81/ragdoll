@@ -30,6 +30,7 @@ import { UsersScreen } from "./components/UsersScreen.tsx";
 import { RolesScreen } from "./components/RolesScreen.tsx";
 import { IdentityProvidersScreen } from "./components/IdentityProvidersScreen.tsx";
 import { AuthSettingsScreen } from "./components/AuthSettingsScreen.tsx";
+import { RetentionScreen } from "./components/RetentionScreen.tsx";
 import { ProfileScreen } from "./components/ProfileScreen.tsx";
 import { LoginScreen } from "./components/LoginScreen.tsx";
 import { AuthProvider, useAuth } from "./auth/AuthContext.tsx";
@@ -96,7 +97,7 @@ const NAV_GROUPS: Array<{ group: string; items: NavItem[] }> = [
     ]
   },
   {
-    group: "Access",
+    group: "Settings",
     items: [
       { path: "/users", label: "Users", perms: ["user:manage"] },
       { path: "/roles", label: "Roles & Permissions", perms: ["role:manage"] },
@@ -105,7 +106,12 @@ const NAV_GROUPS: Array<{ group: string; items: NavItem[] }> = [
         label: "Identity Providers",
         perms: ["idp:manage"]
       },
-      { path: "/auth-settings", label: "Auth Settings", perms: ["auth:settings"] }
+      { path: "/auth-settings", label: "Auth Settings", perms: ["auth:settings"] },
+      {
+        path: "/retention",
+        label: "Retention",
+        perms: ["config:edit_global"]
+      }
     ]
   }
 ];
@@ -282,6 +288,7 @@ function Shell() {
           element={<IdentityProvidersScreen />}
         />
         <Route path="/auth-settings" element={<AuthSettingsScreen />} />
+        <Route path="/retention" element={<RetentionScreen />} />
         {/* Self-service: reachable by any signed-in user (no nav perm). */}
         <Route path="/profile" element={<ProfileScreen />} />
         {/* Unknown routes: fall back to whichever view the user can see, so a

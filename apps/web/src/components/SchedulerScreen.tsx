@@ -432,16 +432,29 @@ export function SchedulerScreen() {
           </thead>
           <tbody>
           {rows.map((s) => (
-            <tr key={s.id}>
+            <tr key={s.id} className={s.system ? "row-system" : undefined}>
               <td>
                 <div className="cell-stack">
-                  <code title={s.pipelineId}>{shortId(s.pipelineId)}</code>
-                  <span className="muted small" title={s.tenantId}>
-                    tenant {shortId(s.tenantId)}
-                  </span>
+                  {s.system ? (
+                    <>
+                      <strong>{s.name ?? s.jobType ?? "system schedule"}</strong>
+                      <span className="muted small">
+                        platform · <code>{s.jobType}</code>
+                      </span>
+                    </>
+                  ) : (
+                    <>
+                      <code title={s.pipelineId ?? ""}>
+                        {shortId(s.pipelineId ?? "—")}
+                      </code>
+                      <span className="muted small" title={s.tenantId ?? ""}>
+                        tenant {shortId(s.tenantId ?? "—")}
+                      </span>
+                    </>
+                  )}
                 </div>
               </td>
-              <td>{s.environment}</td>
+              <td>{s.environment ?? "—"}</td>
               <td>
                 <code className="mono">{s.cron}</code>
                 {s.activationLabel && (
@@ -471,16 +484,18 @@ export function SchedulerScreen() {
                   >
                     {s.enabled ? "Pause" : "Enable"}
                   </button>
-                  <button
-                    className="link-btn danger"
-                    onClick={() => {
-                      if (window.confirm("Delete this schedule?")) {
-                        remove.mutate(s.id);
-                      }
-                    }}
-                  >
-                    Delete
-                  </button>
+                  {!s.system && (
+                    <button
+                      className="link-btn danger"
+                      onClick={() => {
+                        if (window.confirm("Delete this schedule?")) {
+                          remove.mutate(s.id);
+                        }
+                      }}
+                    >
+                      Delete
+                    </button>
+                  )}
                 </div>
               </td>
             </tr>

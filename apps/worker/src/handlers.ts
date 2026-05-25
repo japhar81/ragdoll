@@ -175,6 +175,43 @@ export interface WorkerDeps {
    * preserves the install-free unit-test path.
    */
   authorizer?: Authorizer;
+  /**
+   * System-sweep adapter for the un-deletable `stale_exec_sweep` and
+   * `retention_sweep` schedules. Optional so the install-free test path
+   * doesn't have to fake one — the dispatch is a no-op when missing.
+   * Production wiring (main.ts) passes a Postgres-backed implementation.
+   */
+  systemSweeps?: SystemSweeps;
+}
+
+/* -------------------------------------------------------------------------- */
+/*  System sweeps                                                             */
+/* -------------------------------------------------------------------------- */
+
+export interface StaleExecSweepResult {
+  /** Number of executions transitioned from `running` to `failed`. */
+  swept: number;
+  /** Effective timeout the sweep used as the platform floor (ms). */
+  defaultTimeoutMs: number;
+}
+
+export interface RetentionSweepResult {
+  executionsDeleted: number;
+  usageDeleted: number;
+  auditDeleted: number;
+}
+
+export interface SystemSweeps {
+  /** Mark executions whose `started_at + timeoutMs` is in the past as
+   *  failed. `timeoutMs` is read from the pipeline_version spec's
+   *  `metadata.timeoutMs` (falling back to the platform default). */
+  staleExec(args: {
+    /** Platform default timeout, used when a spec doesn't override. */
+    defaultTimeoutMs: number;
+  }): Promise<StaleExecSweepResult>;
+  /** Apply per-resource count + age caps from retention_settings,
+   *  deleting rows that exceed any active limit. */
+  retention(): Promise<RetentionSweepResult>;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -1537,6 +1574,42 @@ export function createWorker(deps: WorkerDeps): Worker {
     return { plugins: results };
   }
 
+  /* ----------------------------- system sweeps --------------------------- */
+
+  /** Platform default pipeline timeout, applied when a spec doesn't carry
+   *  `metadata.timeoutMs`. 60 min matches the user-visible default in the
+   *  Pipelines screen; override per-pipeline by editing that field. */
+  const DEFAULT_PIPELINE_TIMEOUT_MS = 60 * 60 * 1000;
+
+  async function staleExecSweep(): Promise<StaleExecSweepResult> {
+    if (!deps.systemSweeps) {
+      deps.logger?.info(
+        "stale_exec_sweep skipped: no systemSweeps adapter wired (test mode?)"
+      );
+      return { swept: 0, defaultTimeoutMs: DEFAULT_PIPELINE_TIMEOUT_MS };
+    }
+    const result = await deps.systemSweeps.staleExec({
+      defaultTimeoutMs: DEFAULT_PIPELINE_TIMEOUT_MS
+    });
+    deps.logger?.info("stale_exec_sweep completed", {
+      swept: result.swept,
+      defaultTimeoutMs: result.defaultTimeoutMs
+    });
+    return result;
+  }
+
+  async function retentionSweep(): Promise<RetentionSweepResult> {
+    if (!deps.systemSweeps) {
+      deps.logger?.info(
+        "retention_sweep skipped: no systemSweeps adapter wired (test mode?)"
+      );
+      return { executionsDeleted: 0, usageDeleted: 0, auditDeleted: 0 };
+    }
+    const result = await deps.systemSweeps.retention();
+    deps.logger?.info("retention_sweep completed", { ...result });
+    return result;
+  }
+
   /* ------------------------------ dispatch ------------------------------- */
 
   async function handle(job: QueueJob, signal?: AbortSignal): Promise<unknown> {
@@ -1559,6 +1632,10 @@ export function createWorker(deps: WorkerDeps): Worker {
         );
       case "plugin_health_check":
         return pluginHealthCheck();
+      case "stale_exec_sweep":
+        return staleExecSweep();
+      case "retention_sweep":
+        return retentionSweep();
       default: {
         const exhaustive: never = job.type;
         throw new Error(`unsupported job type: ${String(exhaustive)}`);

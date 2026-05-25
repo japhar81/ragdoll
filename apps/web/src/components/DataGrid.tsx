@@ -22,7 +22,7 @@
  * Filters apply as the user types; sort toggles ascending /
  * descending / off on header click.
  */
-import { useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
 export type DataGridScalar = string | number | boolean | null | undefined;
 
@@ -50,6 +50,15 @@ export interface DataGridProps<Row> {
   rowClassName?: (row: Row) => string | undefined;
   /** Empty-state text. Defaults to "No rows." */
   emptyMessage?: string;
+  /** When true an IntersectionObserver sentinel below the last row calls
+   *  `onLoadMore` as soon as it scrolls into view. The grid stays passive
+   *  otherwise — the caller controls when the trigger fires (e.g. only
+   *  when the previous fetch finished and another page exists). */
+  hasMore?: boolean;
+  /** Set true while a page is already fetching so the sentinel doesn't
+   *  request twice. */
+  isLoadingMore?: boolean;
+  onLoadMore?: () => void;
 }
 
 interface SortState {
@@ -221,7 +230,58 @@ export function DataGrid<Row>(props: DataGridProps<Row>) {
             ))}
           </tr>
         ))}
+        {props.hasMore && (
+          <tr>
+            <td colSpan={props.columns.length} style={{ padding: 0 }}>
+              <LoadMoreSentinel
+                isLoading={!!props.isLoadingMore}
+                onIntersect={() => props.onLoadMore?.()}
+              />
+            </td>
+          </tr>
+        )}
       </tbody>
     </table>
+  );
+}
+
+/**
+ * Sentinel row at the bottom of the grid. As soon as it scrolls into the
+ * viewport the IntersectionObserver fires `onIntersect`; the parent's
+ * `useInfiniteQuery` debounces against `isFetchingNextPage` so we don't
+ * stack requests. A small height keeps it from collapsing into nothing
+ * (a 0-px element can never intersect).
+ */
+function LoadMoreSentinel(props: {
+  isLoading: boolean;
+  onIntersect: () => void;
+}) {
+  const ref = useRef<HTMLDivElement | null>(null);
+  // Latest `onIntersect` reference — keeps the observer effect from
+  // re-binding every render (which would briefly disconnect the listener
+  // and miss intersections during fast scroll).
+  const cb = useRef(props.onIntersect);
+  cb.current = props.onIntersect;
+  useEffect(() => {
+    const node = ref.current;
+    if (!node) return;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) cb.current();
+      },
+      { rootMargin: "200px" }
+    );
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, []);
+  return (
+    <div
+      ref={ref}
+      className="datagrid-load-more"
+      role="status"
+      aria-live="polite"
+    >
+      {props.isLoading ? "Loading more…" : "Scroll for more…"}
+    </div>
   );
 }
