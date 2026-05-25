@@ -31,12 +31,19 @@ _MODELS: Dict[str, Any] = {}
 def _load_model(model_id: str):
     if model_id in _MODELS:
         return _MODELS[model_id]
-    # Imported inside the function so the worker process doesn't pay
-    # the ~2-3s torch initialisation tax at boot when the plugin
-    # isn't going to be called. The sentence_transformers package
-    # bundles a cross-encoder wrapper that handles tokenisation +
-    # scoring in one call.
-    from sentence_transformers import CrossEncoder  # type: ignore
+    # Imported inside the function so:
+    #  (a) the worker process doesn't pay the ~2-3s torch initialisation
+    #      tax at boot when the plugin isn't going to be called;
+    #  (b) sidecar images built without the `reranker` poetry group
+    #      still boot — calls just fail here with a clear error.
+    try:
+        from sentence_transformers import CrossEncoder  # type: ignore
+    except ImportError as exc:
+        raise ValueError(
+            "rerank_bge_local: sentence-transformers not installed. "
+            "Rebuild the python-plugins image with the `reranker` poetry "
+            "group enabled (see services/python-plugins/pyproject.toml)."
+        ) from exc
 
     logger.info("loading cross-encoder model: %s", model_id)
     model = CrossEncoder(model_id)

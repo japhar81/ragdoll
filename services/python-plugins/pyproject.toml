@@ -13,10 +13,19 @@ uvicorn = { extras = ["standard"], version = "^0.30.0" }
 crawl4ai = "^0.4.0"
 scrapy = "^2.11.0"
 pydantic = "^2.7.0"
-# Phase 13 follow-up: local cross-encoder reranking via the rerank_bge
-# plugin's provider=local branch. sentence-transformers bundles a
-# CrossEncoder wrapper + torch; cpu-only inference is fine for the
-# BGE rerankers we target.
+
+# Phase 13 follow-up: local cross-encoder reranking is an OPTIONAL
+# dependency group (`reranker`). Pulling sentence-transformers + torch
+# into the default sidecar image triples the build size and pulls in
+# nvidia-cudnn etc. Operators who want local rerank_bge build with
+# `--with reranker` (see services/python-plugins/Dockerfile + the
+# `make crawl-up-reranker` target). The rerank_bge_local handler
+# imports lazily so the sidecar still boots without the dep — calls
+# just fail with an ImportError + a clear message.
+[tool.poetry.group.reranker]
+optional = true
+
+[tool.poetry.group.reranker.dependencies]
 sentence-transformers = "^3.0.0"
 
 [tool.poetry.group.dev.dependencies]

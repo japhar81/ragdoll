@@ -41,7 +41,12 @@ RUN pip install "poetry==${POETRY_VERSION}"
 # Dependency manifests first → this layer (Poetry resolve + install) only
 # re-runs when pyproject.toml / poetry.lock change, not on every app edit.
 COPY services/python-plugins/pyproject.toml services/python-plugins/poetry.lock ./
-RUN poetry install --no-root --only main
+# POETRY_INSTALL_ARGS lets `make crawl-up-reranker` build with
+# `--with reranker` to pull sentence-transformers + torch in for the
+# rerank_bge `provider: local` branch. The default build (and the
+# baseline `make crawl-up`) stays slim.
+ARG POETRY_INSTALL_ARGS="--no-root --only main"
+RUN poetry install ${POETRY_INSTALL_ARGS}
 
 # Headless Chromium + its system deps for crawl4ai/playwright. Installed
 # once into a shared path, made world-readable so the non-root runtime user
