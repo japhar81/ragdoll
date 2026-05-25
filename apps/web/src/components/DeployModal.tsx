@@ -77,15 +77,67 @@ function SlotRow(props: {
     ? props.variants.find((v) => v.id === props.override)
     : undefined;
   const effective = overrideRow ?? resolved;
+  // Inherit modalities + backends from the existing slug variants so the
+  // new env/tenant override starts compatible with everything the parent
+  // already declared. Without this the new row would default to a single
+  // `["vector"]` modality and immediately fail the picker's mismatch check
+  // for any text/hybrid plugin pinned to the same slug.
+  const inheritedModalities = useMemo(() => {
+    const set = new Set<string>();
+    for (const v of props.variants)
+      for (const m of v.modalities ?? []) set.add(m);
+    return set.size > 0 ? [...set] : ["vector"];
+  }, [props.variants]);
+  const inheritedBackends = useMemo(() => {
+    const out: Record<string, unknown> = {};
+    for (const v of props.variants) {
+      for (const [m, cfg] of Object.entries(v.backends ?? {})) {
+        if (!out[m]) out[m] = cfg;
+      }
+    }
+    return out;
+  }, [props.variants]);
   const create = useMutation({
     mutationFn: async () => {
+      // Conflict-aware: an env/tenant variant for this (slug, tenant, env)
+      // may already exist from a prior deploy attempt. POST 409s; PATCH +
+      // re-select the existing row instead.
+      const existing = props.variants.find((v) => {
+        if (v.scope !== createScope) return false;
+        if (createScope === "global") return true;
+        if (createScope === "tenant")
+          return v.tenantId === (props.tenantId ?? null);
+        return (
+          v.tenantId === (props.tenantId ?? null) &&
+          v.environmentId === props.environment
+        );
+      });
+      if (existing) {
+        // Same merge semantics as the picker: union modalities + fill
+        // missing backends from the union of all variants of this slug.
+        const nextModalities = [
+          ...new Set([...(existing.modalities ?? []), ...inheritedModalities])
+        ];
+        const nextBackends: Record<string, unknown> = {
+          ...(existing.backends ?? {})
+        };
+        for (const [m, cfg] of Object.entries(inheritedBackends)) {
+          if (!nextBackends[m]) nextBackends[m] = cfg;
+        }
+        const patched = await api.updateDataset(existing.id, {
+          modalities: nextModalities,
+          backends: nextBackends
+        });
+        return patched.dataset;
+      }
       const res = await api.createDataset({
         slug: props.slot.slug,
         scope: createScope,
         tenantId: createScope === "global" ? undefined : props.tenantId,
         environmentId: createScope === "environment" ? props.environment : undefined,
         displayName: props.slot.slug,
-        modalities: ["vector"]
+        modalities: inheritedModalities,
+        backends: inheritedBackends
       });
       return res.dataset;
     },
