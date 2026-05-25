@@ -27,3 +27,5 @@ npm-debug.log*
 # AI Stuff
 .github/
 .claude/
+.test-output/
+tests/playwright/.test-output/
