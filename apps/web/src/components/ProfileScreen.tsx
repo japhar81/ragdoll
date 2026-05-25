@@ -32,7 +32,7 @@ function ProfileCard() {
 
   const u = auth.user;
   return (
-    <div className="settings-card">
+    <div className="settings-card compact">
       <h3>Account</h3>
       <Table
         columns={["Field", "Value"]}
@@ -120,7 +120,7 @@ function PasswordCard() {
   });
 
   return (
-    <div className="settings-card">
+    <div className="settings-card compact">
       <h3>{ssoOnly ? "Set a password" : "Change password"}</h3>
       <p className="muted">
         {ssoOnly
@@ -566,8 +566,13 @@ export function ProfileScreen() {
   const auth = useAuth();
   return (
     <Screen title={`Profile · ${auth.user?.email ?? ""}`}>
-      <ProfileCard />
-      <PasswordCard />
+      {/* Two narrow cards (account + password) tile side-by-side on wide
+          screens; the API keys card spans full width below so the grid of
+          keys never gets cramped. */}
+      <div className="settings-grid">
+        <ProfileCard />
+        <PasswordCard />
+      </div>
       <ApiKeysCard />
     </Screen>
   );

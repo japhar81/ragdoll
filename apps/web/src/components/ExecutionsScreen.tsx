@@ -3,7 +3,7 @@ import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import { api } from "../lib/api.ts";
 import type { ExecutionRecord } from "../lib/types.ts";
 import { Screen } from "./Screen.tsx";
-import { DataGrid } from "./DataGrid.tsx";
+import { SvarDataGrid, type SvarColumn } from "./SvarDataGrid.tsx";
 import {
   isTerminalStatus,
   sampleForDisplay,
@@ -133,60 +133,58 @@ export function ExecutionsScreen() {
       isLoading={executions.isLoading}
       error={executions.error}
     >
-      <DataGrid<ExecutionRecord>
-        columns={[
-          {
-            key: "actions",
-            header: "",
-            accessor: () => "",
-            filter: "none",
-            sortable: false,
-            width: "8%",
-            cell: (e) => (
-              <button onClick={() => setSelected(e.executionId)}>
-                {selected === e.executionId ? "Viewing" : "View trace"}
-              </button>
-            )
-          },
-          {
-            key: "executionId",
-            header: "Execution",
-            accessor: (e) => e.executionId,
-            cell: (e) => <code>{e.executionId.slice(0, 12)}…</code>,
-            width: "16%"
-          },
-          {
-            key: "pipelineId",
-            header: "Pipeline",
-            accessor: (e) => e.pipelineId,
-            filter: "select",
-            width: "22%"
-          },
-          {
-            key: "status",
-            header: "Status",
-            accessor: (e) => e.status,
-            filter: "select",
-            cell: (e) => <span className={`status status-${e.status}`}>{e.status}</span>,
-            width: "10%"
-          },
-          {
-            key: "startedAt",
-            header: "Started",
-            accessor: (e) => e.startedAt,
-            cell: (e) => new Date(e.startedAt).toLocaleString(),
-            width: "18%"
-          },
-          {
-            key: "completedAt",
-            header: "Completed",
-            accessor: (e) => e.completedAt ?? "",
-            cell: (e) =>
-              e.completedAt ? new Date(e.completedAt).toLocaleString() : "—",
-            width: "18%"
-          }
-        ]}
+      <SvarDataGrid<ExecutionRecord>
+        columns={
+          [
+            {
+              id: "actions",
+              header: "",
+              sort: false,
+              width: 110,
+              cell: (e) => (
+                <button onClick={() => setSelected(e.executionId)}>
+                  {selected === e.executionId ? "Viewing" : "View trace"}
+                </button>
+              )
+            },
+            {
+              id: "executionId",
+              header: "Execution",
+              width: 160,
+              cell: (e) => <code>{e.executionId.slice(0, 12)}…</code>
+            },
+            {
+              id: "pipelineId",
+              header: "Pipeline",
+              cell: (e) => <code>{e.pipelineId.slice(0, 12)}…</code>
+            },
+            {
+              id: "status",
+              header: "Status",
+              width: 120,
+              cell: (e) => (
+                <span className={`status status-${e.status}`}>{e.status}</span>
+              )
+            },
+            {
+              id: "startedAt",
+              header: "Started",
+              width: 180,
+              cell: (e) => new Date(e.startedAt).toLocaleString()
+            },
+            {
+              id: "completedAt",
+              header: "Completed",
+              width: 180,
+              cell: (e) =>
+                e.completedAt ? new Date(e.completedAt).toLocaleString() : "—"
+            }
+          ] satisfies SvarColumn<ExecutionRecord>[]
+        }
         rows={executionRows}
+        rowKey={(e) => e.executionId}
+        height={selected ? 360 : "calc(100vh - 220px)"}
+        emptyMessage="No executions yet."
         hasMore={executions.hasNextPage}
         isLoadingMore={executions.isFetchingNextPage}
         onLoadMore={() => {
@@ -194,8 +192,6 @@ export function ExecutionsScreen() {
             void executions.fetchNextPage();
           }
         }}
-        rowKey={(e) => e.executionId}
-        emptyMessage="No executions yet."
       />
 
       {selected && (

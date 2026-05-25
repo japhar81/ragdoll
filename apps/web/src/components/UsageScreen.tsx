@@ -3,7 +3,7 @@ import { useInfiniteQuery } from "@tanstack/react-query";
 import { api } from "../lib/api.ts";
 import type { UsageRow } from "../lib/api.ts";
 import { Screen } from "./Screen.tsx";
-import { DataGrid, type DataGridColumn } from "./DataGrid.tsx";
+import { SvarDataGrid, type SvarColumn } from "./SvarDataGrid.tsx";
 
 /** Usage admin. GET /api/usage returns an aggregated summary + raw records. */
 export function UsageScreen() {
@@ -64,57 +64,52 @@ export function UsageScreen() {
         />
       </div>
       <h2>Records</h2>
-      <DataGrid<UsageRow>
+      <SvarDataGrid<UsageRow>
         columns={
           [
             {
-              key: "executionId",
+              id: "executionId",
               header: "Execution",
-              accessor: (r) => r.executionId ?? "—",
+              width: 180,
               cell: (r) =>
-                r.executionId ? <code>{r.executionId.slice(0, 12)}…</code> : "—",
-              width: "20%"
+                r.executionId ? <code>{r.executionId.slice(0, 12)}…</code> : "—"
             },
             {
-              key: "tenantId",
+              id: "tenantId",
               header: "Tenant",
-              accessor: (r) => r.tenantId ?? "—",
-              filter: "select",
-              width: "20%"
+              cell: (r) =>
+                r.tenantId ? <code>{r.tenantId.slice(0, 8)}…</code> : "—"
             },
             {
-              key: "inputTokens",
+              id: "inputTokens",
               header: "Input",
-              accessor: (r) => r.inputTokens,
-              align: "right",
-              width: "12%"
+              width: 100,
+              align: "right"
             },
             {
-              key: "outputTokens",
+              id: "outputTokens",
               header: "Output",
-              accessor: (r) => r.outputTokens,
-              align: "right",
-              width: "12%"
+              width: 100,
+              align: "right"
             },
             {
-              key: "embeddingTokens",
+              id: "embeddingTokens",
               header: "Embedding",
-              accessor: (r) => r.embeddingTokens,
-              align: "right",
-              width: "12%"
+              width: 110,
+              align: "right"
             },
             {
-              key: "cost",
+              id: "estimatedCostUsd",
               header: "Cost",
-              accessor: (r) => r.estimatedCostUsd,
-              cell: (r) => `$${r.estimatedCostUsd.toFixed(4)}`,
+              width: 110,
               align: "right",
-              width: "12%"
+              cell: (r) => `$${r.estimatedCostUsd.toFixed(4)}`
             }
-          ] satisfies DataGridColumn<UsageRow>[]
+          ] satisfies SvarColumn<UsageRow>[]
         }
         rows={records}
-        rowKey={(r, i) => `${r.executionId ?? "no-exec"}-${i}`}
+        rowKey={(r) => `${r.executionId ?? "no-exec"}-${r.id ?? ""}`}
+        height="calc(100vh - 320px)"
         emptyMessage="No usage records yet."
         hasMore={usage.hasNextPage}
         isLoadingMore={usage.isFetchingNextPage}
