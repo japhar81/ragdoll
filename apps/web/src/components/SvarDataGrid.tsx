@@ -47,6 +47,9 @@ export interface SvarDataGridProps<Row> {
   /** Used as SVAR's row key. Defaults to `(row as any).id`. */
   rowKey?: (row: Row) => string | number;
   emptyMessage?: string;
+  /** Singular noun for the footer row-count summary (e.g. "execution",
+   *  "audit entry"). Defaults to "row". */
+  rowNoun?: string;
   /** Pixel height the grid claims. Defaults to letting the surrounding
    *  flex container size it. Use a fixed number on screens where the
    *  grid is the entire content (executions / audit). */
@@ -63,13 +66,20 @@ export function SvarDataGrid<Row>(props: SvarDataGridProps<Row>) {
   // Map our typed Column<Row> into SVAR's IColumnConfig. SVAR's cell FC
   // receives ICellProps with `.row` typed loosely — wrap with our
   // typed `cell` callback so column definitions stay type-safe.
+  const rowNoun = props.rowNoun ?? "row";
+  const footerLabel =
+    rows.length === 1 ? `1 ${rowNoun}` : `${rows.length.toLocaleString()} ${rowNoun}s`;
   const svarColumns = useMemo<IColumnConfig[]>(
     () =>
-      columns.map((c) => {
+      columns.map((c, idx) => {
         const cfg: IColumnConfig = {
           id: c.id,
           header: c.header,
-          sort: c.sort !== false
+          sort: c.sort !== false,
+          // Footer cell: SVAR pins it to the bottom of the grid when
+          // `footer={true}` is set on <Grid>. We put the loaded-row
+          // count in the first column and leave the rest blank.
+          footer: idx === 0 ? footerLabel : ""
         };
         if (c.width !== undefined) {
           cfg.width = c.width;
@@ -194,11 +204,11 @@ export function SvarDataGrid<Row>(props: SvarDataGridProps<Row>) {
 
   return (
     <div className="svar-grid-wrap">
-      <Willow>
-        <div
-          className="svar-grid-host"
-          style={heightStyle ? { height: heightStyle, minHeight: 200 } : undefined}
-        >
+      <div
+        className="svar-grid-host"
+        style={heightStyle ? { height: heightStyle, minHeight: 200 } : undefined}
+      >
+        <Willow>
           {rows.length === 0 ? (
             <div className="svar-grid-empty">
               {props.emptyMessage ?? "No rows."}
@@ -212,12 +222,13 @@ export function SvarDataGrid<Row>(props: SvarDataGridProps<Row>) {
               // measures and renders every loaded row in DOM, the
               // table overflows the viewport, and the scroll-bottom
               // event we hook for the next-page fetch never fires.
+              footer
               filterValues={{}}
               init={onInit}
             />
           )}
-        </div>
-      </Willow>
+        </Willow>
+      </div>
       {/* Virtual scroll auto-fetches via the `init`-bound scroll
           listener above; a small status line tells the user when more
           rows are inbound. No button — that would defeat the

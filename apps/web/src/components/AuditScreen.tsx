@@ -61,6 +61,7 @@ export function AuditScreen() {
         rows={rows}
         rowKey={(l) => `${l.createdAt}-${l.targetId}`}
         emptyMessage="No audit entries."
+        rowNoun="audit entry"
         hasMore={audit.hasNextPage}
         isLoadingMore={audit.isFetchingNextPage}
         onLoadMore={() => {

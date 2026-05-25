@@ -2705,26 +2705,31 @@ kbd {
   min-height: 0;
 }
 .svar-grid-host {
+  /* The flex parent (.svar-grid-wrap) gives the host its height.
+     We anchor a `position: relative` frame here and pin the SVAR
+     theme wrapper to fill it absolutely so SVAR's `.wx-grid {
+     height: 100% }` resolves against a definite parent — flex
+     alone wasn't enough through the chained theme + table-box. */
   flex: 1 1 auto;
-  min-height: 320px;
+  min-height: 0;
+  position: relative;
   border: 1px solid #e2e8f0;
   border-radius: 8px;
   overflow: hidden;
   background: white;
-  /* The flex parent ensures the host has a definite height; force the
-     SVAR theme wrapper chain (Willow → wx-grid → wx-table-box) to also
-     fill it. Without this the theme div renders at content height and
-     the grid stops half-way down the wrapper. */
-  display: flex;
-  flex-direction: column;
 }
-.svar-grid-host > div,
-.svar-grid-host .wx-willow-theme,
-.svar-grid-host .wx-material-theme,
-.svar-grid-host .wx-willow-dark-theme {
-  flex: 1 1 auto;
+.svar-grid-host > .wx-theme,
+.svar-grid-host > .wx-willow-theme,
+.svar-grid-host > .wx-material-theme,
+.svar-grid-host > .wx-willow-dark-theme {
+  position: absolute;
+  inset: 0;
   display: flex;
   flex-direction: column;
+  min-height: 0;
+}
+.svar-grid-host .wx-grid {
+  flex: 1 1 auto;
   min-height: 0;
 }
 .svar-grid-empty {
