@@ -112,9 +112,12 @@ function SlotRow(props: {
           v.environmentId === props.environment
         );
       });
+      const defaultProvider = (m: string): string =>
+        m === "vector" ? "qdrant" : m === "text" ? "opensearch" : m;
       if (existing) {
         // Same merge semantics as the picker: union modalities + fill
-        // missing backends from the union of all variants of this slug.
+        // missing backends from the union of all variants of this slug,
+        // then backfill defaults for any modality still without a backend.
         const nextModalities = [
           ...new Set([...(existing.modalities ?? []), ...inheritedModalities])
         ];
@@ -124,11 +127,20 @@ function SlotRow(props: {
         for (const [m, cfg] of Object.entries(inheritedBackends)) {
           if (!nextBackends[m]) nextBackends[m] = cfg;
         }
+        for (const m of nextModalities) {
+          if (!nextBackends[m]) nextBackends[m] = { provider: defaultProvider(m) };
+        }
         const patched = await api.updateDataset(existing.id, {
           modalities: nextModalities,
           backends: nextBackends
         });
         return patched.dataset;
+      }
+      // Fresh row: make sure every modality has a backend so the Datasets
+      // view doesn't show a half-populated dataset.
+      const seededBackends: Record<string, unknown> = { ...inheritedBackends };
+      for (const m of inheritedModalities) {
+        if (!seededBackends[m]) seededBackends[m] = { provider: defaultProvider(m) };
       }
       const res = await api.createDataset({
         slug: props.slot.slug,
@@ -137,7 +149,7 @@ function SlotRow(props: {
         environmentId: createScope === "environment" ? props.environment : undefined,
         displayName: props.slot.slug,
         modalities: inheritedModalities,
-        backends: inheritedBackends
+        backends: seededBackends
       });
       return res.dataset;
     },

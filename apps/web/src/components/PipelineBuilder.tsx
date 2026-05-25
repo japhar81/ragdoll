@@ -347,7 +347,12 @@ function DatasetPickerSection(props: {
         const nextBackends: Record<string, unknown> = {
           ...(existingGlobal.backends ?? {})
         };
-        for (const m of modalities) {
+        // Backfill a default backend for EVERY declared modality that
+        // doesn't yet have one — covers the legacy case where an earlier
+        // create wrote `modalities: ["vector"]` but `backends: {}`. Without
+        // this, the Datasets view shows only the newly-added backend and
+        // the older modality looks empty.
+        for (const m of nextModalities) {
           if (!nextBackends[m]) nextBackends[m] = { provider: defaultProvider(m) };
         }
         await api.updateDataset(existingGlobal.id, {
