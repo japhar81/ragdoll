@@ -271,6 +271,27 @@ export const api = {
       `/api/pipelines/${encodeURIComponent(pipelineId)}/run`,
       input
     ),
+  /**
+   * Phase 8: synchronous in-process execution. Returns the terminal
+   * output in one HTTP round-trip; intended for synchronous pipelines
+   * (those with `metadata.executionKind: "synchronous"`).
+   */
+  invokePipeline: (
+    pipelineId: string,
+    input: { input?: unknown; environment?: string }
+  ) =>
+    request<{
+      executionId: string;
+      pipelineId: string;
+      pipelineVersionId: string;
+      version: string;
+      status: "succeeded";
+      output: Record<string, unknown>;
+    }>(
+      "POST",
+      `/api/pipelines/${encodeURIComponent(pipelineId)}/invoke`,
+      input
+    ),
 
   // ---- per-tenant Git storage (migration 007) ---------------------------
   getTenantStorage: (tenantId: string) =>

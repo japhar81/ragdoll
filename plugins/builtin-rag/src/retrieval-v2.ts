@@ -716,6 +716,228 @@ export const conversationRewritePlugin: InProcessPlugin = {
 };
 
 // ===========================================================================
+// rerank_bge — cross-encoder reranking via HuggingFace Inference API
+// ===========================================================================
+
+/**
+ * Calls a cross-encoder model on HuggingFace's Inference API to score
+ * each (question, document) pair. The HF endpoint accepts a sentence-
+ * pair classification request and returns a per-pair score; we batch
+ * the candidates into one request to keep latency reasonable.
+ *
+ * No local model loading: that needs a Python sidecar + GPU/CPU model
+ * weights, which is a separate ops decision. The HF Inference API is
+ * the lowest-friction path that gives you a real cross-encoder
+ * reranker today; later we can add a `provider: "local"` branch
+ * pointing at a model-loader seam.
+ */
+export const rerankBgePlugin: InProcessPlugin = {
+  manifest: {
+    id: "rerank_bge",
+    name: "BGE Cross-Encoder Reranker",
+    version: "1.0.0",
+    category: "reranker",
+    contract: 2,
+    description:
+      "Rerank candidate documents against the question using a HuggingFace cross-encoder (BGE-Reranker by default). Calls the HF Inference API; needs an `hfApiKey` secret. Top-K kept, others dropped.",
+    configSchema: {
+      type: "object",
+      properties: {
+        model: {
+          type: "string",
+          default: "BAAI/bge-reranker-v2-m3",
+          description: "HuggingFace model id of a cross-encoder."
+        },
+        endpoint: {
+          type: "string",
+          default: "https://api-inference.huggingface.co",
+          description: "HF Inference API base URL (override for private endpoints)."
+        },
+        topK: { type: "integer", default: 5 },
+        textField: { type: "string", default: "text" },
+        timeoutMs: { type: "integer", default: 30000 }
+      },
+      additionalProperties: false
+    },
+    secretsSchema: {
+      type: "object",
+      properties: {
+        hfApiKey: {
+          type: "string",
+          format: "secret-ref",
+          description: "HuggingFace API token (read scope is enough)."
+        }
+      },
+      additionalProperties: false
+    },
+    inputPorts: [
+      { name: "question", required: true },
+      { name: "documents", required: true }
+    ],
+    outputPorts: [
+      { name: "documents", description: "Top-K reranked documents with `rerankScore`." }
+    ],
+    capabilities: ["query"],
+    ui: {
+      icon: "list-ordered",
+      color: "#7c3aed",
+      paletteGroup: "Retrieval",
+      formHints: {
+        model: { widget: "text" },
+        topK: { widget: "number", min: 1, step: 1 },
+        timeoutMs: { widget: "number", min: 1000, step: 1000 },
+        hfApiKey: { widget: "secret" }
+      }
+    }
+  },
+  async execute(input) {
+    const { inputs, config, secrets } = input;
+    const question = questionFrom(inputs);
+    const documents = (inputs.documents as RankedDoc[] | undefined) ?? [];
+    if (documents.length === 0) return { outputs: { documents: [] } };
+    const topK = Math.max(1, Number(config.topK ?? 5));
+    const textField = String(config.textField ?? "text");
+    const model = String(config.model ?? "BAAI/bge-reranker-v2-m3");
+    const endpoint = String(config.endpoint ?? "https://api-inference.huggingface.co");
+    const timeoutMs = Math.max(1000, Number(config.timeoutMs ?? 30000));
+    if (!secrets.hfApiKey) {
+      throw new Error(
+        "rerank_bge: hfApiKey secret is required (HuggingFace Inference API)"
+      );
+    }
+    // The HF Inference API accepts a sentence-pair payload as
+    // `{ inputs: { source_sentence, sentences } }` for sentence-similarity
+    // pipelines; cross-encoder rerankers expose the same shape and
+    // return one float per `sentences[i]`. One request, batched.
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    let scores: number[];
+    try {
+      const response = await fetch(
+        `${endpoint}/models/${encodeURIComponent(model)}`,
+        {
+          method: "POST",
+          signal: controller.signal,
+          headers: {
+            "content-type": "application/json",
+            authorization: `Bearer ${secrets.hfApiKey}`
+          },
+          body: JSON.stringify({
+            inputs: {
+              source_sentence: question,
+              sentences: documents.map((d) =>
+                String((d as Record<string, unknown>)[textField] ?? "").slice(0, 4000)
+              )
+            }
+          })
+        }
+      );
+      if (!response.ok) {
+        const text = await response.text();
+        throw new Error(
+          `rerank_bge: HF API returned ${response.status}: ${text.slice(0, 400)}`
+        );
+      }
+      const raw = await response.json();
+      if (!Array.isArray(raw) || raw.some((s) => typeof s !== "number")) {
+        throw new Error(
+          `rerank_bge: unexpected HF response shape (expected number[]): ${JSON.stringify(raw).slice(0, 200)}`
+        );
+      }
+      scores = raw as number[];
+    } finally {
+      clearTimeout(timer);
+    }
+    const reranked = documents
+      .map((doc, i) => ({ ...doc, rerankScore: scores[i] ?? 0 }))
+      .sort((a, b) => (b.rerankScore as number) - (a.rerankScore as number))
+      .slice(0, topK);
+    return {
+      outputs: { documents: reranked },
+      usage: { provider: "huggingface", model }
+    };
+  }
+};
+
+// ===========================================================================
+// pipeline_call — synchronous nested pipeline invocation
+// ===========================================================================
+
+/**
+ * Invokes another synchronous pipeline by slug and emits its terminal
+ * output. The runtime injects `runPipelineByRef` on the execution
+ * input ONLY when the surrounding execution is synchronous (the API
+ * /invoke + /stream path), so trying to use this from a batch
+ * pipeline fails fast with a clear error.
+ *
+ * Cycle and depth protection lives in the API helper:
+ *  - calling yourself or any ancestor → throws "cycle detected"
+ *  - depth > 8 → throws "depth limit exceeded"
+ * Both errors propagate up the executor as plugin failures.
+ */
+export const pipelineCallPlugin: InProcessPlugin = {
+  manifest: {
+    id: "pipeline_call",
+    name: "Call Pipeline",
+    version: "1.0.0",
+    category: "tool",
+    contract: 2,
+    description:
+      "Invokes another synchronous pipeline by slug. The caller MUST itself be running synchronously; batch pipelines can't sub-invoke (BullMQ jobs aren't awaitable in-process). Cycles and depth > 8 are rejected.",
+    configSchema: {
+      type: "object",
+      properties: {
+        pipelineSlug: {
+          type: "string",
+          description: "Slug of the target pipeline."
+        },
+        environment: {
+          type: "string",
+          description: "Environment to invoke the target in. Defaults to the caller's env."
+        }
+      },
+      required: ["pipelineSlug"],
+      additionalProperties: false
+    },
+    inputPorts: [
+      { name: "input", description: "Payload forwarded to the target pipeline's input node." }
+    ],
+    outputPorts: [
+      { name: "output", description: "Terminal output of the target pipeline." }
+    ],
+    capabilities: ["query"],
+    ui: {
+      icon: "git-pull-request",
+      color: "#7c3aed",
+      paletteGroup: "Tools",
+      formHints: {
+        pipelineSlug: { widget: "text" },
+        environment: { widget: "text" }
+      }
+    }
+  },
+  async execute(input) {
+    const { inputs, config, runPipelineByRef } = input;
+    if (!runPipelineByRef) {
+      throw new Error(
+        "pipeline_call requires synchronous execution context (call this pipeline via /api/pipelines/:id/invoke, not /run)"
+      );
+    }
+    const slug = String(config.pipelineSlug ?? "");
+    if (!slug) {
+      throw new Error("pipeline_call: pipelineSlug is required");
+    }
+    const environment = config.environment ? String(config.environment) : undefined;
+    // The caller's `input` port becomes the nested pipeline's input;
+    // fall back to the whole inputs object so flow-style wiring also
+    // works ("just pass everything I got").
+    const subInput = inputs.input ?? inputs;
+    const result = await runPipelineByRef({ slug, input: subInput, environment });
+    return { outputs: { output: result.output } };
+  }
+};
+
+// ===========================================================================
 // topic_shift_detect — has the conversation topic changed?
 // ===========================================================================
 

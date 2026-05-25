@@ -95,6 +95,11 @@ export interface PipelineSpec {
     /** Optional, ordered list of user-defined stages. Pipeline nodes
      *  reference a stage by id via `node.ui.stageId`. */
     stages?: PipelineStage[];
+    /** Phase 8 execution mode; absent reads as "batch". */
+    executionKind?: "batch" | "synchronous";
+    /** Phase 8 MCP auto-expose. Only meaningful when executionKind ===
+     *  "synchronous". */
+    mcpExpose?: boolean;
   };
   spec: {
     nodes: PipelineNode[];

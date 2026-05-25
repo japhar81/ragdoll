@@ -50,6 +50,8 @@ export {
   queryFanoutPlugin,
   mergeRrfPlugin,
   rerankLlmPlugin,
+  rerankBgePlugin,
+  pipelineCallPlugin,
   conversationRewritePlugin,
   topicShiftDetectPlugin
 } from "./retrieval-v2.ts";

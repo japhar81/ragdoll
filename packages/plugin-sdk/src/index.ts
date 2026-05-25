@@ -242,6 +242,19 @@ export interface PluginExecutionInput {
    */
   dataset?: ResolvedDataset;
   /**
+   * Nested synchronous pipeline invocation (Phase 9, Round 2). Only
+   * populated when the current pipeline is itself running in
+   * synchronous mode — batch pipelines can't sub-invoke synchronously
+   * because BullMQ jobs aren't awaitable in-process. Cycles are
+   * detected by the runtime via a small per-execution call stack
+   * (max depth defaults to 8).
+   */
+  runPipelineByRef?: (args: {
+    slug: string;
+    input: unknown;
+    environment?: string;
+  }) => Promise<{ output: Record<string, unknown> }>;
+  /**
    * Recursively execute a body pipeline spec from inside a plugin. Used by
    * iteration plugins (for/foreach/while) to evaluate their body N times. Only
    * provided to in-process plugins — external plugins must implement their own

@@ -333,6 +333,24 @@ export function PipelineBuilder(props: {
   const [pipelineName, setPipelineName] = useState("support-rag");
   const [pipelineSlug, setPipelineSlug] = useState("support-rag");
   const [pipelineDescription, setPipelineDescription] = useState("");
+  // Phase 11.3: execution mode + MCP exposure are pipeline-level metadata
+  // on the spec. Default to "batch" (the historical kind) so nothing
+  // changes for existing pipelines until the operator flips this here.
+  const [executionKind, setExecutionKind] = useState<"batch" | "synchronous">(
+    "batch"
+  );
+  const [mcpExpose, setMcpExpose] = useState<boolean>(false);
+  // Sample input + last result for the Invoke panel that appears on
+  // synchronous pipelines.
+  const [invokeInput, setInvokeInput] = useState<string>(
+    '{ "question": "hello" }'
+  );
+  const [invokeBusy, setInvokeBusy] = useState(false);
+  const [invokeResult, setInvokeResult] = useState<
+    | { ok: true; output: unknown; executionId: string }
+    | { ok: false; error: string }
+    | null
+  >(null);
   // The identifier used for every API call: the slug until the pipeline row
   // exists, then its real UUID (set on create / open-from-tree).
   const [pipelineId, setPipelineId] = useState("support-rag");
@@ -513,9 +531,11 @@ export function PipelineBuilder(props: {
       graphToSpec(nodes as unknown as FlowNode[], edges as unknown as FlowEdge[], {
         name: pipelineName,
         description: pipelineDescription.trim() || undefined,
-        stages: stages.length > 0 ? stages : undefined
+        stages: stages.length > 0 ? stages : undefined,
+        executionKind,
+        mcpExpose
       }),
-    [nodes, edges, pipelineName, pipelineDescription, stages]
+    [nodes, edges, pipelineName, pipelineDescription, stages, executionKind, mcpExpose]
   );
 
   // Stage management — pipeline-level CRUD that mutates the local
@@ -1051,6 +1071,15 @@ export function PipelineBuilder(props: {
           const loadedStages = (loaded.metadata as { stages?: PipelineStage[] } | undefined)
             ?.stages;
           setStages(Array.isArray(loadedStages) ? loadedStages : []);
+          // Phase 11.3: restore executionKind + mcpExpose so opening a
+          // synchronous pipeline lights up the Invoke panel without the
+          // user re-flipping anything.
+          const loadedMeta = (loaded.metadata ?? {}) as {
+            executionKind?: "batch" | "synchronous";
+            mcpExpose?: boolean;
+          };
+          setExecutionKind(loadedMeta.executionKind ?? "batch");
+          setMcpExpose(loadedMeta.mcpExpose === true);
           setNodes(toFlowNodes(loaded));
           setEdges(toFlowEdges(loaded));
           setVersion(latest.version);
@@ -2131,9 +2160,112 @@ export function PipelineBuilder(props: {
                 <button onClick={deleteSelected}>Delete node</button>
               )}
               {!selectedNode && (
-                <p className="muted">
-                  Click a node on the canvas to edit it.
-                </p>
+                <>
+                  {/* Phase 11.3: pipeline-level settings live in the
+                      Inspector's Config tab when no node is selected.
+                      They drive metadata.executionKind + mcpExpose on
+                      the spec, which the API reads to decide between
+                      /run (BullMQ) and /invoke (in-process). */}
+                  <div className="settings-card" style={{ padding: 8 }}>
+                    <h3 style={{ margin: 0 }}>Pipeline kind</h3>
+                    <p className="muted" style={{ fontSize: "0.85em" }}>
+                      <strong>Batch</strong> pipelines run via the worker queue
+                      (the historical default). <strong>Synchronous</strong>{" "}
+                      pipelines run in-process on the API and return the output
+                      in a single HTTP round-trip — required for chat-style
+                      retrieval and MCP tool exposure.
+                    </p>
+                    <select
+                      value={executionKind}
+                      onChange={(e) =>
+                        setExecutionKind(e.target.value as "batch" | "synchronous")
+                      }
+                    >
+                      <option value="batch">batch (queue-driven)</option>
+                      <option value="synchronous">synchronous (in-process)</option>
+                    </select>
+                    {executionKind === "synchronous" && (
+                      <label
+                        style={{ display: "block", marginTop: 8, fontSize: "0.9em" }}
+                        title="Expose this pipeline as a callable MCP tool"
+                      >
+                        <input
+                          type="checkbox"
+                          checked={mcpExpose}
+                          onChange={(e) => setMcpExpose(e.target.checked)}
+                        />
+                        {" "}Expose as MCP tool
+                      </label>
+                    )}
+                  </div>
+
+                  {executionKind === "synchronous" && (
+                    <div className="settings-card" style={{ padding: 8, marginTop: 8 }}>
+                      <h3 style={{ margin: 0 }}>Invoke</h3>
+                      <p className="muted" style={{ fontSize: "0.85em" }}>
+                        Run this pipeline against the deployed version in{" "}
+                        <code>{environment}</code> and see the output here.
+                        Saves a round-trip vs. opening a terminal.
+                      </p>
+                      <textarea
+                        value={invokeInput}
+                        onChange={(e) => setInvokeInput(e.target.value)}
+                        rows={4}
+                        style={{ width: "100%", fontFamily: "monospace" }}
+                        placeholder='{ "question": "..." }'
+                      />
+                      <button
+                        className="primary"
+                        disabled={invokeBusy || !pipelineId}
+                        onClick={async () => {
+                          setInvokeBusy(true);
+                          setInvokeResult(null);
+                          try {
+                            let parsed: unknown;
+                            try {
+                              parsed = JSON.parse(invokeInput);
+                            } catch {
+                              throw new Error(
+                                "Invoke input must be valid JSON (e.g. {\"question\": \"...\"})"
+                              );
+                            }
+                            const res = await api.invokePipeline(
+                              pipelineId,
+                              { input: parsed, environment }
+                            );
+                            setInvokeResult({
+                              ok: true,
+                              output: res.output,
+                              executionId: res.executionId
+                            });
+                          } catch (e) {
+                            setInvokeResult({
+                              ok: false,
+                              error: e instanceof Error ? e.message : String(e)
+                            });
+                          } finally {
+                            setInvokeBusy(false);
+                          }
+                        }}
+                      >
+                        {invokeBusy ? "Invoking…" : "Invoke"}
+                      </button>
+                      {invokeResult && invokeResult.ok && (
+                        <pre className="codeblock" style={{ marginTop: 8 }}>
+                          {JSON.stringify(invokeResult.output, null, 2)}
+                        </pre>
+                      )}
+                      {invokeResult && !invokeResult.ok && (
+                        <p className="error" style={{ marginTop: 8 }}>
+                          {invokeResult.error}
+                        </p>
+                      )}
+                    </div>
+                  )}
+                  <p className="muted" style={{ marginTop: 8 }}>
+                    Click a node on the canvas to edit it.
+                  </p>
+                </>
               )}
             </div>
           )}

@@ -816,6 +816,14 @@ export function createApp(deps: AppDeps): App {
    * through the shared executionStore + changeBus so observability is
    * uniform.
    */
+  /**
+   * Max depth for synchronous pipeline_call chains. Pipeline A → B → A
+   * deadlocks otherwise; a hard cap of 8 is conservative for real RAG
+   * compositions (you'd normally see 2-3 levels: planner → retriever
+   * → answer-shaper) and trips fast on accidental cycles.
+   */
+  const MAX_SYNC_DEPTH = 8;
+
   async function runSyncPipeline(args: {
     tenantId: string;
     pipeline: PipelineRow;
@@ -825,8 +833,21 @@ export function createApp(deps: AppDeps): App {
     actorId?: string;
     requestId?: string;
     deadlineMs?: number;
+    /** Slugs already on the call stack — propagated by nested invocations. */
+    callStack?: string[];
   }): Promise<{ executionId: string; output: Record<string, unknown> }> {
     const { tenantId, pipeline, versionRow, environment, input } = args;
+    const callStack = args.callStack ?? [];
+    if (callStack.length >= MAX_SYNC_DEPTH) {
+      throw new Error(
+        `pipeline_call depth limit (${MAX_SYNC_DEPTH}) exceeded: ${callStack.join(" → ")} → ${pipeline.slug}`
+      );
+    }
+    if (callStack.includes(pipeline.slug)) {
+      throw new Error(
+        `pipeline_call cycle detected: ${callStack.join(" → ")} → ${pipeline.slug}`
+      );
+    }
     // Resolve config (provides ${config.*} template expansion in node
     // configs + secret references through the same precedence the worker
     // uses).
@@ -869,11 +890,50 @@ export function createApp(deps: AppDeps): App {
       { redactSecrets: false }
     );
     const executionId = randomUUID();
+    // Phase 9 Round 2: nested sync invocations. The closure captures
+    // tenantId + the call stack so cycle detection works across
+    // arbitrary depths, and the target pipeline's deployment lookup
+    // is done at the moment of the call (so a target redeployed
+    // mid-run picks up the new version on the next nested call).
+    const runPipelineByRef = async (sub: {
+      slug: string;
+      input: unknown;
+      environment?: string;
+    }): Promise<{ output: Record<string, unknown> }> => {
+      const target = await deps.pipelines.findBySlug(sub.slug);
+      if (!target) {
+        throw new Error(`pipeline_call: unknown pipeline slug "${sub.slug}"`);
+      }
+      const subEnv = sub.environment ?? environment;
+      const subVersion = await resolveDeployedVersion(
+        deps,
+        target.id,
+        subEnv,
+        tenantId
+      );
+      if (!subVersion) {
+        throw new Error(
+          `pipeline_call: pipeline "${sub.slug}" has no active deployment in ${subEnv}`
+        );
+      }
+      const nested = await runSyncPipeline({
+        tenantId,
+        pipeline: target,
+        versionRow: subVersion,
+        environment: subEnv,
+        input: sub.input,
+        actorId: args.actorId,
+        requestId: args.requestId,
+        callStack: [...callStack, pipeline.slug]
+      });
+      return { output: nested.output };
+    };
     const executor = new DagExecutor({
       pluginRegistry: deps.pluginRegistry,
       secretProvider: deps.secretProvider,
       store: deps.executionStore,
       datasetResolver: apiDatasetResolver,
+      runPipelineByRef,
       maxRetries: 1
     });
     const output = await executor.execute({

@@ -11,6 +11,65 @@ import {
 import { Screen } from "./Screen.tsx";
 import type { EditingPipeline } from "../App.tsx";
 import type { PipelineVersionRow } from "../lib/api.ts";
+import type { PipelineSpec } from "../lib/types.ts";
+import { datasetColor } from "../lib/datasetColor.ts";
+
+/**
+ * Phase 11.2: render colored pills for every Dataset a pipeline
+ * references, so two pipelines sharing a corpus are visually paired
+ * at a glance. The pipeline's spec is fetched on demand (cheap — the
+ * version row is already cached when the user expanded the folder)
+ * and the dataset refs are pulled out of `spec.spec.nodes[i].dataset`.
+ *
+ * Hover surfaces the alias; clicking would deep-link to the dataset
+ * detail page once that route gains stable URLs (TODO).
+ */
+function PipelineDatasetPills(props: { pipelineId: string }) {
+  const versions = useQuery({
+    queryKey: ["pipeline-versions", props.pipelineId],
+    queryFn: () => api.listVersions(props.pipelineId),
+    staleTime: 30_000
+  });
+  const refs = useMemo(() => {
+    const out = new Map<string, string | undefined>();
+    const all = versions.data?.versions ?? [];
+    const latestId = versions.data?.latestVersionId;
+    const target = latestId
+      ? all.find((v) => v.id === latestId) ?? all[0]
+      : all[0];
+    if (!target?.spec) return out;
+    const spec = target.spec as PipelineSpec;
+    for (const node of spec.spec?.nodes ?? []) {
+      if (node.dataset?.slug) {
+        out.set(node.dataset.slug, node.dataset.alias);
+      }
+    }
+    return out;
+  }, [versions.data]);
+  if (refs.size === 0) return null;
+  return (
+    <span style={{ display: "inline-flex", gap: 4, marginLeft: 8 }}>
+      {[...refs.entries()].map(([slug, alias]) => {
+        const c = datasetColor(slug);
+        return (
+          <span
+            key={slug}
+            title={`Dataset: ${slug}${alias ? ` @ ${alias}` : ""}`}
+            style={{
+              background: c.bg,
+              color: c.fg,
+              padding: "1px 6px",
+              borderRadius: 8,
+              fontSize: "0.8em"
+            }}
+          >
+            {slug}
+          </span>
+        );
+      })}
+    </span>
+  );
+}
 
 function errText(e: unknown): string {
   if (e instanceof ApiError) {
@@ -150,6 +209,7 @@ export function PipelinesScreen(props: {
         <span className="tree-ico">{"\u{1F4C4}"}</span>
         <span className="tree-name">{p.name}</span>
         <span className="muted">{p.slug ?? p.id}</span>
+        <PipelineDatasetPills pipelineId={p.id} />
         <span className="tree-tools">
           <button
             className="link-btn"

@@ -249,9 +249,9 @@ services:
       BOOTSTRAP_ADMIN_PASSWORD: ragdoll-admin
       # Where the SSO callback sends the browser back with its session token.
       WEB_BASE_URL: "http://localhost:8088"
-      # Opt back into the insecure header-trusting dev provider if you really
-      # want the old x-roles flow locally: set RAGDOLL_DEV_AUTH=1 (never in prod).
-      # RAGDOLL_DEV_AUTH: "1"
+      # NOTE: the historical RAGDOLL_DEV_AUTH header-trusting fallback was
+      # removed in Phase 12. Sign in as the bootstrap admin above and mint
+      # an API key from Profile → API keys for non-interactive clients.
       QDRANT_URL: http://qdrant:6333
       OPENSEARCH_URL: http://opensearch:9200
       # Phase 6: which vector backend createVectorStore picks when a
