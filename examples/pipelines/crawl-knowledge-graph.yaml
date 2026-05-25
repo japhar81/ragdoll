@@ -1,0 +1,73 @@
+apiVersion: rag-platform/v1
+kind: Pipeline
+metadata:
+  name: crawl-knowledge-graph
+  description: "Crawls a public site, chunks each page, and writes the chunks into a Dgraph knowledge graph keyed by URL + chunk index. Pair with dgraph_query to retrieve via DQL."
+  labels:
+    demo: graph
+spec:
+  parameters:
+  - key: url
+    type: string
+    defaultValue: "https://en.wikipedia.org/wiki/Knowledge_graph"
+    allowedScopes: [pipeline, tenant_pipeline, runtime]
+    runtimeOverridable: true
+    description: "Seed URL the crawler starts from."
+  - key: maxPages
+    type: integer
+    defaultValue: 5
+    allowedScopes: [pipeline, tenant_pipeline, runtime]
+    runtimeOverridable: true
+    description: "Hard cap on pages fetched (be polite)."
+  nodes:
+  - id: input
+    type: input
+  - id: crawl
+    plugin:
+      category: datasource
+      id: crawl4ai_crawler
+      version: 1.0.0
+    config:
+      url: "${config.url}"
+      maxPages: "${config.maxPages}"
+      maxDepth: 1
+      sameDomainOnly: true
+      extract: markdown
+      timeoutMs: 60000
+  - id: chunk
+    plugin:
+      category: chunker
+      id: basic_text_chunker
+      version: 1.0.0
+    config:
+      chunkSize: 1200
+      overlap: 100
+  - id: upsert
+    plugin:
+      category: sink
+      id: dgraph_upsert
+      version: 1.0.0
+    dataset:
+      slug: crawl-knowledge-graph
+      alias: stable
+    config:
+      # Predicate types + indexes the queries downstream rely on.
+      # Dgraph is idempotent on /alter so this is safe to re-apply.
+      schema: "tenant_id: string @index(exact) . source_url: string @index(exact) . text: string @index(fulltext) . chunkIndex: int . dgraph.type: [string] @index(exact) ."
+  - id: output
+    type: output
+  edges:
+  - from: input
+    to: crawl
+    fromPort: question
+    toPort: question
+  - from: crawl
+    to: chunk
+    fromPort: documents
+    toPort: documents
+  - from: chunk
+    to: upsert
+    fromPort: chunks
+    toPort: nodes
+  - from: upsert
+    to: output
