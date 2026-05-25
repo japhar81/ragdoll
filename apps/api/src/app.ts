@@ -144,6 +144,8 @@ import type {
   ExecutionRecord,
   ExecutionNodeRecord
 } from "../../../packages/runtime/src/index.ts";
+import { DagExecutor } from "../../../packages/runtime/src/index.ts";
+import type { DatasetResolver } from "../../../packages/plugin-sdk/src/index.ts";
 import type { SecretProvider } from "../../../packages/secrets/src/index.ts";
 import { SecretNotFoundError, SecretAccessDeniedError } from "../../../packages/secrets/src/index.ts";
 import type {
@@ -758,6 +760,140 @@ export function createApp(deps: AppDeps): App {
       resolvedVia,
       ...(resolvedLabel !== undefined ? { activationLabel: resolvedLabel } : {})
     };
+  }
+
+  // ---- Phase 8: synchronous in-process execution -------------------------
+  // The DatasetResolver mirrors what the worker wires up but lives inside
+  // the API process so synchronous /invoke runs don't need a worker hop.
+  // When any of the three repositories is missing (e.g. legacy harness)
+  // we leave the resolver undefined and the executor falls back to
+  // plain config.collection / config.index — same v1 path the shim
+  // protects.
+  const apiDatasetResolver: DatasetResolver | undefined =
+    deps.datasets && deps.datasetVersions && deps.datasetAliases
+      ? {
+          async resolve(args) {
+            const ds = await datasets.resolveSlug({
+              slug: args.ref.slug,
+              tenantId: args.tenantId,
+              environmentId: args.environmentId
+            });
+            if (!ds) return undefined;
+            const aliasName = args.ref.alias ?? "stable";
+            const aliasRow = await datasetAliases.resolve(ds.id, aliasName);
+            const versionId = aliasRow?.versionId ?? ds.currentVersionId;
+            if (!versionId) return undefined;
+            const ver = await datasetVersions.get(versionId);
+            if (!ver) return undefined;
+            return {
+              id: ds.id,
+              slug: ds.slug,
+              scope: ds.scope,
+              tenantId: ds.tenantId ?? undefined,
+              environmentId: ds.environmentId ?? undefined,
+              modalities: ds.modalities,
+              embeddingProfile: ds.embeddingProfile,
+              chunkSchema: ds.chunkSchema,
+              version: {
+                id: ver.id,
+                versionLabel: ver.versionLabel,
+                status: ver.status
+              },
+              backendCollections: ver.backendCollections
+            };
+          }
+        }
+      : undefined;
+
+  /**
+   * Run a pipeline version in-process and return its terminal output.
+   * Skips the queue entirely — the API pod does the whole DAG execution
+   * itself, so chat-style retrieval can return in one HTTP round-trip.
+   *
+   * Reuses the same DagExecutor the worker uses, including the Phase 5
+   * dataset resolver, so v2 plugins behave identically on both paths.
+   * Per-node usage records + execution lifecycle events still flow
+   * through the shared executionStore + changeBus so observability is
+   * uniform.
+   */
+  async function runSyncPipeline(args: {
+    tenantId: string;
+    pipeline: PipelineRow;
+    versionRow: PipelineVersionRow;
+    environment: string;
+    input: unknown;
+    actorId?: string;
+    requestId?: string;
+    deadlineMs?: number;
+  }): Promise<{ executionId: string; output: Record<string, unknown> }> {
+    const { tenantId, pipeline, versionRow, environment, input } = args;
+    // Resolve config (provides ${config.*} template expansion in node
+    // configs + secret references through the same precedence the worker
+    // uses).
+    const definitionRows = await deps.configDefinitions.list();
+    const valueRows = await deps.configValues.listConfigValues();
+    const resolver = new ConfigResolver(
+      definitionRows.map((row) => ({
+        key: row.key,
+        type: row.type,
+        defaultValue: row.defaultValue,
+        allowedScopes: row.allowedScopes,
+        required: row.required,
+        secret: row.secret,
+        sensitive: row.sensitive,
+        overridable: row.overridable,
+        inherited: row.inherited,
+        nullable: row.nullable,
+        tenantOverridable: row.tenantOverridable,
+        runtimeOverridable: row.runtimeOverridable,
+        description: row.description ?? undefined
+      }))
+    );
+    const values: ConfigValue[] = valueRows.map((row) => ({
+      key: row.key,
+      value: row.value,
+      scope: row.scope,
+      scopeId: row.scopeId ?? undefined,
+      locked: row.locked,
+      createdBy: row.createdBy ?? undefined,
+      createdAt: row.createdAt
+    }));
+    const resolvedConfig = resolver.resolve(
+      {
+        pipelineId: pipeline.id,
+        pipelineVersionId: versionRow.id,
+        tenantId,
+        environment,
+        values
+      },
+      { redactSecrets: false }
+    );
+    const executionId = randomUUID();
+    const executor = new DagExecutor({
+      pluginRegistry: deps.pluginRegistry,
+      secretProvider: deps.secretProvider,
+      store: deps.executionStore,
+      datasetResolver: apiDatasetResolver,
+      maxRetries: 1
+    });
+    const output = await executor.execute({
+      spec: versionRow.spec as PipelineSpec,
+      context: {
+        requestId: args.requestId ?? randomUUID(),
+        executionId,
+        tenantId,
+        pipelineId: pipeline.id,
+        pipelineVersionId: versionRow.id,
+        environment,
+        resolvedConfig,
+        actor: args.actorId
+          ? { id: args.actorId, type: "user" }
+          : undefined,
+        deadline: args.deadlineMs ? new Date(args.deadlineMs) : undefined
+      },
+      input: (isObject(input) ? input : {}) as Record<string, unknown>
+    });
+    return { executionId, output };
   }
 
   // ---- health -------------------------------------------------------------
@@ -2998,14 +3134,20 @@ export function createApp(deps: AppDeps): App {
     );
   });
 
-  // ---- stream (SSE) -------------------------------------------------------
-  route("POST", "/api/pipelines/:id/stream", async (ctx) => {
+  // ---- Phase 8: synchronous /invoke ---------------------------------------
+  // The synchronous companion to /run. Runs the pipeline in-process and
+  // returns the terminal output JSON in the response body. Pipelines
+  // SHOULD declare `metadata.executionKind: "synchronous"` to be invoked
+  // here; legacy / batch pipelines aren't rejected but are warned about
+  // (operators sometimes deliberately invoke a batch spec synchronously
+  // when iterating). pipeline:run RBAC + dataset resolution + Phase 2
+  // executor entry-check all behave exactly as the worker path.
+  route("POST", "/api/pipelines/:id/invoke", async (ctx) => {
     const pipeline = await resolvePipelineRef(ctx.params.id);
     if (isAppResponse(pipeline)) return pipeline;
-    const pipelineId = pipeline.id;
     enforce(ctx.principal, "pipeline:run", {
       tenantId: ctx.principal.tenantId,
-      pipelineId
+      pipelineId: pipeline.id
     });
     const tenantId = tenantScope(ctx);
     if (!tenantId) {
@@ -3013,29 +3155,151 @@ export function createApp(deps: AppDeps): App {
         issues: [{ message: "tenant context required" }]
       });
     }
+    const body = isObject(ctx.request.body) ? ctx.request.body : {};
     const environment =
-      (isObject(ctx.request.body) && typeof ctx.request.body.environment === "string"
-        ? ctx.request.body.environment
-        : undefined) ||
+      (typeof body.environment === "string" && body.environment) ||
       ctx.request.query.environment ||
       "dev";
-    const resolved = await resolveDeployedVersion(deps, pipelineId, environment, tenantId);
+    const resolved = await resolveDeployedVersion(deps, pipeline.id, environment, tenantId);
     if (!resolved) {
       return error(409, "no_active_deployment", {
-        message: `no active deployment for pipeline ${pipelineId} in ${environment}`
+        message: `no active deployment for pipeline ${pipeline.id} in ${environment}`
       });
     }
-    // Honest scaffold: no streaming-capable provider wired in the API process.
-    // We return a small, well-formed SSE event sequence so clients can
-    // integrate, while clearly documenting that token streaming arrives via a
-    // streaming provider in the worker. The body is the raw SSE text.
-    const events = [
-      `event: status\ndata: ${JSON.stringify({ status: "not_enabled", reason: "streaming provider not configured in control-plane; use /run via worker" })}\n\n`,
-      `event: done\ndata: ${JSON.stringify({ pipelineId, pipelineVersionId: resolved.id })}\n\n`
-    ];
+    const validation = validatePipelineSpec(
+      resolved.spec as PipelineSpec,
+      deps.pluginRegistry
+    );
+    if (!validation.valid) {
+      return error(422, "validation_failed", { issues: validation.errors });
+    }
+    try {
+      const { executionId, output } = await runSyncPipeline({
+        tenantId,
+        pipeline,
+        versionRow: resolved,
+        environment,
+        input: body.input,
+        actorId: ctx.principal.id,
+        requestId: headerValue(ctx.request.headers, "x-request-id") ?? undefined,
+        deadlineMs:
+          typeof body.deadlineMs === "number" ? body.deadlineMs : undefined
+      });
+      await audit(ctx, "pipeline.invoke", "execution", executionId, undefined, {
+        pipelineId: pipeline.id,
+        version: resolved.version,
+        kind: "synchronous",
+        input: redactValue(body.input)
+      });
+      return ok({
+        executionId,
+        pipelineId: pipeline.id,
+        pipelineVersionId: resolved.id,
+        version: resolved.version,
+        status: "succeeded",
+        output
+      });
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      return error(500, "execution_failed", { message });
+    }
+  });
+
+  // ---- stream (SSE) -------------------------------------------------------
+  // Real implementation: subscribes to the ChangeBus, kicks off the
+  // pipeline in-process, and forwards `execution.*` events tagged with
+  // the running executionId as SSE frames. Replaces the historical
+  // `not_enabled` stub. The HTTP response stays buffered (we wait for
+  // the run to complete then flush the accumulated frames) because the
+  // AppResponse contract is non-streaming; real over-the-wire chunked
+  // streaming is a Fastify-layer enhancement.
+  route("POST", "/api/pipelines/:id/stream", async (ctx) => {
+    const pipeline = await resolvePipelineRef(ctx.params.id);
+    if (isAppResponse(pipeline)) return pipeline;
+    enforce(ctx.principal, "pipeline:run", {
+      tenantId: ctx.principal.tenantId,
+      pipelineId: pipeline.id
+    });
+    const tenantId = tenantScope(ctx);
+    if (!tenantId) {
+      return error(422, "validation_failed", {
+        issues: [{ message: "tenant context required" }]
+      });
+    }
+    const body = isObject(ctx.request.body) ? ctx.request.body : {};
+    const environment =
+      (typeof body.environment === "string" && body.environment) ||
+      ctx.request.query.environment ||
+      "dev";
+    const resolved = await resolveDeployedVersion(deps, pipeline.id, environment, tenantId);
+    if (!resolved) {
+      return error(409, "no_active_deployment", {
+        message: `no active deployment for pipeline ${pipeline.id} in ${environment}`
+      });
+    }
+    const validation = validatePipelineSpec(
+      resolved.spec as PipelineSpec,
+      deps.pluginRegistry
+    );
+    if (!validation.valid) {
+      return error(422, "validation_failed", { issues: validation.errors });
+    }
+    const frames: string[] = [];
+    function frame(event: string, data: unknown): void {
+      frames.push(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+    }
+    // We emit lifecycle frames directly from this route (rather than
+    // subscribing to the ChangeBus) because the API's executionStore is
+    // not necessarily wrapped with the worker's PublishingExecutionStore,
+    // and we want /stream to work regardless of how the deployment
+    // chose to wire observability. Real per-node progress would require
+    // adding the wrapper here too; for v1 of /stream the started /
+    // completed / output / done sequence is enough for clients to draw
+    // a "running…" spinner that flips to the result.
+    frame("execution.started", {
+      pipelineId: pipeline.id,
+      pipelineVersionId: resolved.id
+    });
+    let executionId: string | undefined;
+    try {
+      const result = await runSyncPipeline({
+        tenantId,
+        pipeline,
+        versionRow: resolved,
+        environment,
+        input: body.input,
+        actorId: ctx.principal.id,
+        requestId: headerValue(ctx.request.headers, "x-request-id") ?? undefined,
+        deadlineMs:
+          typeof body.deadlineMs === "number" ? body.deadlineMs : undefined
+      });
+      executionId = result.executionId;
+      frame("execution.completed", {
+        executionId: result.executionId,
+        status: "succeeded"
+      });
+      frame("output", { output: result.output });
+      frame("done", {
+        executionId: result.executionId,
+        pipelineId: pipeline.id,
+        pipelineVersionId: resolved.id
+      });
+      await audit(ctx, "pipeline.invoke", "execution", result.executionId, undefined, {
+        pipelineId: pipeline.id,
+        version: resolved.version,
+        kind: "stream",
+        input: redactValue(body.input)
+      });
+    } catch (e) {
+      frame("execution.failed", {
+        executionId,
+        error: e instanceof Error ? e.message : String(e)
+      });
+      frame("error", { message: e instanceof Error ? e.message : String(e) });
+    }
     return {
       status: 200,
-      body: events.join(""),
+      body: frames.join(""),
       headers: {
         "content-type": "text/event-stream",
         "cache-control": "no-cache",

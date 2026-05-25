@@ -119,6 +119,19 @@ export interface PipelineStage {
   label: string;
 }
 
+/**
+ * How a pipeline is invoked at runtime (Phase 8 of dataset/RBAC/retrieval
+ * refactor). The default `batch` mode is the historical behaviour:
+ * `/api/pipelines/:id/run` enqueues a `RunPipelineJob` onto BullMQ and a
+ * worker drains it. `synchronous` pipelines run in-process on the API
+ * pod via `/api/pipelines/:id/invoke` (and stream node progress over
+ * `/api/pipelines/:id/stream`) so chat-style retrieval can answer in a
+ * single HTTP round-trip. Mode is a metadata flag (not the apiVersion
+ * `kind` which is reserved for the Kubernetes-style resource type) so
+ * existing seeded specs need no edit — `undefined` reads as `batch`.
+ */
+export type PipelineExecutionKind = "batch" | "synchronous";
+
 export interface PipelineSpec {
   apiVersion: "rag-platform/v1";
   kind: "Pipeline";
@@ -129,6 +142,18 @@ export interface PipelineSpec {
     annotations?: Record<string, string>;
     /** Ordered list of Builder stage sections. */
     stages?: PipelineStage[];
+    /**
+     * Execution mode (Phase 8). `undefined` → `batch` for back-compat.
+     */
+    executionKind?: PipelineExecutionKind;
+    /**
+     * When true on a synchronous pipeline, the MCP server auto-registers
+     * the pipeline as a callable tool. Tool name defaults to the
+     * pipeline slug; input/output schemas come from the spec's I/O
+     * nodes. No-op on batch pipelines (MCP tools are call-and-wait by
+     * contract).
+     */
+    mcpExpose?: boolean;
   };
   spec: {
     parameters?: ConfigDefinition[];

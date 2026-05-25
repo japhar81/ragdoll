@@ -43,6 +43,7 @@ import {
 import {
   decodePaletteDrag,
   newNodeFromPlugin,
+  defaultDatasetForNewNode,
   type PaletteDragItem
 } from "../lib/palette.ts";
 import { PalettePanel } from "./PalettePanel.tsx";
@@ -1122,6 +1123,20 @@ export function PipelineBuilder(props: {
             },
             id
           );
+          // Phase 7+ UX: if the new node touches a backend (qdrant_* /
+          // opensearch_* / vector_upsert) and the pipeline already
+          // has a sibling node wired to a dataset in the same family,
+          // copy that dataset onto the new node. Saves the operator
+          // a click in the overwhelmingly common case where one
+          // pipeline talks to one corpus.
+          const siblingNodes = current
+            .map((flow) => (flow.data as { node?: PipelineNode } | undefined)?.node)
+            .filter((n): n is PipelineNode => !!n);
+          const inheritedDataset = defaultDatasetForNewNode(
+            item.id,
+            siblingNodes
+          );
+          if (inheritedDataset) pipelineNode.dataset = inheritedDataset;
         }
         const flow = specToGraph({
           ...STARTER_SPEC,
@@ -1168,6 +1183,14 @@ export function PipelineBuilder(props: {
             },
             id
           );
+          const siblingNodes = current
+            .map((flow) => (flow.data as { node?: PipelineNode } | undefined)?.node)
+            .filter((n): n is PipelineNode => !!n);
+          const inheritedDataset = defaultDatasetForNewNode(
+            item.id,
+            siblingNodes
+          );
+          if (inheritedDataset) pipelineNode.dataset = inheritedDataset;
         }
         const flow = specToGraph({
           ...STARTER_SPEC,

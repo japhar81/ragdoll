@@ -42,6 +42,17 @@ export {
 // own module; re-exported so the plugin-loader's namespace scan registers
 // them alongside the rest.
 export { transformPlugin, xmlCodecPlugin } from "./transform.ts";
+// Phase 9 retrieval plugin set. v2-native, dataset-aware.
+export {
+  datasetSearchPlugin,
+  datasetUpsertPlugin,
+  queryHydePlugin,
+  queryFanoutPlugin,
+  mergeRrfPlugin,
+  rerankLlmPlugin,
+  conversationRewritePlugin,
+  topicShiftDetectPlugin
+} from "./retrieval-v2.ts";
 import { createVectorStore } from "../../../packages/vector/src/index.ts";
 import type { DistanceMetric, VectorPoint } from "../../../packages/vector/src/index.ts";
 import {

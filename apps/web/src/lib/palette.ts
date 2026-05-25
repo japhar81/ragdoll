@@ -61,6 +61,48 @@ export function newNodeFromPlugin(
 }
 
 /**
+ * Coarse "which backend does this storage plugin talk to" classifier,
+ * used by the Builder to pre-fill `node.dataset` when an operator drags
+ * in a new storage node and there's already a sibling node wired to a
+ * dataset of the same family. v1-style plugins (`vector_upsert`) share
+ * the qdrant family because that's what `createVectorStore` defaults to
+ * when no explicit backend is wired; v2 dataset_* primitives don't have
+ * a fixed family so they're left as `undefined` and the user picks.
+ */
+export function backendFamily(pluginId: string | undefined): string | undefined {
+  if (!pluginId) return undefined;
+  if (pluginId.startsWith("qdrant_")) return "qdrant";
+  if (pluginId.startsWith("opensearch_")) return "opensearch";
+  if (pluginId === "vector_upsert") return "qdrant";
+  return undefined;
+}
+
+/**
+ * If the current pipeline already has a node in the same backend
+ * family with a dataset set, copy that dataset onto the new node so
+ * the operator doesn't re-pick it. Most pipelines stay wired to a
+ * single corpus across all their storage nodes — this just makes the
+ * common case zero-click.
+ *
+ * Returns the dataset to attach (or `undefined` to leave it blank).
+ */
+export function defaultDatasetForNewNode(
+  newPluginId: string | undefined,
+  existingNodes: Iterable<PipelineNode>
+): PipelineNode["dataset"] | undefined {
+  const family = backendFamily(newPluginId);
+  if (!family) return undefined;
+  for (const sibling of existingNodes) {
+    if (!sibling.dataset) continue;
+    if (backendFamily(sibling.plugin?.id) === family) {
+      // Spread so a later edit on the new node doesn't mutate the sibling.
+      return { ...sibling.dataset };
+    }
+  }
+  return undefined;
+}
+
+/**
  * Fixed display order for palette groups. A plugin's group is
  * `ui.paletteGroup || <derived from category>`; anything not matched here
  * falls into the trailing "Other" bucket so the layout is deterministic
