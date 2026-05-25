@@ -18,7 +18,8 @@ import {
   datasetSearchPlugin,
   datasetUpsertPlugin,
   queryHydePlugin,
-  queryFanoutPlugin
+  queryFanoutPlugin,
+  pipelineCallPlugin
 } from "../src/retrieval-v2.ts";
 import type { PluginExecutionInput, ResolvedDataset } from "../../../packages/plugin-sdk/src/index.ts";
 import type { RuntimeContext } from "../../../packages/core/src/index.ts";
@@ -332,4 +333,100 @@ test("dataset_upsert: empty / missing chunk_schema accepts any record", async ()
     dataset: fakeDataset() // chunkSchema: {}
   });
   assert.equal(result.outputs.upserted, 1);
+});
+
+// ---- pipeline_call --------------------------------------------------------
+
+test("pipeline_call: refuses to run outside a synchronous execution", async () => {
+  // The runtime injects `runPipelineByRef` only on the synchronous
+  // /invoke + /stream path. Batch runs leave it undefined, and the
+  // plugin must fail fast instead of pretending to work.
+  const input: PluginExecutionInput = {
+    context: fakeContext(),
+    node: {
+      id: "n",
+      plugin: {
+        category: pipelineCallPlugin.manifest.category,
+        id: pipelineCallPlugin.manifest.id,
+        version: "1.0.0"
+      }
+    },
+    inputs: { input: { question: "hi" } },
+    config: { pipelineSlug: "child" },
+    secrets: {}
+    // runPipelineByRef intentionally absent
+  };
+  await assert.rejects(
+    pipelineCallPlugin.execute(input),
+    /synchronous execution context/
+  );
+});
+
+test("pipeline_call: requires pipelineSlug in config", async () => {
+  const input: PluginExecutionInput = {
+    context: fakeContext(),
+    node: { id: "n", plugin: { category: "tool", id: "pipeline_call", version: "1.0.0" } },
+    inputs: { input: {} },
+    config: {},
+    secrets: {},
+    runPipelineByRef: async () => ({ output: {} })
+  };
+  await assert.rejects(
+    pipelineCallPlugin.execute(input),
+    /pipelineSlug is required/
+  );
+});
+
+test("pipeline_call: forwards the input port to the target pipeline + returns its output", async () => {
+  const calls: Array<{ slug: string; input: unknown; environment?: string }> = [];
+  const input: PluginExecutionInput = {
+    context: fakeContext(),
+    node: { id: "n", plugin: { category: "tool", id: "pipeline_call", version: "1.0.0" } },
+    inputs: { input: { question: "echo me" } },
+    config: { pipelineSlug: "child-pipeline", environment: "staging" },
+    secrets: {},
+    runPipelineByRef: async (args) => {
+      calls.push(args);
+      return { output: { answer: `got: ${(args.input as { question?: string }).question ?? ""}` } };
+    }
+  };
+  const result = await pipelineCallPlugin.execute(input);
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0], {
+    slug: "child-pipeline",
+    input: { question: "echo me" },
+    environment: "staging"
+  });
+  assert.deepEqual(result.outputs.output, { answer: "got: echo me" });
+});
+
+test("pipeline_call: falls back to inputs envelope when no `input` port is wired", async () => {
+  // Flow-style users sometimes don't bother wiring the named `input`
+  // port — they just dump the whole upstream payload onto the node.
+  // The plugin should pass the entire `inputs` object through.
+  let captured: unknown = undefined;
+  const input: PluginExecutionInput = {
+    context: fakeContext(),
+    node: { id: "n", plugin: { category: "tool", id: "pipeline_call", version: "1.0.0" } },
+    inputs: { question: "no-port-wiring" }, // <- no `.input` key
+    config: { pipelineSlug: "child" },
+    secrets: {},
+    runPipelineByRef: async (args) => {
+      captured = args.input;
+      return { output: { ok: true } };
+    }
+  };
+  await pipelineCallPlugin.execute(input);
+  assert.deepEqual(captured, { question: "no-port-wiring" });
+});
+
+test("pipeline_call: manifest declares contract: 2 + the right ports", () => {
+  // Contract = 2 so the validator + Builder picker treat it as a
+  // first-class plugin (input/output ports etc. are honored).
+  assert.equal(pipelineCallPlugin.manifest.contract, 2);
+  assert.equal(pipelineCallPlugin.manifest.category, "tool");
+  const inputs = pipelineCallPlugin.manifest.inputPorts ?? [];
+  const outputs = pipelineCallPlugin.manifest.outputPorts ?? [];
+  assert.ok(inputs.some((p) => p.name === "input"));
+  assert.ok(outputs.some((p) => p.name === "output"));
 });
