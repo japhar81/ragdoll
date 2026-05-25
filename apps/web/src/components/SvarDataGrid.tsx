@@ -20,8 +20,13 @@
  * Heavy CSS (`@svar-ui/react-grid/all.css`) is imported once from
  * `main.tsx` so the bundle only pays for it on app boot.
  */
-import { type ReactNode, useMemo } from "react";
-import { Grid, Willow, type IColumnConfig } from "@svar-ui/react-grid";
+import { type ReactNode, useEffect, useMemo, useRef } from "react";
+import {
+  Grid,
+  Willow,
+  type IApi,
+  type IColumnConfig
+} from "@svar-ui/react-grid";
 
 export interface SvarColumn<Row> {
   /** Field key on the row. Required — SVAR uses it for sort + filter. */
@@ -66,7 +71,15 @@ export function SvarDataGrid<Row>(props: SvarDataGridProps<Row>) {
           header: c.header,
           sort: c.sort !== false
         };
-        if (c.width !== undefined) cfg.width = c.width;
+        if (c.width !== undefined) {
+          cfg.width = c.width;
+        } else {
+          // No explicit width → let the column flex-grow to fill any
+          // remaining horizontal space in the viewport. Without this
+          // SVAR sizes each unsized column to its content default
+          // (~120px) and leaves a band of empty space on the right.
+          cfg.flexgrow = 1;
+        }
         // SVAR aligns through the cell renderer + flex; we mirror via
         // a wrapped element if the caller asked for explicit alignment.
         const userCell = c.cell;
@@ -110,6 +123,75 @@ export function SvarDataGrid<Row>(props: SvarDataGridProps<Row>) {
         ? `${props.height}px`
         : props.height;
 
+  // SVAR's internal scroll fires per-row as the user navigates the
+  // virtual viewport. We auto-fetch the next page when the visible
+  // row is within the last `LOAD_MORE_BUFFER` of the loaded set so
+  // the user never sees an empty scroll-tail. `latest` mirrors the
+  // current loaders into a ref so the scroll handler doesn't have to
+  // re-bind every render.
+  const LOAD_MORE_BUFFER = 10;
+  const latest = useRef({
+    rowCount: rows.length,
+    hasMore: props.hasMore ?? false,
+    isLoadingMore: props.isLoadingMore ?? false,
+    onLoadMore: props.onLoadMore,
+    rowKey: props.rowKey
+  });
+  latest.current = {
+    rowCount: rows.length,
+    hasMore: props.hasMore ?? false,
+    isLoadingMore: props.isLoadingMore ?? false,
+    onLoadMore: props.onLoadMore,
+    rowKey: props.rowKey
+  };
+
+  const apiRef = useRef<IApi | undefined>(undefined);
+  const onInit = (api: IApi): void => {
+    apiRef.current = api;
+    if (!latest.current.onLoadMore) return;
+    api.on("scroll", () => {
+      const cur = latest.current;
+      if (!cur.hasMore || cur.isLoadingMore || !cur.onLoadMore) return;
+      // Inspect the grid's reactive state for the index of the row
+      // currently at the bottom of the viewport. The exact field
+      // names differ between SVAR releases; we read them defensively.
+      const state = api.getState() as unknown as Record<string, unknown>;
+      const positions = (state._positionsData as
+        | { stop?: number; end?: number }
+        | undefined) ??
+        (state.positionsData as
+          | { stop?: number; end?: number }
+          | undefined);
+      const stop =
+        (positions?.stop as number | undefined) ??
+        (positions?.end as number | undefined);
+      const remaining = cur.rowCount - (stop ?? 0);
+      if (remaining <= LOAD_MORE_BUFFER) cur.onLoadMore!();
+    });
+  };
+
+  // Belt-and-suspenders: a row count growing past the previous render
+  // may not re-trigger scroll if the user is already at the bottom.
+  // After every refetch, re-check distance to bottom once.
+  useEffect(() => {
+    const cur = latest.current;
+    if (!cur.hasMore || cur.isLoadingMore || !cur.onLoadMore) return;
+    const api = apiRef.current;
+    if (!api) return;
+    const state = api.getState() as unknown as Record<string, unknown>;
+    const positions = (state._positionsData as
+      | { stop?: number; end?: number }
+      | undefined) ??
+      (state.positionsData as
+        | { stop?: number; end?: number }
+        | undefined);
+    const stop =
+      (positions?.stop as number | undefined) ??
+      (positions?.end as number | undefined);
+    const remaining = cur.rowCount - (stop ?? 0);
+    if (remaining <= LOAD_MORE_BUFFER) cur.onLoadMore!();
+  }, [rows.length]);
+
   return (
     <div className="svar-grid-wrap">
       <Willow>
@@ -127,20 +209,18 @@ export function SvarDataGrid<Row>(props: SvarDataGridProps<Row>) {
               columns={svarColumns}
               autoRowHeight
               filterValues={{}}
+              init={onInit}
             />
           )}
         </div>
       </Willow>
-      {props.onLoadMore && (props.hasMore ?? false) && (
-        <div className="svar-grid-loadmore">
-          <button
-            type="button"
-            className="link-btn"
-            onClick={() => props.onLoadMore?.()}
-            disabled={props.isLoadingMore}
-          >
-            {props.isLoadingMore ? "Loading…" : "Load more"}
-          </button>
+      {/* Virtual scroll auto-fetches via the `init`-bound scroll
+          listener above; a small status line tells the user when more
+          rows are inbound. No button — that would defeat the
+          continuous-scroll affordance. */}
+      {props.isLoadingMore && (
+        <div className="svar-grid-loadmore" aria-live="polite">
+          Loading more rows…
         </div>
       )}
     </div>
