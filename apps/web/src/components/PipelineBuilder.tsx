@@ -20,7 +20,7 @@ import ReactFlow, {
   type ReactFlowInstance
 } from "reactflow";
 import "reactflow/dist/style.css";
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, ApiError, type PluginInfo } from "../lib/api.ts";
 import { stringifyYaml } from "../lib/yaml.ts";
 import {
@@ -257,8 +257,10 @@ function DatasetPickerSection(props: {
   node: PipelineNode;
   tenantId: string | undefined;
   environment: string;
+  pipelineSlug: string;
   onChange: (dataset: { slug: string; alias?: string } | undefined) => void;
 }) {
+  const qc = useQueryClient();
   const datasets = useQuery({
     queryKey: ["datasets-picker", props.tenantId, props.environment],
     queryFn: () =>
@@ -268,18 +270,49 @@ function DatasetPickerSection(props: {
       }),
     enabled: !!props.tenantId
   });
+  const visible = datasets.data?.datasets ?? [];
   const current = props.node.dataset as
     | { slug: string; alias?: string }
     | undefined;
+  // Suggest a sensible new dataset slug derived from the pipeline:
+  // `<pipelineSlug>` for a single-store pipeline; same shape the auto-
+  // synthesize script uses. Operators can override before clicking
+  // Create. Empty pipelineSlug means we don't yet know what to call
+  // it — disable the create button until the pipeline has a slug.
+  const suggestedSlug = props.pipelineSlug?.trim() || "";
+  const create = useMutation({
+    mutationFn: async (slug: string): Promise<{ slug: string }> => {
+      // Create at env scope when both tenant + env are known, else
+      // tenant scope. Either way the user can promote / re-scope from
+      // the Datasets screen later.
+      const res = await api.createDataset({
+        scope: props.environment && props.tenantId ? "environment" : "tenant",
+        tenantId: props.tenantId,
+        environmentId:
+          props.environment && props.tenantId ? props.environment : undefined,
+        slug,
+        displayName: slug,
+        modalities: ["vector"]
+      });
+      return { slug: res.dataset.slug };
+    },
+    onSuccess: (res) => {
+      qc.invalidateQueries({
+        queryKey: ["datasets-picker", props.tenantId, props.environment]
+      });
+      qc.invalidateQueries({ queryKey: ["datasets"] });
+      props.onChange({ slug: res.slug, alias: "stable" });
+    }
+  });
   return (
     <div className="settings-card" style={{ padding: 8, marginBottom: 8 }}>
       <h3 style={{ margin: 0 }}>Dataset</h3>
       <p className="muted" style={{ marginTop: 2, fontSize: "0.85em" }}>
-        Pin this node to a managed dataset. The runtime resolves the
-        backend collection at execute time. Leave blank to keep using
-        the explicit collection name in Config.
+        Pin this node to a managed Dataset so the runtime resolves the
+        backend collection at execute time. Leaving this blank falls
+        back to whatever the plugin's own config says.
       </p>
-      <div className="inline-form" style={{ gap: 6 }}>
+      <div className="inline-form" style={{ gap: 6, flexWrap: "wrap" }}>
         <select
           value={current?.slug ?? ""}
           onChange={(e) => {
@@ -290,14 +323,29 @@ function DatasetPickerSection(props: {
           }}
           disabled={!props.tenantId || datasets.isLoading}
         >
-          <option value="">(none — use config.collection)</option>
-          {(datasets.data?.datasets ?? []).map((d) => (
+          <option value="">(no dataset)</option>
+          {visible.map((d) => (
             <option key={d.id} value={d.slug}>
               {d.slug} · {d.scope}
               {d.environmentId ? `/${d.environmentId}` : ""}
             </option>
           ))}
         </select>
+        {!current?.slug && props.tenantId && (
+          <button
+            type="button"
+            className="link-btn"
+            disabled={!suggestedSlug || create.isPending}
+            title={
+              suggestedSlug
+                ? `Create a new dataset "${suggestedSlug}" at this scope`
+                : "Save the pipeline first so we can suggest a slug"
+            }
+            onClick={() => suggestedSlug && create.mutate(suggestedSlug)}
+          >
+            {create.isPending ? "Creating…" : `+ New dataset "${suggestedSlug || "—"}"`}
+          </button>
+        )}
         {current?.slug && (
           <input
             value={current.alias ?? "stable"}
@@ -2127,6 +2175,7 @@ export function PipelineBuilder(props: {
                         node={selectedNode}
                         tenantId={tenantId}
                         environment={environment}
+                        pipelineSlug={pipelineSlug}
                         onChange={(dataset) =>
                           updateSelectedNode((n) => ({ ...n, dataset }))
                         }

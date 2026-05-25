@@ -452,14 +452,13 @@ export function DatasetsScreen() {
     <Screen title="Datasets">
       <div className="settings-card">
         <p className="muted">
-          Datasets are the named, schema'd corpora pipelines read from and
-          write into. A single Dataset can be shared by many pipelines —
-          ingest in one, retrieve in others. Scope is global, tenant, or
-          environment; resolution walks env → tenant → global at reference
-          time.
+          Named, schema'd corpora that pipelines read from and write
+          into. One Dataset can back many pipelines — ingest in one,
+          retrieve in others. Scope is global, tenant, or environment;
+          resolution walks env → tenant → global at reference time.
         </p>
 
-        <div className="inline-form" style={{ gap: 8, marginBottom: 12 }}>
+        <div className="inline-form" style={{ gap: 8, marginBottom: 12, flexWrap: "wrap" }}>
           <select
             value={tenantFilter}
             onChange={(e) => {
@@ -486,41 +485,178 @@ export function DatasetsScreen() {
               </option>
             ))}
           </select>
+          {canAdmin && <CreateDatasetForm onCreated={(d) => setSelectedId(d.id)} />}
         </div>
 
-        {canAdmin && (
-          <>
-            <h4>Create dataset</h4>
-            <CreateDatasetForm
-              onCreated={(d) => setSelectedId(d.id)}
-            />
-          </>
-        )}
-
-        <h4 style={{ marginTop: 16 }}>{visible.length} dataset{visible.length === 1 ? "" : "s"}</h4>
-        <Table
-          columns={["Slug", "Display", "Scope", "Modalities", "Current ver", ""]}
-          rows={visible.map((d) => [
-            <code key="sl">{d.slug}</code>,
-            d.displayName,
-            <span key="sc" className="status">
-              {scopeLabel(d)}
-            </span>,
-            d.modalities.join(", ") || "—",
-            d.currentVersionId ? "set" : "—",
-            <button
-              key="open"
-              className="link-btn"
-              onClick={() => setSelectedId(d.id === selectedId ? null : d.id)}
-            >
-              {selectedId === d.id ? "hide" : "details"}
-            </button>
-          ])}
+        <DatasetsTable
+          rows={visible}
+          canAdmin={canAdmin}
+          highlightedId={selectedId ?? undefined}
         />
         {datasets.isError && <p className="error">{errText(datasets.error)}</p>}
       </div>
 
+      {/* A deep-link selects a row; we render the version + alias panel
+          below the table so operators can still drill into versions
+          without leaving the screen. */}
       {selected && <DatasetDetail dataset={selected} canAdmin={canAdmin} />}
     </Screen>
+  );
+}
+
+/**
+ * Flat datasets table. One row per dataset; actions inline; RBAC
+ * gates write actions (Archive / Delete) when the user lacks
+ * `dataset:admin` at that scope. Display name is editable in-place
+ * (admin only).
+ */
+function DatasetsTable(props: {
+  rows: DatasetView[];
+  canAdmin: boolean;
+  highlightedId?: string;
+}) {
+  const qc = useQueryClient();
+  const archive = useMutation({
+    mutationFn: (args: { id: string; archive: boolean }) =>
+      api.updateDataset(args.id, { archived: args.archive }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["datasets"] })
+  });
+  const remove = useMutation({
+    mutationFn: (id: string) => api.deleteDataset(id),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["datasets"] })
+  });
+  if (props.rows.length === 0) {
+    return <p className="muted">No datasets at this scope yet.</p>;
+  }
+  return (
+    <Table
+      columns={[
+        "Slug",
+        "Display name",
+        "Scope",
+        "Modalities",
+        "Backends",
+        "Current ver",
+        "Status",
+        ""
+      ]}
+      rows={props.rows.map((d) => [
+        <code key="sl" style={{
+          fontWeight: d.id === props.highlightedId ? "bold" : undefined
+        }}>{d.slug}</code>,
+        <EditableDisplayName key="dn" dataset={d} canAdmin={props.canAdmin} />,
+        <span key="sc" className="status">
+          {scopeLabel(d)}
+        </span>,
+        d.modalities.join(", ") || "—",
+        <span key="be" className="muted">
+          {Object.entries(d.backends)
+            .map(
+              ([modality, cfg]) =>
+                `${modality}:${(cfg as { provider?: string })?.provider ?? "?"}`
+            )
+            .join(", ") || "—"}
+        </span>,
+        d.currentVersionId ? (
+          <span key="cv" className="status status-running">
+            ready
+          </span>
+        ) : (
+          <span key="cv" className="muted">—</span>
+        ),
+        d.archivedAt ? (
+          <span key="st" className="status status-cancelled">archived</span>
+        ) : (
+          <span key="st" className="status status-succeeded">active</span>
+        ),
+        <span key="actions" style={{ display: "inline-flex", gap: 6 }}>
+          {props.canAdmin && (
+            <>
+              <button
+                className="link-btn"
+                title={d.archivedAt ? "Restore from archive" : "Archive (hide from default lists)"}
+                onClick={() => archive.mutate({ id: d.id, archive: !d.archivedAt })}
+                disabled={archive.isPending}
+              >
+                {d.archivedAt ? "unarchive" : "archive"}
+              </button>
+              <button
+                className="link-btn danger"
+                title="Permanently delete (refuses if pipelines reference it once that check is wired)"
+                onClick={() => {
+                  if (
+                    window.confirm(
+                      `Delete dataset "${d.slug}"? This cannot be undone.`
+                    )
+                  ) {
+                    remove.mutate(d.id);
+                  }
+                }}
+                disabled={remove.isPending}
+              >
+                delete
+              </button>
+            </>
+          )}
+        </span>
+      ])}
+    />
+  );
+}
+
+function EditableDisplayName(props: {
+  dataset: DatasetView;
+  canAdmin: boolean;
+}) {
+  const qc = useQueryClient();
+  const [editing, setEditing] = useState(false);
+  const [value, setValue] = useState(props.dataset.displayName);
+  const save = useMutation({
+    mutationFn: () =>
+      api.updateDataset(props.dataset.id, { displayName: value.trim() }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["datasets"] });
+      setEditing(false);
+    }
+  });
+  if (!editing) {
+    return (
+      <span
+        title={props.canAdmin ? "Click to rename" : undefined}
+        onClick={() => props.canAdmin && setEditing(true)}
+        style={{ cursor: props.canAdmin ? "pointer" : "default" }}
+      >
+        {props.dataset.displayName}
+      </span>
+    );
+  }
+  return (
+    <span style={{ display: "inline-flex", gap: 4 }}>
+      <input
+        autoFocus
+        value={value}
+        onChange={(e) => setValue(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") save.mutate();
+          if (e.key === "Escape") {
+            setValue(props.dataset.displayName);
+            setEditing(false);
+          }
+        }}
+        style={{ minWidth: 160 }}
+      />
+      <button className="link-btn" onClick={() => save.mutate()} disabled={save.isPending}>
+        save
+      </button>
+      <button
+        className="link-btn"
+        onClick={() => {
+          setValue(props.dataset.displayName);
+          setEditing(false);
+        }}
+      >
+        cancel
+      </button>
+    </span>
   );
 }
