@@ -747,7 +747,15 @@ export const api = {
     request<{ dataset: DatasetView }>("POST", "/api/datasets", input),
   updateDataset: (
     id: string,
-    patch: { displayName?: string; description?: string | null; archived?: boolean }
+    patch: {
+      displayName?: string;
+      description?: string | null;
+      archived?: boolean;
+      modalities?: string[];
+      backends?: Record<string, unknown>;
+      embeddingProfile?: Record<string, unknown>;
+      chunkSchema?: Record<string, unknown>;
+    }
   ) =>
     request<{ dataset: DatasetView }>(
       "PATCH",
@@ -1000,6 +1008,10 @@ export interface PluginInfo {
   /** Plugin contract version. v1 (default) uses config.collection; v2 takes
    *  a ResolvedDataset on input.dataset and the Builder requires a slug pin. */
   contract?: number;
+  /** Modality slots this plugin reads/writes inside the bound dataset (e.g.
+   *  ["vector"] for qdrant_*, ["text"] for opensearch_*, ["vector", "text"]
+   *  for hybrid). Drives the picker filter + mismatch validation. */
+  datasetModalities?: string[];
   description?: string;
   mode?: string;
   capabilities?: string[];

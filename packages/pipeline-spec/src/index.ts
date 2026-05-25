@@ -174,7 +174,20 @@ export interface PipelineValidationResult {
   datasetSlots: DatasetSlotRef[];
 }
 
-export function validatePipelineSpec(spec: PipelineSpec, registry?: PluginRegistry): PipelineValidationResult {
+/**
+ * Optional slug → modalities map injected by the Builder. The validator uses
+ * this to check that a node bound to a slug has all the modalities the
+ * plugin requires (e.g. opensearch_delete pinned to a vector-only dataset).
+ * When omitted, modality mismatches go silently — the worker re-validates
+ * at execute time with the real dataset rows.
+ */
+export type DatasetModalityIndex = (slug: string) => string[] | undefined;
+
+export function validatePipelineSpec(
+  spec: PipelineSpec,
+  registry?: PluginRegistry,
+  datasetModalityIndex?: DatasetModalityIndex
+): PipelineValidationResult {
   const issues: ValidationIssue[] = [];
   const requiredSecrets = new Set<string>();
   const requiredConfig = new Set<string>();
@@ -233,6 +246,31 @@ export function validatePipelineSpec(spec: PipelineSpec, registry?: PluginRegist
         slug: dataset.slug,
         alias: dataset.alias ?? "stable"
       });
+      // Modality mismatch: if both the plugin AND the bound slug declare
+      // their modalities, every one the plugin needs must be present on
+      // the dataset. Reported as an error so the canvas badge lights up
+      // and Run/Deploy are blocked the same way `missing_required_dataset`
+      // does — operators don't get to ship a doomed wiring.
+      if (node.plugin && datasetModalityIndex) {
+        const manifest = registry?.get(node.plugin)?.manifest as
+          | { datasetModalities?: string[] }
+          | undefined;
+        const required = manifest?.datasetModalities ?? [];
+        if (required.length > 0) {
+          const present = datasetModalityIndex(dataset.slug);
+          if (present) {
+            const missing = required.filter((m) => !present.includes(m));
+            if (missing.length > 0) {
+              issues.push({
+                level: "error",
+                code: "dataset_modality_mismatch",
+                message: `node "${node.id}" needs the ${missing.join("/")} backend on dataset "${dataset.slug}" but it isn't declared — add it on the Datasets screen or pick a different slug`,
+                nodeId: node.id
+              });
+            }
+          }
+        }
+      }
     }
     collectRefs(node, requiredConfig, requiredSecrets);
   }
