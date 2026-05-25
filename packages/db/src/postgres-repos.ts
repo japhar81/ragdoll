@@ -1203,12 +1203,13 @@ export class PostgresApiKeyRepository implements ApiKeyRepository {
     try {
       const result = await this.pool.query<Record<string, unknown>>(
         `INSERT INTO api_keys
-           (id, tenant_id, principal_id, name, prefix, hash, roles, created_at, last_used_at, revoked_at)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+           (id, tenant_id, environment_id, principal_id, name, prefix, hash, roles, created_at, last_used_at, revoked_at, expires_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
          RETURNING *`,
         [
           row.id,
           row.tenantId ?? null,
+          row.environmentId ?? null,
           row.principalId,
           row.name,
           row.prefix,
@@ -1216,7 +1217,8 @@ export class PostgresApiKeyRepository implements ApiKeyRepository {
           row.roles,
           row.createdAt,
           row.lastUsedAt ?? null,
-          row.revokedAt ?? null
+          row.revokedAt ?? null,
+          row.expiresAt ?? null
         ]
       );
       return mapApiKey(result.rows[0]);
@@ -1268,6 +1270,7 @@ function mapApiKey(row: Record<string, unknown>): ApiKeyRow {
   return {
     id: row.id as string,
     tenantId: (row.tenant_id as string | null) ?? undefined,
+    environmentId: (row.environment_id as string | null) ?? undefined,
     principalId: row.principal_id as string,
     name: row.name as string,
     prefix: row.prefix as string,
@@ -1284,7 +1287,11 @@ function mapApiKey(row: Record<string, unknown>): ApiKeyRow {
     revokedAt:
       row.revoked_at instanceof Date
         ? row.revoked_at.toISOString()
-        : ((row.revoked_at as string | null) ?? undefined)
+        : ((row.revoked_at as string | null) ?? undefined),
+    expiresAt:
+      row.expires_at instanceof Date
+        ? row.expires_at.toISOString()
+        : ((row.expires_at as string | null) ?? undefined)
   };
 }
 

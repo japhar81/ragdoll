@@ -681,7 +681,15 @@ export const api = {
    * Mint a key. `plaintext` is returned exactly once — it is unrecoverable
    * afterwards, so the caller must surface it to the user immediately.
    */
-  createApiKey: (input: { name: string; role: string; tenantId?: string }) =>
+  createApiKey: (input: {
+    name: string;
+    role: string;
+    tenantId?: string;
+    /** Tenant-environment scope; the key cannot act outside this env. */
+    environmentId?: string;
+    /** ISO-8601 absolute expiration; omit for no expiration. */
+    expiresAt?: string;
+  }) =>
     request<{ apiKey: ApiKeyView; plaintext: string }>(
       "POST",
       "/api/api-keys",
@@ -967,10 +975,14 @@ export interface ApiKeyView {
   prefix: string;
   roles: string[];
   tenantId: string | null;
-  /** `*` (global) or `t/<tenantId>`. */
+  /** Environment scope (Phase 3); null when the key is tenant-wide. */
+  environmentId: string | null;
+  /** `*` (global), `t/<tenantId>`, or `t/<tenantId>/e/<env>`. */
   scope: string;
   createdAt: string;
   lastUsedAt: string | null;
   revokedAt: string | null;
-  status: "active" | "revoked";
+  /** Absolute expiration; null means "no expiration". */
+  expiresAt: string | null;
+  status: "active" | "revoked" | "expired";
 }

@@ -489,6 +489,7 @@ async function handleAuth(
           id: principal.id,
           type: principal.type,
           tenantId: principal.tenantId,
+          environment: principal.environment,
           roles: principal.roles
         },
         { defaultTenantId: principal.tenantId }

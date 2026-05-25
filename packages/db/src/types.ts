@@ -391,6 +391,15 @@ export interface VectorCollectionRow {
 export interface ApiKeyRow {
   id: string;
   tenantId?: string;
+  /**
+   * Optional environment scope (free string matching
+   * `tenant_environments.name`). When set, the key's grants are synthesized
+   * at scope `t/<tenant>/e/<environment>` so it cannot act outside that
+   * environment — sibling-scope rules of {@link scopeCovers} apply.
+   * `undefined` means "every environment in the tenant", which is the
+   * back-compat behaviour for keys minted before this column existed.
+   */
+  environmentId?: string;
   principalId: string;
   name: string;
   prefix: string;
@@ -399,6 +408,12 @@ export interface ApiKeyRow {
   createdAt: string;
   lastUsedAt?: string;
   revokedAt?: string;
+  /**
+   * Optional expiration. When set, {@link ApiKeyService.verify} rejects
+   * the key once `now()` is past it — same constant-time error shape as
+   * a revoked key. `undefined` means "no expiration".
+   */
+  expiresAt?: string;
 }
 
 // --- Repository interfaces -----------------------------------------------------------

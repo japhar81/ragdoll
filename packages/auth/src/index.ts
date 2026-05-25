@@ -26,6 +26,13 @@ export interface Principal {
   id: string;
   type: PrincipalType;
   tenantId?: string;
+  /**
+   * Optional environment scope carried by env-scoped API keys. When set,
+   * the principal's synthesized grants live at `t/<tenant>/e/<env>` and
+   * the key cannot act outside that environment (siblings under a tenant
+   * don't cover each other; see {@link scopeCovers}).
+   */
+  environment?: string;
   roles: Role[];
   /**
    * Per-request synchronous decision closure, attached by the API after the
@@ -145,11 +152,15 @@ export interface ApiKeyRecord {
   hash: string;
   principalId: string;
   tenantId?: string;
+  /** Optional environment scope. See {@link Principal.environment}. */
+  environmentId?: string;
   name: string;
   roles: Role[];
   createdAt: string;
   lastUsedAt?: string;
   revokedAt?: string;
+  /** Optional absolute expiration; verify() rejects after now(). */
+  expiresAt?: string;
 }
 
 export interface ApiKeyRepository {
@@ -200,8 +211,12 @@ function sha256Hex(value: string): string {
 export interface IssueApiKeyInput {
   principalId: string;
   tenantId?: string;
+  /** Optional environment scope. See {@link ApiKeyRecord.environmentId}. */
+  environmentId?: string;
   name: string;
   roles: Role[];
+  /** Optional absolute expiration (ISO 8601). */
+  expiresAt?: string;
 }
 
 export interface IssuedApiKey {
@@ -237,9 +252,11 @@ export class ApiKeyService {
       hash: sha256Hex(plaintext),
       principalId: input.principalId,
       tenantId: input.tenantId,
+      environmentId: input.environmentId,
       name: input.name,
       roles: input.roles,
-      createdAt: new Date().toISOString()
+      createdAt: new Date().toISOString(),
+      expiresAt: input.expiresAt
     });
 
     return { id, plaintext, record };
@@ -265,6 +282,14 @@ export class ApiKeyService {
     const record = await this.repository.findByPrefix(prefix);
     if (!record) throw new InvalidCredentialsError("Unknown API key");
     if (record.revokedAt) throw new InvalidCredentialsError("API key has been revoked");
+    if (
+      record.expiresAt &&
+      new Date(record.expiresAt).getTime() <= Date.now()
+    ) {
+      // Same constant-time error shape as revoked so callers don't
+      // distinguish revoked vs expired in the wire response.
+      throw new InvalidCredentialsError("API key has expired");
+    }
 
     const candidate = Buffer.from(sha256Hex(rawKey), "hex");
     const expected = Buffer.from(record.hash, "hex");
@@ -278,6 +303,7 @@ export class ApiKeyService {
       id: record.principalId,
       type: "api_key",
       tenantId: record.tenantId,
+      environment: record.environmentId,
       roles: record.roles
     };
   }

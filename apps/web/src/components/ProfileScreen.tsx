@@ -221,22 +221,49 @@ function ApiKeysCard() {
   const qc = useQueryClient();
   const [name, setName] = useState("");
   const [grantIdx, setGrantIdx] = useState(0);
+  const [environmentId, setEnvironmentId] = useState<string>("");
+  const [expiresPreset, setExpiresPreset] = useState<string>("never");
   const [issued, setIssued] = useState<{ key: ApiKeyView; plaintext: string } | null>(
     null
   );
 
   // A key cannot exceed its issuer, and an API key is scoped globally or to a
   // whole tenant — so only the user's global / tenant-level grants are
-  // delegable. Environment- and pipeline-scoped grants are excluded.
+  // delegable. Environment- and pipeline-scoped grants are excluded; an env
+  // scope, when wanted, is set on the key itself via the picker below.
   const eligible = useMemo(
     () => auth.grants.filter((g) => !g.environment && !g.pipelineId),
     [auth.grants]
   );
 
+  const selectedGrant = eligible[grantIdx];
+  const selectedTenantId = selectedGrant?.tenantId;
+
+  // Tenant environments only matter when a tenant grant is selected.
+  // Platform-wide grants (tenantId === undefined) can't carry an env scope.
+  const envs = useQuery({
+    queryKey: ["tenant-environments", selectedTenantId ?? "none"],
+    queryFn: () =>
+      selectedTenantId
+        ? api.listEnvironments(selectedTenantId)
+        : Promise.resolve({ environments: [] }),
+    enabled: Boolean(selectedTenantId)
+  });
+
   const keys = useQuery({
     queryKey: ["api-keys"],
     queryFn: () => api.listApiKeys()
   });
+
+  function resolveExpiresAt(): string | undefined {
+    if (expiresPreset === "never") return undefined;
+    const m = /^(\d+)([dhm])$/.exec(expiresPreset);
+    if (!m) return undefined;
+    const n = Number(m[1]);
+    const ms =
+      m[2] === "d" ? n * 86_400_000 : m[2] === "h" ? n * 3_600_000 : n * 60_000;
+    return new Date(Date.now() + ms).toISOString();
+  }
 
   const create = useMutation({
     mutationFn: () => {
@@ -244,11 +271,15 @@ function ApiKeysCard() {
       return api.createApiKey({
         name: name.trim(),
         role: g.role,
-        tenantId: g.tenantId
+        tenantId: g.tenantId,
+        environmentId: environmentId || undefined,
+        expiresAt: resolveExpiresAt()
       });
     },
     onSuccess: (res) => {
       setName("");
+      setEnvironmentId("");
+      setExpiresPreset("never");
       setIssued({ key: res.apiKey, plaintext: res.plaintext });
       qc.invalidateQueries({ queryKey: ["api-keys"] });
     }
@@ -295,13 +326,44 @@ function ApiKeysCard() {
             />
             <select
               value={grantIdx}
-              onChange={(e) => setGrantIdx(Number(e.target.value))}
+              onChange={(e) => {
+                setGrantIdx(Number(e.target.value));
+                // Selecting a new grant clears the env — environments are
+                // tenant-scoped, so the choice may not be valid anymore.
+                setEnvironmentId("");
+              }}
             >
               {eligible.map((g, i) => (
                 <option key={g.id} value={i}>
                   {g.role} · {scopeLabel(g)}
                 </option>
               ))}
+            </select>
+            {selectedTenantId && (envs.data?.environments ?? []).length > 0 && (
+              <select
+                value={environmentId}
+                onChange={(e) => setEnvironmentId(e.target.value)}
+                title="Restrict the key to a single environment"
+              >
+                <option value="">all envs</option>
+                {(envs.data?.environments ?? []).map((env) => (
+                  <option key={env.id} value={env.name}>
+                    env · {env.name}
+                  </option>
+                ))}
+              </select>
+            )}
+            <select
+              value={expiresPreset}
+              onChange={(e) => setExpiresPreset(e.target.value)}
+              title="Optional expiration"
+            >
+              <option value="never">no expiration</option>
+              <option value="1h">expires in 1 hour</option>
+              <option value="24h">expires in 24 hours</option>
+              <option value="7d">expires in 7 days</option>
+              <option value="30d">expires in 30 days</option>
+              <option value="90d">expires in 90 days</option>
             </select>
             <button
               type="submit"
@@ -317,19 +379,37 @@ function ApiKeysCard() {
         )}
 
         <Table
-          columns={["Name", "Prefix", "Role", "Scope", "Last used", "Status", ""]}
+          columns={[
+            "Name",
+            "Prefix",
+            "Role",
+            "Scope",
+            "Last used",
+            "Expires",
+            "Status",
+            ""
+          ]}
           rows={(keys.data?.apiKeys ?? []).map((k) => [
             k.name,
             <code key="p">rgd_{k.prefix}_…</code>,
             k.roles.join(", ") || "—",
             <span key="sc" className="status">
-              {k.scope === "*" ? "global" : `tenant ${k.tenantId?.slice(0, 8)}…`}
+              {k.scope === "*"
+                ? "global"
+                : k.environmentId
+                  ? `tenant ${k.tenantId?.slice(0, 8)}… · ${k.environmentId}`
+                  : `tenant ${k.tenantId?.slice(0, 8)}…`}
             </span>,
             k.lastUsedAt ? new Date(k.lastUsedAt).toLocaleString() : "never",
+            k.expiresAt ? new Date(k.expiresAt).toLocaleString() : "—",
             <span
               key="st"
               className={`status ${
-                k.status === "active" ? "status-succeeded" : "status-failed"
+                k.status === "active"
+                  ? "status-succeeded"
+                  : k.status === "expired"
+                    ? "status-cancelled"
+                    : "status-failed"
               }`}
             >
               {k.status}

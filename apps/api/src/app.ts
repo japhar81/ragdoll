@@ -2789,17 +2789,28 @@ export function createApp(deps: AppDeps): App {
    * which is not a credential on its own.
    */
   function publicApiKey(r: ApiKeyRecord): Record<string, unknown> {
+    const expired =
+      !!r.expiresAt && new Date(r.expiresAt).getTime() <= Date.now();
     return {
       id: r.id,
       name: r.name,
       prefix: r.prefix,
       roles: r.roles,
       tenantId: r.tenantId ?? null,
-      scope: r.tenantId ? `t/${r.tenantId}` : "*",
+      environmentId: r.environmentId ?? null,
+      scope: scopeToString({
+        tenantId: r.tenantId,
+        environment: r.environmentId
+      }),
       createdAt: r.createdAt,
       lastUsedAt: r.lastUsedAt ?? null,
       revokedAt: r.revokedAt ?? null,
-      status: r.revokedAt ? "revoked" : "active"
+      expiresAt: r.expiresAt ?? null,
+      status: r.revokedAt
+        ? "revoked"
+        : expired
+          ? "expired"
+          : "active"
     };
   }
 
@@ -3047,6 +3058,32 @@ export function createApp(deps: AppDeps): App {
     const role = body.role;
     const tenantId =
       typeof body.tenantId === "string" && body.tenantId ? body.tenantId : undefined;
+    // Phase 3: optional env + expiration. env is a string that must match a
+    // configured tenant environment when both tenant and env are provided.
+    const environmentId =
+      typeof body.environmentId === "string" && body.environmentId
+        ? body.environmentId.trim()
+        : undefined;
+    let expiresAt: string | undefined;
+    if (body.expiresAt !== undefined && body.expiresAt !== null) {
+      if (typeof body.expiresAt !== "string") {
+        return error(422, "validation_failed", {
+          issues: [{ path: "expiresAt", message: "expiresAt must be an ISO 8601 string" }]
+        });
+      }
+      const parsed = new Date(body.expiresAt);
+      if (Number.isNaN(parsed.getTime())) {
+        return error(422, "validation_failed", {
+          issues: [{ path: "expiresAt", message: "expiresAt is not a valid date" }]
+        });
+      }
+      if (parsed.getTime() <= Date.now()) {
+        return error(422, "validation_failed", {
+          issues: [{ path: "expiresAt", message: "expiresAt must be in the future" }]
+        });
+      }
+      expiresAt = parsed.toISOString();
+    }
 
     const catalog = await effectiveCatalog();
     if (!catalog.has(role)) {
@@ -3062,11 +3099,26 @@ export function createApp(deps: AppDeps): App {
         });
       }
     }
+    if (environmentId) {
+      if (!tenantId) {
+        return error(422, "validation_failed", {
+          issues: [{ path: "environmentId", message: "environmentId requires tenantId" }]
+        });
+      }
+      const envs = await environments.listByTenant(tenantId);
+      if (!envs.find((e) => e.name === environmentId)) {
+        return error(422, "validation_failed", {
+          issues: [{ path: "environmentId", message: `unknown environment: ${environmentId}` }]
+        });
+      }
+    }
 
     // Cap the key at its creator's authority: reuse the exact scoped decision
     // the rest of the API uses. `enforce` throws AuthorizationError (-> 403)
     // for any permission of `role` the creator does not hold at this scope.
-    const resource = scopeResource(tenantId ? `t/${tenantId}` : "*");
+    const resource = scopeResource(
+      scopeToString({ tenantId, environment: environmentId })
+    );
     for (const permission of catalog.get(role) ?? []) {
       enforce(p, permission as Permission, resource);
     }
@@ -3074,8 +3126,10 @@ export function createApp(deps: AppDeps): App {
     const issued = await apiKeys.issue({
       principalId: p.id,
       tenantId,
+      environmentId,
       name: body.name.trim(),
-      roles: [role] as ApiKeyRecord["roles"]
+      roles: [role] as ApiKeyRecord["roles"],
+      expiresAt
     });
     await audit(
       ctx,
@@ -3571,7 +3625,13 @@ export function createApp(deps: AppDeps): App {
             : principal.tenantId;
         try {
           principal.authorize = await authorizer.authorizeClosure(
-            { id: principal.id, type: principal.type, tenantId: principal.tenantId, roles: principal.roles },
+            {
+              id: principal.id,
+              type: principal.type,
+              tenantId: principal.tenantId,
+              environment: principal.environment,
+              roles: principal.roles
+            },
             { defaultTenantId }
           );
           // Session tokens carry NO roles/tenant (grants live in the policy

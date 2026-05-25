@@ -13,6 +13,7 @@ import {
 } from "../../../packages/auth/src/index.ts";
 import {
   InMemoryTenantRepository,
+  InMemoryEnvironmentRepository,
   InMemoryPipelineRepository,
   InMemoryPipelineVersionRepository,
   InMemoryPipelineDeploymentRepository,
@@ -169,6 +170,7 @@ export function buildHarness(options: BuildOptions = {}): Harness {
   const deps: AppDeps = {
     ...authStack,
     tenants: new InMemoryTenantRepository(),
+    environments: new InMemoryEnvironmentRepository(),
     pipelines: new InMemoryPipelineRepository(),
     pipelineVersions: new InMemoryPipelineVersionRepository(),
     deployments: new InMemoryPipelineDeploymentRepository(),

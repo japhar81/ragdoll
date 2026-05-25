@@ -315,6 +315,13 @@ export interface AuthorizablePrincipal {
   id: string;
   type: PrincipalKind;
   tenantId?: string;
+  /**
+   * Optional environment scope; when set together with `tenantId` the
+   * principal's synthesized grants live at `t/<tenant>/e/<env>`. Used by
+   * env-scoped API keys (Phase 3) so a key cannot act outside its
+   * environment regardless of the role permissions it carries.
+   */
+  environment?: string;
   roles: Role[];
 }
 
@@ -362,7 +369,10 @@ export class Authorizer {
 
   /** Grants a non-user principal carries, mapped onto its scope. */
   private synthesizeGrants(p: AuthorizablePrincipal): Grant[] {
-    const scope = p.tenantId ? `t/${p.tenantId}` : GLOBAL_SCOPE;
+    const scope = scopeToString({
+      tenantId: p.tenantId,
+      environment: p.environment
+    });
     return p.roles.map((role) => ({ role, scope }));
   }
 

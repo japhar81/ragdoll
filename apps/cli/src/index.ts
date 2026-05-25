@@ -18,6 +18,7 @@ import { registerSchedules } from "./commands/schedules.ts";
 import { registerExecutions } from "./commands/executions.ts";
 import { registerAccess } from "./commands/access.ts";
 import { registerObservability } from "./commands/observability.ts";
+import { registerKeys } from "./commands/keys.ts";
 
 async function main(): Promise<void> {
   const config = await loadConfig();
@@ -43,6 +44,7 @@ async function main(): Promise<void> {
   registerSchedules(program, ctx);
   registerExecutions(program, ctx);
   registerAccess(program, ctx);
+  registerKeys(program, ctx);
   registerObservability(program, ctx);
 
   await program.parseAsync(process.argv);
