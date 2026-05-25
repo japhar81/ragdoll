@@ -64,6 +64,9 @@ import type {
   UsageRecordRepository,
   PipelineRepository,
   PipelineActivationRepository,
+  DatasetRepository,
+  DatasetVersionRepository,
+  DatasetAliasRepository,
   PipelineVersionRow,
   ConfigValueRow,
   ProviderModelRow,
@@ -99,6 +102,15 @@ export interface WorkerRepositories {
    * `pipelineVersionId` (i.e. schedule-originated runs).
    */
   activations?: PipelineActivationRepository;
+  /**
+   * Optional dataset repositories (Phase 5). When all three are wired
+   * the executor resolves `node.dataset` refs against them; without
+   * them the resolver hook never fires and pipelines see only their
+   * literal `config.collection` / `config.index` exactly as before.
+   */
+  datasets?: DatasetRepository;
+  datasetVersions?: DatasetVersionRepository;
+  datasetAliases?: DatasetAliasRepository;
 }
 
 export interface WorkerDeps {
@@ -683,12 +695,64 @@ export function createWorker(deps: WorkerDeps): Worker {
     ? new PublishingExecutionStore(usageMirrored, deps.changeBus, deps.logger)
     : usageMirrored;
 
+  // Phase 5: build a DatasetResolver from the wired repos. When any of
+  // the three is missing we leave it undefined so the executor falls
+  // back to "no dataset refs are resolvable" (and the v1 shim never
+  // runs) — preserves the legacy harness exactly.
+  const datasetResolver =
+    deps.repositories.datasets &&
+    deps.repositories.datasetVersions &&
+    deps.repositories.datasetAliases
+      ? {
+          async resolve(args: {
+            ref: { slug: string; alias?: string };
+            tenantId?: string;
+            environmentId?: string;
+          }) {
+            const dsRepo = deps.repositories.datasets!;
+            const verRepo = deps.repositories.datasetVersions!;
+            const aliasRepo = deps.repositories.datasetAliases!;
+            const ds = await dsRepo.resolveSlug({
+              slug: args.ref.slug,
+              tenantId: args.tenantId,
+              environmentId: args.environmentId
+            });
+            if (!ds) return undefined;
+            // alias default = "stable". When the alias points at a version,
+            // use that; otherwise fall back to `current_version_id`.
+            const aliasName = args.ref.alias ?? "stable";
+            const aliasRow = await aliasRepo.resolve(ds.id, aliasName);
+            const versionId = aliasRow?.versionId ?? ds.currentVersionId;
+            if (!versionId) return undefined;
+            const ver = await verRepo.get(versionId);
+            if (!ver) return undefined;
+            return {
+              id: ds.id,
+              slug: ds.slug,
+              scope: ds.scope,
+              tenantId: ds.tenantId ?? undefined,
+              environmentId: ds.environmentId ?? undefined,
+              modalities: ds.modalities,
+              embeddingProfile: ds.embeddingProfile,
+              chunkSchema: ds.chunkSchema,
+              version: {
+                id: ver.id,
+                versionLabel: ver.versionLabel,
+                status: ver.status
+              },
+              backendCollections: ver.backendCollections
+            };
+          }
+        }
+      : undefined;
+
   function executor(): DagExecutor {
     return new DagExecutor({
       pluginRegistry: deps.plugins,
       secretProvider: deps.secretProvider,
       store: runtimeStore,
       ingestStateRepository: deps.ingestStateRepository,
+      datasetResolver,
       maxRetries: deps.maxRetries ?? 1,
       tracer
     });

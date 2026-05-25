@@ -39,6 +39,7 @@ import {
   StaticKeyProvider,
   type SecretProvider
 } from "../../../packages/secrets/src/index.ts";
+import * as db from "../../../packages/db/src/index.ts";
 import {
   InMemoryExecutionStore,
   InMemoryPipelineRepository,
@@ -93,7 +94,6 @@ async function buildDeps(): Promise<BuiltDeps> {
     // Postgres-backed execution store + control-plane repositories so the
     // worker resolves the SAME seeded pipeline versions / config / providers
     // the API serves. Migrations are owned by db-init / the API.
-    const db = await import("../../../packages/db/src/index.ts");
     const pool = await db.createPool({
       connectionString: process.env.DATABASE_URL
     });
@@ -112,7 +112,11 @@ async function buildDeps(): Promise<BuiltDeps> {
       usageRecords: new db.PostgresUsageRecordRepository(pool),
       // Org-versioning resolution for schedule-originated run_pipeline jobs.
       pipelines: new db.PostgresPipelineRepository(pool),
-      activations: new db.PostgresPipelineActivationRepository(pool)
+      activations: new db.PostgresPipelineActivationRepository(pool),
+      // Phase 5: dataset resolution at executor time.
+      datasets: new db.PostgresDatasetRepository(pool),
+      datasetVersions: new db.PostgresDatasetVersionRepository(pool),
+      datasetAliases: new db.PostgresDatasetAliasRepository(pool)
     };
     schedules = new db.PostgresScheduleRepository(pool);
     secretProvider = new DatabaseEncryptedSecretProvider(
@@ -133,7 +137,11 @@ async function buildDeps(): Promise<BuiltDeps> {
       usageRecords: new InMemoryUsageRecordRepository(),
       // Org-versioning resolution for schedule-originated run_pipeline jobs.
       pipelines: new InMemoryPipelineRepository(),
-      activations: new InMemoryPipelineActivationRepository()
+      activations: new InMemoryPipelineActivationRepository(),
+      // Phase 5: dataset resolution at executor time.
+      datasets: new db.InMemoryDatasetRepository(),
+      datasetVersions: new db.InMemoryDatasetVersionRepository(),
+      datasetAliases: new db.InMemoryDatasetAliasRepository()
     };
     schedules = new InMemoryScheduleRepository();
     secretProvider = new DatabaseEncryptedSecretProvider(

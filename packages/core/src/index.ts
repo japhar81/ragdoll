@@ -143,6 +143,16 @@ export interface PipelineNode {
   plugin?: PluginRef;
   config?: Record<string, unknown>;
   secrets?: Record<string, SecretRef>;
+  /**
+   * Optional Dataset reference (Phase 5 of dataset/RBAC/retrieval
+   * refactor). When set on a storage-touching node, the runtime
+   * resolves the `slug` (+ optional `alias`, defaults to `stable`)
+   * against scope inheritance at execute time and either hands a
+   * v2 plugin a {@link ResolvedDataset} OR splices the resolved
+   * backend collection names into the v1 plugin's
+   * `config.collection` / `config.index` via the compatibility shim.
+   */
+  dataset?: { slug: string; alias?: string };
   ui?: Record<string, unknown>;
 }
 
