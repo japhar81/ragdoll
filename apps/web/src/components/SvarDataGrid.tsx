@@ -146,13 +146,9 @@ export function SvarDataGrid<Row>(props: SvarDataGridProps<Row>) {
         ? `${props.height}px`
         : props.height;
 
-  // SVAR's internal scroll fires per-row as the user navigates the
-  // virtual viewport. We auto-fetch the next page when the visible
-  // row is within the last `LOAD_MORE_BUFFER` of the loaded set so
-  // the user never sees an empty scroll-tail. `latest` mirrors the
-  // current loaders into a ref so the scroll handler doesn't have to
-  // re-bind every render.
-  const LOAD_MORE_BUFFER = 10;
+  // Mirror the current loader callbacks into a ref so the scroll
+  // listener bound below doesn't have to re-bind on every render
+  // (and lose intermediate scroll events while React tears it down).
   const latest = useRef({
     rowCount: rows.length,
     hasMore: props.hasMore ?? false,
@@ -171,53 +167,43 @@ export function SvarDataGrid<Row>(props: SvarDataGridProps<Row>) {
   const apiRef = useRef<IApi | undefined>(undefined);
   const onInit = (api: IApi): void => {
     apiRef.current = api;
-    if (!latest.current.onLoadMore) return;
-    api.on("scroll", () => {
-      const cur = latest.current;
-      if (!cur.hasMore || cur.isLoadingMore || !cur.onLoadMore) return;
-      // Inspect the grid's reactive state for the index of the row
-      // currently at the bottom of the viewport. The exact field
-      // names differ between SVAR releases; we read them defensively.
-      const state = api.getState() as unknown as Record<string, unknown>;
-      const positions = (state._positionsData as
-        | { stop?: number; end?: number }
-        | undefined) ??
-        (state.positionsData as
-          | { stop?: number; end?: number }
-          | undefined);
-      const stop =
-        (positions?.stop as number | undefined) ??
-        (positions?.end as number | undefined);
-      const remaining = cur.rowCount - (stop ?? 0);
-      if (remaining <= LOAD_MORE_BUFFER) cur.onLoadMore!();
-    });
   };
 
-  // Belt-and-suspenders: a row count growing past the previous render
-  // may not re-trigger scroll if the user is already at the bottom.
-  // After every refetch, re-check distance to bottom once.
+  // Vanilla DOM scroll listener on SVAR's `.wx-scroll` container — the
+  // version-shifting internal `api.on("scroll", …)` payload didn't
+  // give us a reliable bottom-of-viewport signal, so we just watch
+  // scrollTop / scrollHeight / clientHeight directly. Fires
+  // `onLoadMore()` whenever we're within `THRESHOLD_PX` of the bottom.
+  const hostRef = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
-    const cur = latest.current;
-    if (!cur.hasMore || cur.isLoadingMore || !cur.onLoadMore) return;
-    const api = apiRef.current;
-    if (!api) return;
-    const state = api.getState() as unknown as Record<string, unknown>;
-    const positions = (state._positionsData as
-      | { stop?: number; end?: number }
-      | undefined) ??
-      (state.positionsData as
-        | { stop?: number; end?: number }
-        | undefined);
-    const stop =
-      (positions?.stop as number | undefined) ??
-      (positions?.end as number | undefined);
-    const remaining = cur.rowCount - (stop ?? 0);
-    if (remaining <= LOAD_MORE_BUFFER) cur.onLoadMore!();
+    const root = hostRef.current;
+    if (!root) return;
+    const scroller = root.querySelector(".wx-scroll") as HTMLElement | null;
+    if (!scroller) return;
+    const THRESHOLD_PX = 300;
+    const check = (): void => {
+      const cur = latest.current;
+      if (!cur.hasMore || cur.isLoadingMore || !cur.onLoadMore) return;
+      const remaining =
+        scroller.scrollHeight - (scroller.scrollTop + scroller.clientHeight);
+      if (remaining <= THRESHOLD_PX) cur.onLoadMore();
+    };
+    scroller.addEventListener("scroll", check, { passive: true });
+    // Also check after layout in case the initial page didn't fill the
+    // viewport (then scroll never fires and the user is stuck).
+    const id = requestAnimationFrame(check);
+    return () => {
+      scroller.removeEventListener("scroll", check);
+      cancelAnimationFrame(id);
+    };
+    // Re-bind whenever the loaded row count changes — SVAR re-renders
+    // the scroller and the previous listener target gets detached.
   }, [rows.length]);
 
   return (
     <div className="svar-grid-wrap">
       <div
+        ref={hostRef}
         className="svar-grid-host"
         style={heightStyle ? { height: heightStyle, minHeight: 200 } : undefined}
       >
