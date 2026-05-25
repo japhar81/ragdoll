@@ -255,6 +255,15 @@ export interface PluginExecutionInput {
     environment?: string;
   }) => Promise<{ output: Record<string, unknown> }>;
   /**
+   * Optional token sink for streaming LLM plugins (Phase 13 follow-up).
+   * When the surrounding execution is happening behind /stream and
+   * the plugin can produce incremental output, it calls onToken for
+   * each token; the SSE route forwards them as `token` frames in
+   * real time. Plugins that don't stream ignore this and return the
+   * full text in their `outputs` as usual.
+   */
+  onToken?: (token: string) => void;
+  /**
    * Recursively execute a body pipeline spec from inside a plugin. Used by
    * iteration plugins (for/foreach/while) to evaluate their body N times. Only
    * provided to in-process plugins — external plugins must implement their own

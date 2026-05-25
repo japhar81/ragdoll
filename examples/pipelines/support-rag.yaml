@@ -2,8 +2,11 @@ apiVersion: rag-platform/v1
 kind: Pipeline
 metadata:
   name: support-rag
+  description: "Canonical synchronous retrieval pipeline using dataset_search + executionKind: synchronous; auto-exposed as an MCP tool."
   labels:
     domain: support
+  executionKind: synchronous
+  mcpExpose: true
   stages:
   - id: s_auto_1
     label: Stage 1
@@ -49,11 +52,18 @@ spec:
   - id: retrieve
     plugin:
       category: retriever
-      id: qdrant_retriever
+      id: dataset_search
       version: 1.0.0
+    # Phase 5: the runtime resolves this slug at execute time and
+    # passes the resolved ResolvedDataset on input.dataset. The
+    # plugin reads `dataset.backendCollections.vector` for the
+    # physical collection name — no hard-coded collection here.
+    dataset:
+      slug: support-rag
+      alias: stable
     config:
-      top_k: "${config.retrieval.top_k}"
-      collection: "${config.vector.collection}"
+      modality: vector
+      topK: "${config.retrieval.top_k}"
     ui:
       position:
         x: 453.6171875

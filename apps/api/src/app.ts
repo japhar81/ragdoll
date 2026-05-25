@@ -835,6 +835,10 @@ export function createApp(deps: AppDeps): App {
     deadlineMs?: number;
     /** Slugs already on the call stack — propagated by nested invocations. */
     callStack?: string[];
+    /** Phase 13 token streaming. When set, the executor passes it to
+     *  streaming-capable plugins (provider_chat etc.) which call it
+     *  per emitted token. /stream forwards each token as an SSE frame. */
+    onToken?: (event: { nodeId: string; token: string }) => void;
   }): Promise<{ executionId: string; output: Record<string, unknown> }> {
     const { tenantId, pipeline, versionRow, environment, input } = args;
     const callStack = args.callStack ?? [];
@@ -934,6 +938,7 @@ export function createApp(deps: AppDeps): App {
       store: deps.executionStore,
       datasetResolver: apiDatasetResolver,
       runPipelineByRef,
+      onToken: args.onToken,
       maxRetries: 1
     });
     const output = await executor.execute({
@@ -3317,56 +3322,88 @@ export function createApp(deps: AppDeps): App {
       function f(event: string, data: unknown): string {
         return `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
       }
-      // Lifecycle frame goes out before the executor work begins so the
-      // client renders a "running" state immediately. Real chunked
-      // delivery: the Fastify glue flushes this byte-by-byte instead of
-      // waiting for the whole response. Per-node progress events from
-      // PublishingExecutionStore would arrive between started + output
-      // when wired (deferred — needs the API to wrap its executionStore
-      // the way the worker does, factored out of apps/worker).
+      // Producer/consumer pattern: the run executes in the background
+      // and pushes token frames into the queue via onToken; the
+      // generator drains the queue between yield points. When the run
+      // resolves, we push the terminal output + done frames and let
+      // the loop exit.
+      const queue: string[] = [];
+      let resolveNext: (() => void) | undefined;
+      let done = false;
+      function push(frame: string): void {
+        queue.push(frame);
+        resolveNext?.();
+        resolveNext = undefined;
+      }
       yield f("execution.started", {
         pipelineId: pipelineForStream.id,
         pipelineVersionId: resolvedForStream.id
       });
+      const runPromise = runSyncPipeline({
+        tenantId: tenantIdForStream,
+        pipeline: pipelineForStream,
+        versionRow: resolvedForStream,
+        environment,
+        input: body.input,
+        actorId: ctx.principal.id,
+        requestId: headerValue(ctx.request.headers, "x-request-id") ?? undefined,
+        deadlineMs:
+          typeof body.deadlineMs === "number" ? body.deadlineMs : undefined,
+        onToken: ({ nodeId, token }) => push(f("token", { nodeId, token }))
+      })
+        .then(async (result) => {
+          push(
+            f("execution.completed", {
+              executionId: result.executionId,
+              status: "succeeded"
+            })
+          );
+          push(f("output", { output: result.output }));
+          push(
+            f("done", {
+              executionId: result.executionId,
+              pipelineId: pipelineForStream.id,
+              pipelineVersionId: resolvedForStream.id
+            })
+          );
+          await audit(
+            ctx,
+            "pipeline.invoke",
+            "execution",
+            result.executionId,
+            undefined,
+            {
+              pipelineId: pipelineForStream.id,
+              version: resolvedForStream.version,
+              kind: "stream",
+              input: redactValue(body.input)
+            }
+          );
+        })
+        .catch((e) => {
+          const message = e instanceof Error ? e.message : String(e);
+          push(f("execution.failed", { error: message }));
+          push(f("error", { message }));
+        })
+        .finally(() => {
+          done = true;
+          resolveNext?.();
+          resolveNext = undefined;
+        });
       try {
-        const result = await runSyncPipeline({
-          tenantId: tenantIdForStream,
-          pipeline: pipelineForStream,
-          versionRow: resolvedForStream,
-          environment,
-          input: body.input,
-          actorId: ctx.principal.id,
-          requestId: headerValue(ctx.request.headers, "x-request-id") ?? undefined,
-          deadlineMs:
-            typeof body.deadlineMs === "number" ? body.deadlineMs : undefined
-        });
-        yield f("execution.completed", {
-          executionId: result.executionId,
-          status: "succeeded"
-        });
-        yield f("output", { output: result.output });
-        yield f("done", {
-          executionId: result.executionId,
-          pipelineId: pipelineForStream.id,
-          pipelineVersionId: resolvedForStream.id
-        });
-        await audit(
-          ctx,
-          "pipeline.invoke",
-          "execution",
-          result.executionId,
-          undefined,
-          {
-            pipelineId: pipelineForStream.id,
-            version: resolvedForStream.version,
-            kind: "stream",
-            input: redactValue(body.input)
+        while (true) {
+          while (queue.length > 0) {
+            yield queue.shift()!;
           }
-        );
-      } catch (e) {
-        const message = e instanceof Error ? e.message : String(e);
-        yield f("execution.failed", { error: message });
-        yield f("error", { message });
+          if (done) break;
+          await new Promise<void>((resolve) => {
+            resolveNext = resolve;
+          });
+        }
+      } finally {
+        // If the consumer hung up early, let the run finish so the
+        // audit log + execution record stay consistent.
+        await runPromise.catch(() => undefined);
       }
     }
     return {

@@ -334,17 +334,49 @@ export const providerChatPlugin: InProcessPlugin = {
       }
     }
   },
-  async execute({ inputs, config, secrets, context }) {
+  async execute(input) {
+    const { inputs, config, secrets, context, onToken } = input;
     const providers = new ProviderRegistry();
     providers.register(new OpenAIProvider());
     providers.register(new AnthropicProvider());
     providers.register(new OllamaCompatibleProvider());
     const providerId = String(config.provider ?? context.resolvedConfig.values["llm.provider"]?.value ?? "ollama");
     const provider = providers.require(providerId);
-    const response = await provider.chat({
+    const chatArgs = {
       tenantId: context.tenantId,
       model: String(config.model ?? context.resolvedConfig.values["llm.model"]?.value ?? "llama3.1"),
       messages: (inputs.messages ?? (inputs.prompt as any)?.messages ?? []) as any,
+      temperature: Number(config.temperature ?? context.resolvedConfig.values["llm.temperature"]?.value ?? 0.2),
+      maxTokens: Number(config.maxTokens ?? context.resolvedConfig.values["llm.max_tokens"]?.value ?? 1024),
+      apiKey: secrets.apiKey,
+      baseUrl: config.baseUrl ? String(config.baseUrl) : undefined
+    };
+    // Phase 13 follow-up: token-by-token streaming. When the executor
+    // wired an `onToken` callback (i.e. this run is happening behind
+    // /stream) AND the provider supports streamChat, we stream tokens
+    // out as they arrive while still returning the full text in the
+    // outputs at the end. Providers without streamChat silently fall
+    // through to the synchronous chat call below.
+    if (onToken && provider.streamChat) {
+      let collected = "";
+      for await (const event of provider.streamChat(chatArgs)) {
+        if (event.type === "token" && event.token) {
+          collected += event.token;
+          onToken(event.token);
+        } else if (event.type === "error" && event.error) {
+          throw new Error(event.error);
+        } else if (event.type === "done") {
+          break;
+        }
+      }
+      return {
+        outputs: { text: collected, provider: provider.id, model: chatArgs.model }
+      };
+    }
+    const response = await provider.chat({
+      tenantId: context.tenantId,
+      model: chatArgs.model,
+      messages: chatArgs.messages,
       temperature: Number(config.temperature ?? context.resolvedConfig.values["llm.temperature"]?.value ?? 0.2),
       maxTokens: Number(config.maxTokens ?? context.resolvedConfig.values["llm.max_tokens"]?.value ?? 1024),
       apiKey: secrets.apiKey,

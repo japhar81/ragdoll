@@ -13,6 +13,11 @@ uvicorn = { extras = ["standard"], version = "^0.30.0" }
 crawl4ai = "^0.4.0"
 scrapy = "^2.11.0"
 pydantic = "^2.7.0"
+# Phase 13 follow-up: local cross-encoder reranking via the rerank_bge
+# plugin's provider=local branch. sentence-transformers bundles a
+# CrossEncoder wrapper + torch; cpu-only inference is fine for the
+# BGE rerankers we target.
+sentence-transformers = "^3.0.0"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.2.0"

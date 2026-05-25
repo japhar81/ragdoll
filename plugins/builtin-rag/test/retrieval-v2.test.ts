@@ -264,6 +264,60 @@ test("dataset_upsert: passes records that conform to chunk_schema", async () => 
   assert.equal(result.outputs.upserted, 2);
 });
 
+test("rerank_bge: provider=local routes to the python sidecar", async () => {
+  // Stub global fetch so we don't actually hit the network. The
+  // important thing is the request shape: POST /execute with the
+  // rerank_bge_local plugin id + the documents + question in inputs.
+  const originalFetch = globalThis.fetch;
+  const calls: Array<{ url: string; body: unknown }> = [];
+  globalThis.fetch = (async (url: string, init?: RequestInit) => {
+    calls.push({ url, body: init?.body ? JSON.parse(String(init.body)) : null });
+    return new Response(
+      JSON.stringify({
+        outputs: {
+          documents: [
+            { id: "d1", text: "alpha", rerankScore: 0.9 },
+            { id: "d2", text: "beta", rerankScore: 0.1 }
+          ]
+        },
+        usage: { provider: "huggingface-local", model: "BAAI/bge-reranker-v2-m3" }
+      }),
+      { status: 200, headers: { "content-type": "application/json" } }
+    );
+  }) as unknown as typeof fetch;
+  try {
+    const { rerankBgePlugin } = await import("../src/retrieval-v2.ts");
+    const result = await runPlugin({
+      plugin: rerankBgePlugin,
+      inputs: {
+        question: "what is alpha?",
+        documents: [
+          { id: "d1", text: "alpha is the first letter" },
+          { id: "d2", text: "unrelated text" }
+        ]
+      },
+      config: {
+        provider: "local",
+        sidecarUrl: "http://python-plugins:8000",
+        topK: 5
+      }
+    });
+    const docs = result.outputs.documents as Array<{ id: string }>;
+    assert.equal(docs[0].id, "d1");
+    assert.equal(calls.length, 1);
+    assert.ok(calls[0].url.endsWith("/execute"));
+    const body = calls[0].body as {
+      plugin: { id: string };
+      inputs: { question: string; documents: unknown[] };
+    };
+    assert.equal(body.plugin.id, "rerank_bge_local");
+    assert.equal(body.inputs.question, "what is alpha?");
+    assert.equal(body.inputs.documents.length, 2);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("dataset_upsert: empty / missing chunk_schema accepts any record", async () => {
   // Back-compat: existing pipelines that didn't declare a schema must
   // keep working through dataset_upsert with no change.

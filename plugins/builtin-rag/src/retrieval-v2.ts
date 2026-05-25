@@ -761,10 +761,17 @@ export const rerankBgePlugin: InProcessPlugin = {
     category: "reranker",
     contract: 2,
     description:
-      "Rerank candidate documents against the question using a HuggingFace cross-encoder (BGE-Reranker by default). Calls the HF Inference API; needs an `hfApiKey` secret. Top-K kept, others dropped.",
+      "Rerank candidate documents against the question using a HuggingFace cross-encoder (BGE-Reranker by default). Two backends: `hf-api` (default, calls the HuggingFace Inference API; needs an hfApiKey secret) and `local` (calls the Python sidecar at PYTHON_PLUGIN_URL; loads the model in-process there).",
     configSchema: {
       type: "object",
       properties: {
+        provider: {
+          type: "string",
+          enum: ["hf-api", "local"],
+          default: "hf-api",
+          description:
+            "Where to run the cross-encoder. `hf-api` hits HuggingFace Inference; `local` calls the Python sidecar (no API token, loads model in-process)."
+        },
         model: {
           type: "string",
           default: "BAAI/bge-reranker-v2-m3",
@@ -774,6 +781,10 @@ export const rerankBgePlugin: InProcessPlugin = {
           type: "string",
           default: "https://api-inference.huggingface.co",
           description: "HF Inference API base URL (override for private endpoints)."
+        },
+        sidecarUrl: {
+          type: "string",
+          description: "Python sidecar base URL (defaults to PYTHON_PLUGIN_URL env). Used when provider=local."
         },
         topK: { type: "integer", default: 5 },
         textField: { type: "string", default: "text" },
@@ -820,8 +831,64 @@ export const rerankBgePlugin: InProcessPlugin = {
     const topK = Math.max(1, Number(config.topK ?? 5));
     const textField = String(config.textField ?? "text");
     const model = String(config.model ?? "BAAI/bge-reranker-v2-m3");
-    const endpoint = String(config.endpoint ?? "https://api-inference.huggingface.co");
     const timeoutMs = Math.max(1000, Number(config.timeoutMs ?? 30000));
+    const provider = String(config.provider ?? "hf-api");
+
+    // Phase 13 follow-up: local cross-encoder via the Python sidecar.
+    // The sidecar loads the model once and serves /execute requests;
+    // no HF API token, latency settles after the first call.
+    if (provider === "local") {
+      const sidecar = String(
+        config.sidecarUrl ??
+          process.env.PYTHON_PLUGIN_URL ??
+          "http://python-plugins:8000"
+      );
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), timeoutMs);
+      try {
+        const response = await fetch(`${sidecar}/execute`, {
+          method: "POST",
+          signal: controller.signal,
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            plugin: { category: "reranker", id: "rerank_bge_local", version: "1.0.0" },
+            node: { id: "rerank_bge", config: {}, secrets: {} },
+            inputs: { question, documents },
+            config: { model, topK, textField },
+            secrets: {},
+            context: {
+              requestId: "rerank_bge",
+              executionId: input.context.executionId,
+              tenantId: input.context.tenantId,
+              pipelineId: input.context.pipelineId,
+              pipelineVersionId: input.context.pipelineVersionId,
+              environment: input.context.environment,
+              deadline: null,
+              resolvedConfig: { values: {} }
+            }
+          })
+        });
+        if (!response.ok) {
+          throw new Error(
+            `rerank_bge (local): sidecar returned ${response.status}: ${(await response.text()).slice(0, 400)}`
+          );
+        }
+        const body = (await response.json()) as
+          | { error: string }
+          | { outputs: { documents: RankedDoc[] }; usage?: Record<string, unknown> };
+        if ("error" in body) {
+          throw new Error(`rerank_bge (local): ${body.error}`);
+        }
+        return {
+          outputs: { documents: body.outputs.documents },
+          ...(body.usage ? { usage: body.usage } : {})
+        };
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+
+    const endpoint = String(config.endpoint ?? "https://api-inference.huggingface.co");
     if (!secrets.hfApiKey) {
       throw new Error(
         "rerank_bge: hfApiKey secret is required (HuggingFace Inference API)"
