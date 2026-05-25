@@ -1,7 +1,7 @@
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import {
   authorize,
-  requirePermission,
+  requirePermission as legacyRequirePermission,
   AuthorizationError,
   Authorizer,
   BuiltinPolicyEngine,
@@ -13,7 +13,7 @@ import {
 } from "../../authz/src/index.ts";
 
 export type { Permission, Role, Resource, PolicyStore, PolicyEngine };
-export { authorize, requirePermission, Authorizer, BuiltinPolicyEngine };
+export { authorize, Authorizer, BuiltinPolicyEngine };
 export { CasbinPolicyEngine, createCasbinEngine } from "../../authz/src/casbin.ts";
 
 // ---------------------------------------------------------------------------
@@ -457,11 +457,86 @@ export function enforce(
     }
     return;
   }
-  requirePermission(
+  legacyRequirePermission(
     { id: principal.id, tenantId: principal.tenantId, roles: principal.roles },
     permission,
     { ...resource, tenantId: resource.tenantId ?? principal.tenantId }
   );
+}
+
+// ---------------------------------------------------------------------------
+// Unified permission helper (Phase 2 of dataset/RBAC/retrieval refactor)
+// ---------------------------------------------------------------------------
+
+/**
+ * Thrown by {@link requirePermission} when a principal is missing a
+ * permission for a given scope. Mirrors `enforce`/`AuthorizationError` but
+ * carries structured fields so worker handlers, the scheduler, and the
+ * runtime executor can record a denial with the originating subject and
+ * scope intact — important because those paths run after the original HTTP
+ * request and need to attribute a denial back to a specific principal +
+ * resource for audit logs and execution rows.
+ */
+export class PermissionDeniedError extends Error {
+  readonly subject: string;
+  readonly subjectType?: PrincipalType;
+  readonly action: Permission;
+  readonly resource: Resource;
+  readonly requestId?: string;
+  readonly reason?: string;
+  constructor(opts: {
+    subject: string;
+    subjectType?: PrincipalType;
+    action: Permission;
+    resource?: Resource;
+    requestId?: string;
+    reason?: string;
+  }) {
+    super(
+      `Permission denied: principal ${opts.subject} lacks ${opts.action}` +
+        (opts.reason ? ` (${opts.reason})` : "")
+    );
+    this.name = "PermissionDeniedError";
+    this.subject = opts.subject;
+    this.subjectType = opts.subjectType;
+    this.action = opts.action;
+    this.resource = opts.resource ?? {};
+    this.requestId = opts.requestId;
+    this.reason = opts.reason;
+  }
+}
+
+/**
+ * Canonical permission check shared by every layer that is NOT a Fastify
+ * route handler (REST routes keep using {@link enforce} so the existing
+ * AuthorizationError -> 403 mapping is unchanged). Worker job dequeue, the
+ * scheduler fire path, and the DagExecutor entry check call this. The
+ * decision prefers the scoped `principal.authorize` closure (Casbin /
+ * default-deny) and falls back to the legacy flat role map only when no
+ * closure is attached — important for offline test harnesses and any
+ * caller that resolves a principal outside an API request.
+ */
+export function requirePermission(
+  principal: Principal,
+  permission: Permission,
+  resource: Resource = {},
+  options: { requestId?: string } = {}
+): void {
+  const allowed = principal.authorize
+    ? principal.authorize(permission, resource)
+    : authorize(
+        { id: principal.id, tenantId: principal.tenantId, roles: principal.roles },
+        permission,
+        { ...resource, tenantId: resource.tenantId ?? principal.tenantId }
+      );
+  if (allowed) return;
+  throw new PermissionDeniedError({
+    subject: principal.id,
+    subjectType: principal.type,
+    action: permission,
+    resource,
+    requestId: options.requestId
+  });
 }
 
 // ---------------------------------------------------------------------------
