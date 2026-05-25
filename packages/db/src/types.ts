@@ -226,6 +226,14 @@ export interface ScheduleRow {
   lastRunAt?: string | null;
   nextRunAt?: string | null;
   createdAt: string;
+  /**
+   * Identifier of the principal that created the schedule. The scheduler
+   * re-resolves their grants at fire time so a creator who lost
+   * `pipeline:run` can't keep firing runs through schedules they made.
+   * Optional for backward-compat with pre-Phase-2 rows; absent means the
+   * legacy "trust the schedule" behaviour (no re-check).
+   */
+  createdBy?: UUID | null;
 }
 
 export interface PipelineDeploymentRow {
