@@ -498,27 +498,50 @@ async function executeExternalHttp(
 ): Promise<PluginExecutionOutput> {
   const url = joinUrl(endpoint.baseUrl, endpoint.executePath ?? "/execute");
   const timeoutMs = endpoint.timeoutMs ?? DEFAULT_EXTERNAL_TIMEOUT_MS;
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  let response: Response;
-  try {
-    response = await fetch(url, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(buildExternalRequestBody(plugin, input)),
-      signal: controller.signal
-    });
-  } catch (error) {
-    if (controller.signal.aborted) {
-      throw new Error(`External plugin request timed out after ${timeoutMs}ms`);
+  const body = JSON.stringify(buildExternalRequestBody(plugin, input));
+  // Retry transient connection failures (typical when the python-plugins
+  // container is restarting at the same minute a schedule fires). Three
+  // attempts with 250ms / 750ms / 2250ms backoff keeps the total ceiling
+  // under a 5s budget. Timeouts are NOT retried — those usually mean the
+  // plugin is genuinely hung, not flaky.
+  const attempts = 3;
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const response = await fetch(url, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body,
+        signal: controller.signal
+      });
+      clearTimeout(timer);
+      return await handleExternalResponse(response);
+    } catch (error) {
+      clearTimeout(timer);
+      if (controller.signal.aborted) {
+        throw new Error(`External plugin request timed out after ${timeoutMs}ms`);
+      }
+      lastError = error;
+      if (attempt < attempts) {
+        // Exponential-ish backoff; jitter unnecessary at this small N.
+        const delay = 250 * Math.pow(3, attempt - 1);
+        await new Promise((resolve) => setTimeout(resolve, delay));
+        continue;
+      }
     }
-    throw new Error(
-      `External plugin request failed: ${error instanceof Error ? error.message : String(error)}`
-    );
-  } finally {
-    clearTimeout(timer);
   }
+  throw new Error(
+    `External plugin request failed after ${attempts} attempts: ${
+      lastError instanceof Error ? lastError.message : String(lastError)
+    }`
+  );
+}
 
+async function handleExternalResponse(
+  response: Response
+): Promise<PluginExecutionOutput> {
   let parsed: unknown;
   let rawText = "";
   try {

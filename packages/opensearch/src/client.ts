@@ -175,7 +175,36 @@ export class OpenSearchClient {
       { ndjson: true }
     );
     if (body?.errors) {
-      throw new OpenSearchError(207, "OpenSearch bulk index reported item errors", body);
+      // Surface the first failed item's reason so the operator can act on
+      // it instead of staring at a generic "bulk index reported item
+      // errors". OpenSearch's response is an array of per-op shells; we
+      // walk it for the first one carrying a `.error` and pluck `type`
+      // and `reason` for the message.
+      const items = Array.isArray(body.items) ? body.items : [];
+      let firstFailure: { type?: string; reason?: string } | undefined;
+      let failedCount = 0;
+      for (const item of items) {
+        if (!item || typeof item !== "object") continue;
+        for (const op of Object.values(item as Record<string, unknown>)) {
+          const err = (op as { error?: unknown } | undefined)?.error;
+          if (err && typeof err === "object") {
+            failedCount += 1;
+            if (!firstFailure) {
+              firstFailure = err as { type?: string; reason?: string };
+            }
+          }
+        }
+      }
+      const summary = firstFailure
+        ? `${firstFailure.type ?? "unknown"}: ${firstFailure.reason ?? "(no reason)"}`
+        : "(no per-item detail)";
+      throw new OpenSearchError(
+        207,
+        `OpenSearch bulk index reported ${failedCount} failed item${
+          failedCount === 1 ? "" : "s"
+        } — first failure: ${summary}`,
+        body
+      );
     }
     return { indexed: docs.length };
   }
