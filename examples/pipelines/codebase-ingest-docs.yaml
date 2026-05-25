@@ -29,6 +29,12 @@ spec:
       - "docs/**/*.md"
       - "docs/**/*.mdx"
       - "**/README.md"
+      exclude:
+      - "**/node_modules/**"
+      - "**/dist/**"
+      - "**/build/**"
+      - "**/.next/**"
+      - "**/.git/**"
       maxFileSize: 1048576
       computeHash: false
     ui:

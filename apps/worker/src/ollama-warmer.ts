@@ -37,48 +37,79 @@ export function startOllamaWarmer(opts: OllamaWarmerOptions): () => void {
   }
   const { models, baseUrl, intervalMs, logger } = opts;
 
-  async function pingOnce(): Promise<void> {
-    for (const model of models) {
-      try {
-        // `keep_alive` keeps the model resident; `num_predict: 1` makes
-        // the request near-instant once the model is loaded. We don't
-        // care about the generated token — the side effect is what
-        // matters.
-        const controller = new AbortController();
-        const timer = setTimeout(() => controller.abort(), 90_000);
-        try {
-          const response = await fetch(`${baseUrl}/api/generate`, {
-            method: "POST",
-            signal: controller.signal,
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({
-              model,
-              prompt: "ping",
-              stream: false,
-              keep_alive: "10m",
-              options: { num_predict: 1 }
-            })
-          });
-          if (!response.ok) {
-            logger?.warn?.("ollama_warm_failed", {
-              model,
-              status: response.status,
-              message: await response.text().then((t) => t.slice(0, 200))
-            });
-          } else {
-            // Drain so the underlying connection can be released.
-            await response.text();
-            logger?.info?.("ollama_warm_keepalive", { model });
+  async function ping(
+    endpoint: "/api/generate" | "/api/embed",
+    model: string
+  ): Promise<{ ok: boolean; status?: number; body?: string }> {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 90_000);
+    const body =
+      endpoint === "/api/generate"
+        ? {
+            model,
+            prompt: "ping",
+            stream: false,
+            keep_alive: "10m",
+            options: { num_predict: 1 }
           }
-        } finally {
-          clearTimeout(timer);
-        }
-      } catch (e) {
-        logger?.warn?.("ollama_warm_error", {
+        : { model, input: "ping", keep_alive: "10m" };
+    try {
+      const response = await fetch(`${baseUrl}${endpoint}`, {
+        method: "POST",
+        signal: controller.signal,
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body)
+      });
+      const text = await response.text();
+      return { ok: response.ok, status: response.status, body: text };
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  async function warmModel(model: string): Promise<void> {
+    // Try /api/generate first (correct for chat models). Embedding-only
+    // models like nomic-embed-text reject it with `does not support
+    // generate` — fall back to /api/embed so the model still gets
+    // pre-loaded. `keep_alive: 10m` on either endpoint pins the model
+    // in RAM so the first real request pays no cold-start cost.
+    try {
+      const gen = await ping("/api/generate", model);
+      if (gen.ok) {
+        logger?.info?.("ollama_warm_keepalive", { model, via: "generate" });
+        return;
+      }
+      const isEmbedModel =
+        gen.status === 400 && /does not support generate/i.test(gen.body ?? "");
+      if (!isEmbedModel) {
+        logger?.warn?.("ollama_warm_failed", {
           model,
-          error: e instanceof Error ? e.message : String(e)
+          status: gen.status,
+          message: (gen.body ?? "").slice(0, 200)
+        });
+        return;
+      }
+      const embed = await ping("/api/embed", model);
+      if (embed.ok) {
+        logger?.info?.("ollama_warm_keepalive", { model, via: "embed" });
+      } else {
+        logger?.warn?.("ollama_warm_failed", {
+          model,
+          status: embed.status,
+          message: (embed.body ?? "").slice(0, 200)
         });
       }
+    } catch (e) {
+      logger?.warn?.("ollama_warm_error", {
+        model,
+        error: e instanceof Error ? e.message : String(e)
+      });
+    }
+  }
+
+  async function pingOnce(): Promise<void> {
+    for (const model of models) {
+      await warmModel(model);
     }
   }
 
