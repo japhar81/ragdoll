@@ -279,53 +279,75 @@ test("events tagged with requiredPermission are dropped for subscribers lacking 
     nextFrame(viewerWs, (m) => m.type === "ready")
   ]);
 
-  // Publish a tagged secret rotation and an untagged pipeline update.
-  await bus.publish({
-    id: randomUUID(),
-    action: "secret.rotate",
-    targetType: "secret",
-    targetId: "s-1",
-    tenantId,
-    actorId: admin.id,
-    requiredPermission: "secret:manage_tenant",
-    at: new Date().toISOString()
-  });
-  await bus.publish({
-    id: randomUUID(),
-    action: "pipeline.update",
-    targetType: "pipeline",
-    targetId: "p-1",
-    tenantId,
-    actorId: admin.id,
-    at: new Date().toISOString()
-  });
+  try {
+    // Attach the wait-for-frame listeners on BOTH sockets BEFORE
+    // publishing. Otherwise the second nextFrame() races with WS
+    // delivery: by the time it attaches its listener, the message
+    // frame may have already fired with no subscriber, and the await
+    // sits until timeout. Bug surfaced as ~40% intermittent failures
+    // under suite-level backlog.
+    const adminFirstP = nextFrame(adminWs, (m) => m.type === "event");
+    const viewerFirstP = nextFrame(viewerWs, (m) => m.type === "event");
 
-  // Admin receives the secret event first.
-  const adminFirst = await nextFrame(adminWs, (m) => m.type === "event");
-  assert.equal(adminFirst.type, "event");
-  if (adminFirst.type === "event") {
-    assert.equal(adminFirst.event.action, "secret.rotate");
-  }
-  // Viewer skips the secret event and receives the untagged pipeline
-  // event. If the tagged event leaked through, the next event frame on
-  // the viewer's socket would be `secret.rotate`, not `pipeline.update`.
-  const viewerFirst = await nextFrame(viewerWs, (m) => m.type === "event");
-  assert.equal(viewerFirst.type, "event");
-  if (viewerFirst.type === "event") {
-    assert.equal(
-      viewerFirst.event.action,
-      "pipeline.update",
-      "viewer received the tagged secret.rotate event — per-event filter is broken"
-    );
-  }
+    // Publish a tagged secret rotation and an untagged pipeline update.
+    await bus.publish({
+      id: randomUUID(),
+      action: "secret.rotate",
+      targetType: "secret",
+      targetId: "s-1",
+      tenantId,
+      actorId: admin.id,
+      requiredPermission: "secret:manage_tenant",
+      at: new Date().toISOString()
+    });
+    await bus.publish({
+      id: randomUUID(),
+      action: "pipeline.update",
+      targetType: "pipeline",
+      targetId: "p-1",
+      tenantId,
+      actorId: admin.id,
+      at: new Date().toISOString()
+    });
 
-  adminWs.close();
-  viewerWs.close();
-  await Promise.all([
-    new Promise((r) => adminWs.once("close", () => r(undefined))),
-    new Promise((r) => viewerWs.once("close", () => r(undefined)))
-  ]);
-  await srv.close();
+    // Admin receives the secret event first.
+    const adminFirst = await adminFirstP;
+    assert.equal(adminFirst.type, "event");
+    if (adminFirst.type === "event") {
+      assert.equal(adminFirst.event.action, "secret.rotate");
+    }
+    // Viewer skips the secret event and receives the untagged pipeline
+    // event. If the tagged event leaked through, the next event frame
+    // on the viewer's socket would be `secret.rotate`.
+    const viewerFirst = await viewerFirstP;
+    assert.equal(viewerFirst.type, "event");
+    if (viewerFirst.type === "event") {
+      assert.equal(
+        viewerFirst.event.action,
+        "pipeline.update",
+        "viewer received the tagged secret.rotate event — per-event filter is broken"
+      );
+    }
+  } finally {
+    // Always tear down: an assertion failure above must not leak open
+    // sockets / a listening Fastify instance — open handles can stall
+    // process exit far past the per-test timeout.
+    try {
+      adminWs.close();
+    } catch {
+      /* best-effort */
+    }
+    try {
+      viewerWs.close();
+    } catch {
+      /* best-effort */
+    }
+    await Promise.allSettled([
+      new Promise((r) => adminWs.once("close", () => r(undefined))),
+      new Promise((r) => viewerWs.once("close", () => r(undefined)))
+    ]);
+    await srv.close();
+  }
 });
 
 // --- WebSocket: Builder room ----------------------------------------------
