@@ -827,21 +827,32 @@ function DatasetsGrid(props: {
  */
 function AddBackendForm(props: { dataset: DatasetView }) {
   const qc = useQueryClient();
-  const existingModalities = new Set(props.dataset.modalities);
-  const candidateModalities = ["vector", "text", "graph", "image"].filter(
-    (m) => !existingModalities.has(m)
-  );
+  // Only offer modalities + providers we actually have plugins for. Adding
+  // graph/neo4j or image here without a backing plugin gets the operator a
+  // dead binding the runtime can't resolve.
   const providersByModality: Record<string, string[]> = {
     vector: ["qdrant", "pgvector"],
-    text: ["opensearch"],
-    graph: ["neo4j"],
-    image: ["qdrant"]
+    text: ["opensearch"]
   };
+  const allModalities = Object.keys(providersByModality);
+  const existingModalities = new Set(props.dataset.modalities);
+  const existingBackends = props.dataset.backends ?? {};
+  // Candidates = modalities the user could add OR fill in a missing
+  // backend for. A modality is "addable" if either:
+  //   (a) the dataset doesn't declare it yet, OR
+  //   (b) it's declared but the backends map has no entry (legacy half-
+  //       populated row — the runtime can't dispatch it without this).
+  const candidateModalities = allModalities.filter(
+    (m) => !existingModalities.has(m) || !existingBackends[m]
+  );
   const [open, setOpen] = useState(false);
   const [modality, setModality] = useState(candidateModalities[0] ?? "");
   const [provider, setProvider] = useState(
     providersByModality[candidateModalities[0] ?? ""]?.[0] ?? ""
   );
+  const isHealing = modality
+    ? existingModalities.has(modality) && !existingBackends[modality]
+    : false;
   const add = useMutation({
     mutationFn: async () => {
       const nextBackends = {
@@ -866,7 +877,7 @@ function AddBackendForm(props: { dataset: DatasetView }) {
   if (candidateModalities.length === 0) {
     return (
       <p className="muted" style={{ fontSize: "0.85em" }}>
-        All known modalities are configured on this dataset.
+        All supported modalities ({allModalities.join(", ")}) have a backend.
       </p>
     );
   }
@@ -876,8 +887,9 @@ function AddBackendForm(props: { dataset: DatasetView }) {
         className="link-btn"
         onClick={() => setOpen(true)}
         style={{ marginTop: 4 }}
+        title="Add a new modality or fix a declared modality with no backend"
       >
-        + Add backend
+        + {candidateModalities.some((m) => existingModalities.has(m)) ? "Fix / add" : "Add"} backend
       </button>
     );
   }
@@ -890,7 +902,7 @@ function AddBackendForm(props: { dataset: DatasetView }) {
       }}
       style={{ gap: 6, marginTop: 6, flexWrap: "wrap" }}
     >
-      <span className="muted">Add</span>
+      <span className="muted">{isHealing ? "Set backend for" : "Add modality"}</span>
       <select
         value={modality}
         onChange={(e) => {
@@ -902,6 +914,9 @@ function AddBackendForm(props: { dataset: DatasetView }) {
         {candidateModalities.map((m) => (
           <option key={m} value={m}>
             {m}
+            {existingModalities.has(m) && !existingBackends[m]
+              ? " (declared, no backend)"
+              : ""}
           </option>
         ))}
       </select>
@@ -914,7 +929,7 @@ function AddBackendForm(props: { dataset: DatasetView }) {
         ))}
       </select>
       <button className="primary" type="submit" disabled={add.isPending || !provider}>
-        {add.isPending ? "Adding…" : "Add"}
+        {add.isPending ? "Saving…" : isHealing ? "Set backend" : "Add"}
       </button>
       <button
         type="button"
