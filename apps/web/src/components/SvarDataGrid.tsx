@@ -207,7 +207,11 @@ export function SvarDataGrid<Row>(props: SvarDataGridProps<Row>) {
             <Grid
               data={data}
               columns={svarColumns}
-              autoRowHeight
+              // No autoRowHeight: SVAR's virtual scroll only kicks in
+              // with fixed-height rows. With autoRowHeight the grid
+              // measures and renders every loaded row in DOM, the
+              // table overflows the viewport, and the scroll-bottom
+              // event we hook for the next-page fetch never fires.
               filterValues={{}}
               init={onInit}
             />
