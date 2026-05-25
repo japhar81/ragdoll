@@ -1,7 +1,9 @@
 /**
  * Phase 4d of the dataset/RBAC/retrieval refactor: synthesize a Dataset
  * per (tenant, pipeline, environment) row that has a storage-touching
- * node in its current pipeline_version spec.
+ * node in its current pipeline_version spec AND pin
+ * `node.dataset = { slug, alias: "stable" }` onto every storage-touching
+ * node in the spec itself.
  *
  * Why this script exists: before Datasets, every pipeline directly named
  * a Qdrant collection / OpenSearch index in its spec. That coupled
@@ -9,11 +11,21 @@
  * Dataset for every existing pipeline-env binding that ALREADY writes
  * somewhere, recording the existing physical collection in the
  * Dataset's v1.backend_collections. NO DATA MOVES; the script only adds
- * metadata. A follow-up "merge datasets" tool consolidates duplicates.
+ * metadata.
+ *
+ * After Phase 4d, contract-v2 storage nodes also need an explicit
+ * `node.dataset` pin so the validator's `missing_required_dataset` check
+ * doesn't block Run/Deploy on pre-existing pipelines. The script writes
+ * the pin in-place on the spec JSON of the latest version per pipeline
+ * (one updated row per pipeline_id; older versions are left alone since
+ * they're immutable history). The slug used for the pin matches the
+ * pipeline slug so the global dataset created here is the one that
+ * resolves at run time.
  *
  * Idempotent: re-running skips datasets whose (scope, tenant_id,
- * environment_id, slug) already exists, and skips versions whose
- * (dataset_id, version_label) already exists.
+ * environment_id, slug) already exists, skips versions whose
+ * (dataset_id, version_label) already exists, and re-pins specs only
+ * when a storage node is currently missing `node.dataset`.
  *
  * Run with:
  *   DATABASE_URL=postgres://ragdoll:ragdoll@localhost:5432/ragdoll \
@@ -120,6 +132,49 @@ function csv(env: string | undefined): Set<string> {
       .map((s) => s.trim())
       .filter(Boolean)
   );
+}
+
+/** Plugin ids whose `manifest.contract` is 2 (dataset-aware contract).
+ *  Mirrors the explicit datasetModalities tags in plugins/builtin-rag —
+ *  if a node uses one of these AND has no `node.dataset.slug`, the
+ *  validator now refuses to Run/Publish/Deploy. The migration pins each
+ *  matched node to a slug = the pipeline slug so the resulting global
+ *  Dataset auto-resolves on a fresh stack. */
+const V2_STORAGE_PLUGINS = new Set([
+  "qdrant_retriever",
+  "qdrant_vector_store",
+  "qdrant_delete",
+  "vector_upsert",
+  "opensearch_output",
+  "opensearch_bm25_retriever",
+  "opensearch_vector_retriever",
+  "opensearch_hybrid_retriever",
+  "opensearch_delete"
+]);
+
+interface SpecNodeWithDataset extends NodeRef {
+  dataset?: { slug?: string; alias?: string };
+}
+
+/** Returns a new spec object with `node.dataset = { slug, alias: "stable" }`
+ *  written onto every storage-touching v2 node that doesn't already have
+ *  one. Returns `undefined` when no change is needed (idempotent re-run). */
+function pinDatasetOnSpec(
+  spec: Record<string, unknown>,
+  slug: string
+): Record<string, unknown> | undefined {
+  const inner = spec.spec as { nodes?: SpecNodeWithDataset[] } | undefined;
+  if (!inner?.nodes) return undefined;
+  let mutated = false;
+  const nextNodes: SpecNodeWithDataset[] = inner.nodes.map((node) => {
+    const pid = node.plugin?.id;
+    if (!pid || !V2_STORAGE_PLUGINS.has(pid)) return node;
+    if (node.dataset?.slug) return node;
+    mutated = true;
+    return { ...node, dataset: { slug, alias: "stable" } };
+  });
+  if (!mutated) return undefined;
+  return { ...spec, spec: { ...inner, nodes: nextNodes } };
 }
 
 async function main(): Promise<void> {
@@ -307,7 +362,55 @@ async function main(): Promise<void> {
     }
 
     console.log(
-      `\ndone — ${created} created, ${unchanged} already existed, ${skipped} skipped` +
+      `\ndatasets: ${created} created, ${unchanged} already existed, ${skipped} skipped` +
+        (dryRun ? " (DRY_RUN: nothing was written)" : "")
+    );
+
+    // ---- second pass: pin node.dataset on every pipeline's latest spec ----
+    // Walk each pipeline once (slug is the dataset slug — same as the
+    // pipeline's slug). For each pipeline_versions row we'd otherwise
+    // leave alone, check whether any storage v2 node lacks a dataset
+    // pin; if so, write back the patched spec.
+    let pinned = 0;
+    let pinSkipped = 0;
+    for (const p of pipelines) {
+      if (skipSlugs.has(p.slug)) {
+        pinSkipped += 1;
+        continue;
+      }
+      // We rewrite ALL versions of the pipeline that contain a storage
+      // node missing a slug pin — not just the latest — because the
+      // worker may run an older version via `resolveRunVersion` (pinned
+      // activation, explicit pipelineVersionId), and the validator
+      // rejects any of them.
+      const versions = (
+        await pool.query<VersionRow>(
+          `SELECT id, pipeline_id AS "pipelineId", status, spec
+           FROM pipeline_versions WHERE pipeline_id = $1`,
+          [p.id]
+        )
+      ).rows;
+      for (const v of versions) {
+        const patched = pinDatasetOnSpec(v.spec, p.slug);
+        if (!patched) {
+          pinSkipped += 1;
+          continue;
+        }
+        console.log(`  ${p.slug} v=${v.id.slice(0, 8)}…: pin dataset slug "${p.slug}"`);
+        if (dryRun) {
+          pinned += 1;
+          continue;
+        }
+        await pool.query(
+          `UPDATE pipeline_versions SET spec = $1 WHERE id = $2`,
+          [JSON.stringify(patched), v.id]
+        );
+        pinned += 1;
+      }
+    }
+
+    console.log(
+      `\nspecs:    ${pinned} pinned, ${pinSkipped} already pinned / skipped` +
         (dryRun ? " (DRY_RUN: nothing was written)" : "")
     );
   } finally {

@@ -68,6 +68,9 @@ spec:
       category: vector_store
       id: qdrant_vector_store
       version: 1.0.0
+    dataset:
+      slug: support-ingestion
+      alias: stable
     config:
       isolationMode: "${config.vector.isolation.mode}"
     ui:

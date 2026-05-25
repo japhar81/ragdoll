@@ -84,6 +84,9 @@ spec:
       category: sink
       id: opensearch_output
       version: 1.0.0
+    dataset:
+      slug: codebase-ingest-docs
+      alias: stable
     config:
       index: codebase-docs
       vectorField: embedding
@@ -107,6 +110,9 @@ spec:
       category: sink
       id: opensearch_delete
       version: 1.0.0
+    dataset:
+      slug: codebase-ingest-docs
+      alias: stable
     config:
       index: codebase-docs
     secrets:

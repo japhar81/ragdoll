@@ -84,6 +84,9 @@ spec:
       category: vector_store
       id: qdrant_vector_store
       version: 1.0.0
+    dataset:
+      slug: codebase-ingest-code
+      alias: stable
     config:
       collection: codebase
     secrets:
@@ -100,6 +103,9 @@ spec:
       category: sink
       id: qdrant_delete
       version: 1.0.0
+    dataset:
+      slug: codebase-ingest-code
+      alias: stable
     config:
       collection: codebase
     secrets:
