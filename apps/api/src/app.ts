@@ -162,287 +162,73 @@ import {
   type ChangeBus
 } from "../../../packages/events/src/index.ts";
 
-/**
- * The shared queue contract specifies `QueueJob.type` includes `"run_pipeline"`
- * and `"ingest_datasource"`. The worker package's current `QueueJob` union does
- * not yet list `"run_pipeline"`, so we widen the type locally to stay
- * forward-compatible without editing the worker package.
- */
-type ApiQueueJobType = QueueJob["type"] | "run_pipeline";
-interface ApiQueueJob<T> extends Omit<QueueJob<T>, "type"> {
-  type: ApiQueueJobType;
-}
+// Types (AppRequest, AppResponse, CursorPage, ReadableExecutionStore,
+// AppDeps, App) live in ./app/types.ts. Re-exported below so callers
+// importing from `apps/api/src/app.ts` keep working. The
+// framework-agnostic shape lets the route closures below stay tightly
+// scoped to deps without dragging the type bodies through this file.
+export type {
+  AppRequest,
+  AppResponse,
+  CursorPage,
+  ReadableExecutionStore,
+  AppDeps,
+  App,
+  ApiQueueJobType,
+  ApiQueueJob
+} from "./app/types.ts";
+import type {
+  AppRequest,
+  AppResponse,
+  CursorPage,
+  ReadableExecutionStore,
+  AppDeps,
+  App,
+  ApiQueueJob
+} from "./app/types.ts";
+export {
+  decodeCursor,
+  encodeCursor
+} from "./app/http-utils.ts";
+import {
+  JSON_HEADERS,
+  ok,
+  error,
+  headerValue,
+  isObject,
+  nowIso,
+  isUuid,
+  isInvalidTextRepresentation,
+  decodeCursor,
+  encodeCursor,
+  compile,
+  matchRoute
+} from "./app/http-utils.ts";
+import {
+  readPluginDoc,
+  projectPlugin,
+  parseSpec,
+  buildSecretRef,
+  resolveDeployedVersion
+} from "./app/spec-helpers.ts";
 
-// ---------------------------------------------------------------------------
-// Request / response contracts
-// ---------------------------------------------------------------------------
-
-export interface AppRequest {
-  method: string;
-  path: string;
-  query: Record<string, string | undefined>;
-  headers: Record<string, string | string[] | undefined>;
-  body?: unknown;
-}
-
-export interface AppResponse {
-  status: number;
-  body: unknown;
-  headers: Record<string, string>;
-}
-
-/**
- * An execution store the API can both write to (when seeding from a queued
- * run) and read traces from. The runtime `ExecutionStore` only defines writes;
- * for the control plane we also need read access via async query methods, so
- * the app accepts a `ReadableExecutionStore`. The InMemory store implements
- * the async methods over its in-process arrays (which it still exposes as the
- * optional sync `executions`/`nodes` for tests); a Postgres-backed reader
- * queries the executions / execution_nodes tables.
- */
-export interface CursorPage<T> {
-  rows: T[];
-  /** Opaque continuation token, or null when there are no more rows. */
-  nextCursor: string | null;
-  /** Total rows under the same filter (NOT the cursor slice). Drives
-   *  the SVAR grid footer "N of M" display. */
-  total: number;
-}
-
-export interface ReadableExecutionStore extends ExecutionStore {
-  listExecutions(tenantId?: string): Promise<ExecutionRecord[]>;
-  /**
-   * Cursor-paginated list ordered by (started_at DESC, id DESC). Optional
-   * on the interface so the in-memory test store can fall back to the
-   * full `listExecutions` slicing — Postgres-backed deployments override.
-   */
-  listExecutionsPage?(args: {
-    tenantId?: string;
-    limit: number;
-    cursor?: string;
-  }): Promise<CursorPage<ExecutionRecord>>;
-  getExecution(executionId: string): Promise<ExecutionRecord | undefined>;
-  listNodes(executionId: string): Promise<ExecutionNodeRecord[]>;
-  /** Optional sync arrays kept by the InMemory store for tests. */
-  executions?: ExecutionRecord[];
-  nodes?: ExecutionNodeRecord[];
-}
-
-/** Decode a `{timestamp, id}` cursor; returns null on any parse failure
- *  so callers fall back to "start from the top". */
-export function decodeCursor(
-  raw: string | undefined
-): { timestamp: string; id: string } | null {
-  if (!raw) return null;
-  try {
-    const decoded = Buffer.from(raw, "base64url").toString("utf-8");
-    const parsed = JSON.parse(decoded) as { t?: string; i?: string };
-    if (typeof parsed.t === "string" && typeof parsed.i === "string") {
-      return { timestamp: parsed.t, id: parsed.i };
-    }
-    return null;
-  } catch {
-    return null;
-  }
-}
-
-export function encodeCursor(timestamp: string, id: string): string {
-  return Buffer.from(JSON.stringify({ t: timestamp, i: id })).toString("base64url");
-}
-
-export interface AppDeps {
-  tenants: TenantRepository;
-  pipelines: PipelineRepository;
-  pipelineVersions: PipelineVersionRepository;
-  deployments: PipelineDeploymentRepository;
-  /**
-   * Org/versioning/scheduler repositories. Optional so older harnesses that
-   * predate Wave B (e.g. the cross-component e2e harness) still construct a
-   * valid `AppDeps`; when omitted `createApp` falls back to fresh InMemory
-   * instances so the new routes remain fully functional.
-   */
-  pipelineFolders?: PipelineFolderRepository;
-  pipelineActivations?: PipelineActivationRepository;
-  schedules?: ScheduleRepository;
-  tenantPipelines?: TenantPipelineRepository;
-  environments?: EnvironmentRepository;
-  /**
-   * Datasets / dataset versions / dataset aliases (Phase 4). Optional so
-   * the legacy harness still constructs a valid AppDeps; when omitted
-   * createApp falls back to fresh InMemory instances.
-   */
-  datasets?: DatasetRepository;
-  datasetVersions?: DatasetVersionRepository;
-  datasetAliases?: DatasetAliasRepository;
-  configDefinitions: ConfigDefinitionRepository;
-  configValues: ConfigValueRepository;
-  auditLogs: AuditLogRepository;
-  usageRecords: UsageRecordRepository;
-  /** Retention caps for executions/usage/audit. Optional so legacy harnesses
-   *  still build a valid AppDeps; createApp falls back to an InMemory impl. */
-  retentionSettings?: RetentionSettingsRepository;
-  plugins: PluginRepository;
-  providers: ProviderRepository;
-  datasources: DatasourceConnectionRepository;
-  vectorCollections: VectorCollectionRepository;
-  executionStore: ReadableExecutionStore;
-  auth: AuthResolver;
-  queue: QueuePort;
-  secretProvider: SecretProvider;
-  pluginRegistry: PluginRegistry;
-  providerRegistry: ProviderRegistry;
-  logger: StructuredLogger;
-  /** RAGDOLL_ENV; the dev auth fallback is rejected when this is "production". */
-  env?: string;
-  /**
-   * Auth / RBAC stores. Optional so legacy harnesses still construct a valid
-   * `AppDeps`; `createApp` falls back to fresh InMemory instances. When
-   * `authorizer` is wired, route-level `enforce(...)` becomes scoped
-   * default-deny RBAC; otherwise the legacy flat role map is used.
-   */
-  users?: UserRepository;
-  userIdentities?: UserIdentityRepository;
-  identityProviders?: IdentityProviderRepository;
-  rbacPolicies?: RbacPolicyRepository;
-  authSettings?: AuthSettingsRepository;
-  roles?: RoleRepository;
-  webhookTriggers?: WebhookTriggerRepository;
-  /**
-   * Per-tenant Git storage config (migration 007). Optional so legacy
-   * harnesses keep working; the storage routes 404 when omitted.
-   */
-  tenantGitConfigs?: TenantGitConfigRepository;
-  /** Resolves a principal's scoped grants; attaches the per-request decider. */
-  authorizer?: Authorizer;
-  /** Session signer used for login/SSO; required for the auth routes. */
-  sessions?: SessionTokenService;
-  /** Built from the stores when omitted (needs `sessions`). */
-  accounts?: AccountService;
-  /**
-   * Issues / lists / revokes API keys. SHOULD be the same instance handed to
-   * the `AuthResolver` so a key minted via `POST /api/api-keys` is immediately
-   * verifiable. When omitted `createApp` falls back to a fresh in-memory
-   * service (its keys then won't be recognised by an unrelated resolver).
-   */
-  apiKeys?: ApiKeyService;
-  /**
-   * Change-event bus. Every audited mutation publishes a {@link ChangeEvent};
-   * the WebSocket endpoint (`/api/events`) fans events out to subscribed
-   * clients so the web UI updates in real time. Multi-replica deploys MUST
-   * pass a Redis-backed bus so events cross processes; when omitted
-   * `createApp` falls back to in-process pubsub (single-replica + tests).
-   */
-  changeBus?: ChangeBus;
-}
-
-export interface App {
-  handle(request: AppRequest): Promise<AppResponse>;
-}
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-const JSON_HEADERS = { "content-type": "application/json" };
-
-function ok(body: unknown, status = 200): AppResponse {
-  return { status, body, headers: { ...JSON_HEADERS } };
-}
-
-function error(status: number, code: string, extra: Record<string, unknown> = {}): AppResponse {
-  return { status, body: { error: code, ...extra }, headers: { ...JSON_HEADERS } };
-}
-
-function headerValue(
-  headers: Record<string, string | string[] | undefined>,
-  name: string
-): string | undefined {
-  const raw = headers[name] ?? headers[name.toLowerCase()];
-  if (raw === undefined) return undefined;
-  return Array.isArray(raw) ? raw[0] : raw;
-}
-
-function isObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function nowIso(): string {
-  return new Date().toISOString();
-}
-
-/**
- * A canonical UUID. Path params that don't match this are treated as a
- * pipeline slug/name (the web builder POSTs `/api/pipelines/<slug>/run`), so
- * they are NEVER passed into a Postgres `uuid` column query.
- */
-const UUID_RE =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
-function isUuid(value: string): boolean {
-  return UUID_RE.test(value);
-}
-
-/**
- * True when a thrown error is a Postgres invalid-text-representation, i.e. a
- * value (often a slug) being cast to a typed column such as `uuid`. PG raises
- * SQLSTATE 22P02 with a message like
- * `invalid input syntax for type uuid: "support-rag"`. We surface these as a
- * clear 400 instead of a 500.
- */
-function isInvalidTextRepresentation(e: unknown): boolean {
-  const code = (e as { code?: unknown } | null | undefined)?.code;
-  if (code === "22P02") return true;
-  const msg =
-    e instanceof Error ? e.message : typeof e === "string" ? e : "";
-  return /invalid input syntax for type uuid/i.test(msg);
-}
-
-// ---------------------------------------------------------------------------
-// Routing table
-// ---------------------------------------------------------------------------
-
+// `Handler` + `Route` + `RouteContext` close over `Principal` (per-request
+// authenticated user) and `AppDeps` (the deps bundle createApp receives),
+// so they stay local — extracting them would force every caller to import
+// a Principal type just to read a route signature.
 type Handler = (ctx: RouteContext) => Promise<AppResponse>;
-
 interface Route {
   method: string;
   /** Pattern segments; `:name` captures a path param. */
   segments: string[];
   handler: Handler;
 }
-
 interface RouteContext {
   request: AppRequest;
   params: Record<string, string>;
   principal: Principal;
   deps: AppDeps;
 }
-
-function compile(pattern: string): string[] {
-  return pattern.split("/").filter((part) => part.length > 0);
-}
-
-function matchRoute(
-  route: Route,
-  method: string,
-  pathSegments: string[]
-): Record<string, string> | undefined {
-  if (route.method !== method) return undefined;
-  if (route.segments.length !== pathSegments.length) return undefined;
-  const params: Record<string, string> = {};
-  for (let i = 0; i < route.segments.length; i += 1) {
-    const seg = route.segments[i];
-    if (seg.startsWith(":")) {
-      params[seg.slice(1)] = decodeURIComponent(pathSegments[i]);
-    } else if (seg !== pathSegments[i]) {
-      return undefined;
-    }
-  }
-  return params;
-}
-
-// ---------------------------------------------------------------------------
-// createApp
-// ---------------------------------------------------------------------------
 
 export function createApp(deps: AppDeps): App {
   const routes: Route[] = [];
@@ -4539,7 +4325,7 @@ export function createApp(deps: AppDeps): App {
       if (authorizer) {
         const headerTenant = headerValue(request.headers, "x-tenant-id");
         const defaultTenantId =
-          headerTenant && UUID_RE.test(headerTenant)
+          headerTenant && isUuid(headerTenant)
             ? headerTenant
             : principal.tenantId;
         try {
@@ -4646,162 +4432,3 @@ export function createApp(deps: AppDeps): App {
   return { handle };
 }
 
-// ---------------------------------------------------------------------------
-// Module-level helpers (no closure over deps)
-// ---------------------------------------------------------------------------
-
-/**
- * Reads the narrative markdown doc for a plugin id from `docs/plugins/<id>.md`,
- * resolved relative to this module (works regardless of cwd, and in the
- * container image where `COPY . .` places the repo under /app). Returns
- * `undefined` when the file is absent — a plugin without a narrative doc is
- * not an error. The `id` MUST be pre-validated by the caller.
- */
-async function readPluginDoc(id: string): Promise<string | undefined> {
-  try {
-    return await readFile(new URL(`../../../docs/plugins/${id}.md`, import.meta.url), "utf8");
-  } catch {
-    return undefined;
-  }
-}
-
-/**
- * Projects a registered plugin's manifest onto the public shape consumed by
- * the web UI to render schema-driven config/secret forms. This is the single
- * source of truth shared by `GET /api/plugins` and the per-plugin route, so
- * both responses always match the documented contract.
- */
-function projectPlugin(plugin: RegisteredPlugin): {
-  id: string;
-  name: string;
-  version: string;
-  category: string;
-  contract?: number;
-  datasetModalities?: string[];
-  description: string;
-  mode: string;
-  capabilities: string[];
-  configSchema?: unknown;
-  secretsSchema?: unknown;
-  inputPorts?: unknown;
-  outputPorts?: unknown;
-  dynamicPorts?: { inputsFrom?: string; outputsFrom?: string };
-  ui?: {
-    icon?: string;
-    color?: string;
-    formHints?: Record<string, unknown>;
-    paletteGroup?: string;
-    module?: string;
-  };
-} {
-  const m = plugin.manifest;
-  const ui = m.ui
-    ? {
-        ...(m.ui.icon !== undefined ? { icon: m.ui.icon } : {}),
-        ...(m.ui.color !== undefined ? { color: m.ui.color } : {}),
-        ...(m.ui.formHints !== undefined ? { formHints: m.ui.formHints } : {}),
-        ...(m.ui.paletteGroup !== undefined ? { paletteGroup: m.ui.paletteGroup } : {}),
-        ...(m.ui.module !== undefined ? { module: m.ui.module } : {})
-      }
-    : undefined;
-  return {
-    id: m.id,
-    name: m.name,
-    version: m.version,
-    category: m.category,
-    // contract version drives the Builder's "needs a Dataset binding"
-    // validation rule — v1 plugins still use config.collection, v2 plugins
-    // must pin a slug. Without this on the wire, the client treats every
-    // plugin as v1 and the badge never lights up.
-    ...(m.contract !== undefined ? { contract: m.contract } : {}),
-    // datasetModalities drives the Builder's "compatible slugs" picker and
-    // the `dataset_modality_mismatch` validator — see PluginManifest doc.
-    ...(m.datasetModalities !== undefined
-      ? { datasetModalities: m.datasetModalities }
-      : {}),
-    description: m.description,
-    mode: plugin.mode,
-    capabilities: m.capabilities ?? [],
-    ...(m.configSchema !== undefined ? { configSchema: m.configSchema } : {}),
-    ...(m.secretsSchema !== undefined ? { secretsSchema: m.secretsSchema } : {}),
-    ...(m.inputPorts !== undefined ? { inputPorts: m.inputPorts } : {}),
-    ...(m.outputPorts !== undefined ? { outputPorts: m.outputPorts } : {}),
-    ...(m.dynamicPorts !== undefined ? { dynamicPorts: m.dynamicPorts } : {}),
-    ...(ui !== undefined ? { ui } : {})
-  };
-}
-
-function parseSpec(input: unknown): PipelineSpec | undefined {
-  if (typeof input === "string") {
-    try {
-      return loadPipelineSpec(input);
-    } catch {
-      return undefined;
-    }
-  }
-  if (isObject(input) && "apiVersion" in input && "kind" in input && "spec" in input) {
-    return input as unknown as PipelineSpec;
-  }
-  return undefined;
-}
-
-function buildSecretRef(
-  body: Record<string, unknown>,
-  fallbackTenant: string | undefined
-): SecretRef {
-  const scope = (typeof body.scope === "string" ? body.scope : "tenant") as SecretRef["scope"];
-  return {
-    provider: "database_encrypted",
-    scope,
-    tenantId:
-      typeof body.tenantId === "string"
-        ? body.tenantId
-        : scope === "tenant" || scope === "tenant_provider" || scope === "datasource"
-          ? fallbackTenant
-          : undefined,
-    environment: typeof body.environment === "string" ? body.environment : undefined,
-    key: body.key as string,
-    version: typeof body.version === "string" ? body.version : undefined
-  };
-}
-
-async function resolveDeployedVersion(
-  deps: AppDeps,
-  pipelineId: string,
-  environment: string,
-  tenantId: string
-): Promise<PipelineVersionRow | undefined> {
-  // Prefer the repository's active-deployment lookup (tenant-scoped first).
-  const tenantDeployment = await deps.deployments.getActiveDeployment(
-    pipelineId,
-    environment,
-    tenantId
-  );
-  const envDeployment =
-    tenantDeployment ??
-    (await deps.deployments.getActiveDeployment(pipelineId, environment, null));
-
-  let versionId = envDeployment?.pipelineVersionId;
-
-  if (!versionId) {
-    // Fall back to the pipeline-spec selector over the full deployment list.
-    const all = await deps.deployments.listByPipeline(pipelineId);
-    const deployments: PipelineDeployment[] = all
-      .filter((row) => row.status === "active")
-      .map((row) => ({
-        pipelineId: row.pipelineId,
-        environment: row.environment,
-        version: row.pipelineVersionId,
-        tenantId: row.tenantId ?? undefined
-      }));
-    const selected = selectDeployedVersion(deployments, {
-      environment,
-      tenantId,
-      pipelineId
-    });
-    versionId = selected?.version;
-  }
-
-  if (!versionId) return undefined;
-  return deps.pipelineVersions.get(versionId);
-}
