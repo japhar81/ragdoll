@@ -12,8 +12,23 @@ import {
 import { Screen } from "./Screen.tsx";
 import type { EditingPipeline } from "../App.tsx";
 import type { PipelineVersionRow } from "../lib/api.ts";
-import type { PipelineSpec } from "../lib/types.ts";
+import type { DatasetSlotRef, PipelineSpec } from "../lib/types.ts";
 import { datasetColor } from "../lib/datasetColor.ts";
+import { TenantSelect, useSelectedTenant } from "./useTenants.tsx";
+import { useEnvironments, EnvironmentSelect } from "./useEnvironments.tsx";
+import { DeployModal } from "./DeployModal.tsx";
+
+/** Pull dataset slots straight off the spec — same shape `validatePipelineSpec`
+ *  emits, but without re-running the whole validator just to find the slots. */
+function extractDatasetSlots(spec: PipelineSpec): DatasetSlotRef[] {
+  return (spec.spec?.nodes ?? [])
+    .filter((n) => n.dataset?.slug)
+    .map((n) => ({
+      nodeId: n.id,
+      slug: n.dataset!.slug,
+      alias: n.dataset?.alias ?? "stable"
+    }));
+}
 
 /**
  * Phase 11.2: render colored pills for every Dataset a pipeline
@@ -130,9 +145,17 @@ function errText(e: unknown): string {
 export function PipelinesScreen(props: {
   onEditPipeline: (p: EditingPipeline) => void;
 }) {
+  const navigate = useNavigate();
   const qc = useQueryClient();
   const [revisionsFor, setRevisionsFor] = useState<PipelineLike | undefined>();
   const [banner, setBanner] = useState<string | undefined>();
+
+  // Run target — shared by the per-row "Run" button and (later) the Run-All
+  // flow. Tenant + env default to the demo wiring so the bundled pipelines
+  // run out of the box; pickers above the tree let the operator switch.
+  const tenantCtx = useSelectedTenant();
+  const envs = useEnvironments(tenantCtx.tenantId);
+  const [environment, setEnvironment] = useState("dev");
 
   const pipelines = useQuery({
     queryKey: ["pipelines"],
@@ -146,6 +169,66 @@ export function PipelinesScreen(props: {
     queryKey: ["tenants"],
     queryFn: () => api.listTenants()
   });
+
+  // ---- Single-pipeline Run ---------------------------------------------
+  // `runTarget` holds the pipeline + its latest spec while the DeployModal is
+  // open. Loading happens in the click handler so the modal opens with the
+  // dataset slots already resolved — no flicker.
+  const [runTarget, setRunTarget] = useState<
+    | {
+        pipeline: PipelineLike;
+        slots: DatasetSlotRef[];
+      }
+    | undefined
+  >();
+  const [runBusy, setRunBusy] = useState(false);
+
+  async function openRunModal(p: PipelineLike) {
+    if (!tenantCtx.ready) {
+      setBanner("Select a tenant first (the run is scoped per tenant).");
+      return;
+    }
+    setBanner(undefined);
+    setRunBusy(true);
+    try {
+      const versions = await api.listVersions(p.id);
+      const latestId = versions.latestVersionId;
+      const target = latestId
+        ? versions.versions.find((v) => v.id === latestId) ?? versions.versions[0]
+        : versions.versions[0];
+      if (!target?.spec) {
+        setBanner(`Pipeline ${p.name} has no published version yet.`);
+        return;
+      }
+      const spec = target.spec as PipelineSpec;
+      const slots = extractDatasetSlots(spec);
+      setRunTarget({ pipeline: p, slots });
+    } catch (e) {
+      setBanner(errText(e));
+    } finally {
+      setRunBusy(false);
+    }
+  }
+
+  async function doRun() {
+    if (!runTarget) return;
+    const { pipeline } = runTarget;
+    setRunBusy(true);
+    try {
+      const result = await api.run(pipeline.id, {
+        input: {},
+        environment
+      });
+      setRunTarget(undefined);
+      // Hop the operator straight to the Executions screen with the new
+      // run selected so they can watch the trace stream in.
+      navigate(`/executions?selected=${encodeURIComponent(result.executionId)}`);
+    } catch (e) {
+      setBanner(errText(e));
+    } finally {
+      setRunBusy(false);
+    }
+  }
 
   // Aggregate every tenant's pipeline associations so we can show a
   // tenant <-> activation <-> version rollup per pipeline.
@@ -255,6 +338,18 @@ export function PipelinesScreen(props: {
         <span className="tree-tools">
           <button
             className="link-btn"
+            disabled={runBusy || !tenantCtx.ready}
+            onClick={() => openRunModal(p)}
+            title={
+              !tenantCtx.ready
+                ? "Select a tenant first."
+                : "Run this pipeline against the selected tenant + environment"
+            }
+          >
+            ▶ Run
+          </button>
+          <button
+            className="link-btn"
             onClick={() => props.onEditPipeline({ id: p.id, name: p.name })}
           >
             Edit
@@ -313,9 +408,24 @@ export function PipelinesScreen(props: {
       isLoading={pipelines.isLoading || folders.isLoading}
       error={pipelines.error ?? folders.error}
     >
-      <div className="inline-form">
+      <div className="inline-form" style={{ flexWrap: "wrap" }}>
         <button onClick={() => onNewFolder(null)}>+ Root folder</button>
         <button onClick={() => onNewPipeline(null)}>+ Root pipeline</button>
+        <span style={{ marginLeft: "auto", display: "flex", gap: 8, alignItems: "center" }}>
+          <span className="muted">Run target:</span>
+          <TenantSelect
+            tenants={tenantCtx.tenants}
+            value={tenantCtx.tenantId}
+            onChange={tenantCtx.setTenantId}
+            isLoading={tenantCtx.isLoading}
+          />
+          <EnvironmentSelect
+            environments={envs.data?.environments ?? []}
+            value={environment}
+            onChange={setEnvironment}
+            isLoading={envs.isLoading}
+          />
+        </span>
       </div>
       {banner && <p className="error">{banner}</p>}
 
@@ -352,6 +462,19 @@ export function PipelinesScreen(props: {
             tenantPipelines.data ?? [],
             revisionsFor.id
           )}
+        />
+      )}
+      {runTarget && (
+        <DeployModal
+          open
+          mode="run"
+          tenantId={tenantCtx.tenantId}
+          tenantSlug={tenantCtx.selected?.slug}
+          environment={environment}
+          pipelineSlug={runTarget.pipeline.slug ?? runTarget.pipeline.name}
+          slots={runTarget.slots}
+          onClose={() => setRunTarget(undefined)}
+          onConfirm={doRun}
         />
       )}
     </Screen>
