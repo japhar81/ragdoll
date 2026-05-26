@@ -1,4 +1,5 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import { api } from "../lib/api.ts";
 import type { ExecutionRecord } from "../lib/types.ts";
@@ -11,6 +12,7 @@ import {
 } from "../lib/execTrace.ts";
 import { useEvents } from "../events/EventsProvider.tsx";
 import type { ExecutionNodeRecord } from "../lib/types.ts";
+import { ExecutionsConsole } from "./ExecutionsConsole.tsx";
 
 /**
  * Executions admin. Lists GET /api/executions; selecting one fetches
@@ -85,7 +87,32 @@ function NodeRow(props: { node: ExecutionNodeRecord }) {
 }
 
 export function ExecutionsScreen() {
-  const [selected, setSelected] = useState<string | undefined>();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const [selected, setSelectedState] = useState<string | undefined>(
+    () => searchParams.get("selected") ?? undefined
+  );
+  // Wrap setSelected so the URL stays in sync — gives us a shareable
+  // deep-link AND lets the live-tail console's "jump" badge feed back
+  // here through search params instead of needing a parent callback.
+  const setSelected = (id: string | undefined) => {
+    setSelectedState(id);
+    setSearchParams(
+      (prev) => {
+        const next = new URLSearchParams(prev);
+        if (id) next.set("selected", id);
+        else next.delete("selected");
+        return next;
+      },
+      { replace: true }
+    );
+  };
+  // Pick up changes to `?selected=` from outside (back/forward nav,
+  // the console's jump badge fires `navigate(?selected=…)`).
+  useEffect(() => {
+    const fromUrl = searchParams.get("selected") ?? undefined;
+    if (fromUrl !== selected) setSelectedState(fromUrl);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams]);
   const events = useEvents();
   // When the live socket is connected, lean on event-driven invalidation
   // (the EventsProvider maps `execution.*` events onto these query keys).
@@ -288,6 +315,7 @@ export function ExecutionsScreen() {
           )}
         </section>
       )}
+      <ExecutionsConsole onJumpToExecution={(id) => setSelected(id)} />
     </Screen>
   );
 }

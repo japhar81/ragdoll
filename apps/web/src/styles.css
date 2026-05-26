@@ -1353,15 +1353,29 @@ table.datagrid tbody tr.row-highlighted {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 4px 0;
+  padding: 4px 8px;
+  margin: 0 -8px;
+  border-radius: 4px;
+  transition: background-color 0.1s ease;
+}
+
+.tree-folder:hover {
+  background: rgba(99, 102, 241, 0.08);
 }
 
 .tree-leaf {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 3px 0;
+  padding: 3px 8px;
+  margin: 0 -8px;
   font-size: 13px;
+  border-radius: 4px;
+  transition: background-color 0.1s ease;
+}
+
+.tree-leaf:hover {
+  background: rgba(99, 102, 241, 0.08);
 }
 
 .tree-ico {
