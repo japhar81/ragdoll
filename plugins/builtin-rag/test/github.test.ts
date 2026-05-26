@@ -56,6 +56,15 @@ function installFakeFetch(
     const u = url.toString();
     const headers = (init?.headers as Record<string, string>) ?? {};
     calls.push({ url: u, headers });
+    // Default-branch lookup: github_source hits /repos/{owner}/{name}
+    // first when `ref` is unset / "HEAD" / "default" (recent change).
+    // Tests that pass an explicit `ref` skip this entirely.
+    if (/\/repos\/[^/]+\/[^/]+(?:\?|$)/.test(u) && !u.includes("/git/trees/")) {
+      return new Response(
+        JSON.stringify({ default_branch: "main" }),
+        { status: 200, headers: { "content-type": "application/json" } }
+      );
+    }
     if (u.includes("/git/trees/")) {
       return new Response(
         JSON.stringify({
