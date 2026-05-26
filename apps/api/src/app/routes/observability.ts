@@ -12,11 +12,19 @@
 
 import { enforce } from "../../../../../packages/auth/src/index.ts";
 import { ok, error, isObject } from "../http-utils.ts";
-import type { RouteRegistry, RouteServices } from "./types.ts";
+import type { AppDeps } from "../types.ts";
+import type { RetentionSettingsRepository } from "../../../../../packages/db/src/index.ts";
+import type { RouteRegistry, AuditWriter } from "./types.ts";
+
+interface ObservabilityServices {
+  deps: AppDeps;
+  audit: AuditWriter;
+  retentionSettings: RetentionSettingsRepository;
+}
 
 export function registerObservabilityRoutes(
   api: RouteRegistry,
-  svc: RouteServices
+  svc: ObservabilityServices
 ): void {
   const { deps, retentionSettings, audit } = svc;
 
