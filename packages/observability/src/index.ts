@@ -439,16 +439,25 @@ export interface HistogramHandle {
   record(value: number, attributes?: Record<string, string | number | boolean>): void;
 }
 
+/** UpDownCounter — like a counter but the value can decrease, so it
+ *  behaves as a gauge of "current count" (e.g. in-flight jobs). */
+export interface UpDownCounterHandle {
+  add(value: number, attributes?: Record<string, string | number | boolean>): void;
+}
+
 export interface Meter {
   counter(name: string, opts?: { description?: string; unit?: string }): CounterHandle;
   histogram(name: string, opts?: { description?: string; unit?: string }): HistogramHandle;
+  upDownCounter(name: string, opts?: { description?: string; unit?: string }): UpDownCounterHandle;
 }
 
 class NoopCounter implements CounterHandle { add(): void {} }
 class NoopHistogram implements HistogramHandle { record(): void {} }
+class NoopUpDownCounter implements UpDownCounterHandle { add(): void {} }
 export class NoopMeter implements Meter {
   counter(): CounterHandle { return new NoopCounter(); }
   histogram(): HistogramHandle { return new NoopHistogram(); }
+  upDownCounter(): UpDownCounterHandle { return new NoopUpDownCounter(); }
 }
 
 interface OtelMetricsApiLike {
@@ -461,6 +470,9 @@ interface OtelMeterLike {
   };
   createHistogram(name: string, opts?: { description?: string; unit?: string }): {
     record(value: number, attributes?: Record<string, unknown>): unknown;
+  };
+  createUpDownCounter?(name: string, opts?: { description?: string; unit?: string }): {
+    add(value: number, attributes?: Record<string, unknown>): unknown;
   };
 }
 
@@ -476,6 +488,19 @@ class OtelMeter implements Meter {
   histogram(name: string, opts: { description?: string; unit?: string } = {}): HistogramHandle {
     const h = this.meter.createHistogram(name, opts);
     return { record: (value, attributes) => h.record(value, attributes) };
+  }
+  upDownCounter(
+    name: string,
+    opts: { description?: string; unit?: string } = {}
+  ): UpDownCounterHandle {
+    // Older versions of `@opentelemetry/api-metrics` exposed only
+    // createCounter; treat that as a best-effort fallback (the gauge
+    // monotonically increases there but the worker dashboard still
+    // works because we read it via `sum without(...)`).
+    const c = this.meter.createUpDownCounter
+      ? this.meter.createUpDownCounter(name, opts)
+      : this.meter.createCounter(name, opts);
+    return { add: (value, attributes) => c.add(value, attributes) };
   }
 }
 

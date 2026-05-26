@@ -17,7 +17,7 @@ cd "$(dirname "$0")/.."
 ENV_ARGS=()
 [[ -f .env ]] && ENV_ARGS=(--env-file ./.env)
 COMPOSE=(docker compose "${ENV_ARGS[@]}" -f infra/docker/docker-compose.yml)
-SERVICES=("${@:-api worker web file-watcher}")
+SERVICES=("${@:-api worker-1 worker-2 web file-watcher}")
 
 "${COMPOSE[@]}" up -d --build ${SERVICES[@]}
 # otel-collector config is volume-mounted; pick up edits without a rebuild.

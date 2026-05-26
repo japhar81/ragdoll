@@ -1,0 +1,271 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": { "type": "datasource", "uid": "grafana" },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "description": "Per-worker breakdown to demonstrate BullMQ scale-out. Same execution counter the Overview dashboard uses, sliced by the `worker_id` label every worker stamps (driven by the WORKER_ID env var in docker-compose). Side-by-side panels make it obvious when a Run-All is splitting jobs across replicas vs. piling up on one. The 'In-flight' panel is the visual proof of concurrency: pick the same time range and watch both worker series climb together.",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "links": [
+    {
+      "asDropdown": false,
+      "icon": "external link",
+      "includeVars": false,
+      "keepTime": true,
+      "tags": ["ragdoll"],
+      "targetBlank": false,
+      "title": "RAGdoll · Overview",
+      "tooltip": "Cluster-wide telemetry",
+      "type": "link",
+      "url": "/d/ragdoll-overview"
+    }
+  ],
+  "liveNow": false,
+  "panels": [
+    {
+      "type": "row",
+      "title": "In-flight concurrency (proves Run-All is concurrent + spread)",
+      "id": 100,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "collapsed": false
+    },
+    {
+      "type": "timeseries",
+      "title": "Active runs per worker",
+      "description": "Current in-flight executions on each worker (+1 when a job starts, -1 when it terminates). When you click Run-All you should see BOTH series climb at once and drop as runs finish — visual proof BullMQ is fanning jobs across replicas.",
+      "id": 1,
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 1 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "sum by (worker_id) (ragdoll_worker_inflight)",
+          "legendFormat": "{{worker_id}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "stepAfter",
+            "fillOpacity": 25,
+            "stacking": { "mode": "none" }
+          }
+        }
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "calcs": ["max"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Currently in-flight (per worker)",
+      "description": "Live count of running executions, one tile per worker. The total across tiles is what the cluster is processing right now.",
+      "id": 2,
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 1 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "sum by (worker_id) (ragdoll_worker_inflight)",
+          "legendFormat": "{{worker_id}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": { "mode": "palette-classic" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "blue", "value": null },
+              { "color": "green", "value": 1 }
+            ]
+          }
+        }
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "" },
+        "orientation": "horizontal",
+        "colorMode": "value",
+        "graphMode": "area",
+        "textMode": "value_and_name"
+      }
+    },
+    {
+      "type": "row",
+      "title": "Throughput + latency, per worker",
+      "id": 101,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 10 },
+      "collapsed": false
+    },
+    {
+      "type": "timeseries",
+      "title": "Executions completed per minute, by worker",
+      "description": "Total terminal events (succeeded + failed) per worker, per minute. A healthy scale-out has both lines moving together during a Run-All — if one stays flat while the other works, you've got a stuck worker or an uneven hash.",
+      "id": 3,
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 11 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "sum by (worker_id) (rate(ragdoll_worker_executions_total[1m]) * 60)",
+          "legendFormat": "{{worker_id}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short" } },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Executions by worker × status (stacked)",
+      "description": "Stacked bars — width is throughput, color is status. If one worker is shouldering all the failures, it'll show up here as a tall red band on its column.",
+      "id": 4,
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 11 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "sum by (worker_id, status) (rate(ragdoll_worker_executions_total[1m]) * 60)",
+          "legendFormat": "{{worker_id}} · {{status}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "bars",
+            "fillOpacity": 80,
+            "stacking": { "mode": "normal" }
+          }
+        }
+      },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "right", "calcs": ["sum"] }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Execution p95 duration (ms), per worker",
+      "description": "p95 end-to-end pipeline duration on each worker. Watch this during a Run-All — if one worker's p95 spikes while the other stays flat, you've got noisy-neighbor pressure on that pod.",
+      "id": 5,
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 20 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, worker_id) (rate(ragdoll_worker_execution_duration_ms_bucket[5m])))",
+          "legendFormat": "{{worker_id}} p95",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.50, sum by (le, worker_id) (rate(ragdoll_worker_execution_duration_ms_bucket[5m])))",
+          "legendFormat": "{{worker_id}} p50",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ms" } },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "right" }
+      }
+    },
+    {
+      "type": "barchart",
+      "title": "Total runs this window, by worker",
+      "description": "Cumulative count over the dashboard time range. A roughly-equal split says BullMQ is balancing the queue; a lopsided split is the smoking gun for a stuck worker.",
+      "id": 6,
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 20 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "sum by (worker_id) (increase(ragdoll_worker_executions_total[$__range]))",
+          "legendFormat": "{{worker_id}}",
+          "refId": "A",
+          "instant": true
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short" } },
+      "options": {
+        "orientation": "horizontal",
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "xTickLabelRotation": 0,
+        "showValue": "always"
+      }
+    },
+    {
+      "type": "row",
+      "title": "Per-worker logs",
+      "id": 102,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 29 },
+      "collapsed": false
+    },
+    {
+      "type": "logs",
+      "title": "worker-1 — recent log records",
+      "description": "Loki query scoped to the worker-1 container by service.instance.id resource attribute.",
+      "id": 7,
+      "gridPos": { "h": 12, "w": 12, "x": 0, "y": 30 },
+      "datasource": { "type": "loki", "uid": "loki" },
+      "targets": [
+        {
+          "expr": "{service_namespace=\"ragdoll\", service_instance_id=\"worker-1\"}",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "showTime": true,
+        "showLabels": false,
+        "showCommonLabels": false,
+        "sortOrder": "Descending",
+        "wrapLogMessage": true,
+        "dedupStrategy": "none"
+      }
+    },
+    {
+      "type": "logs",
+      "title": "worker-2 — recent log records",
+      "description": "Loki query scoped to the worker-2 container by service.instance.id resource attribute.",
+      "id": 8,
+      "gridPos": { "h": 12, "w": 12, "x": 12, "y": 30 },
+      "datasource": { "type": "loki", "uid": "loki" },
+      "targets": [
+        {
+          "expr": "{service_namespace=\"ragdoll\", service_instance_id=\"worker-2\"}",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "showTime": true,
+        "showLabels": false,
+        "showCommonLabels": false,
+        "sortOrder": "Descending",
+        "wrapLogMessage": true,
+        "dedupStrategy": "none"
+      }
+    }
+  ],
+  "refresh": "5s",
+  "schemaVersion": 39,
+  "tags": ["ragdoll", "workers", "scale-out"],
+  "templating": { "list": [] },
+  "time": { "from": "now-15m", "to": "now" },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "RAGdoll · Worker scale-out",
+  "uid": "ragdoll-workers",
+  "version": 1,
+  "weekStart": ""
+}

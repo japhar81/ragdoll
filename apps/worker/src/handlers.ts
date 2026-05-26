@@ -708,6 +708,12 @@ export async function resolveRunVersion(
 export function createWorker(deps: WorkerDeps): Worker {
   const tracer = deps.tracer ?? new NoopTracer();
   const meter = deps.meter ?? new NoopMeter();
+  // Worker identity stamped on every metric so the Grafana dashboard
+  // can break throughput / duration down per replica. Defaults to
+  // "worker-1" when unset so single-worker stacks still produce a
+  // non-empty label (Prometheus drops series with empty label values).
+  // Cardinality is bounded by the number of replicas — safe to label.
+  const workerId = process.env.WORKER_ID ?? "worker-1";
   // Worker-side metrics. Cardinality is bounded: pipeline_id is a tenant
   // ref but the universe per tenant is finite; status is two values; node
   // plugin_id is a registered set. Avoid putting execution_id / tenant_id
@@ -720,6 +726,16 @@ export function createWorker(deps: WorkerDeps): Worker {
   // OTLP→Prometheus bridge doesn't double-suffix the exported series.
   const executionDuration = meter.histogram("ragdoll_worker_execution_duration_ms", {
     description: "End-to-end pipeline execution duration."
+  });
+  // In-flight gauge so the dashboard can show concurrent runs per
+  // worker (proves scale-out at a glance). Counter-of-counters because
+  // the OTel histogram/counter API doesn't include UpDownCounter on
+  // our minimal NoopMeter; we model the gauge as a counter that ticks
+  // +1 on start and -1 on complete, then a `sum without (status)` in
+  // PromQL collapses it back to current in-flight.
+  const inFlight = meter.upDownCounter("ragdoll_worker_inflight", {
+    description: "Pipeline executions currently running on this worker (+1 on start, -1 on terminal).",
+    unit: "{execution}"
   });
   const now = deps.now ?? (() => new Date());
   // Compose the runtime store decorators outermost-first:
@@ -1122,6 +1138,15 @@ export function createWorker(deps: WorkerDeps): Worker {
     });
     const startNs = process.hrtime.bigint();
     let metricStatus: "succeeded" | "failed" = "succeeded";
+    // Mark this run as in-flight on the local worker the instant we
+    // start spending time on it. The matching `-1` lands in the finally
+    // block so a thrown exception still rolls the gauge back.
+    const inflightLabels = {
+      worker_id: workerId,
+      pipeline_id: payload.pipelineId,
+      environment: payload.environment
+    };
+    inFlight.add(1, inflightLabels);
     try {
       const output = await executor().execute({
         spec,
@@ -1145,12 +1170,14 @@ export function createWorker(deps: WorkerDeps): Worker {
     } finally {
       const durationMs = Number(process.hrtime.bigint() - startNs) / 1_000_000;
       const labels = {
+        worker_id: workerId,
         pipeline_id: payload.pipelineId,
         environment: payload.environment,
         status: metricStatus
       };
       executionCounter.add(1, labels);
       executionDuration.record(durationMs, labels);
+      inFlight.add(-1, inflightLabels);
     }
   }
 
