@@ -17,6 +17,37 @@ import { datasetColor } from "../lib/datasetColor.ts";
 import { TenantSelect, useSelectedTenant } from "./useTenants.tsx";
 import { useEnvironments, EnvironmentSelect } from "./useEnvironments.tsx";
 import { DeployModal } from "./DeployModal.tsx";
+import { RunAllModal, type RunAllTarget } from "./RunAllModal.tsx";
+
+/** Flatten a folder subtree (or the full tree, when called with the root)
+ *  into a list of pipelines the operator has access to. Used by "Run all"
+ *  at folder and global scope. */
+function flattenPipelines(
+  folders: FolderTreeNode[],
+  uncategorized: PipelineLike[],
+  includeUncategorized: boolean
+): PipelineLike[] {
+  const out: PipelineLike[] = [];
+  const walk = (nodes: FolderTreeNode[]) => {
+    for (const n of nodes) {
+      for (const p of n.pipelines) out.push(p);
+      walk(n.children);
+    }
+  };
+  walk(folders);
+  if (includeUncategorized) out.push(...uncategorized);
+  return out;
+}
+
+function flattenFolder(node: FolderTreeNode): PipelineLike[] {
+  const out: PipelineLike[] = [];
+  const walk = (n: FolderTreeNode) => {
+    for (const p of n.pipelines) out.push(p);
+    for (const c of n.children) walk(c);
+  };
+  walk(node);
+  return out;
+}
 
 /** Pull dataset slots straight off the spec — same shape `validatePipelineSpec`
  *  emits, but without re-running the whole validator just to find the slots. */
@@ -230,6 +261,105 @@ export function PipelinesScreen(props: {
     }
   }
 
+  // ---- Run all (folder / global) ---------------------------------------
+  const [runAll, setRunAll] = useState<
+    | {
+        scopeLabel: string;
+        targets: RunAllTarget[];
+      }
+    | undefined
+  >();
+
+  async function openRunAll(scopeLabel: string, pipelines: PipelineLike[]) {
+    if (!tenantCtx.ready) {
+      setBanner("Select a tenant first (the run is scoped per tenant).");
+      return;
+    }
+    if (pipelines.length === 0) {
+      setBanner("Nothing to run — the scope is empty.");
+      return;
+    }
+    setBanner(undefined);
+    setRunBusy(true);
+    try {
+      // Load every pipeline's spec in parallel so the modal opens with
+      // all dataset slots ready. A pipeline with no published version is
+      // surfaced inline (zero slots) so the operator sees why it'll
+      // 409 — they can still confirm to attempt the rest.
+      const loaded = await Promise.all(
+        pipelines.map(async (p) => {
+          try {
+            const versions = await api.listVersions(p.id);
+            const latestId = versions.latestVersionId;
+            const target = latestId
+              ? versions.versions.find((v) => v.id === latestId) ??
+                versions.versions[0]
+              : versions.versions[0];
+            const spec = target?.spec as PipelineSpec | undefined;
+            return {
+              pipeline: p,
+              slots: spec ? extractDatasetSlots(spec) : []
+            } satisfies RunAllTarget;
+          } catch {
+            return { pipeline: p, slots: [] } satisfies RunAllTarget;
+          }
+        })
+      );
+      setRunAll({ scopeLabel, targets: loaded });
+    } catch (e) {
+      setBanner(errText(e));
+    } finally {
+      setRunBusy(false);
+    }
+  }
+
+  async function doRunAll(
+    _overrides: Map<string, Record<string, string>>
+  ) {
+    if (!runAll) return;
+    setRunBusy(true);
+    const results: Array<
+      { id: string; ok: true; executionId: string } | { id: string; ok: false; error: string }
+    > = [];
+    try {
+      // Dispatch in parallel — the server queues them anyway, and a
+      // failing enqueue for one pipeline shouldn't block the others.
+      await Promise.all(
+        runAll.targets.map(async (t) => {
+          try {
+            const r = await api.run(t.pipeline.id, {
+              input: {},
+              environment
+            });
+            results.push({ id: t.pipeline.id, ok: true, executionId: r.executionId });
+          } catch (e) {
+            results.push({
+              id: t.pipeline.id,
+              ok: false,
+              error: errText(e)
+            });
+          }
+        })
+      );
+      const failures = results.filter((r) => !r.ok);
+      if (failures.length > 0) {
+        setBanner(
+          `Started ${results.length - failures.length}/${results.length}. ` +
+            `Failed: ${failures
+              .map((f) => f.id.slice(0, 8))
+              .join(", ")} — see Executions for details.`
+        );
+      }
+      setRunAll(undefined);
+      // Land the operator on the Executions screen so they can watch
+      // the wave roll through. The live tail handles the per-pipeline
+      // progress reporting from here.
+      navigate("/executions");
+    } finally {
+      setRunBusy(false);
+    }
+  }
+
   // Aggregate every tenant's pipeline associations so we can show a
   // tenant <-> activation <-> version rollup per pipeline.
   const tenantPipelines = useQuery({
@@ -364,6 +494,7 @@ export function PipelinesScreen(props: {
 
   function FolderBranch(props2: { node: FolderTreeNode }) {
     const { node } = props2;
+    const subtreeCount = flattenFolder(node).length;
     return (
       <li>
         <div
@@ -373,6 +504,22 @@ export function PipelinesScreen(props: {
           <span className="tree-ico">{"\u{1F4C1}"}</span>
           <strong>{node.name}</strong>
           <span className="tree-tools">
+            <button
+              className="link-btn"
+              disabled={runBusy || !tenantCtx.ready || subtreeCount === 0}
+              onClick={() =>
+                openRunAll(`folder ${node.name}`, flattenFolder(node))
+              }
+              title={
+                !tenantCtx.ready
+                  ? "Select a tenant first."
+                  : subtreeCount === 0
+                    ? "Folder is empty."
+                    : `Run every pipeline under "${node.name}" (${subtreeCount}) against the selected tenant + env`
+              }
+            >
+              ▶ Run all ({subtreeCount})
+            </button>
             <button className="link-btn" onClick={() => onNewFolder(node.id)}>
               + Folder
             </button>
@@ -411,6 +558,27 @@ export function PipelinesScreen(props: {
       <div className="inline-form" style={{ flexWrap: "wrap" }}>
         <button onClick={() => onNewFolder(null)}>+ Root folder</button>
         <button onClick={() => onNewPipeline(null)}>+ Root pipeline</button>
+        <button
+          disabled={
+            runBusy ||
+            !tenantCtx.ready ||
+            flattenPipelines(tree.folders, tree.uncategorized, true).length === 0
+          }
+          onClick={() =>
+            openRunAll(
+              "all pipelines",
+              flattenPipelines(tree.folders, tree.uncategorized, true)
+            )
+          }
+          title={
+            !tenantCtx.ready
+              ? "Select a tenant first."
+              : "Run every pipeline you can see against the selected tenant + env"
+          }
+        >
+          ▶ Run all (
+          {flattenPipelines(tree.folders, tree.uncategorized, true).length})
+        </button>
         <span style={{ marginLeft: "auto", display: "flex", gap: 8, alignItems: "center" }}>
           <span className="muted">Run target:</span>
           <TenantSelect
@@ -475,6 +643,19 @@ export function PipelinesScreen(props: {
           slots={runTarget.slots}
           onClose={() => setRunTarget(undefined)}
           onConfirm={doRun}
+        />
+      )}
+      {runAll && (
+        <RunAllModal
+          open
+          scopeLabel={runAll.scopeLabel}
+          tenantId={tenantCtx.tenantId}
+          tenantSlug={tenantCtx.selected?.slug}
+          environment={environment}
+          targets={runAll.targets}
+          busy={runBusy}
+          onClose={() => setRunAll(undefined)}
+          onConfirm={doRunAll}
         />
       )}
     </Screen>
