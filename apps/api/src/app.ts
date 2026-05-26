@@ -211,6 +211,7 @@ import {
   buildSecretRef,
   resolveDeployedVersion
 } from "./app/spec-helpers.ts";
+import { registerObservabilityRoutes } from "./app/routes/observability.ts";
 
 // `Handler` + `Route` + `RouteContext` close over `Principal` (per-request
 // authenticated user) and `AppDeps` (the deps bundle createApp receives),
@@ -2683,157 +2684,14 @@ export function createApp(deps: AppDeps): App {
     return ok({ executionId: ctx.params.id, execution, nodes });
   });
 
-  // ---- audit --------------------------------------------------------------
-  route("GET", "/api/audit", async (ctx) => {
-    enforce(ctx.principal, "audit:view");
-    const tenantId = ctx.principal.roles.includes("platform_admin")
-      ? (ctx.request.query.tenant_id ?? undefined)
-      : ctx.principal.tenantId;
-    const cursor =
-      typeof ctx.request.query.cursor === "string"
-        ? ctx.request.query.cursor
-        : undefined;
-    // When the caller passes `?limit=`, use cursor pagination; otherwise the
-    // legacy "all rows" path runs unchanged for back-compat with API clients
-    // that haven't migrated.
-    if (ctx.request.query.limit !== undefined && deps.auditLogs.listPage) {
-      const limit = Math.max(1, Math.min(200, Number(ctx.request.query.limit) || 50));
-      const page = await deps.auditLogs.listPage({ tenantId, limit, cursor });
-      return ok({
-        logs: page.rows,
-        nextCursor: page.nextCursor,
-        total: page.total
-      });
-    }
-    const limit = ctx.request.query.limit ? Number(ctx.request.query.limit) : undefined;
-    const logs = await deps.auditLogs.list({ tenantId, limit });
-    return ok({ logs });
-  });
 
-  // ---- usage --------------------------------------------------------------
-  route("GET", "/api/usage", async (ctx) => {
-    enforce(ctx.principal, "execution:view_logs");
-    const tenantId = ctx.principal.roles.includes("platform_admin")
-      ? (ctx.request.query.tenant_id ?? undefined)
-      : ctx.principal.tenantId;
-    const cursor =
-      typeof ctx.request.query.cursor === "string"
-        ? ctx.request.query.cursor
-        : undefined;
-    if (
-      ctx.request.query.limit !== undefined &&
-      deps.usageRecords.listPage &&
-      ctx.request.query.execution_id === undefined
-    ) {
-      // Cursor path: paginated records, plus a summary that's local to the
-      // returned page only. The web Usage screen recomputes summary across
-      // pages client-side; deep aggregates use the non-paginated /api/usage.
-      const limit = Math.max(1, Math.min(200, Number(ctx.request.query.limit) || 50));
-      const page = await deps.usageRecords.listPage({ tenantId, limit, cursor });
-      const summary = page.rows.reduce(
-        (acc, record) => {
-          acc.inputTokens += record.inputTokens;
-          acc.outputTokens += record.outputTokens;
-          acc.embeddingTokens += record.embeddingTokens;
-          acc.estimatedCostUsd += record.estimatedCostUsd;
-          acc.count += 1;
-          return acc;
-        },
-        { inputTokens: 0, outputTokens: 0, embeddingTokens: 0, estimatedCostUsd: 0, count: 0 }
-      );
-      return ok({
-        summary,
-        records: page.rows,
-        nextCursor: page.nextCursor,
-        total: page.total
-      });
-    }
-    const records = await deps.usageRecords.list({
-      tenantId,
-      executionId: ctx.request.query.execution_id
-    });
-    const summary = records.reduce(
-      (acc, record) => {
-        acc.inputTokens += record.inputTokens;
-        acc.outputTokens += record.outputTokens;
-        acc.embeddingTokens += record.embeddingTokens;
-        acc.estimatedCostUsd += record.estimatedCostUsd;
-        acc.count += 1;
-        return acc;
-      },
-      { inputTokens: 0, outputTokens: 0, embeddingTokens: 0, estimatedCostUsd: 0, count: 0 }
-    );
-    return ok({ summary, records });
-  });
-
-  // ---- retention settings -------------------------------------------------
-  // Global-only platform config that drives the un-deletable retention sweep
-  // worker job (see migration 012). Three rows, one per resource type.
-  route("GET", "/api/retention", async (ctx) => {
-    enforce(ctx.principal, "config:edit_global");
-    const settings = await retentionSettings.list();
-    return ok({ settings });
-  });
-
-  route("PATCH", "/api/retention/:resource", async (ctx) => {
-    enforce(ctx.principal, "config:edit_global");
-    const resource = ctx.params.resource;
-    if (resource !== "executions" && resource !== "usage" && resource !== "audit") {
-      return error(404, "not_found");
-    }
-    const body = ctx.request.body;
-    if (!isObject(body)) {
-      return error(422, "validation_failed", {
-        issues: [{ message: "body required" }]
-      });
-    }
-    // null clears a cap, omitted means "leave the existing value alone".
-    // Read current to merge with patch so partial updates don't wipe the
-    // unspecified column.
-    const current = (await retentionSettings.list()).find(
-      (r) => r.resource === resource
-    );
-    const maxCount =
-      "maxCount" in body
-        ? body.maxCount === null
-          ? null
-          : Number(body.maxCount)
-        : (current?.maxCount ?? null);
-    const maxAgeDays =
-      "maxAgeDays" in body
-        ? body.maxAgeDays === null
-          ? null
-          : Number(body.maxAgeDays)
-        : (current?.maxAgeDays ?? null);
-    if (maxCount !== null && (!Number.isFinite(maxCount) || maxCount < 0)) {
-      return error(422, "validation_failed", {
-        issues: [{ path: "maxCount", message: "non-negative number or null" }]
-      });
-    }
-    if (
-      maxAgeDays !== null &&
-      (!Number.isFinite(maxAgeDays) || maxAgeDays < 0)
-    ) {
-      return error(422, "validation_failed", {
-        issues: [{ path: "maxAgeDays", message: "non-negative integer or null" }]
-      });
-    }
-    const updated = await retentionSettings.upsert({
-      resource,
-      maxCount,
-      maxAgeDays: maxAgeDays === null ? null : Math.floor(maxAgeDays),
-      updatedBy: ctx.principal.id
-    });
-    await audit(
-      ctx,
-      "retention.update",
-      "retention",
-      resource,
-      current ?? undefined,
-      updated
-    );
-    return ok({ setting: updated });
-  });
+  // ---- observability (audit / usage / retention) --------------------------
+  // Extracted into ./app/routes/observability.ts. Future route domains
+  // follow the same `registerXxxRoutes(api, svc)` pattern.
+  registerObservabilityRoutes(
+    { route },
+    { deps, changeBus, audit, retentionSettings, auditLogs: deps.auditLogs, usageRecords: deps.usageRecords }
+  );
 
   // ---- plugins ------------------------------------------------------------
   route("GET", "/api/plugins", async (ctx) => {
