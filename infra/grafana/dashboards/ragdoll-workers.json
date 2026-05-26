@@ -184,8 +184,8 @@
     },
     {
       "type": "barchart",
-      "title": "Total runs this window, by worker",
-      "description": "Cumulative count over the dashboard time range. A roughly-equal split says BullMQ is balancing the queue; a lopsided split is the smoking gun for a stuck worker.",
+      "title": "Total runs (count) this window, by worker",
+      "description": "Cumulative COUNT over the dashboard time range. Useful for spotting a stuck worker — but count alone misleads when jobs have wildly different durations (a worker that ran 20 transform-demos looks busier than one that ran 1 codebase-ingest even though the second worker spent 10× longer working).",
       "id": 6,
       "gridPos": { "h": 9, "w": 12, "x": 12, "y": 20 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
@@ -206,10 +206,63 @@
       }
     },
     {
+      "type": "barchart",
+      "title": "Total work TIME (s) this window, by worker",
+      "description": "Sum of execution durations per worker — the honest measure of load. A worker holding one slow codebase-ingest for 5 minutes is doing more work than one ripping through 20 transform-demos. Reach for THIS panel when the count chart looks lopsided.",
+      "id": 11,
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 29 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "sum by (worker_id) (increase(ragdoll_worker_execution_duration_ms_sum[$__range])) / 1000",
+          "legendFormat": "{{worker_id}}",
+          "refId": "A",
+          "instant": true
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "s" } },
+      "options": {
+        "orientation": "horizontal",
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "xTickLabelRotation": 0,
+        "showValue": "always"
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Concurrent slot utilization (%) per worker",
+      "description": "In-flight runs divided by WORKER_CONCURRENCY (default 4). At 100% a worker is saturated — any further enqueue waits. If one worker pegs at 100% while the other stays low, the queue is bottlenecked on the slow worker and BullMQ can't do anything about it (it can only assign jobs, not reschedule running ones).",
+      "id": 12,
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 29 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "(sum by (worker_id) (ragdoll_worker_inflight) / 4) * 100",
+          "legendFormat": "{{worker_id}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "stepAfter",
+            "fillOpacity": 30
+          }
+        }
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" }
+      }
+    },
+    {
       "type": "row",
       "title": "Per-worker logs",
       "id": 102,
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 29 },
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 38 },
       "collapsed": false
     },
     {
@@ -217,7 +270,7 @@
       "title": "worker-1 — recent log records",
       "description": "Loki query scoped to the worker-1 container by service.instance.id resource attribute.",
       "id": 7,
-      "gridPos": { "h": 12, "w": 12, "x": 0, "y": 30 },
+      "gridPos": { "h": 12, "w": 12, "x": 0, "y": 39 },
       "datasource": { "type": "loki", "uid": "loki" },
       "targets": [
         {
@@ -239,7 +292,7 @@
       "title": "worker-2 — recent log records",
       "description": "Loki query scoped to the worker-2 container by service.instance.id resource attribute.",
       "id": 8,
-      "gridPos": { "h": 12, "w": 12, "x": 12, "y": 30 },
+      "gridPos": { "h": 12, "w": 12, "x": 12, "y": 39 },
       "datasource": { "type": "loki", "uid": "loki" },
       "targets": [
         {
