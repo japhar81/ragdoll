@@ -225,6 +225,19 @@ import { registerTenantPipelinesRoutes } from "./app/routes/tenant-pipelines.ts"
 import { registerPipelinesRoutes } from "./app/routes/pipelines.ts";
 import { registerPipelineRunsRoutes } from "./app/routes/pipeline-runs.ts";
 import { buildApiDatasetResolver } from "./app/pipeline-execution.ts";
+import {
+  publicUser,
+  publicApiKey,
+  publicIdp,
+  requestOrigin,
+  webRedirect
+} from "./app/projections.ts";
+import {
+  scopeInputFromBody,
+  scopeResource,
+  defaultPermsFor,
+  effectiveCatalog as effectiveCatalogFn
+} from "./app/rbac-helpers.ts";
 
 // `Handler` + `Route` + `RouteContext` close over `Principal` (per-request
 // authenticated user) and `AppDeps` (the deps bundle createApp receives),
@@ -503,125 +516,13 @@ export function createApp(deps: AppDeps): App {
 
 
   // ---- auth & access-control ---------------------------------------------
-  //
-  // Authentication entry points (login/signup/sso/providers) are public; every
-  // management route is default-deny via `enforce`. Grant-scoped routes derive
-  // the request scope from the grant itself so an admin can only act within
-  // scopes their own grants cover (a tenant_admin cannot mint platform roles).
-
-  function scopeInputFromBody(body: Record<string, unknown>): ScopeInput {
-    if (typeof body.scope === "string" && body.scope.length > 0) {
-      return parseScope(body.scope);
-    }
-    return {
-      tenantId: typeof body.tenantId === "string" ? body.tenantId : undefined,
-      environment:
-        typeof body.environment === "string" ? body.environment : undefined,
-      pipelineId:
-        typeof body.pipelineId === "string" ? body.pipelineId : undefined
-    };
-  }
-
-  function scopeResource(scope: string): {
-    tenantId?: string;
-    pipelineId?: string;
-    environment?: string;
-  } {
-    const s = parseScope(scope);
-    return {
-      tenantId: s.tenantId ?? undefined,
-      environment: s.environment ?? undefined,
-      pipelineId: s.pipelineId ?? undefined
-    };
-  }
-
-  function defaultPermsFor(role: string): string[] {
-    return (
-      (DEFAULT_ROLE_PERMISSIONS as Record<string, string[]>)[role] ?? []
-    );
-  }
-
-  /**
-   * Effective role -> permission catalog: the DB store if populated, else the
-   * built-in defaults (so a fresh / in-memory deployment works with no seed).
-   */
-  async function effectiveCatalog(): Promise<Map<string, Set<string>>> {
-    const rows = await rbacPolicies.listRolePermissions();
-    const catalog = new Map<string, Set<string>>();
-    const source = rows.length
-      ? rows
-      : ALL_ROLES.flatMap((r) =>
-          defaultPermsFor(r).map((permission) => ({ role: r, permission }))
-        );
-    for (const { role, permission } of source) {
-      let set = catalog.get(role);
-      if (!set) {
-        set = new Set();
-        catalog.set(role, set);
-      }
-      set.add(permission);
-    }
-    return catalog;
-  }
-
-  function publicUser(u: UserRow): Record<string, unknown> {
-    return {
-      id: u.id,
-      email: u.email,
-      displayName: u.displayName ?? null,
-      status: u.status,
-      sso: !u.passwordHash,
-      createdAt: u.createdAt
-    };
-  }
-
-  /**
-   * Non-secret view of an API key. The stored sha256 `hash` and the one-time
-   * plaintext are NEVER part of this projection — only the lookup `prefix`,
-   * which is not a credential on its own.
-   */
-  function publicApiKey(r: ApiKeyRecord): Record<string, unknown> {
-    const expired =
-      !!r.expiresAt && new Date(r.expiresAt).getTime() <= Date.now();
-    return {
-      id: r.id,
-      name: r.name,
-      prefix: r.prefix,
-      roles: r.roles,
-      tenantId: r.tenantId ?? null,
-      environmentId: r.environmentId ?? null,
-      scope: scopeToString({
-        tenantId: r.tenantId,
-        environment: r.environmentId
-      }),
-      createdAt: r.createdAt,
-      lastUsedAt: r.lastUsedAt ?? null,
-      revokedAt: r.revokedAt ?? null,
-      expiresAt: r.expiresAt ?? null,
-      status: r.revokedAt
-        ? "revoked"
-        : expired
-          ? "expired"
-          : "active"
-    };
-  }
-
-  /** Non-secret view of an IdP (client secrets / SP keys are write-only). */
-  function publicIdp(p: IdentityProviderRow): Record<string, unknown> {
-    const cfg = { ...(p.config as Record<string, unknown>) };
-    for (const k of ["clientSecret", "spPrivateKey", "privateKey"]) {
-      if (k in cfg) cfg[k] = "REDACTED";
-    }
-    return {
-      id: p.id,
-      slug: p.slug,
-      kind: p.kind,
-      displayName: p.displayName,
-      enabled: p.enabled,
-      config: cfg
-    };
-  }
-
+  // Pure helpers + projections live in ./app/projections.ts +
+  // ./app/rbac-helpers.ts. `effectiveCatalog` needs the rbacPolicies repo;
+  // bind it once here so the inline routes can call it without args.
+  // `buildSsoProvider` is closure-internal because OidcProvider /
+  // SamlProvider are constructed per IdP row at call time.
+  const effectiveCatalog = (): Promise<Map<string, Set<string>>> =>
+    effectiveCatalogFn(rbacPolicies);
   function buildSsoProvider(
     row: IdentityProviderRow
   ): OidcProvider | SamlProvider {
@@ -644,25 +545,6 @@ export function createApp(deps: AppDeps): App {
       nameAttribute:
         typeof c.nameAttribute === "string" ? c.nameAttribute : undefined
     });
-  }
-
-  function requestOrigin(req: AppRequest): string {
-    const proto = headerValue(req.headers, "x-forwarded-proto") ?? "http";
-    const host =
-      headerValue(req.headers, "x-forwarded-host") ??
-      headerValue(req.headers, "host") ??
-      "localhost:3001";
-    return `${proto}://${host}`;
-  }
-
-  function webRedirect(token: string): AppResponse {
-    const base = process.env.WEB_BASE_URL ?? "/";
-    const sep = base.includes("#") ? "&" : "#";
-    return {
-      status: 302,
-      body: undefined,
-      headers: { location: `${base}${sep}access_token=${encodeURIComponent(token)}` }
-    };
   }
 
   // ---- auth: local + session ----------------------------------------------
