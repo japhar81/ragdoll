@@ -113,6 +113,17 @@ export function ExecutionsScreen() {
     if (fromUrl !== selected) setSelectedState(fromUrl);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [searchParams]);
+  // Esc hides the open trace — matches the modal convention used
+  // elsewhere in the app (Builder inspector, DeployModal).
+  useEffect(() => {
+    if (!selected) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setSelected(undefined);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selected]);
   const events = useEvents();
   // When the live socket is connected, lean on event-driven invalidation
   // (the EventsProvider maps `execution.*` events onto these query keys).
@@ -170,21 +181,25 @@ export function ExecutionsScreen() {
               header: "",
               sort: false,
               width: 110,
-              cell: (e) => (
-                <button
-                  // SVAR's row-click handler fires on mousedown, before
-                  // React's `click` event runs. We hook the same earlier
-                  // phase and stop propagation so the button wins the
-                  // event and the row selection doesn't pre-empt us.
-                  onMouseDown={(ev) => {
-                    ev.stopPropagation();
-                    setSelected(e.executionId);
-                  }}
-                  onClick={(ev) => ev.stopPropagation()}
-                >
-                  {selected === e.executionId ? "Viewing" : "View trace"}
-                </button>
-              )
+              cell: (e) => {
+                const isOpen = selected === e.executionId;
+                return (
+                  <button
+                    // SVAR's row-click handler fires on mousedown, before
+                    // React's `click` event runs. We hook the same earlier
+                    // phase and stop propagation so the button wins the
+                    // event and the row selection doesn't pre-empt us.
+                    onMouseDown={(ev) => {
+                      ev.stopPropagation();
+                      setSelected(isOpen ? undefined : e.executionId);
+                    }}
+                    onClick={(ev) => ev.stopPropagation()}
+                    title={isOpen ? "Hide this trace" : "Open this trace"}
+                  >
+                    {isOpen ? "Hide" : "View trace"}
+                  </button>
+                );
+              }
             },
             {
               id: "executionId",
@@ -248,6 +263,15 @@ export function ExecutionsScreen() {
                 · live ({liveConnected ? "streaming" : "polling"}…)
               </span>
             )}
+            <button
+              type="button"
+              className="link-btn"
+              onClick={() => setSelected(undefined)}
+              title="Hide this trace (Esc)"
+              style={{ marginLeft: "auto", float: "right" }}
+            >
+              ✕ Hide
+            </button>
           </h2>
           {trace.isLoading && <p className="muted">Loading trace…</p>}
           {trace.error && <p className="error">{String(trace.error)}</p>}
