@@ -23,7 +23,10 @@ spec:
       version: 1.0.0
     config:
       repo: "${config.repo}"
-      ref: main
+      # `HEAD` (or unset / `default`) → github_source resolves the
+      # repo's default_branch at runtime. Keeps the demo working
+      # against repos that still use `master` (e.g. octocat/Hello-World).
+      ref: HEAD
       include: ["**/*.md", "src/**/*.{ts,js,py}"]
       computeHash: true
     # No `secrets:` block: github_source treats `token` as optional and

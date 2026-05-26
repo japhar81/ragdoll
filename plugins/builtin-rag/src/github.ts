@@ -175,7 +175,22 @@ export const githubSourcePlugin: InProcessPlugin = {
         `github_source: \`repo\` must be \`owner/name\`, got "${repo}"`
       );
     }
-    const ref = String(config.ref ?? "main");
+    // `ref` accepts a branch, tag, or full SHA. When unset or set to
+    // the sentinel "HEAD"/"default" we discover the repo's default
+    // branch via `/repos/{owner}/{name}` — keeps the demo working
+    // against legacy repos like `octocat/Hello-World` that still use
+    // `master`, without hardcoding the demo to one branch name.
+    let ref = String(config.ref ?? "").trim();
+    const wantsDefault =
+      ref === "" || /^(head|default)$/i.test(ref);
+    if (wantsDefault) {
+      const metaRes = await ghFetch(
+        `${API_HOST}/repos/${repo}`,
+        secrets.token ? String(secrets.token) : undefined
+      );
+      const meta = (await metaRes.json()) as { default_branch?: string };
+      ref = meta.default_branch ?? "main";
+    }
     const include = (Array.isArray(config.include) ? (config.include as string[]) : ["**/*"]).map(
       globToRegExp
     );
