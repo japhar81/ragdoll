@@ -254,11 +254,25 @@ export async function main(): Promise<void> {
       redisUrl: process.env.REDIS_URL,
       queueName: process.env.WORKER_QUEUE_NAME
     });
-    const scheduler = createScheduler({ schedules, queue, logger });
-    stopScheduler = scheduler.start(
-      Number(process.env.SCHEDULER_INTERVAL_MS ?? 60000)
-    );
-    logger.info("scheduler started (BullMQ enqueue)");
+    // Only ONE replica should run the scheduler — otherwise every cron
+    // tick fires N times (once per replica) and the queue counters get
+    // multiplied by replica count. Honour `WORKER_SCHEDULER_ENABLED`
+    // (default true so single-worker stacks keep working unchanged);
+    // multi-worker compose files flip it to "false" on every replica
+    // except the designated leader. A real distributed leader election
+    // (Redis SETNX with TTL renewal) belongs in a follow-up — see
+    // ./scheduler.ts.
+    const schedulerEnabled =
+      (process.env.WORKER_SCHEDULER_ENABLED ?? "true").toLowerCase() !== "false";
+    if (schedulerEnabled) {
+      const scheduler = createScheduler({ schedules, queue, logger });
+      stopScheduler = scheduler.start(
+        Number(process.env.SCHEDULER_INTERVAL_MS ?? 60000)
+      );
+      logger.info("scheduler started (BullMQ enqueue)");
+    } else {
+      logger.info("scheduler disabled on this replica (WORKER_SCHEDULER_ENABLED=false)");
+    }
     const shutdown = async (): Promise<void> => {
       logger.info("worker shutting down");
       stopScheduler?.();

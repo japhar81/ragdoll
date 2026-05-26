@@ -368,6 +368,10 @@ services:
       dockerfile: infra/docker/worker.Dockerfile
     environment:
       WORKER_ID: worker-2
+      # worker-1 owns the cron scheduler; worker-2 only consumes jobs.
+      # Without this, every cron tick would fire twice — once per replica
+      # — and the dashboard counts would drift away from reality.
+      WORKER_SCHEDULER_ENABLED: "false"
       DATABASE_URL: postgres://ragdoll:ragdoll@postgres:5432/ragdoll
       REDIS_URL: redis://redis:6379
       SECRET_ENCRYPTION_KEY: local-dev-only-change-me-32-bytes-min
