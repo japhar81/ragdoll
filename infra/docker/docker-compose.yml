@@ -317,44 +317,73 @@ services:
       timeout: 3s
       retries: 20
 
-  worker:
+  # Two worker replicas to prove BullMQ scale-out. Both consume from the
+  # same Redis queue; BullMQ distributes jobs across them so a Run-All
+  # of N pipelines lands roughly N/2 on each worker, capped by
+  # WORKER_CONCURRENCY. The Grafana "Worker scale-out" dashboard shows
+  # the split live. The two services share everything except WORKER_ID,
+  # OTEL service.instance.id, and depends_on (worker-2 doesn't block
+  # behind file-watcher's startup since file-watcher needs only one
+  # API/worker pair).
+  worker-1:
     build:
       context: ../..
       dockerfile: infra/docker/worker.Dockerfile
     environment:
+      WORKER_ID: worker-1
       DATABASE_URL: postgres://ragdoll:ragdoll@postgres:5432/ragdoll
       REDIS_URL: redis://redis:6379
       SECRET_ENCRYPTION_KEY: local-dev-only-change-me-32-bytes-min
       QDRANT_URL: http://qdrant:6333
       OPENSEARCH_URL: http://opensearch:9200
       DGRAPH_URL: http://dgraph:8080
-      # Phase 6: which vector backend createVectorStore picks when a
-      # plugin hasn't been pointed at a specific Dataset. Default
-      # `qdrant` keeps every existing pipeline working unchanged; flip
-      # to `pgvector` to run Postgres-only (Qdrant container becomes
-      # optional). Per-Dataset backend selection lands in a follow-up
-      # via dataset.backends.vector.provider.
       RAGDOLL_VECTOR_BACKEND: ${RAGDOLL_VECTOR_BACKEND:-qdrant}
-      # Phase 13: keep these Ollama models resident so the first chat
-      # request doesn't pay the 30-60s cold-start. Empty / unset is a
-      # no-op. Models must already be pulled (see the ollama-pull
-      # service above which pulls qwen2.5:0.5b + nomic-embed-text).
       OLLAMA_BASE_URL: http://ollama:11434
       OLLAMA_WARM_MODELS: ${OLLAMA_WARM_MODELS:-qwen2.5:0.5b,nomic-embed-text}
       OLLAMA_WARM_INTERVAL_MS: ${OLLAMA_WARM_INTERVAL_MS:-300000}
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
       OTEL_SERVICE_NAME: ragdoll-worker
-      OTEL_RESOURCE_ATTRIBUTES: "service.namespace=ragdoll,deployment.environment=local"
-      # The worker executes crawl jobs against the Python plugin service, so
-      # it waits for python-plugins to be healthy (Chromium ready) before
-      # starting.
+      OTEL_RESOURCE_ATTRIBUTES: "service.namespace=ragdoll,deployment.environment=local,service.instance.id=worker-1"
       PYTHON_PLUGIN_URL: http://python-plugins:8000
       PYTHON_PLUGIN_TIMEOUT_MS: "300000"
     volumes:
-      # `filesystem_source` and the codebase-ingest pipelines walk /workspace.
-      # CODEBASE_PATH is set in `.env` (or your shell) — defaults to the repo
-      # itself so the smoke pipeline just works on a fresh checkout. Change
-      # it to point at any host directory you want indexed.
+      - "${CODEBASE_PATH:-../..}:/workspace:ro"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      db-init:
+        condition: service_completed_successfully
+      api:
+        condition: service_started
+      python-plugins:
+        condition: service_healthy
+      opensearch:
+        condition: service_healthy
+
+  worker-2:
+    build:
+      context: ../..
+      dockerfile: infra/docker/worker.Dockerfile
+    environment:
+      WORKER_ID: worker-2
+      DATABASE_URL: postgres://ragdoll:ragdoll@postgres:5432/ragdoll
+      REDIS_URL: redis://redis:6379
+      SECRET_ENCRYPTION_KEY: local-dev-only-change-me-32-bytes-min
+      QDRANT_URL: http://qdrant:6333
+      OPENSEARCH_URL: http://opensearch:9200
+      DGRAPH_URL: http://dgraph:8080
+      RAGDOLL_VECTOR_BACKEND: ${RAGDOLL_VECTOR_BACKEND:-qdrant}
+      OLLAMA_BASE_URL: http://ollama:11434
+      OLLAMA_WARM_MODELS: ${OLLAMA_WARM_MODELS:-qwen2.5:0.5b,nomic-embed-text}
+      OLLAMA_WARM_INTERVAL_MS: ${OLLAMA_WARM_INTERVAL_MS:-300000}
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+      OTEL_SERVICE_NAME: ragdoll-worker
+      OTEL_RESOURCE_ATTRIBUTES: "service.namespace=ragdoll,deployment.environment=local,service.instance.id=worker-2"
+      PYTHON_PLUGIN_URL: http://python-plugins:8000
+      PYTHON_PLUGIN_TIMEOUT_MS: "300000"
+    volumes:
       - "${CODEBASE_PATH:-../..}:/workspace:ro"
     depends_on:
       postgres:
