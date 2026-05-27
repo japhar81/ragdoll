@@ -291,6 +291,215 @@ export const filesystemSourcePlugin: InProcessPlugin = {
 };
 
 // ===========================================================================
+// jsonl_source
+// ===========================================================================
+
+/**
+ * Drop-in alternative to `filesystem_source` for JSON Lines corpora. Walks the
+ * same way (include/exclude globs, default-exclude list) but reads each matched
+ * file LINE BY LINE and emits one document per parsed line. The original line
+ * string is preserved on `content` so downstream chunkers / text_parsers keep
+ * working; parsed JSON fields are spread alongside so transforms / sinks can
+ * reference them directly.
+ *
+ * Defaults differ from `filesystem_source` in two places:
+ *   - `include` defaults to `["**​/*.jsonl"]` (the canonical extension).
+ *   - `maxFileSize` defaults to 512 MiB — JSONL corpora routinely run tens
+ *     to hundreds of megabytes; the 1 MiB filesystem_source default would
+ *     silently skip them.
+ */
+export const jsonlSourcePlugin: InProcessPlugin = {
+  manifest: {
+    id: "jsonl_source",
+    name: "JSONL Source",
+    version: "1.0.0",
+    category: "datasource",
+    description:
+      "Reads a directory tree from the worker filesystem and emits ONE DOCUMENT PER LINE of each matched JSONL file. Each line is parsed as JSON and spread onto the document; the raw line text is also preserved on `content` so downstream chunkers/parsers keep working. Like `filesystem_source` but for newline-delimited JSON corpora (email dumps, log archives, scraped feeds).",
+    configSchema: {
+      type: "object",
+      required: ["rootPath"],
+      properties: {
+        rootPath: {
+          type: "string",
+          description: "Absolute path on the worker filesystem to walk."
+        },
+        include: {
+          type: "array",
+          items: { type: "string" },
+          default: ["**/*.jsonl"],
+          description:
+            "Glob patterns (relative to rootPath); a file is included iff it matches at least one. Defaults to all .jsonl files."
+        },
+        exclude: {
+          type: "array",
+          items: { type: "string" },
+          description:
+            "Glob patterns excluded after include matching. Common heavy directories (.git, node_modules, dist, target, …) are excluded by default; this list is appended."
+        },
+        maxFileSize: {
+          type: "integer",
+          default: 536870912,
+          description: "Skip files larger than this many bytes (default 512 MiB)."
+        },
+        encoding: {
+          type: "string",
+          enum: ["utf8", "utf16le", "latin1"],
+          default: "utf8",
+          description: "Text encoding used to read file contents."
+        },
+        idField: {
+          type: "string",
+          description:
+            "Name of a field on each parsed JSON line to use as `docId`. Falls back to `${relPath}#L${lineNumber}` when the field is missing or empty."
+        },
+        contentField: {
+          type: "string",
+          description:
+            "When set, the value at this field on each parsed line is copied to the document's top-level `content` (overriding the raw line text). Useful when the field already holds the body (e.g. `body_text` for email dumps) so the downstream chunker indexes the meaningful payload directly."
+        },
+        dropFields: {
+          type: "array",
+          items: { type: "string" },
+          description:
+            "Field names to remove from each parsed line BEFORE emitting. Useful when the corpus carries heavy duplicate fields you don't need downstream (e.g. `body_html` next to `body_text`). Dropping them at the source keeps the documents array small enough that the runtime's per-node trace doesn't hit V8's ~512 MiB string cap on large corpora."
+        },
+        skipMalformed: {
+          type: "boolean",
+          default: true,
+          description:
+            "When a line is not parseable as JSON, skip it (and count it in metadata) instead of failing the run. Turn off to fail loudly on corrupt input."
+        },
+        maxLinesPerFile: {
+          type: "integer",
+          description:
+            "Optional upper bound on lines read from any single file. Unset = no limit. Useful for sampling huge corpora during pipeline iteration."
+        }
+      },
+      additionalProperties: false
+    },
+    outputPorts: [
+      {
+        name: "documents",
+        description:
+          "Array of { docId, path, line, size, mtime, content, ...parsedFields } — one entry per non-empty line of each matched file."
+      },
+      { name: "rootPath", description: "Resolved absolute rootPath, surfaced for downstream auditing." }
+    ],
+    capabilities: ["ingestion"],
+    ui: {
+      icon: "file-json",
+      formHints: {
+        include: { widget: "tags" },
+        exclude: { widget: "tags" },
+        maxFileSize: { widget: "number", min: 1, step: 1024 },
+        encoding: { widget: "select" },
+        idField: { widget: "text" },
+        contentField: { widget: "text" },
+        skipMalformed: { widget: "checkbox" },
+        maxLinesPerFile: { widget: "number", min: 1, step: 1000 }
+      }
+    }
+  },
+  async execute({ config }) {
+    const rawRoot = String(config.rootPath ?? "");
+    if (!rawRoot) throw new Error("jsonl_source: `rootPath` is required");
+    const rootAbs = path.resolve(rawRoot);
+    if (rootAbs === path.sep || rootAbs === "/") {
+      throw new Error("jsonl_source: refusing to walk filesystem root");
+    }
+    const include = (Array.isArray(config.include) ? (config.include as string[]) : ["**/*.jsonl"]).map(globToRegExp);
+    const excludeList = Array.isArray(config.exclude) ? (config.exclude as string[]) : [];
+    const exclude = [...DEFAULT_EXCLUDE, ...excludeList].map(globToRegExp);
+    const maxFileSize = Number(config.maxFileSize ?? 536870912);
+    const encoding = String(config.encoding ?? "utf8") as BufferEncoding;
+    const idField = config.idField ? String(config.idField) : undefined;
+    const contentField = config.contentField ? String(config.contentField) : undefined;
+    const dropFields = Array.isArray(config.dropFields)
+      ? (config.dropFields as unknown[]).filter((f): f is string => typeof f === "string")
+      : [];
+    const skipMalformed = config.skipMalformed !== false;
+    const maxLinesPerFile =
+      typeof config.maxLinesPerFile === "number" && config.maxLinesPerFile > 0
+        ? Number(config.maxLinesPerFile)
+        : undefined;
+
+    const documents: Array<Record<string, unknown>> = [];
+    let filesRead = 0;
+    let linesRead = 0;
+    let malformedLines = 0;
+
+    for await (const entry of walkFiles(rootAbs, include, exclude)) {
+      const resolved = path.resolve(entry.absPath);
+      if (!resolved.startsWith(rootAbs + path.sep) && resolved !== rootAbs) continue;
+      if (entry.stat.size > maxFileSize) continue;
+      let raw: string;
+      try {
+        raw = await fs.readFile(entry.absPath, { encoding });
+      } catch {
+        continue;
+      }
+      filesRead += 1;
+      const mtime = new Date(entry.stat.mtimeMs).toISOString();
+      const lines = raw.split(/\r?\n/);
+      const lineCap = maxLinesPerFile !== undefined ? Math.min(lines.length, maxLinesPerFile) : lines.length;
+      for (let i = 0; i < lineCap; i += 1) {
+        const line = lines[i];
+        if (!line || line.trim().length === 0) continue;
+        linesRead += 1;
+        let parsed: Record<string, unknown> | undefined;
+        try {
+          const value = JSON.parse(line);
+          if (value && typeof value === "object" && !Array.isArray(value)) {
+            parsed = value as Record<string, unknown>;
+          } else {
+            // Scalars / arrays are unusual in JSONL but legal — wrap so the
+            // doc still has consistent shape downstream.
+            parsed = { value };
+          }
+        } catch {
+          malformedLines += 1;
+          if (skipMalformed) continue;
+          throw new Error(
+            `jsonl_source: malformed JSON at ${entry.relPath}:L${i + 1}` +
+              ` (set skipMalformed=true to tolerate)`
+          );
+        }
+        if (dropFields.length > 0) {
+          for (const f of dropFields) delete parsed[f];
+        }
+        const lineNo = i + 1;
+        const rawIdValue = idField ? parsed[idField] : undefined;
+        const docId =
+          typeof rawIdValue === "string" && rawIdValue.length > 0
+            ? rawIdValue
+            : typeof rawIdValue === "number"
+              ? String(rawIdValue)
+              : `${entry.relPath}#L${lineNo}`;
+        const projectedContent =
+          contentField && typeof parsed[contentField] === "string"
+            ? (parsed[contentField] as string)
+            : line;
+        documents.push({
+          ...parsed,
+          docId,
+          path: entry.relPath,
+          line: lineNo,
+          size: entry.stat.size,
+          mtime,
+          content: projectedContent
+        });
+      }
+    }
+
+    return {
+      outputs: { documents, rootPath: rootAbs },
+      metadata: { filesRead, linesRead, malformedLines, emitted: documents.length }
+    };
+  }
+};
+
+// ===========================================================================
 // delta_filter
 // ===========================================================================
 

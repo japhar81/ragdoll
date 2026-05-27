@@ -125,6 +125,51 @@ test("bulkIndex builds NDJSON action/doc pairs and reports errors", async () => 
   await assert.rejects(() => c2.bulkIndex("kb", [{ doc: { x: 1 } }]), OpenSearchError);
 });
 
+test("bulkIndex splits large batches into ~5 MiB chunks", async () => {
+  // Build a doc whose JSON ~ 12 KiB; 1000 of these would be ~12 MB → must split.
+  const big = "x".repeat(12 * 1024);
+  const docs = Array.from({ length: 1000 }, (_, i) => ({ id: `d${i}`, doc: { text: big } }));
+  const { fetchImpl, calls } = fakeFetch(() => ({ status: 200, json: { errors: false } }));
+  const client = new OpenSearchClient({ endpoint: ENDPOINT, fetchImpl });
+  const out = await client.bulkIndex("kb", docs);
+  assert.equal(out.indexed, 1000);
+  assert.ok(calls.length >= 2, `expected multiple bulk requests, got ${calls.length}`);
+  for (const c of calls) {
+    assert.ok((c.body as string).length <= 5 * 1024 * 1024 + 14 * 1024, "chunk under 5 MiB + slack");
+  }
+});
+
+test("bulkIndex retries once on 429, then succeeds", async () => {
+  let attempts = 0;
+  const fetchImpl = (async (_url: string, _init: { method?: string }) => {
+    attempts += 1;
+    if (attempts === 1) {
+      return new Response(JSON.stringify({ error: "throttled" }), {
+        status: 429,
+        headers: { "content-type": "application/json" }
+      });
+    }
+    return new Response(JSON.stringify({ errors: false }), {
+      status: 200,
+      headers: { "content-type": "application/json" }
+    });
+  }) as unknown as typeof fetch;
+  const client = new OpenSearchClient({ endpoint: ENDPOINT, fetchImpl });
+  const out = await client.bulkIndex("kb", [{ doc: { x: 1 } }]);
+  assert.equal(out.indexed, 1);
+  assert.equal(attempts, 2, "first 429 retried");
+});
+
+test("bulkIndex re-throws on second 429", async () => {
+  const fetchImpl = (async () =>
+    new Response(JSON.stringify({ error: "throttled" }), {
+      status: 429,
+      headers: { "content-type": "application/json" }
+    })) as unknown as typeof fetch;
+  const client = new OpenSearchClient({ endpoint: ENDPOINT, fetchImpl });
+  await assert.rejects(() => client.bulkIndex("kb", [{ doc: { x: 1 } }]), /429/);
+});
+
 test("search parses hits + total shape", async () => {
   const { fetchImpl } = fakeFetch(() => ({
     status: 200,
@@ -183,6 +228,9 @@ test("OpenSearchVectorStore round-trips with tenant isolation in the query body"
 
   const results = await store.query("docs", { vector: [1, 0], topK: 3, tenantId: "t1" });
   assert.equal(lastSearchBody.query.knn.vector.k, 3);
+  // kNN filter must be a leaf `term` (Lucene engine rejects compound
+  // bool.should with "Rewrite first"). The BM25 path keeps the OR shape; kNN
+  // does not.
   assert.deepEqual(lastSearchBody.query.knn.vector.filter.bool.must[0], {
     term: { tenantId: "t1" }
   });

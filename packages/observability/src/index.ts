@@ -178,6 +178,44 @@ export type LogSink = (
   fields: Record<string, unknown>
 ) => void;
 
+/**
+ * JSON.stringify a log line, falling back to a per-field elision when the
+ * combined payload would exceed V8's ~512 MiB max-string and throw
+ * `RangeError: Invalid string length`. Without this, a single huge field
+ * (e.g. a pipeline node bag holding tens of thousands of docs) would kill
+ * the entire run with a logger throw rather than letting the trace cap
+ * handle truncation cleanly downstream.
+ */
+function safeStringifyLogLine(line: Record<string, unknown>): string {
+  try {
+    return JSON.stringify(line);
+  } catch (e) {
+    if (!(e instanceof RangeError)) throw e;
+    const reduced: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(line)) {
+      try {
+        // Re-stringify each value alone — anything that overflows by itself
+        // is the culprit; everything else passes through unchanged.
+        JSON.stringify(v);
+        reduced[k] = v;
+      } catch {
+        if (Array.isArray(v)) {
+          reduced[k] = { __elided: true, kind: "array", length: v.length };
+        } else if (v && typeof v === "object") {
+          reduced[k] = {
+            __elided: true,
+            kind: "object",
+            keys: Object.keys(v as Record<string, unknown>).slice(0, 16)
+          };
+        } else {
+          reduced[k] = { __elided: true, kind: typeof v };
+        }
+      }
+    }
+    return JSON.stringify(reduced);
+  }
+}
+
 export class ConsoleJsonLogger implements StructuredLogger {
   private readonly sink?: LogSink;
   constructor(sink?: LogSink) {
@@ -186,19 +224,19 @@ export class ConsoleJsonLogger implements StructuredLogger {
 
   info(message: string, fields: Record<string, unknown> = {}): void {
     const enriched = { ...fields, ...readActiveTraceContext() };
-    console.log(JSON.stringify({ level: "info", message, ...enriched, timestamp: new Date().toISOString() }));
+    console.log(safeStringifyLogLine({ level: "info", message, ...enriched, timestamp: new Date().toISOString() }));
     this.sink?.("info", message, enriched);
   }
 
   warn(message: string, fields: Record<string, unknown> = {}): void {
     const enriched = { ...fields, ...readActiveTraceContext() };
-    console.warn(JSON.stringify({ level: "warn", message, ...enriched, timestamp: new Date().toISOString() }));
+    console.warn(safeStringifyLogLine({ level: "warn", message, ...enriched, timestamp: new Date().toISOString() }));
     this.sink?.("warn", message, enriched);
   }
 
   error(message: string, fields: Record<string, unknown> = {}): void {
     const enriched = { ...fields, ...readActiveTraceContext() };
-    console.error(JSON.stringify({ level: "error", message, ...enriched, timestamp: new Date().toISOString() }));
+    console.error(safeStringifyLogLine({ level: "error", message, ...enriched, timestamp: new Date().toISOString() }));
     this.sink?.("error", message, enriched);
   }
 }

@@ -159,22 +159,84 @@ export class OpenSearchClient {
     await this.request("DELETE", `/${encodeURIComponent(index)}`, undefined, { tolerate: [404] });
   }
 
-  /** Bulk-index documents. `refresh` makes them immediately searchable (handy for tests/ingest). */
+  /**
+   * Add fields to an existing index's mapping via PUT `_mapping`. Used to
+   * graft a `knn_vector` field onto an index that was already created (often
+   * by a sibling writer that ran first without a vector field). OpenSearch
+   * accepts adding NEW fields freely; trying to change an existing field's
+   * type 400s — that case is on the caller to detect.
+   */
+  async putMapping(index: string, properties: Record<string, unknown>): Promise<void> {
+    await this.request("PUT", `/${encodeURIComponent(index)}/_mapping`, { properties });
+  }
+
+  /** Read the current property mapping for an index. Returns `{}` on 404. */
+  async getMappingProperties(index: string): Promise<Record<string, unknown>> {
+    try {
+      const { body } = await this.request<Record<string, { mappings?: { properties?: Record<string, unknown> } }>>(
+        "GET",
+        `/${encodeURIComponent(index)}/_mapping`
+      );
+      const entry = body ? Object.values(body)[0] : undefined;
+      return entry?.mappings?.properties ?? {};
+    } catch (err) {
+      if (err instanceof OpenSearchError && err.status === 404) return {};
+      throw err;
+    }
+  }
+
+  /**
+   * Bulk-index documents. `refresh` makes them immediately searchable (handy
+   * for tests/ingest). Internally splits the batch into chunks whose NDJSON
+   * payload stays under ~5 MiB so OpenSearch's in-flight-request circuit
+   * breaker doesn't trip on large corpora (the default heap fraction is
+   * tight enough that a single ~50 MiB body 429s on a default-sized cluster).
+   * Each chunk is retried once on a 429 after a short backoff before failing.
+   */
   async bulkIndex(index: string, docs: BulkDoc[], refresh = false): Promise<{ indexed: number }> {
     if (docs.length === 0) return { indexed: 0 };
-    const lines: string[] = [];
-    for (const { id, doc } of docs) {
-      lines.push(JSON.stringify({ index: { _index: index, ...(id ? { _id: id } : {}) } }));
-      lines.push(JSON.stringify(doc));
-    }
-    const ndjson = `${lines.join("\n")}\n`;
-    const { body } = await this.request<{ errors?: boolean; items?: unknown[] }>(
-      "POST",
-      `/_bulk${refresh ? "?refresh=true" : ""}`,
-      ndjson,
-      { ndjson: true }
-    );
-    if (body?.errors) {
+    const MAX_BYTES = 5 * 1024 * 1024;
+    const lines: Array<{ action: string; doc: string; bytes: number }> = docs.map(({ id, doc }) => {
+      const action = JSON.stringify({ index: { _index: index, ...(id ? { _id: id } : {}) } });
+      const docStr = JSON.stringify(doc);
+      return { action, doc: docStr, bytes: action.length + docStr.length + 2 };
+    });
+    let cursor = 0;
+    while (cursor < lines.length) {
+      let bytes = 0;
+      let end = cursor;
+      while (end < lines.length && (end === cursor || bytes + lines[end].bytes <= MAX_BYTES)) {
+        bytes += lines[end].bytes;
+        end += 1;
+      }
+      const chunk = lines.slice(cursor, end);
+      const ndjson = chunk.map((c) => `${c.action}\n${c.doc}`).join("\n") + "\n";
+      let body: { errors?: boolean; items?: unknown[] } | undefined;
+      let attempt = 0;
+      while (true) {
+        try {
+          const resp = await this.request<{ errors?: boolean; items?: unknown[] }>(
+            "POST",
+            `/_bulk${refresh ? "?refresh=true" : ""}`,
+            ndjson,
+            { ndjson: true }
+          );
+          body = resp.body;
+          break;
+        } catch (err) {
+          // Retry once on 429 (circuit breaker / queue full) with a small
+          // delay; rethrow anything else, and the second 429 too.
+          const status = (err as { status?: number } | undefined)?.status;
+          if (status === 429 && attempt === 0) {
+            attempt += 1;
+            await new Promise((resolve) => setTimeout(resolve, 500));
+            continue;
+          }
+          throw err;
+        }
+      }
+      cursor = end;
+      if (body?.errors) {
       // Surface the first failed item's reason so the operator can act on
       // it instead of staring at a generic "bulk index reported item
       // errors". OpenSearch's response is an array of per-op shells; we
@@ -205,6 +267,7 @@ export class OpenSearchClient {
         } — first failure: ${summary}`,
         body
       );
+      }
     }
     return { indexed: docs.length };
   }

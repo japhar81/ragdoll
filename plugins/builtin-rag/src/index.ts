@@ -32,6 +32,7 @@ function deterministicUuid(key: string): string {
 // picks them up alongside everything else.
 export {
   filesystemSourcePlugin,
+  jsonlSourcePlugin,
   deltaFilterPlugin,
   codeChunkerPlugin,
   qdrantDeletePlugin,

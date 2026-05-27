@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import * as path from "node:path";
 import {
   filesystemSourcePlugin,
+  jsonlSourcePlugin,
   deltaFilterPlugin,
   codeChunkerPlugin,
   qdrantDeletePlugin,
@@ -137,6 +138,124 @@ test("filesystem_source: refuses to walk filesystem root", async () => {
     } as unknown as PluginExecutionInput),
     /filesystem root/i
   );
+});
+
+// ---------------------------------------------------------------------------
+// jsonl_source
+// ---------------------------------------------------------------------------
+
+test("jsonl_source: emits one document per non-empty line, parsed fields are spread", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "ragdoll-jsonl-"));
+  try {
+    const lines = [
+      JSON.stringify({ id: "m1", subject: "hello", body_text: "first body" }),
+      "", // blank line should be skipped
+      JSON.stringify({ id: "m2", subject: "world", body_text: "second body" })
+    ].join("\n");
+    await writeFile(path.join(root, "a.jsonl"), lines);
+    const result = await jsonlSourcePlugin.execute({
+      context: fakeContext(),
+      node: { id: "j", plugin: jsonlSourcePlugin.manifest, config: {}, secrets: {} },
+      inputs: {},
+      config: { rootPath: root, idField: "id", contentField: "body_text" },
+      secrets: {}
+    } as unknown as PluginExecutionInput);
+    const docs = result.outputs.documents as Array<Record<string, unknown>>;
+    assert.equal(docs.length, 2);
+    assert.equal(docs[0].docId, "m1");
+    assert.equal(docs[0].subject, "hello");
+    assert.equal(docs[0].content, "first body", "contentField projects body_text → content");
+    assert.equal(docs[0].line, 1);
+    assert.equal(docs[1].docId, "m2");
+    assert.equal(docs[1].line, 3, "blank line at L2 is skipped but line numbers stay 1-based on the source");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("jsonl_source: skipMalformed=true counts bad lines without failing", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "ragdoll-jsonl-"));
+  try {
+    await writeFile(
+      path.join(root, "mixed.jsonl"),
+      [JSON.stringify({ id: "ok" }), "{not valid json", JSON.stringify({ id: "ok2" })].join("\n")
+    );
+    const result = await jsonlSourcePlugin.execute({
+      context: fakeContext(),
+      node: { id: "j", plugin: jsonlSourcePlugin.manifest, config: {}, secrets: {} },
+      inputs: {},
+      config: { rootPath: root, idField: "id" },
+      secrets: {}
+    } as unknown as PluginExecutionInput);
+    const docs = result.outputs.documents as Array<Record<string, unknown>>;
+    assert.equal(docs.length, 2, "two valid lines emit, one malformed skipped");
+    assert.equal((result.metadata as { malformedLines: number }).malformedLines, 1);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("jsonl_source: skipMalformed=false rejects loudly", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "ragdoll-jsonl-"));
+  try {
+    await writeFile(path.join(root, "bad.jsonl"), "this is not json\n");
+    await assert.rejects(
+      jsonlSourcePlugin.execute({
+        context: fakeContext(),
+        node: { id: "j", plugin: jsonlSourcePlugin.manifest, config: {}, secrets: {} },
+        inputs: {},
+        config: { rootPath: root, skipMalformed: false },
+        secrets: {}
+      } as unknown as PluginExecutionInput),
+      /malformed JSON/i
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("jsonl_source: dropFields strips heavy fields before emit", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "ragdoll-jsonl-"));
+  try {
+    await writeFile(
+      path.join(root, "a.jsonl"),
+      JSON.stringify({ id: "m1", subject: "s", body_text: "t", body_html: "<html>...</html>", attachments: [{ name: "a" }] })
+    );
+    const result = await jsonlSourcePlugin.execute({
+      context: fakeContext(),
+      node: { id: "j", plugin: jsonlSourcePlugin.manifest, config: {}, secrets: {} },
+      inputs: {},
+      config: { rootPath: root, idField: "id", dropFields: ["body_html", "attachments"] },
+      secrets: {}
+    } as unknown as PluginExecutionInput);
+    const docs = result.outputs.documents as Array<Record<string, unknown>>;
+    assert.equal(docs.length, 1);
+    assert.equal(docs[0].subject, "s");
+    assert.equal(docs[0].body_text, "t");
+    assert.ok(!("body_html" in docs[0]), "body_html dropped");
+    assert.ok(!("attachments" in docs[0]), "attachments dropped");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("jsonl_source: maxLinesPerFile caps reads for sampling", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "ragdoll-jsonl-"));
+  try {
+    const lines = Array.from({ length: 50 }, (_, i) => JSON.stringify({ id: `m${i}` })).join("\n");
+    await writeFile(path.join(root, "big.jsonl"), lines);
+    const result = await jsonlSourcePlugin.execute({
+      context: fakeContext(),
+      node: { id: "j", plugin: jsonlSourcePlugin.manifest, config: {}, secrets: {} },
+      inputs: {},
+      config: { rootPath: root, idField: "id", maxLinesPerFile: 5 },
+      secrets: {}
+    } as unknown as PluginExecutionInput);
+    const docs = result.outputs.documents as Array<Record<string, unknown>>;
+    assert.equal(docs.length, 5);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 // ---------------------------------------------------------------------------

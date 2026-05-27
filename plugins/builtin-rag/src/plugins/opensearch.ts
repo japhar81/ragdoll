@@ -69,6 +69,38 @@ function questionFrom(inputs: Record<string, unknown>): string {
   );
 }
 
+/**
+ * Build a tenant-isolation filter clause for BM25 / `_search` bool queries.
+ * Matches whether the field was created as `keyword` (the shape
+ * `opensearch_output` ensures) OR was left to OpenSearch's dynamic mapping,
+ * which stores it as `text` with a `<field>.keyword` sub-field. A plain
+ * `term` against the text parent silently 0-matches; we OR both shapes via
+ * `bool.should` so either mapping works.
+ */
+function tenantFilterClause(tenantField: string, tenantId: string): Record<string, unknown> {
+  return {
+    bool: {
+      should: [
+        { term: { [tenantField]: tenantId } },
+        { term: { [`${tenantField}.keyword`]: tenantId } }
+      ],
+      minimum_should_match: 1
+    }
+  };
+}
+
+/**
+ * Build a tenant-isolation filter clause for the Lucene kNN engine, which
+ * rejects compound `bool.should` queries inside `knn.filter` with a "Rewrite
+ * first" exception. kNN-bearing indexes are always created by
+ * `opensearch_output` (or fail validation up front), and that writer
+ * guarantees `tenantId: keyword` — so a plain leaf `term` is correct and
+ * safe here.
+ */
+function tenantFilterClauseForKnn(tenantField: string, tenantId: string): Record<string, unknown> {
+  return { term: { [tenantField]: tenantId } };
+}
+
 interface RankedDoc {
   id: string;
   score: number;
@@ -195,7 +227,7 @@ export const openSearchInputPlugin: InProcessPlugin = {
     const must: Array<Record<string, unknown>> = [
       queryStr ? { query_string: { query: queryStr } } : { match_all: {} }
     ];
-    const filter = tenantField ? [{ term: { [tenantField]: context.tenantId } }] : [];
+    const filter = tenantField ? [tenantFilterClause(tenantField, context.tenantId)] : [];
 
     const { hits, total } = await client.search(index, {
       size,
@@ -308,22 +340,54 @@ export const openSearchOutputPlugin: InProcessPlugin = {
 
     if (docs.length === 0) return { outputs: { indexed: 0 } };
 
+    // ALWAYS ensure the index has a `tenantId: keyword` mapping before
+    // writing. If we let OpenSearch's dynamic mapping fire on the first
+    // doc, `tenantId` ends up as `text` with a `.keyword` sub-field — and
+    // a later retriever's `term: { tenantId: ... }` filter silently
+    // 0-matches because `term` doesn't query analysed text fields.
+    //
+    // When this writer carries vectors AND `createKnnIndex` is set, we
+    // also need the vector field mapped as `knn_vector`. The tricky case:
+    // a sibling BM25 writer can have ALREADY created the index (without
+    // the knn field) by the time we run. In that case `ensureIndex` is a
+    // no-op and we have to `putMapping` to graft the kNN field on
+    // afterwards — OpenSearch lets you ADD new fields to a live index,
+    // just not change an existing field's type. Doing nothing here is
+    // what produced "vector: float" auto-mapping (and the resulting kNN
+    // 400 at query time) in earlier runs.
     if (config.createKnnIndex === true && vectorField && config.dimensions) {
       const space = { cosine: "cosinesimil", dot: "innerproduct", euclidean: "l2" }[
         String(config.distance ?? "cosine") as DistanceMetric
       ];
+      const knnFieldMapping = {
+        type: "knn_vector",
+        dimension: Number(config.dimensions),
+        method: { name: "hnsw", engine: "lucene", space_type: space }
+      };
       await client.ensureIndex(index, {
         settings: { index: { knn: true } },
         mappings: {
           properties: {
-            [vectorField]: {
-              type: "knn_vector",
-              dimension: Number(config.dimensions),
-              method: { name: "hnsw", engine: "lucene", space_type: space }
-            },
+            [vectorField]: knnFieldMapping,
             tenantId: { type: "keyword" }
           }
         }
+      });
+      // If the index was already there (sibling writer ran first), our
+      // ensureIndex was a no-op and the kNN field is still missing or
+      // — worse — auto-mapped as `float`. Try to graft it on.
+      const existing = await client.getMappingProperties(index);
+      const existingVector = (existing[vectorField] as { type?: string } | undefined)?.type;
+      if (existingVector === undefined) {
+        await client.putMapping(index, { [vectorField]: knnFieldMapping });
+      } else if (existingVector !== "knn_vector") {
+        throw new Error(
+          `opensearch_output: index "${index}" already has field "${vectorField}" mapped as "${existingVector}" — kNN requires "knn_vector". Drop the index and re-run the vector ingest before any other writer.`
+        );
+      }
+    } else {
+      await client.ensureIndex(index, {
+        mappings: { properties: { tenantId: { type: "keyword" } } }
       });
     }
 
@@ -399,7 +463,7 @@ export const openSearchBm25RetrieverPlugin: InProcessPlugin = {
     const question = questionFrom(inputs);
 
     const filter: Array<Record<string, unknown>> = [];
-    if (tenantField) filter.push({ term: { [tenantField]: context.tenantId } });
+    if (tenantField) filter.push(tenantFilterClause(tenantField, context.tenantId));
     const cfgFilter = config.filter as Record<string, unknown> | undefined;
     if (cfgFilter) {
       for (const [k, v] of Object.entries(cfgFilter)) {
@@ -455,6 +519,10 @@ export const openSearchVectorRetrieverPlugin: InProcessPlugin = {
           type: "string",
           default: "nomic-embed-text",
           description: "Embedding model used to embed the query."
+        },
+        baseUrl: {
+          type: "string",
+          description: "Override the embedding provider base URL (e.g. a remote self-hosted Ollama)."
         }
       },
       additionalProperties: false
@@ -598,6 +666,10 @@ export const openSearchHybridRetrieverPlugin: InProcessPlugin = {
           type: "string",
           default: "nomic-embed-text",
           description: "Embedding model for the vector arm."
+        },
+        baseUrl: {
+          type: "string",
+          description: "Override the embedding provider base URL (e.g. a remote self-hosted Ollama)."
         }
       },
       additionalProperties: false
@@ -648,7 +720,11 @@ export const openSearchHybridRetrieverPlugin: InProcessPlugin = {
     const tenantField =
       config.tenantField === undefined ? "tenantId" : String(config.tenantField);
     const question = questionFrom(inputs);
-    const tenantFilter = tenantField ? [{ term: { [tenantField]: context.tenantId } }] : [];
+    // Two different filter shapes: BM25 uses the mapping-tolerant
+    // bool.should clause; kNN can't (Lucene engine rejects nested bool with
+    // "Rewrite first") and needs a leaf `term`. Both target the same field.
+    const tenantFilter = tenantField ? [tenantFilterClause(tenantField, context.tenantId)] : [];
+    const tenantFilterKnn = tenantField ? [tenantFilterClauseForKnn(tenantField, context.tenantId)] : [];
 
     let queryVector = inputs.queryVector as number[] | undefined;
     let usage: { provider?: string; model?: string; embeddingTokens?: number } | undefined;
@@ -681,7 +757,7 @@ export const openSearchHybridRetrieverPlugin: InProcessPlugin = {
             vector: {
               vector: queryVector,
               k: candidateK,
-              filter: { bool: { must: tenantFilter } }
+              filter: tenantFilterKnn.length === 1 ? tenantFilterKnn[0] : { bool: { must: tenantFilterKnn } }
             }
           }
         }

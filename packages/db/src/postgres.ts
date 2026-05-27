@@ -9,6 +9,83 @@ import { secretRefKey } from "../../secrets/src/index.ts";
 import type { PoolLike } from "./pool.ts";
 
 /**
+ * Maximum serialised size for any single `input_redacted` / `output_redacted`
+ * cell. Postgres `jsonb` rows cap at 256 MiB *total* — a pipeline that
+ * emits 15 k+ docs in a single source node easily blows that. We keep each
+ * cell well below the cap (default 8 MiB) and replace anything larger with a
+ * small sentinel that preserves the shape ("array of N" / "object with these
+ * keys") so the Executions screen still tells you what happened.
+ *
+ * Override at deploy time via the env var `RAGDOLL_MAX_TRACE_BYTES`.
+ */
+const DEFAULT_MAX_TRACE_BYTES = 8 * 1024 * 1024;
+const MAX_TRACE_BYTES = (() => {
+  const raw = process.env.RAGDOLL_MAX_TRACE_BYTES;
+  if (!raw) return DEFAULT_MAX_TRACE_BYTES;
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : DEFAULT_MAX_TRACE_BYTES;
+})();
+
+/**
+ * Serialise a runtime IO bag for the trace columns. Returns `null` for
+ * `undefined`, the raw JSON string for small payloads, and a sentinel
+ * describing the original shape for anything past `MAX_TRACE_BYTES`. The
+ * sentinel always serialises to a few hundred bytes so the cap can't be
+ * exceeded a second time by an honest-but-still-too-large shape summary.
+ */
+export function stringifyForTrace(value: unknown): string | null {
+  if (value === undefined) return null;
+  // Try the full stringify first. For most payloads this is the cheapest
+  // path; we'll fall back to a sentinel on either a soft over-cap or the
+  // hard V8 `Invalid string length` throw (RangeError, fired when the
+  // result would exceed ~512 MiB — comfortably possible with corpora that
+  // emit tens of thousands of docs in a single node bag).
+  let stringified: string | undefined;
+  let stringifyFailed = false;
+  try {
+    stringified = JSON.stringify(value);
+  } catch (e) {
+    if (e instanceof RangeError) {
+      stringifyFailed = true;
+    } else {
+      throw e;
+    }
+  }
+  if (!stringifyFailed && stringified === undefined) return null;
+  if (!stringifyFailed && stringified!.length <= MAX_TRACE_BYTES) {
+    return stringified!;
+  }
+  const originalBytes = stringifyFailed ? undefined : stringified!.length;
+  const sentinel = (() => {
+    if (Array.isArray(value)) {
+      return {
+        __truncated: true,
+        kind: "array",
+        length: value.length,
+        ...(originalBytes !== undefined ? { originalBytes } : { originalBytes: ">512MB (stringify overflow)" }),
+        maxBytes: MAX_TRACE_BYTES
+      };
+    }
+    if (value && typeof value === "object") {
+      return {
+        __truncated: true,
+        kind: "object",
+        keys: Object.keys(value as Record<string, unknown>).slice(0, 16),
+        ...(originalBytes !== undefined ? { originalBytes } : { originalBytes: ">512MB (stringify overflow)" }),
+        maxBytes: MAX_TRACE_BYTES
+      };
+    }
+    return {
+      __truncated: true,
+      kind: typeof value,
+      ...(originalBytes !== undefined ? { originalBytes } : { originalBytes: ">512MB (stringify overflow)" }),
+      maxBytes: MAX_TRACE_BYTES
+    };
+  })();
+  return JSON.stringify(sentinel);
+}
+
+/**
  * Postgres `ExecutionStore` writing to executions / execution_nodes /
  * usage_records. Implements the exact runtime contract; the runtime package
  * owns the in-memory variant.
@@ -41,7 +118,7 @@ export class PostgresExecutionStore implements ExecutionStore {
         // patch the row directly.
         "unknown",
         record.status,
-        record.input === undefined ? null : JSON.stringify(record.input),
+        stringifyForTrace(record.input),
         record.startedAt
       ]
     );
@@ -58,7 +135,7 @@ export class PostgresExecutionStore implements ExecutionStore {
       [
         record.executionId,
         record.status,
-        record.output === undefined ? null : JSON.stringify(record.output),
+        stringifyForTrace(record.output),
         record.error ?? null,
         record.completedAt ?? new Date().toISOString()
       ]
@@ -74,7 +151,7 @@ export class PostgresExecutionStore implements ExecutionStore {
         record.executionId,
         record.nodeId,
         record.status,
-        record.input === undefined ? null : JSON.stringify(record.input),
+        stringifyForTrace(record.input),
         record.startedAt
       ]
     );
@@ -93,7 +170,7 @@ export class PostgresExecutionStore implements ExecutionStore {
         record.executionId,
         record.nodeId,
         record.status,
-        record.output === undefined ? null : JSON.stringify(record.output),
+        stringifyForTrace(record.output),
         record.error ?? null,
         record.latencyMs ?? null,
         record.completedAt ?? new Date().toISOString()

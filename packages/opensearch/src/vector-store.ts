@@ -78,6 +78,12 @@ export class OpenSearchVectorStore implements VectorStore {
 
   async query(collection: string, query: VectorQuery): Promise<VectorQueryResult[]> {
     const k = Math.max(1, query.topK);
+    // The Lucene kNN engine rejects compound `bool.should` queries inside
+    // `knn.filter` with "Rewrite first" — so we use a leaf `term` here. kNN-
+    // bearing indexes are always created with `tenantId: keyword` by
+    // `opensearch_output`, so a leaf term is correct (no need to OR with a
+    // `.keyword` sub-field shape, which only exists on dynamically-mapped
+    // indexes that wouldn't have a proper kNN field in the first place).
     const filter = [
       { term: { tenantId: query.tenantId } },
       ...filterClauses(query.filter)

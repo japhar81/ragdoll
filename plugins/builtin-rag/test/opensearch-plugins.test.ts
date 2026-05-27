@@ -124,7 +124,15 @@ test("opensearch_input maps hits to documents and filters by tenant when configu
   });
   assert.equal(calls.length, 1);
   assert.deepEqual(searchBody.query.bool.must[0], { query_string: { query: "hello" } });
-  assert.deepEqual(searchBody.query.bool.filter[0], { term: { tenantId: "t1" } });
+  assert.deepEqual(searchBody.query.bool.filter[0], {
+    bool: {
+      should: [
+        { term: { tenantId: "t1" } },
+        { term: { "tenantId.keyword": "t1" } }
+      ],
+      minimum_should_match: 1
+    }
+  });
   assert.deepEqual(out.outputs.documents, [{ id: "d1", text: "hello", metadata: { lang: "en" } }]);
 });
 
@@ -179,7 +187,15 @@ test("opensearch_bm25_retriever issues multi_match with tenant filter", async (t
   });
   assert.equal(body.size, 4);
   assert.deepEqual(body.query.bool.must[0].multi_match.fields, ["text", "title"]);
-  assert.deepEqual(body.query.bool.filter[0], { term: { tenantId: "t1" } });
+  assert.deepEqual(body.query.bool.filter[0], {
+    bool: {
+      should: [
+        { term: { tenantId: "t1" } },
+        { term: { "tenantId.keyword": "t1" } }
+      ],
+      minimum_should_match: 1
+    }
+  });
   assert.deepEqual(out.outputs.documents, [{ id: "1", score: 3.2, text: "ans" }]);
 });
 

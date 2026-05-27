@@ -16,6 +16,7 @@ import {
   PostgresAuditLogRepository,
   PostgresConfigDefinitionRepository,
   PostgresExecutionStore,
+  stringifyForTrace,
   PostgresPipelineRepository,
   PostgresProviderRepository,
   PostgresVectorCollectionRepository,
@@ -630,4 +631,36 @@ test("PostgresExecutionStore reader maps execution + node rows", async () => {
     pool.calls[2].text,
     /FROM executions WHERE tenant_id = \$1/
   );
+});
+
+test("stringifyForTrace passes small payloads through unchanged", () => {
+  assert.equal(stringifyForTrace(undefined), null);
+  assert.equal(stringifyForTrace({ a: 1 }), JSON.stringify({ a: 1 }));
+  assert.equal(stringifyForTrace([1, 2, 3]), JSON.stringify([1, 2, 3]));
+});
+
+test("stringifyForTrace replaces oversize array with a length sentinel", () => {
+  // Build a payload whose JSON well exceeds the default 8 MiB cap.
+  const bigStr = "x".repeat(10_000);
+  const arr = Array.from({ length: 1000 }, (_, i) => ({ id: i, blob: bigStr }));
+  const out = stringifyForTrace(arr);
+  assert.ok(out !== null);
+  const parsed = JSON.parse(out!);
+  assert.equal(parsed.__truncated, true);
+  assert.equal(parsed.kind, "array");
+  assert.equal(parsed.length, 1000);
+  assert.ok(parsed.originalBytes > 8 * 1024 * 1024);
+  // Sentinel itself must be tiny so it never blows the cap a second time.
+  assert.ok(out!.length < 1024);
+});
+
+test("stringifyForTrace replaces oversize object with a keys sentinel", () => {
+  const bigStr = "x".repeat(10_000_000);
+  const obj = { hugeBlob: bigStr, k2: 2, k3: 3 };
+  const out = stringifyForTrace(obj);
+  assert.ok(out !== null);
+  const parsed = JSON.parse(out!);
+  assert.equal(parsed.__truncated, true);
+  assert.equal(parsed.kind, "object");
+  assert.deepEqual(parsed.keys, ["hugeBlob", "k2", "k3"]);
 });
