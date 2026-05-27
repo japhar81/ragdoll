@@ -38,8 +38,11 @@ async function read(rel: string): Promise<string> {
 /*  Group A — Worker job payloads must carry an `enqueuedBy` principal       */
 /* -------------------------------------------------------------------------- */
 
+// Job payload interfaces live in handlers/types.ts after the worker
+// split; handlers.ts re-exports them. These tests read types.ts so the
+// `interface XxxJob` match lands on the actual declaration.
 test("RunPipelineJob payload carries an enqueuedBy principal", async () => {
-  const src = await read("apps/worker/src/handlers.ts");
+  const src = await read("apps/worker/src/handlers/types.ts");
   // The Phase 2 fix adds `enqueuedBy?: EnqueuedBy` to every job payload
   // interface so the worker can re-enforce on dequeue. The grep is loose
   // on purpose — any of `enqueuedBy:` / `enqueuedBy?:` matches.
@@ -51,7 +54,7 @@ test("RunPipelineJob payload carries an enqueuedBy principal", async () => {
 });
 
 test("IngestDatasourceJob payload carries an enqueuedBy principal", async () => {
-  const src = await read("apps/worker/src/handlers.ts");
+  const src = await read("apps/worker/src/handlers/types.ts");
   assert.match(
     src,
     /interface IngestDatasourceJob[\s\S]{0,1200}enqueuedBy/,
@@ -60,7 +63,7 @@ test("IngestDatasourceJob payload carries an enqueuedBy principal", async () => 
 });
 
 test("EvaluatePipelineJob payload carries an enqueuedBy principal", async () => {
-  const src = await read("apps/worker/src/handlers.ts");
+  const src = await read("apps/worker/src/handlers/types.ts");
   assert.match(
     src,
     /interface EvaluatePipelineJob[\s\S]{0,1200}enqueuedBy/,
@@ -69,7 +72,7 @@ test("EvaluatePipelineJob payload carries an enqueuedBy principal", async () => 
 });
 
 test("BatchRunJob payload carries an enqueuedBy principal", async () => {
-  const src = await read("apps/worker/src/handlers.ts");
+  const src = await read("apps/worker/src/handlers/types.ts");
   assert.match(
     src,
     /interface BatchRunJob[\s\S]{0,1200}enqueuedBy/,
@@ -78,7 +81,7 @@ test("BatchRunJob payload carries an enqueuedBy principal", async () => {
 });
 
 test("DeleteTenantVectorDataJob payload carries an enqueuedBy principal", async () => {
-  const src = await read("apps/worker/src/handlers.ts");
+  const src = await read("apps/worker/src/handlers/types.ts");
   assert.match(
     src,
     /interface DeleteTenantVectorDataJob[\s\S]{0,800}enqueuedBy/,
