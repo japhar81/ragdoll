@@ -9,7 +9,7 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { buildHarness } from "./helpers.ts";
+import { buildHarness, echoSpec } from "./helpers.ts";
 import { PasswordService } from "../../../packages/auth/src/index.ts";
 import { buildServer } from "../src/mcp.ts";
 
@@ -222,6 +222,59 @@ test("MCP can create and then delete a pipeline end-to-end (full control)", asyn
   assert.ok(
     !afterBody.pipelines.some((p: { id: string }) => p.id === pipelineId),
     "deleted pipeline should be gone from list_pipelines"
+  );
+  await client.close();
+});
+
+test("MCP run_pipeline parses a stringified JSON input (some clients stringify object args)", async () => {
+  // Some MCP clients still stringify object-shaped arguments during
+  // transport even when the tool schema declares `type: "object"`. The
+  // run_pipeline handler parses such strings so the downstream API sees
+  // the structured payload it expects. This test seeds a deployed
+  // pipeline, calls the tool with a JSON-encoded string for `input`,
+  // and asserts the enqueued job carries the parsed object.
+  const h = buildHarness({ withAuth: true });
+  const bearer = await seedAdmin(h);
+  const adminHeaders = {
+    authorization: `Bearer ${bearer}`,
+    "x-tenant-id": "tenant-a"
+  };
+
+  const slug = `mcp-run-${randomUUID().slice(0, 8)}`;
+  const created = await h.request({
+    method: "POST",
+    path: "/api/pipelines",
+    headers: adminHeaders,
+    body: { slug, name: "MCP Run" }
+  });
+  assert.equal(created.status, 201);
+  const pipelineId = created.body.pipeline.id;
+  await h.request({
+    method: "POST",
+    path: `/api/pipelines/${pipelineId}/versions`,
+    headers: adminHeaders,
+    body: { version: "1.0.0", publish: true, spec: echoSpec() }
+  });
+  await h.request({
+    method: "POST",
+    path: `/api/pipelines/${pipelineId}/deployments`,
+    headers: adminHeaders,
+    body: { version: "1.0.0", environment: "dev" }
+  });
+
+  const client = await bootClient({ app: h.app, bearer, tenant: "tenant-a" });
+  const res = await client.callTool({
+    name: "run_pipeline",
+    arguments: { id: pipelineId, input: '{"q":"hello"}', environment: "dev" }
+  });
+  assert.equal(res.isError ?? false, false);
+
+  const runJob = h.queue.list().find((j) => j.type === "run_pipeline");
+  assert.ok(runJob, "run_pipeline job should have been enqueued");
+  assert.deepEqual(
+    (runJob.payload as { input: unknown }).input,
+    { q: "hello" },
+    "stringified JSON input should be parsed before reaching the queue"
   );
   await client.close();
 });
