@@ -222,6 +222,68 @@ test("opensearch_vector_retriever queries kNN and strips vector/tenant from payl
   assert.deepEqual(out.outputs.documents, [{ id: "p1", score: 0.8, text: "doc" }]);
 });
 
+test("opensearch_hybrid_retriever applies user filter clauses to both arms", async (t) => {
+  // Two filter shapes are accepted: an array of raw OpenSearch clauses
+  // (anything from the DSL — range, prefix, exists, …) or an object
+  // whose entries become term/terms clauses for simple exact matches.
+  // The hybrid retriever must splice them in alongside the tenant
+  // filter for BOTH the lexical and kNN arms.
+  const bodies: { lexical?: any; knn?: any } = {};
+  stubFetch(t, (_method, path, body) => {
+    if (path.endsWith("/_search")) {
+      const parsed = JSON.parse(body as string);
+      if (parsed.query?.knn) bodies.knn = parsed;
+      else bodies.lexical = parsed;
+      return { json: { hits: { total: { value: 0 }, hits: [] } } };
+    }
+    return { json: {} };
+  });
+
+  // --- Array shape: raw DSL clauses passed through verbatim. ---
+  await openSearchHybridRetrieverPlugin.execute({
+    context: ctx(),
+    node: { id: "r", plugin: { category: "retriever", id: "opensearch_hybrid_retriever", version: "1.0.0" } },
+    inputs: { queryVector: [1, 0], question: "q" },
+    config: {
+      ...CFG,
+      index: "kb",
+      filter: [
+        { range: { date_received: { gte: "now-14d/d" } } },
+        { prefix: { "folder_path.keyword": "Inbox" } }
+      ]
+    },
+    secrets: {}
+  });
+  // Lexical arm: tenant filter (index 0) is followed by the raw clauses.
+  assert.deepEqual(bodies.lexical.query.bool.filter[1], {
+    range: { date_received: { gte: "now-14d/d" } }
+  });
+  assert.deepEqual(bodies.lexical.query.bool.filter[2], {
+    prefix: { "folder_path.keyword": "Inbox" }
+  });
+  // kNN arm: multi-clause filter is wrapped in a `bool.must` (Lucene
+  // engine rejects nested bool without it).
+  const knnMust = bodies.knn.query.knn.vector.filter.bool.must;
+  assert.deepEqual(knnMust[1], { range: { date_received: { gte: "now-14d/d" } } });
+  assert.deepEqual(knnMust[2], { prefix: { "folder_path.keyword": "Inbox" } });
+
+  // --- Object shape: scalars -> term, arrays -> terms. ---
+  bodies.lexical = bodies.knn = undefined;
+  await openSearchHybridRetrieverPlugin.execute({
+    context: ctx(),
+    node: { id: "r", plugin: { category: "retriever", id: "opensearch_hybrid_retriever", version: "1.0.0" } },
+    inputs: { queryVector: [1, 0], question: "q" },
+    config: {
+      ...CFG,
+      index: "kb",
+      filter: { lang: "en", tag: ["a", "b"] }
+    },
+    secrets: {}
+  });
+  assert.deepEqual(bodies.lexical.query.bool.filter[1], { term: { lang: "en" } });
+  assert.deepEqual(bodies.lexical.query.bool.filter[2], { terms: { tag: ["a", "b"] } });
+});
+
 test("opensearch_hybrid_retriever fuses lexical + kNN arms", async (t) => {
   const calls = stubFetch(t, (method, path, b) => {
     if (path.endsWith("/_search")) {
