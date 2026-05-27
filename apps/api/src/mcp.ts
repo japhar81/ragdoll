@@ -167,6 +167,33 @@ const opt = (description: string) => ({ type: "string", description });
 const bool = (description: string) => ({ type: "boolean", description });
 const int = (description: string) => ({ type: "integer", description });
 const anyType = (description: string) => ({ description });
+// Use for JSON-object payloads (e.g. pipeline input, spec, config values).
+// Some MCP clients stringify schema-less arguments during transport; declaring
+// `type: "object"` keeps the structure intact end-to-end.
+const objectArg = (description: string) => ({
+  type: "object" as const,
+  description,
+  additionalProperties: true
+});
+
+/**
+ * Some MCP clients still stringify object-shaped arguments even when the
+ * schema declares `type: "object"`. Tolerate that by JSON-parsing strings
+ * that look like a JSON object/array, so a stringified payload survives the
+ * round trip and the downstream API sees the structured value it expects.
+ */
+function coerceJsonArg(value: unknown): unknown {
+  if (typeof value !== "string") return value;
+  const trimmed = value.trim();
+  if (!trimmed) return value;
+  const first = trimmed[0];
+  if (first !== "{" && first !== "[") return value;
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    return value;
+  }
+}
 const obj = (
   properties: Record<string, unknown>,
   required: string[] = []
@@ -774,7 +801,7 @@ function toolCatalog(app: App): ToolDef[] {
       obj(
         {
           id: str("pipeline id or slug"),
-          input: anyType("input payload for the pipeline"),
+          input: objectArg("input payload for the pipeline"),
           environment: opt("default: dev"),
           activation: opt("optional activation label"),
           tenant: opt("override tenant UUID")
@@ -787,7 +814,7 @@ function toolCatalog(app: App): ToolDef[] {
           path: `/api/pipelines/${encodeURIComponent(String(a.id))}/run`,
           headers: a.tenant ? { ...h, "x-tenant-id": String(a.tenant) } : h,
           body: {
-            input: a.input,
+            input: coerceJsonArg(a.input),
             environment: typeof a.environment === "string" ? a.environment : "dev",
             ...(typeof a.activation === "string" ? { activation: a.activation } : {})
           }
