@@ -101,6 +101,34 @@ function tenantFilterClauseForKnn(tenantField: string, tenantId: string): Record
   return { term: { [tenantField]: tenantId } };
 }
 
+/**
+ * Normalize a user-supplied `filter` config into an array of raw OpenSearch
+ * filter clauses. Two shapes are accepted:
+ *  - **Array** — passed through verbatim. Use this for `range`, `prefix`,
+ *    `exists`, `bool`, etc. that need the full DSL.
+ *  - **Object** — each entry becomes a `term` (scalar) or `terms` (array)
+ *    clause. Convenient for simple exact-match constraints; mirrors the
+ *    existing BM25 / kNN retriever plugins' `filter` shape so all three are
+ *    interchangeable from the outside.
+ */
+function normalizeFilterConfig(raw: unknown): Array<Record<string, unknown>> {
+  if (raw === undefined || raw === null) return [];
+  if (Array.isArray(raw)) {
+    return raw.filter(
+      (c): c is Record<string, unknown> =>
+        typeof c === "object" && c !== null && !Array.isArray(c)
+    );
+  }
+  if (typeof raw === "object") {
+    const out: Array<Record<string, unknown>> = [];
+    for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+      out.push(Array.isArray(v) ? { terms: { [k]: v } } : { term: { [k]: v } });
+    }
+    return out;
+  }
+  return [];
+}
+
 interface RankedDoc {
   id: string;
   score: number;
@@ -670,6 +698,10 @@ export const openSearchHybridRetrieverPlugin: InProcessPlugin = {
         baseUrl: {
           type: "string",
           description: "Override the embedding provider base URL (e.g. a remote self-hosted Ollama)."
+        },
+        filter: {
+          description:
+            "Optional OpenSearch filter clauses applied to both arms (lexical and kNN). Accepts either an array of raw clauses (e.g. [{range: {date_received: {gte: 'now-14d/d'}}}, {prefix: {'folder_path.keyword': 'Inbox'}}]) or an object whose entries become term/terms clauses (legacy shape)."
         }
       },
       additionalProperties: false
@@ -702,7 +734,8 @@ export const openSearchHybridRetrieverPlugin: InProcessPlugin = {
         provider: { widget: "select" },
         topK: { widget: "number", min: 1, step: 1 },
         alpha: { widget: "range", min: 0, max: 1, step: 0.05 },
-        fields: { widget: "json" }
+        fields: { widget: "json" },
+        filter: { widget: "json" }
       }
     }
   },
@@ -725,6 +758,9 @@ export const openSearchHybridRetrieverPlugin: InProcessPlugin = {
     // "Rewrite first") and needs a leaf `term`. Both target the same field.
     const tenantFilter = tenantField ? [tenantFilterClause(tenantField, context.tenantId)] : [];
     const tenantFilterKnn = tenantField ? [tenantFilterClauseForKnn(tenantField, context.tenantId)] : [];
+    const userFilter = normalizeFilterConfig(config.filter);
+    const bm25Filter = [...tenantFilter, ...userFilter];
+    const knnFilterClauses = [...tenantFilterKnn, ...userFilter];
 
     let queryVector = inputs.queryVector as number[] | undefined;
     let usage: { provider?: string; model?: string; embeddingTokens?: number } | undefined;
@@ -746,7 +782,7 @@ export const openSearchHybridRetrieverPlugin: InProcessPlugin = {
         query: {
           bool: {
             must: [{ multi_match: { query: question, fields, type: "best_fields" } }],
-            filter: tenantFilter
+            filter: bm25Filter
           }
         }
       }),
@@ -757,7 +793,10 @@ export const openSearchHybridRetrieverPlugin: InProcessPlugin = {
             vector: {
               vector: queryVector,
               k: candidateK,
-              filter: tenantFilterKnn.length === 1 ? tenantFilterKnn[0] : { bool: { must: tenantFilterKnn } }
+              filter:
+                knnFilterClauses.length === 1
+                  ? knnFilterClauses[0]
+                  : { bool: { must: knnFilterClauses } }
             }
           }
         }
