@@ -167,8 +167,9 @@ interface HeaderCellProps {
   filterable: boolean;
   sortOrder: SortOrder | undefined;
   filterValue: string | undefined;
+  isOpen: boolean;
   onSortToggle: (columnId: string) => void;
-  onFilterChange: (columnId: string, value: string) => void;
+  onFilterButtonClick: (columnId: string, anchor: HTMLElement) => void;
 }
 
 /**
@@ -176,13 +177,17 @@ interface HeaderCellProps {
  *
  *   [ title ▲ ]  [ 🔍 ]
  *      |           |
- *      |           +--- filter button: click toggles a popover with a
- *      |                text input; clicking the button a SECOND time
- *      |                clears the filter and closes the popover.
+ *      |           +--- filter button: click opens a popover (rendered
+ *      |                by the parent SvarDataGrid, not here — SVAR's
+ *      |                Svelte/React bridge re-mounts our cell on every
+ *      |                column-prop change, which would lose any state
+ *      |                we kept locally and remount the <input>). The
+ *      |                popover stays open while the user types until
+ *      |                they press Enter, Esc, or click outside.
  *      +--- title click cycles sort: none → asc → desc → none.
  *
- * Filter and sort state are owned by the parent `SvarDataGrid`; this
- * component is purely presentational + emits change events.
+ * Sort and "which column's filter popover is open" both live in the
+ * parent; this component is purely presentational.
  */
 function HeaderCell(props: HeaderCellProps) {
   const {
@@ -192,65 +197,24 @@ function HeaderCell(props: HeaderCellProps) {
     filterable,
     sortOrder,
     filterValue,
+    isOpen,
     onSortToggle,
-    onFilterChange
+    onFilterButtonClick
   } = props;
-  const [open, setOpen] = useState(false);
-  const rootRef = useRef<HTMLDivElement | null>(null);
-  const inputRef = useRef<HTMLInputElement | null>(null);
   const filterActive = filterValue !== undefined && filterValue !== "";
-
-  // Click-outside the cell closes the popover without clearing — that
-  // way the filter stays applied if the operator clicked elsewhere by
-  // accident. Only a SECOND click on the button itself clears.
-  useEffect(() => {
-    if (!open) return;
-    const handler = (e: MouseEvent) => {
-      const root = rootRef.current;
-      if (root && !root.contains(e.target as Node)) {
-        setOpen(false);
-      }
-    };
-    document.addEventListener("mousedown", handler);
-    return () => document.removeEventListener("mousedown", handler);
-  }, [open]);
-
-  // Esc closes the popover (matches every other modal in the app).
-  useEffect(() => {
-    if (!open) return;
-    const handler = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setOpen(false);
-    };
-    window.addEventListener("keydown", handler);
-    return () => window.removeEventListener("keydown", handler);
-  }, [open]);
-
-  // Focus the input as soon as the popover opens — operator just
-  // clicked the button, they're about to type.
-  useEffect(() => {
-    if (open) inputRef.current?.focus();
-  }, [open]);
 
   const onTitleClick = (e: React.MouseEvent) => {
     e.stopPropagation();
     if (sortable) onSortToggle(columnId);
   };
 
-  const onFilterButtonClick = (e: React.MouseEvent) => {
+  const onClickButton = (e: React.MouseEvent<HTMLButtonElement>) => {
     e.stopPropagation();
-    if (open) {
-      // SECOND click — operator's signal to clear the filter and tidy
-      // up. Empty string instead of undefined so React treats it as
-      // a controlled-input reset, not a "switch to uncontrolled".
-      if (filterActive) onFilterChange(columnId, "");
-      setOpen(false);
-    } else {
-      setOpen(true);
-    }
+    onFilterButtonClick(columnId, e.currentTarget);
   };
 
   return (
-    <div className="grid-hcell" ref={rootRef}>
+    <div className="grid-hcell">
       <button
         type="button"
         className={`grid-hcell-title${sortable ? " sortable" : ""}`}
@@ -266,36 +230,126 @@ function HeaderCell(props: HeaderCellProps) {
         <button
           type="button"
           className={`grid-hcell-filter-btn${filterActive ? " active" : ""}${
-            open ? " open" : ""
+            isOpen ? " open" : ""
           }`}
-          onClick={onFilterButtonClick}
+          onClick={onClickButton}
           title={
-            filterActive
-              ? `Clear filter on ${title}`
-              : open
-                ? `Close filter`
+            isOpen
+              ? `Clear and close filter on ${title}`
+              : filterActive
+                ? `Filter on ${title} is active — click to edit`
                 : `Filter ${title}`
           }
           aria-label={`Filter ${title}`}
+          aria-pressed={isOpen}
         >
           <FilterIcon />
         </button>
       )}
-      {open && filterable && (
-        <div className="grid-hcell-filter-pop" role="dialog">
-          <input
-            ref={inputRef}
-            type="text"
-            className="grid-hcell-filter-input"
-            value={filterValue ?? ""}
-            onChange={(e) => onFilterChange(columnId, e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") setOpen(false);
-            }}
-            placeholder={`Filter ${title}…`}
-          />
-        </div>
-      )}
+    </div>
+  );
+}
+
+/** Viewport-relative anchor rect captured from the trigger button. */
+interface PopAnchor {
+  left: number;
+  top: number;
+  right: number;
+}
+
+interface FilterPopoverProps {
+  title: string;
+  anchor: PopAnchor;
+  value: string;
+  onChange: (value: string) => void;
+  onClose: () => void;
+}
+
+/**
+ * Filter popover rendered at the top of the SvarDataGrid component
+ * (NOT inside SVAR's column cell). Lives in our stable React tree so
+ * neither the popover container nor the input is unmounted when SVAR
+ * re-renders its header cells in response to a parent-state change
+ * (every keystroke updates the parent's `filters` map). That's the
+ * difference vs. the previous attempt that kept the popover inside
+ * the cell and lost focus + closed after one keypress.
+ *
+ * Positioning is `fixed`, anchored to the trigger button's
+ * `getBoundingClientRect()` captured at click time. The popover
+ * stays put if the operator scrolls; that's a deliberate trade-off
+ * — re-anchoring on every scroll event was jittery. Operators
+ * dismiss via Enter / Esc / click-outside instead.
+ */
+function FilterPopover(props: FilterPopoverProps) {
+  const { title, anchor, value, onChange, onClose } = props;
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const inputRef = useRef<HTMLInputElement | null>(null);
+
+  useEffect(() => {
+    inputRef.current?.focus();
+    // Move the caret to the end if there's existing text so the
+    // operator can extend the filter rather than overwrite it.
+    const el = inputRef.current;
+    if (el) el.setSelectionRange(el.value.length, el.value.length);
+  }, []);
+
+  // Click-outside closes (without clearing). The button's own click
+  // handler runs FIRST (its target is outside this popover too), and
+  // it routes through the wrapper's `onFilterButtonClick` which sets
+  // `popState = undefined`, so we don't double-close. Anywhere else
+  // outside the popover just closes.
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      const root = rootRef.current;
+      if (root && !root.contains(e.target as Node)) {
+        // Defer to next tick so a same-event click on the trigger
+        // button can run its own toggle (which would otherwise be
+        // pre-empted by us calling onClose first).
+        queueMicrotask(onClose);
+      }
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [onClose]);
+
+  // Esc / Enter close the popover. Esc keeps the filter; Enter is
+  // also "commit and close" since the filter is already applied
+  // live on every keystroke.
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === "Escape" || e.key === "Enter") {
+        e.stopPropagation();
+        onClose();
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [onClose]);
+
+  return (
+    <div
+      ref={rootRef}
+      className="grid-hcell-filter-pop"
+      role="dialog"
+      // Right-align with the trigger button when possible; fall back
+      // to left-align if it would overflow the viewport. We compute
+      // left such that the popover's right edge sits at `anchor.right`
+      // but never less than 8px from the viewport left edge.
+      style={{
+        position: "fixed",
+        top: anchor.top,
+        left: Math.max(8, anchor.right - 224),
+        minWidth: 220
+      }}
+    >
+      <input
+        ref={inputRef}
+        type="text"
+        className="grid-hcell-filter-input"
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={`Filter ${title}…`}
+      />
     </div>
   );
 }
@@ -363,6 +417,15 @@ export function SvarDataGrid<Row>(props: SvarDataGridProps<Row>) {
     undefined
   );
   const [filters, setFilters] = useState<Record<string, string>>({});
+  // Which column's filter popover is currently open, plus the anchor
+  // rect captured from the trigger button at click time. Lives here
+  // (not inside HeaderCell) because SVAR's React adapter re-mounts
+  // header cells whenever the columns prop changes — every keystroke
+  // updates `filters`, which would otherwise close the popover and
+  // remount the input mid-typing.
+  const [popState, setPopState] = useState<
+    { columnId: string; title: string; anchor: PopAnchor } | undefined
+  >(undefined);
 
   const onSortToggle = useCallback((columnId: string) => {
     setSort((prev) => {
@@ -400,6 +463,51 @@ export function SvarDataGrid<Row>(props: SvarDataGridProps<Row>) {
     }
   }, []);
 
+  // Headers ask the wrapper to open / clear / close the popover. Same
+  // button clicked twice clears the column's filter and closes; click
+  // on a DIFFERENT column's button switches the popover (without
+  // clearing the previous filter). Click on the same button while
+  // it's the active popover is the operator's "clear" affordance.
+  //
+  // We capture the trigger's getBoundingClientRect at click time so
+  // the FilterPopover (rendered above with `position: fixed`) lands
+  // directly below the button regardless of grid scroll position.
+  const onFilterButtonClick = useCallback(
+    (columnId: string, anchorEl: HTMLElement) => {
+      setPopState((prev) => {
+        if (prev?.columnId === columnId) {
+          onFilterChange(columnId, "");
+          return undefined;
+        }
+        const rect = anchorEl.getBoundingClientRect();
+        const col = columns.find((c) => c.id === columnId);
+        return {
+          columnId,
+          title: col?.header ?? columnId,
+          anchor: { left: rect.left, top: rect.bottom + 4, right: rect.right }
+        };
+      });
+    },
+    [columns, onFilterChange]
+  );
+
+  const closeFilterPopover = useCallback(() => setPopState(undefined), []);
+
+  // Close the popover if the grid scrolls or the window resizes —
+  // the captured anchor rect would otherwise drift away from the
+  // button. The operator can re-open instantly; their typed filter
+  // stays applied.
+  useEffect(() => {
+    if (!popState) return;
+    const onScroll = () => setPopState(undefined);
+    window.addEventListener("scroll", onScroll, { capture: true, passive: true });
+    window.addEventListener("resize", onScroll, { passive: true });
+    return () => {
+      window.removeEventListener("scroll", onScroll, { capture: true });
+      window.removeEventListener("resize", onScroll);
+    };
+  }, [popState]);
+
   // Map our typed Column<Row> into SVAR's IColumnConfig.
   const svarColumns = useMemo<IColumnConfig[]>(
     () =>
@@ -420,8 +528,9 @@ export function SvarDataGrid<Row>(props: SvarDataGridProps<Row>) {
             filterable={filterable}
             sortOrder={sort?.key === c.id ? sort.order : undefined}
             filterValue={filters[c.id]}
+            isOpen={popState?.columnId === c.id}
             onSortToggle={onSortToggle}
-            onFilterChange={onFilterChange}
+            onFilterButtonClick={onFilterButtonClick}
           />
         );
         const headerCell: Record<string, unknown> = {
@@ -473,7 +582,16 @@ export function SvarDataGrid<Row>(props: SvarDataGridProps<Row>) {
         }
         return cfg;
       }),
-    [columns, autoWidths, footerLabel, sort, filters, onSortToggle, onFilterChange]
+    [
+      columns,
+      autoWidths,
+      footerLabel,
+      sort,
+      filters,
+      popState,
+      onSortToggle,
+      onFilterButtonClick
+    ]
   );
 
   // Always provide an `id` field on every row; SVAR uses it as the row
@@ -583,6 +701,21 @@ export function SvarDataGrid<Row>(props: SvarDataGridProps<Row>) {
         <div className="svar-grid-loadmore" aria-live="polite">
           Loading more rows…
         </div>
+      )}
+      {/* Filter popover lives at the wrapper level — outside SVAR's
+          column-cell render path — so it stays mounted while the
+          operator types. Without this lift, SVAR re-mounts the cell
+          on every keystroke (parent state update → new columns
+          array → fresh React cell instance) and the popover would
+          disappear after one character. */}
+      {popState && (
+        <FilterPopover
+          title={popState.title}
+          anchor={popState.anchor}
+          value={filters[popState.columnId] ?? ""}
+          onChange={(v) => onFilterChange(popState.columnId, v)}
+          onClose={closeFilterPopover}
+        />
       )}
     </div>
   );
