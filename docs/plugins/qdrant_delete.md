@@ -41,3 +41,10 @@ delta_filter
 - Deletion is by id only — there's no "delete by docId via metadata" path.
   If your upsert plugin hashed the docId into a different point id, mirror
   that here via `idPrefix` or by configuring the same hash on both sides.
+- **Error detail.** The Qdrant JS client throws bare `Error: Bad
+  Request` (or similar status text) without including the response body
+  or the operation context. This plugin enriches the error with
+  `qdrant delete on "<collection>" (HTTP <status>): <baseMsg> ids[N]=…
+  — server: <body preview>` before it reaches the execution trace so
+  the operator can actually diagnose the failure. The original error is
+  preserved as `cause`.

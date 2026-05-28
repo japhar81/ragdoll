@@ -12,6 +12,7 @@ import type { InProcessPlugin } from "../../../../packages/plugin-sdk/src/index.
 import type { DistanceMetric } from "../../../../packages/vector/src/index.ts";
 import {
   OpenSearchClient,
+  OpenSearchError,
   OpenSearchVectorStore,
   createOpenSearchClient
 } from "../../../../packages/opensearch/src/index.ts";
@@ -127,6 +128,43 @@ function normalizeFilterConfig(raw: unknown): Array<Record<string, unknown>> {
     return out;
   }
   return [];
+}
+
+/**
+ * Heuristic check for the "kNN field absent / not knn_vector" family of
+ * OpenSearch 400 responses. We try the short list of reasons we've
+ * actually seen in the wild rather than substring-matching every
+ * possible string — false positives would mask real query bugs and
+ * hide them as "degraded".
+ */
+export function looksLikeMissingVectorField(body: unknown): boolean {
+  if (!body || typeof body !== "object") return false;
+  const errObj = (body as { error?: unknown }).error;
+  if (!errObj || typeof errObj !== "object") return false;
+  const root = errObj as { type?: unknown; reason?: unknown; root_cause?: unknown };
+  const type = String(root.type ?? "");
+  const reason = String(root.reason ?? "");
+  const rootCauses = Array.isArray(root.root_cause)
+    ? root.root_cause
+        .map((c) => String((c as { reason?: unknown }).reason ?? ""))
+        .join(" | ")
+    : "";
+  const haystack = `${type} ${reason} ${rootCauses}`.toLowerCase();
+  return (
+    haystack.includes("no mapping found for") ||
+    haystack.includes("field [vector]") ||
+    haystack.includes("knn_vector") ||
+    haystack.includes("query_shard_exception")
+  );
+}
+
+/** Extract the human-readable reason from an OpenSearch error body. */
+function vectorErrorMessage(body: unknown): string {
+  if (body && typeof body === "object") {
+    const err = (body as { error?: { reason?: unknown } }).error;
+    if (err && typeof err.reason === "string") return err.reason;
+  }
+  return "kNN search returned 400 (vector field likely missing)";
 }
 
 interface RankedDoc {
@@ -320,7 +358,12 @@ export const openSearchOutputPlugin: InProcessPlugin = {
       { name: "vectors", description: "Optional embedding vectors written to `vectorField` per row." }
     ],
     outputPorts: [
-      { name: "indexed", description: "Number of documents written to the index." }
+      { name: "indexed", description: "Number of documents written to the index." },
+      {
+        name: "skippedVectors",
+        description:
+          "Count of rows whose vector was missing, empty, or wrong-length and was therefore omitted from the indexed doc. Only emitted when > 0."
+      }
     ],
     capabilities: ["ingestion"],
     ui: {
@@ -343,12 +386,38 @@ export const openSearchOutputPlugin: InProcessPlugin = {
     const chunks =
       (inputs.chunks as Array<{ text?: string; index?: number } & Record<string, unknown>> | undefined) ?? [];
     const vectors = (inputs.vectors as number[][] | undefined) ?? [];
+    const declaredDim = config.dimensions ? Number(config.dimensions) : undefined;
+
+    // Validate every vector before splicing it into a doc.
+    //   - `null` / `undefined` → field omitted (the doc indexes without it).
+    //   - `[]` / wrong-length array → DROPPED with a log line, NOT written.
+    //     OpenSearch's knn_vector field renders an empty array as `null` in
+    //     its bulk-error preview ("Preview of field's value: 'null'") which
+    //     masks the upstream cause; we'd rather index a doc without a
+    //     vector than write a poison value that fails the whole bulk.
+    let skippedVectors = 0;
+    const acceptVector = (raw: unknown, _rowLabel: string): number[] | undefined => {
+      if (raw === undefined || raw === null) return undefined;
+      if (!Array.isArray(raw) || raw.length === 0) {
+        skippedVectors += 1;
+        return undefined;
+      }
+      if (declaredDim !== undefined && raw.length !== declaredDim) {
+        skippedVectors += 1;
+        return undefined;
+      }
+      return raw as number[];
+    };
+    // Reusable noop for the rowLabel argument — used by both branches.
 
     const docs: Array<{ id?: string; doc: Record<string, unknown> }> = [];
     if (documents && documents.length > 0) {
       documents.forEach((source, i) => {
         const doc: Record<string, unknown> = { ...source, tenantId: context.tenantId };
-        if (vectorField && vectors[i]) doc[vectorField] = vectors[i];
+        if (vectorField) {
+          const v = acceptVector(vectors[i], `documents[${i}]`);
+          if (v) doc[vectorField] = v;
+        }
         const id = idField ? source[idField] : source.id;
         docs.push({ id: id !== undefined ? String(id) : undefined, doc });
       });
@@ -361,7 +430,10 @@ export const openSearchOutputPlugin: InProcessPlugin = {
           tenantId: context.tenantId,
           ...rest
         };
-        if (vectorField && vectors[i]) doc[vectorField] = vectors[i];
+        if (vectorField) {
+          const v = acceptVector(vectors[i], `chunks[${i}]`);
+          if (v) doc[vectorField] = v;
+        }
         docs.push({ id: chunk.id !== undefined ? String(chunk.id) : undefined, doc });
       });
     }
@@ -420,7 +492,18 @@ export const openSearchOutputPlugin: InProcessPlugin = {
     }
 
     const { indexed } = await client.bulkIndex(index, docs, true);
-    return { outputs: { indexed } };
+    return {
+      outputs: { indexed, ...(skippedVectors > 0 ? { skippedVectors } : {}) },
+      ...(skippedVectors > 0
+        ? {
+            metadata: {
+              skippedVectors,
+              note:
+                "Empty / wrong-length vectors were dropped to avoid an OpenSearch knn_vector parse failure. Check upstream embedder output."
+            }
+          }
+        : {})
+    };
   }
 };
 
@@ -776,6 +859,15 @@ export const openSearchHybridRetrieverPlugin: InProcessPlugin = {
       usage = { provider: embedded.provider, model: embedded.model, embeddingTokens: embedded.embeddingTokens };
     }
 
+    // The kNN arm can fail with HTTP 400 when the index has no
+    // `vector` field mapped as knn_vector — typically when only the
+    // BM25 ingest pipeline has run (or the sibling vector ingest is
+    // pending). Treat that as "no vector hits available" instead of
+    // failing the whole pipeline: BM25 is still a valid answer
+    // source, and the operator can re-run the vector ingest later.
+    // Errors that aren't the known shape still propagate so real
+    // problems aren't masked.
+    let vectorDegradedReason: string | undefined;
     const [lexical, vector] = await Promise.all([
       client.search(index, {
         size: candidateK,
@@ -786,21 +878,33 @@ export const openSearchHybridRetrieverPlugin: InProcessPlugin = {
           }
         }
       }),
-      client.search(index, {
-        size: candidateK,
-        query: {
-          knn: {
-            vector: {
-              vector: queryVector,
-              k: candidateK,
-              filter:
-                knnFilterClauses.length === 1
-                  ? knnFilterClauses[0]
-                  : { bool: { must: knnFilterClauses } }
+      client
+        .search(index, {
+          size: candidateK,
+          query: {
+            knn: {
+              vector: {
+                vector: queryVector,
+                k: candidateK,
+                filter:
+                  knnFilterClauses.length === 1
+                    ? knnFilterClauses[0]
+                    : { bool: { must: knnFilterClauses } }
+              }
             }
           }
-        }
-      })
+        })
+        .catch((err: unknown) => {
+          if (
+            err instanceof OpenSearchError &&
+            err.status === 400 &&
+            looksLikeMissingVectorField(err.body)
+          ) {
+            vectorDegradedReason = vectorErrorMessage(err.body);
+            return { total: 0, hits: [] };
+          }
+          throw err;
+        })
     ]);
 
     const fused = fuseHybridResults(
@@ -817,7 +921,23 @@ export const openSearchHybridRetrieverPlugin: InProcessPlugin = {
       const { vector: _v, ...rest } = d.source;
       return { id: d.id, score: d.score, ...rest };
     });
-    return { outputs: { documents }, ...(usage ? { usage } : {}) };
+    return {
+      outputs: {
+        documents,
+        ...(vectorDegradedReason ? { degraded: { vector: vectorDegradedReason } } : {})
+      },
+      ...(vectorDegradedReason
+        ? {
+            metadata: {
+              vectorArmSkipped: true,
+              vectorArmReason: vectorDegradedReason,
+              note:
+                "kNN arm returned 400 (typically because the vector field has not been ingested on this index). Returning BM25-only results."
+            }
+          }
+        : {}),
+      ...(usage ? { usage } : {})
+    };
   }
 };
 

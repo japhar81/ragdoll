@@ -287,9 +287,19 @@ export class OllamaCompatibleProvider implements ProviderAdapter {
      *  and emit a zero vector for any single text that still won't
      *  embed. Zero vectors are correctly-shaped and let the run finish;
      *  the alternative — dropping rows — would silently desync chunk
-     *  arrays from vector arrays downstream. */
+     *  arrays from vector arrays downstream.
+     *
+     *  `knownDim` is hoisted to the outer scope so a fallback in a
+     *  later batch can reuse the dimension established by an earlier
+     *  successful batch. Earlier the variable was scoped INSIDE the
+     *  catch block and started at 0; if the very first text of the
+     *  very first batch couldn't embed, we'd push `new Array(0).fill(0)`
+     *  — an empty array — which downstream serialised as `null` in
+     *  OpenSearch knn_vector and exploded with `mapper_parsing_exception`
+     *  at index time. */
     const isContextLengthError = (e: unknown): boolean =>
       e instanceof Error && /input length exceeds the context length/i.test(e.message);
+    let knownDim = 0;
     for (let i = 0; i < truncated.length; i += BATCH_SIZE) {
       const slice = truncated.slice(i, i + BATCH_SIZE);
       let batch: Awaited<ReturnType<typeof embedBatch>>;
@@ -298,16 +308,15 @@ export class OllamaCompatibleProvider implements ProviderAdapter {
       } catch (err) {
         if (!isContextLengthError(err)) throw err;
         const singles: number[][] = [];
-        let dim = 0;
         for (const text of slice) {
           try {
             const r = await embedBatch([text]);
             const v = r.embeddings?.[0];
-            if (v) {
+            if (v && v.length > 0) {
               singles.push(v);
-              dim = v.length;
+              knownDim = v.length;
             } else {
-              singles.push(new Array(dim).fill(0));
+              singles.push(zeroVectorOrFail(knownDim));
             }
             totalTokens += r.prompt_eval_count ?? 0;
             lastModel = r.model ?? lastModel;
@@ -316,12 +325,15 @@ export class OllamaCompatibleProvider implements ProviderAdapter {
             // Even after 4000-char truncation this single chunk is
             // still too long. Keep going; sink zeros so the indices
             // line up with the upstream chunk array.
-            singles.push(new Array(dim).fill(0));
+            singles.push(zeroVectorOrFail(knownDim));
           }
         }
         batch = { embeddings: singles };
       }
       const batchVectors = batch.embeddings ?? [];
+      if (batchVectors.length > 0 && batchVectors[0].length > 0) {
+        knownDim = batchVectors[0].length;
+      }
       vectors.push(...batchVectors);
       totalTokens += batch.prompt_eval_count ?? 0;
       lastModel = batch.model ?? lastModel;
@@ -353,6 +365,26 @@ export class OllamaCompatibleProvider implements ProviderAdapter {
       return { ok: false, message: error instanceof Error ? error.message : String(error) };
     }
   }
+}
+
+/**
+ * Build a placeholder zero vector for a text we couldn't embed. Refuses
+ * to return an empty array — downstream callers (OpenSearch knn_vector,
+ * Qdrant) reject zero-length vectors, and worse, opensearch's bulk
+ * serialisation reports them in the error preview as `null`, which
+ * masks the upstream cause. Throwing here surfaces the failure with the
+ * actual root cause: the embedding provider rejected the FIRST chunk of
+ * a request and we never got a chance to learn the model's dimension.
+ */
+export function zeroVectorOrFail(knownDim: number): number[] {
+  if (knownDim > 0) return new Array(knownDim).fill(0);
+  throw new Error(
+    "Ollama embedder: the very first text in the request exceeded the model's context " +
+      "length and no successful embedding has run yet, so the vector dimension is unknown. " +
+      "Cannot emit a zero-vector placeholder. Truncate the inputs upstream (e.g. shrink " +
+      "the chunker's chunkSize or filter oversized chunks) or hit /api/embed once with " +
+      "a small probe to warm the model."
+  );
 }
 
 /**
