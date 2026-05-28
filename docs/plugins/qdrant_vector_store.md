@@ -23,6 +23,10 @@ string) for the Qdrant client.
   in Secrets, never the pipeline spec.
 - Falls back to the in-memory store when `url` is empty — useful for
   smoke tests, not for production state.
+- **Error detail.** Bare `Error: Bad Request` from the Qdrant client
+  is enriched with operation + collection + dim + count + server-side
+  detail before reaching the execution trace, so a dim mismatch or
+  payload-shape error shows the actual cause rather than a flat 400.
 
 ## Typical position
 
