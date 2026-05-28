@@ -1,17 +1,35 @@
+{{/*
+Worker leader: single replica, owns the cron scheduler.
+
+The worker has a built-in croner scheduler that ticks every scheduled
+pipeline. Running N replicas with the scheduler enabled would fire
+every cron N times. So we run ONE leader pod with
+WORKER_SCHEDULER_ENABLED=true and N follower pods that only consume
+BullMQ jobs. This is the helm equivalent of the docker-compose
+worker-1 / worker-2 split.
+*/}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: ragdoll-worker
+  name: ragdoll-worker-leader
+  labels:
+    app: ragdoll-worker
+    role: leader
 spec:
-  replicas: {{ .Values.worker.replicas }}
+  replicas: {{ .Values.worker.leader.replicas }}
   selector:
     matchLabels:
       app: ragdoll-worker
+      role: leader
   template:
     metadata:
       labels:
         app: ragdoll-worker
+        role: leader
     spec:
+      serviceAccountName: {{ include "ragdoll.serviceAccountName" . }}
+      initContainers:
+        {{- include "ragdoll.waitForDbInit" . | nindent 8 }}
       containers:
         - name: worker
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
@@ -20,20 +38,85 @@ spec:
           envFrom:
             - secretRef:
                 name: {{ .Values.secrets.existingSecret }}
-          {{- if .Values.pythonPlugins.enabled }}
-          # Worker executes crawl jobs. Setting PYTHON_PLUGIN_URL makes the
-          # plugin-loader register the external crawl4ai_crawler /
-          # scrapy_spider plugins, pointed at the in-cluster Service.
           env:
-            - name: PYTHON_PLUGIN_URL
-              value: "http://{{ .Release.Name }}-python-plugins:{{ .Values.pythonPlugins.port }}"
-            - name: PYTHON_PLUGIN_TIMEOUT_MS
-              value: "{{ .Values.pythonPlugins.timeoutMs }}"
-          {{- end }}
+            - name: WORKER_ID
+              value: "worker-leader"
+            - name: WORKER_SCHEDULER_ENABLED
+              value: "true"
+            - name: OTEL_SERVICE_NAME
+              value: "ragdoll-worker"
+            {{- if .Values.ollama.baseUrl }}
+            - name: OLLAMA_BASE_URL
+              value: {{ .Values.ollama.baseUrl | quote }}
+            {{- end }}
+            {{- if .Values.worker.ollamaWarmModels }}
+            - name: OLLAMA_WARM_MODELS
+              value: {{ .Values.worker.ollamaWarmModels | quote }}
+            - name: OLLAMA_WARM_INTERVAL_MS
+              value: {{ .Values.worker.ollamaWarmIntervalMs | quote }}
+            {{- end }}
+            {{- include "ragdoll.commonBackendEnv" . | nindent 12 }}
           resources:
             requests:
-              cpu: 250m
-              memory: 256Mi
+              cpu: {{ .Values.worker.leader.resources.requests.cpu }}
+              memory: {{ .Values.worker.leader.resources.requests.memory }}
             limits:
-              cpu: "1"
-              memory: 1Gi
+              cpu: {{ .Values.worker.leader.resources.limits.cpu | quote }}
+              memory: {{ .Values.worker.leader.resources.limits.memory }}
+{{- if gt (int .Values.worker.followers.replicas) 0 }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ragdoll-worker-follower
+  labels:
+    app: ragdoll-worker
+    role: follower
+spec:
+  replicas: {{ .Values.worker.followers.replicas }}
+  selector:
+    matchLabels:
+      app: ragdoll-worker
+      role: follower
+  template:
+    metadata:
+      labels:
+        app: ragdoll-worker
+        role: follower
+    spec:
+      serviceAccountName: {{ include "ragdoll.serviceAccountName" . }}
+      initContainers:
+        {{- include "ragdoll.waitForDbInit" . | nindent 8 }}
+      containers:
+        - name: worker
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["node", "--experimental-strip-types", "apps/worker/src/index.ts"]
+          envFrom:
+            - secretRef:
+                name: {{ .Values.secrets.existingSecret }}
+          env:
+            # Per-pod identity for the OTel service.instance.id +
+            # BullMQ worker name. Downward API → pod name keeps each
+            # replica distinguishable in the dashboards.
+            - name: WORKER_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: WORKER_SCHEDULER_ENABLED
+              value: "false"
+            - name: OTEL_SERVICE_NAME
+              value: "ragdoll-worker"
+            {{- if .Values.ollama.baseUrl }}
+            - name: OLLAMA_BASE_URL
+              value: {{ .Values.ollama.baseUrl | quote }}
+            {{- end }}
+            {{- include "ragdoll.commonBackendEnv" . | nindent 12 }}
+          resources:
+            requests:
+              cpu: {{ .Values.worker.followers.resources.requests.cpu }}
+              memory: {{ .Values.worker.followers.resources.requests.memory }}
+            limits:
+              cpu: {{ .Values.worker.followers.resources.limits.cpu | quote }}
+              memory: {{ .Values.worker.followers.resources.limits.memory }}
+{{- end }}

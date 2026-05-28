@@ -1,53 +1,170 @@
+# ============================================================================
+# RAGdoll Helm chart values
+#
+# This chart deploys the API, worker (split into a "leader" + N followers so
+# the cron scheduler doesn't fan out), web UI, optional python-plugins
+# sidecar, and a one-shot db-init Job that runs migrations + seeds at
+# install/upgrade time. The first install also provisions a platform-admin
+# user from BOOTSTRAP_ADMIN_EMAIL / BOOTSTRAP_ADMIN_PASSWORD (declared on
+# the existingSecret — see infra/k8s/ragdoll-secrets.example.yaml).
+#
+# Bring-your-own backends: Postgres / Redis / Qdrant / OpenSearch / OTel
+# collector are NOT deployed by this chart — point at existing services
+# via the URLs below. The example secret carries the Postgres + Redis DSN;
+# the rest are plain values.
+# ============================================================================
+
 image:
   repository: ragdoll
   tag: latest
   pullPolicy: IfNotPresent
 
+# Web is built from the same monorepo but ships as a separate nginx image
+# (see infra/docker/web.Dockerfile). Override the suffix to swap repos.
+webImage:
+  repository: ragdoll-web
+  tag: latest
+  pullPolicy: IfNotPresent
+
+# Service-account used by every workload. Leave name empty to let helm
+# generate `<release>-ragdoll`; create: false skips creation if you've
+# already minted one out-of-band.
+serviceAccount:
+  create: true
+  name: ""
+
+# ---------------------------------------------------------------------------
+# API
+# ---------------------------------------------------------------------------
 api:
   replicas: 2
   port: 3001
+  env: production
+  # Default-deny auth: the first install reads these from the existing
+  # secret and provisions a single platform_admin user. Override to your
+  # tenant's real address & a strong password BEFORE the first install.
+  # Subsequent installs are idempotent — the user is only created if no
+  # account with this email exists.
+  bootstrapAdmin:
+    # When `existingSecret` carries `BOOTSTRAP_ADMIN_EMAIL` /
+    # `BOOTSTRAP_ADMIN_PASSWORD`, those win and you can leave these
+    # placeholders alone.
+    email: "admin@change-me.local"
+    # Empty → falls back to the value on the existing secret. NEVER ship
+    # a real password in values.yaml; use the secret.
+    password: ""
+  # Browser-facing URL of the web UI. Used as the SSO callback target
+  # and email links. Must match what an operator types into their
+  # browser, including scheme + port.
+  webBaseUrl: "http://localhost:8088"
+  resources:
+    requests: { cpu: 250m, memory: 256Mi }
+    limits: { cpu: "1", memory: 1Gi }
 
+# ---------------------------------------------------------------------------
+# Worker — split to keep the cron scheduler single-fire.
+# ---------------------------------------------------------------------------
+#
+# The worker has a built-in cron scheduler that ticks via croner. Running
+# N replicas of one Deployment would fire every schedule N times. So we
+# run one "leader" pod with WORKER_SCHEDULER_ENABLED=true and N "follower"
+# pods that only consume BullMQ jobs. The split mirrors the docker-compose
+# worker-1 / worker-2 pattern.
 worker:
-  replicas: 2
+  leader:
+    replicas: 1
+    resources:
+      requests: { cpu: 250m, memory: 256Mi }
+      limits: { cpu: "1", memory: 1Gi }
+  followers:
+    replicas: 1   # raise for higher job throughput
+    resources:
+      requests: { cpu: 250m, memory: 256Mi }
+      limits: { cpu: "1", memory: 1Gi }
+  # Comma-separated list of Ollama models the worker pulls/warms on
+  # boot. Empty disables warm-up (saves cold-start time on installs
+  # that don't use local Ollama).
+  ollamaWarmModels: ""
+  ollamaWarmIntervalMs: 300000
 
+# ---------------------------------------------------------------------------
+# Web (nginx serving the SPA + reverse-proxying /api to the API Service)
+# ---------------------------------------------------------------------------
 web:
   replicas: 2
   port: 80
+  resources:
+    requests: { cpu: 100m, memory: 128Mi }
+    limits: { cpu: 500m, memory: 512Mi }
 
-# Python crawler plugin service (crawl4ai + scrapy). The image bundles a
-# headless Chromium so it needs noticeably more memory than the JS services.
-# When enabled, the api/worker get PYTHON_PLUGIN_URL pointing at its Service
-# so the plugin-loader auto-registers the external crawler plugins.
+# ---------------------------------------------------------------------------
+# Python plugins (crawl4ai + scrapy). Optional; enable only when you want
+# the crawler plugins registered in the plugin catalog. Image is large
+# (~headless Chromium) — keep replicas at 1.
+# ---------------------------------------------------------------------------
 pythonPlugins:
   enabled: true
   replicas: 1
   port: 8000
   image:
-    # Defaults to the shared image repo with a distinct tag; override for a
-    # separately built Chromium image.
     repository: ragdoll-python-plugins
     tag: latest
     pullPolicy: IfNotPresent
   timeoutMs: 300000
   resources:
-    requests:
-      cpu: 250m
-      memory: 512Mi
-    limits:
-      cpu: "2"
-      memory: 2Gi
+    requests: { cpu: 250m, memory: 512Mi }
+    limits: { cpu: "2", memory: 2Gi }
 
-postgres:
-  externalUrl: ""
-
-redis:
-  externalUrl: ""
-
+# ---------------------------------------------------------------------------
+# Backend wiring. Sensitive URLs (DATABASE_URL, REDIS_URL,
+# SECRET_ENCRYPTION_KEY, SESSION_SECRET, BOOTSTRAP_ADMIN_*) live on
+# `secrets.existingSecret`; non-secret URLs go here.
+# ---------------------------------------------------------------------------
 qdrant:
-  url: http://qdrant:6333
+  url: "http://qdrant:6333"
+
+opensearch:
+  url: "http://opensearch:9200"
+
+# Optional graph backend. Set to "" to disable the graph modality.
+dgraph:
+  url: ""
+
+# Optional Ollama (local LLM). Set to "" to disable Ollama-backed plugins.
+ollama:
+  baseUrl: ""
+
+# Which vector backend `createVectorStore` picks for plugins that haven't
+# been pointed at a specific Dataset. `qdrant` | `pgvector` | `opensearch`.
+# Per-dataset selection (ADR 0016) overrides this.
+vectorBackend: qdrant
 
 otel:
-  endpoint: http://otel-collector:4318
+  endpoint: "http://otel-collector:4318"
+  # Service-namespace + environment attributes appended to every span /
+  # metric / log. The collector uses them to route to per-tenant
+  # dashboards.
+  resourceAttributes: "service.namespace=ragdoll,deployment.environment=production"
 
 secrets:
+  # Name of the Kubernetes Secret holding sensitive env vars. See
+  # infra/k8s/ragdoll-secrets.example.yaml for the required keys.
   existingSecret: ragdoll-secrets
+
+# ---------------------------------------------------------------------------
+# Ingress (optional). When enabled, an Ingress resource is rendered for the
+# web Service. Class + annotations are passthrough so you can wire any
+# controller (nginx, traefik, gce, alb…).
+# ---------------------------------------------------------------------------
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: ragdoll.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+  # - secretName: ragdoll-tls
+  #   hosts: [ragdoll.example.com]

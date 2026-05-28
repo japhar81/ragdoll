@@ -1,0 +1,53 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-web-nginx
+data:
+  default.conf: |
+    # Map the client's `Upgrade` header to the upstream `Connection` value
+    # so WebSocket upgrades for `/api/events` are forwarded rather than
+    # swallowed. Regular HTTP requests (where `$http_upgrade` is empty)
+    # send `Connection: ""` which nginx treats as "no Connection header".
+    map $http_upgrade $connection_upgrade {
+        default upgrade;
+        ''      '';
+    }
+
+    server {
+        listen 80;
+        server_name _;
+        root /usr/share/nginx/html;
+        index index.html;
+
+        # Reverse-proxy control-plane endpoints to the api Service. The
+        # bundled docker image's nginx.conf hard-coded `api:3001` (the
+        # docker-compose service name + port). In Kubernetes the Service
+        # is `ragdoll-api` on port 80, so the chart renders this
+        # ConfigMap and mounts it into the web container.
+        location /api/ {
+            proxy_pass http://ragdoll-api:80;
+            proxy_http_version 1.1;
+            proxy_set_header Host $host;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+            proxy_set_header Upgrade $http_upgrade;
+            proxy_set_header Connection $connection_upgrade;
+            # First /run on a cold CPU Ollama can take several minutes.
+            proxy_read_timeout 600s;
+            proxy_buffering off;
+        }
+
+        location = /healthz {
+            proxy_pass http://ragdoll-api:80/healthz;
+            proxy_set_header Host $host;
+        }
+
+        location = /readyz {
+            proxy_pass http://ragdoll-api:80/readyz;
+            proxy_set_header Host $host;
+        }
+
+        location / {
+            try_files $uri $uri/ /index.html;
+        }
+    }

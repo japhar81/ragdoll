@@ -2,6 +2,8 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: ragdoll-api
+  labels:
+    app: ragdoll-api
 spec:
   replicas: {{ .Values.api.replicas }}
   selector:
@@ -12,6 +14,13 @@ spec:
       labels:
         app: ragdoll-api
     spec:
+      serviceAccountName: {{ include "ragdoll.serviceAccountName" . }}
+      # Block startup until the pre-install db-init Job has migrated
+      # the schema. Without this guard, the api would fail readiness
+      # for several minutes on a fresh install (or worse, crash on
+      # missing tables) while the Job ran in parallel.
+      initContainers:
+        {{- include "ragdoll.waitForDbInit" . | nindent 8 }}
       containers:
         - name: api
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
@@ -20,30 +29,55 @@ spec:
           ports:
             - containerPort: {{ .Values.api.port }}
           envFrom:
+            # Sensitive vars: DATABASE_URL, REDIS_URL,
+            # SECRET_ENCRYPTION_KEY, SESSION_SECRET,
+            # BOOTSTRAP_ADMIN_EMAIL, BOOTSTRAP_ADMIN_PASSWORD.
+            # See infra/k8s/ragdoll-secrets.example.yaml.
             - secretRef:
                 name: {{ .Values.secrets.existingSecret }}
-          {{- if .Values.pythonPlugins.enabled }}
-          # api only lists/validates the external crawler plugins for the
-          # builder palette, but still needs PYTHON_PLUGIN_URL set so the
-          # plugin-loader registers them.
           env:
-            - name: PYTHON_PLUGIN_URL
-              value: "http://{{ .Release.Name }}-python-plugins:{{ .Values.pythonPlugins.port }}"
-            - name: PYTHON_PLUGIN_TIMEOUT_MS
-              value: "{{ .Values.pythonPlugins.timeoutMs }}"
-          {{- end }}
+            - name: PORT
+              value: {{ .Values.api.port | quote }}
+            - name: RAGDOLL_ENV
+              value: {{ .Values.api.env | quote }}
+            - name: OTEL_SERVICE_NAME
+              value: "ragdoll-api"
+            # SSO-callback / email-link base URL. Override per-env via
+            # values.yaml; this is the URL the operator's browser sees.
+            - name: WEB_BASE_URL
+              value: {{ .Values.api.webBaseUrl | quote }}
+            # Bootstrap admin: api/server.ts reads these on every boot
+            # and provisions a platform_admin user IF none exists with
+            # this email. Idempotent. Prefer setting both on the
+            # existing secret; the inline value here is a fallback
+            # for the email so you can change it without rotating the
+            # secret. Setting `password` here is discouraged — leave
+            # it empty and use the secret.
+            {{- if .Values.api.bootstrapAdmin.email }}
+            - name: BOOTSTRAP_ADMIN_EMAIL
+              value: {{ .Values.api.bootstrapAdmin.email | quote }}
+            {{- end }}
+            {{- if .Values.api.bootstrapAdmin.password }}
+            - name: BOOTSTRAP_ADMIN_PASSWORD
+              value: {{ .Values.api.bootstrapAdmin.password | quote }}
+            {{- end }}
+            {{- include "ragdoll.commonBackendEnv" . | nindent 12 }}
           readinessProbe:
             httpGet:
               path: /readyz
               port: {{ .Values.api.port }}
+            initialDelaySeconds: 5
+            periodSeconds: 5
           livenessProbe:
             httpGet:
               path: /healthz
               port: {{ .Values.api.port }}
+            initialDelaySeconds: 15
+            periodSeconds: 10
           resources:
             requests:
-              cpu: 250m
-              memory: 256Mi
+              cpu: {{ .Values.api.resources.requests.cpu }}
+              memory: {{ .Values.api.resources.requests.memory }}
             limits:
-              cpu: "1"
-              memory: 1Gi
+              cpu: {{ .Values.api.resources.limits.cpu | quote }}
+              memory: {{ .Values.api.resources.limits.memory }}

@@ -2,6 +2,8 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: ragdoll-web
+  labels:
+    app: ragdoll-web
 spec:
   replicas: {{ .Values.web.replicas }}
   selector:
@@ -11,17 +13,41 @@ spec:
     metadata:
       labels:
         app: ragdoll-web
+      annotations:
+        # Roll the web pods whenever the nginx config changes (changing
+        # the upstream is a no-op until we restart nginx).
+        checksum/nginx: {{ include (print $.Template.BasePath "/web-nginx-configmap.yaml") . | sha256sum }}
     spec:
+      serviceAccountName: {{ include "ragdoll.serviceAccountName" . }}
       containers:
         - name: web
-          image: "{{ .Values.image.repository }}-web:{{ .Values.image.tag }}"
-          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          image: "{{ .Values.webImage.repository }}:{{ .Values.webImage.tag }}"
+          imagePullPolicy: {{ .Values.webImage.pullPolicy }}
           ports:
             - containerPort: {{ .Values.web.port }}
+          volumeMounts:
+            - name: nginx-config
+              mountPath: /etc/nginx/conf.d/default.conf
+              subPath: default.conf
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: {{ .Values.web.port }}
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: {{ .Values.web.port }}
+            initialDelaySeconds: 15
+            periodSeconds: 20
           resources:
             requests:
-              cpu: 100m
-              memory: 128Mi
+              cpu: {{ .Values.web.resources.requests.cpu }}
+              memory: {{ .Values.web.resources.requests.memory }}
             limits:
-              cpu: 500m
-              memory: 512Mi
+              cpu: {{ .Values.web.resources.limits.cpu | quote }}
+              memory: {{ .Values.web.resources.limits.memory }}
+      volumes:
+        - name: nginx-config
+          configMap:
+            name: {{ .Release.Name }}-web-nginx
