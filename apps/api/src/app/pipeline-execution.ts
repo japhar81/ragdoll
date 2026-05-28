@@ -196,6 +196,7 @@ export async function enqueuePipelineRun(args: {
     tenantId,
     pipelineId,
     pipelineVersionId: resolved.id,
+    environment,
     status: "running",
     startedAt: nowIso(),
     input: redactValue(input)
