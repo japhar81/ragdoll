@@ -1055,10 +1055,70 @@ export const qdrantDeletePlugin: InProcessPlugin = {
       .map((e) => (typeof e.docId === "string" && e.docId ? `${idPrefix}${e.docId}` : undefined))
       .filter((id): id is string => !!id);
     if (ids.length === 0) return { outputs: { deletedCount: 0 } };
-    await store.deleteByIds(collection, ids);
+    try {
+      await store.deleteByIds(collection, ids);
+    } catch (err) {
+      // The Qdrant js client throws bare `Error: Bad Request` (or
+      // similar status text) without including the response body or
+      // the operation context. That makes a failed delete look
+      // identical to a failed upsert in the trace. Enrich here so the
+      // operator sees the collection + id-list-preview that's needed
+      // to actually diagnose the problem.
+      throw enrichQdrantError(err, {
+        operation: "delete",
+        collection,
+        ids
+      });
+    }
     return { outputs: { deletedCount: ids.length } };
   }
 };
+
+/**
+ * Add operation + collection + first-few-ids to a Qdrant client error.
+ * Pure error transform — no I/O — so it's safe to call from any plugin
+ * that wraps a qdrant call. The original error is kept as `cause` so
+ * stack traces stay intact.
+ */
+export function enrichQdrantError(
+  err: unknown,
+  ctx: { operation: string; collection: string; ids?: string[]; dim?: number; count?: number }
+): Error {
+  const baseMsg = err instanceof Error ? err.message : String(err);
+  // The qdrant-js client surfaces server detail on `err.data` (REST
+  // wrapper) and sometimes `err.body`. We try both and stringify a
+  // compact preview if either is present.
+  const e = err as { data?: unknown; body?: unknown; status?: unknown };
+  let detail = "";
+  for (const candidate of [e.data, e.body]) {
+    if (candidate && typeof candidate === "object") {
+      try {
+        const text = JSON.stringify(candidate);
+        if (text && text !== "{}") {
+          detail = ` — server: ${text.slice(0, 300)}`;
+          break;
+        }
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+  const status = typeof e.status === "number" ? ` (HTTP ${e.status})` : "";
+  const idsPreview =
+    ctx.ids && ctx.ids.length > 0
+      ? ` ids[${ctx.ids.length}]=${JSON.stringify(ctx.ids.slice(0, 5))}${ctx.ids.length > 5 ? "…" : ""}`
+      : "";
+  const sizeInfo =
+    ctx.count !== undefined ? ` count=${ctx.count}` : "";
+  const dimInfo = ctx.dim !== undefined ? ` dim=${ctx.dim}` : "";
+  const enriched = new Error(
+    `qdrant ${ctx.operation} on "${ctx.collection}"${status}: ${baseMsg}${dimInfo}${sizeInfo}${idsPreview}${detail}`
+  );
+  // Preserve the cause chain so stack inspection still leads back to
+  // the qdrant client call.
+  (enriched as { cause?: unknown }).cause = err;
+  return enriched;
+}
 
 // ===========================================================================
 // opensearch_delete

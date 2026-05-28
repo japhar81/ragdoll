@@ -37,8 +37,10 @@ export {
   codeChunkerPlugin,
   qdrantDeletePlugin,
   opensearchDeletePlugin,
-  pathClassifierPlugin
+  pathClassifierPlugin,
+  enrichQdrantError
 } from "./ingest.ts";
+import { enrichQdrantError } from "./ingest.ts";
 // GitHub datasource — emits one document per file in a repo tree at a
 // given ref. Mirrors filesystem_source's output shape so the rest of
 // the ingest path (delta_filter, code_chunker, …) works unchanged.
@@ -1123,7 +1125,20 @@ export const qdrantVectorStorePlugin: InProcessPlugin = {
         payload: { text: text ?? "", chunkIndex: chunkIndex ?? index, ...rest }
       };
     });
-    await store.upsert(collection, points);
+    try {
+      await store.upsert(collection, points);
+    } catch (err) {
+      // Same shape as qdrant_delete: enrich the bare client error with
+      // operation + collection + dim + count so the trace is
+      // diagnosable. Without this, a dim/distance/payload mismatch
+      // looks like a generic 400 in the UI.
+      throw enrichQdrantError(err, {
+        operation: "upsert",
+        collection,
+        dim: dimensions,
+        count: points.length
+      });
+    }
     return { outputs: { upserted: points.length, collection } };
   }
 };
@@ -1554,7 +1569,8 @@ export {
   openSearchBm25RetrieverPlugin,
   openSearchVectorRetrieverPlugin,
   openSearchHybridRetrieverPlugin,
-  fuseHybridResults
+  fuseHybridResults,
+  looksLikeMissingVectorField
 } from "./plugins/opensearch.ts";
 
 // External-database (Postgres) plugin family. The three plugins share a
