@@ -12,24 +12,30 @@
  *    palette out of the box;
  *  - exposes a `Column<Row>` type that maps to SVAR's IColumnConfig
  *    with a typed `cell` renderer, so screens stay TypeScript-strict;
- *  - turns sort, resize, and header-filter ON BY DEFAULT — every
- *    column gets a draggable resize handle, a clickable sort header,
- *    and a text-filter input below the title. Per-column opt-outs
- *    (`sort: false`, `filter: false`, `resize: false`) cover the
- *    odd action column;
+ *  - replaces SVAR's default header with a custom title + sort arrow
+ *    + filter button (popover model — click button to open input,
+ *    click again to clear and close). State is driven through SVAR's
+ *    api.exec("sort-rows" / "filter-rows") actions so the grid stays
+ *    in charge of the actual sort/filter pass over rows;
+ *  - per-column resize handles, default on;
  *  - auto-sizes columns without an explicit `width` to fit their
  *    content (canvas-measured against the first page of rows, then
  *    frozen so subsequent page loads don't reshape the grid);
  *  - surfaces a "Load more" affordance via virtual-scroll auto-fetch
- *    for cursor-paged callers (the activity screens use this with
- *    `useInfiniteQuery`);
- *  - falls back to an empty-state row instead of an empty viewport,
- *    matching the look of the rest of the app.
+ *    for cursor-paged callers;
+ *  - falls back to an empty-state row instead of an empty viewport.
  *
  * Heavy CSS (`@svar-ui/react-grid/all.css`) is imported once from
  * `main.tsx` so the bundle only pays for it on app boot.
  */
-import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
+import {
+  type ReactNode,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState
+} from "react";
 import {
   Grid,
   Willow,
@@ -48,9 +54,8 @@ export interface SvarColumn<Row> {
   width?: number;
   /** Defaults to true — flip to false to keep this column from sorting. */
   sort?: boolean;
-  /** Header filter widget. Defaults to a text input. Set `false` for
-   *  columns where filtering makes no sense (e.g. an actions column). */
-  filter?: false | "text" | "richselect";
+  /** Defaults to true — flip to false to hide the header filter button. */
+  filter?: boolean;
   /** Defaults to true — flip false to lock the column width. */
   resize?: boolean;
   /** Defaults to true when no explicit `width` is set; opts the column
@@ -93,22 +98,14 @@ export interface SvarDataGridProps<Row> {
 // Auto-width measurement
 // ---------------------------------------------------------------------------
 
-/**
- * Number of leading rows the auto-sizer measures to derive each
- * column's width. Big enough to cover the realistic worst case in the
- * first page, small enough that the measurement loop stays under a
- * frame. Subsequent pages do NOT trigger a re-measurement.
- */
 const AUTO_WIDTH_SAMPLE = 80;
-/** Min and max widths the auto-sizer will assign. */
 const AUTO_WIDTH_MIN = 80;
 const AUTO_WIDTH_MAX = 480;
-/** Padding around the measured text inside a cell, plus the sort/
- *  filter icons in the header. */
 const CELL_PADDING_PX = 24;
-const HEADER_PADDING_PX = 56;
-/** Canvas font used for measurement — matches the SVAR Willow theme's
- *  body font. */
+// Header padding reserves room for the sort arrow + the filter button
+// next to the title. ~72px is enough for both controls plus a bit of
+// breathing room.
+const HEADER_PADDING_PX = 72;
 const MEASURE_FONT = "13px system-ui, -apple-system, 'Segoe UI', sans-serif";
 
 let measureCanvas: HTMLCanvasElement | undefined;
@@ -125,8 +122,6 @@ function measureCellText<Row>(row: Row, col: SvarColumn<Row>): string {
   if (col.measure) return col.measure(row);
   const raw = (row as Record<string, unknown>)[col.id];
   if (raw === null || raw === undefined) return "";
-  // Stringify primitives directly; for objects fall back to JSON so the
-  // sizer doesn't trip on `[object Object]` (and still bounds at MAX).
   if (typeof raw === "object") {
     try {
       return JSON.stringify(raw);
@@ -157,6 +152,169 @@ function computeAutoWidths<Row>(
     );
   }
   return out;
+}
+
+// ---------------------------------------------------------------------------
+// Custom header cell — title + sort arrow + filter button popover
+// ---------------------------------------------------------------------------
+
+type SortOrder = "asc" | "desc";
+
+interface HeaderCellProps {
+  title: string;
+  columnId: string;
+  sortable: boolean;
+  filterable: boolean;
+  sortOrder: SortOrder | undefined;
+  filterValue: string | undefined;
+  onSortToggle: (columnId: string) => void;
+  onFilterChange: (columnId: string, value: string) => void;
+}
+
+/**
+ * Header cell rendered inside every column. Layout:
+ *
+ *   [ title ▲ ]  [ 🔍 ]
+ *      |           |
+ *      |           +--- filter button: click toggles a popover with a
+ *      |                text input; clicking the button a SECOND time
+ *      |                clears the filter and closes the popover.
+ *      +--- title click cycles sort: none → asc → desc → none.
+ *
+ * Filter and sort state are owned by the parent `SvarDataGrid`; this
+ * component is purely presentational + emits change events.
+ */
+function HeaderCell(props: HeaderCellProps) {
+  const {
+    title,
+    columnId,
+    sortable,
+    filterable,
+    sortOrder,
+    filterValue,
+    onSortToggle,
+    onFilterChange
+  } = props;
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const inputRef = useRef<HTMLInputElement | null>(null);
+  const filterActive = filterValue !== undefined && filterValue !== "";
+
+  // Click-outside the cell closes the popover without clearing — that
+  // way the filter stays applied if the operator clicked elsewhere by
+  // accident. Only a SECOND click on the button itself clears.
+  useEffect(() => {
+    if (!open) return;
+    const handler = (e: MouseEvent) => {
+      const root = rootRef.current;
+      if (root && !root.contains(e.target as Node)) {
+        setOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [open]);
+
+  // Esc closes the popover (matches every other modal in the app).
+  useEffect(() => {
+    if (!open) return;
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpen(false);
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [open]);
+
+  // Focus the input as soon as the popover opens — operator just
+  // clicked the button, they're about to type.
+  useEffect(() => {
+    if (open) inputRef.current?.focus();
+  }, [open]);
+
+  const onTitleClick = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (sortable) onSortToggle(columnId);
+  };
+
+  const onFilterButtonClick = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (open) {
+      // SECOND click — operator's signal to clear the filter and tidy
+      // up. Empty string instead of undefined so React treats it as
+      // a controlled-input reset, not a "switch to uncontrolled".
+      if (filterActive) onFilterChange(columnId, "");
+      setOpen(false);
+    } else {
+      setOpen(true);
+    }
+  };
+
+  return (
+    <div className="grid-hcell" ref={rootRef}>
+      <button
+        type="button"
+        className={`grid-hcell-title${sortable ? " sortable" : ""}`}
+        onClick={onTitleClick}
+        title={sortable ? `Sort by ${title}` : title}
+      >
+        <span className="grid-hcell-text">{title}</span>
+        <span className="grid-hcell-sort" aria-hidden>
+          {sortOrder === "asc" ? "▲" : sortOrder === "desc" ? "▼" : ""}
+        </span>
+      </button>
+      {filterable && (
+        <button
+          type="button"
+          className={`grid-hcell-filter-btn${filterActive ? " active" : ""}${
+            open ? " open" : ""
+          }`}
+          onClick={onFilterButtonClick}
+          title={
+            filterActive
+              ? `Clear filter on ${title}`
+              : open
+                ? `Close filter`
+                : `Filter ${title}`
+          }
+          aria-label={`Filter ${title}`}
+        >
+          <FilterIcon />
+        </button>
+      )}
+      {open && filterable && (
+        <div className="grid-hcell-filter-pop" role="dialog">
+          <input
+            ref={inputRef}
+            type="text"
+            className="grid-hcell-filter-input"
+            value={filterValue ?? ""}
+            onChange={(e) => onFilterChange(columnId, e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") setOpen(false);
+            }}
+            placeholder={`Filter ${title}…`}
+          />
+        </div>
+      )}
+    </div>
+  );
+}
+
+function FilterIcon() {
+  // Inline SVG funnel — keeps the bundle from pulling an icon set just
+  // for one button. Uses currentColor so the .active state can recolor
+  // via CSS without swapping the icon.
+  return (
+    <svg width="12" height="12" viewBox="0 0 16 16" aria-hidden>
+      <path
+        d="M2 3h12l-4.5 5.5V13l-3 1V8.5L2 3z"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.4"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -194,28 +352,97 @@ export function SvarDataGrid<Row>(props: SvarDataGridProps<Row>) {
     setAutoWidths(computeAutoWidths(columns, rows));
   }, [columns, rows]);
 
+  // Sort + filter state. Owned here so the custom header cells stay
+  // dumb-presentational. Changes are pushed to SVAR via api.exec —
+  // SVAR's internal store then applies the sort/filter pass over the
+  // rows. We don't pass `sortMarks` / `filterValues` as controlled
+  // props because SVAR re-creates its data store on data identity
+  // change; pushing through the API is the durable path.
+  const apiRef = useRef<IApi | undefined>(undefined);
+  const [sort, setSort] = useState<{ key: string; order: SortOrder } | undefined>(
+    undefined
+  );
+  const [filters, setFilters] = useState<Record<string, string>>({});
+
+  const onSortToggle = useCallback((columnId: string) => {
+    setSort((prev) => {
+      let next: { key: string; order: SortOrder } | undefined;
+      if (!prev || prev.key !== columnId) next = { key: columnId, order: "asc" };
+      else if (prev.order === "asc") next = { key: columnId, order: "desc" };
+      else next = undefined; // third click clears
+      const api = apiRef.current;
+      if (api) {
+        if (next) {
+          void api.exec("sort-rows", { key: next.key, order: next.order });
+        } else {
+          // SVAR's clear-sort idiom: omit `order` to reset. We pass
+          // the column key so the store knows which mark to remove.
+          void api.exec("sort-rows", { key: columnId });
+        }
+      }
+      return next;
+    });
+  }, []);
+
+  const onFilterChange = useCallback((columnId: string, value: string) => {
+    setFilters((prev) => {
+      const next = { ...prev };
+      if (value === "") delete next[columnId];
+      else next[columnId] = value;
+      return next;
+    });
+    const api = apiRef.current;
+    if (api) {
+      void api.exec("filter-rows", {
+        key: columnId,
+        value: value === "" ? undefined : value
+      });
+    }
+  }, []);
+
   // Map our typed Column<Row> into SVAR's IColumnConfig.
   const svarColumns = useMemo<IColumnConfig[]>(
     () =>
       columns.map((c, idx) => {
-        const wantsFilter = c.filter !== false;
-        const filterType = c.filter === false ? undefined : c.filter ?? "text";
-        // SVAR's filter input lives on the HEADER cell, not on the
-        // column directly. To get a filterable header we have to pass
-        // the structured `IHeaderCell` shape instead of a plain
-        // string. The `text` field becomes the title shown above the
-        // filter input.
-        const headerCell = wantsFilter
-          ? [{ text: c.header, filter: filterType }]
-          : c.header;
+        const sortable = c.sort !== false;
+        const filterable = c.filter !== false;
+        // Custom header cell: shows title + sort arrow + filter button.
+        // `text` is omitted because the custom `cell` already renders
+        // the title (otherwise SVAR draws both and the cell looks
+        // doubled-up). The filter type stays declared so SVAR's
+        // createFilter wires the rows-filter pass when api.exec
+        // pushes a value.
+        const headerCellRenderer = () => (
+          <HeaderCell
+            title={c.header}
+            columnId={c.id}
+            sortable={sortable}
+            filterable={filterable}
+            sortOrder={sort?.key === c.id ? sort.order : undefined}
+            filterValue={filters[c.id]}
+            onSortToggle={onSortToggle}
+            onFilterChange={onFilterChange}
+          />
+        );
+        const headerCell: Record<string, unknown> = {
+          cell: headerCellRenderer
+        };
+        if (filterable) {
+          // Declare the filter type so SVAR's createFilter pass knows
+          // how to match against the value we push via api.exec.
+          headerCell.filter = "text";
+        }
         const cfg: IColumnConfig = {
           id: c.id,
-          header: headerCell,
-          sort: c.sort !== false,
+          header: [headerCell],
+          // We drive sort ourselves through api.exec, but leaving
+          // `sort: true` on the column still lets SVAR's internal
+          // store know which columns are sortable (for clear-sort
+          // behaviour). The native header sort-on-click is not
+          // triggered because our custom header cell stops
+          // propagation of its title-button click.
+          sort: sortable,
           resize: c.resize !== false,
-          // Footer cell: SVAR pins it to the bottom of the grid when
-          // `footer={true}` is set on <Grid>. We put the loaded-row
-          // count in the first column and leave the rest blank.
           footer: idx === 0 ? footerLabel : ""
         };
         const explicit = c.width;
@@ -242,13 +469,11 @@ export function SvarDataGrid<Row>(props: SvarDataGridProps<Row>) {
           );
         }
         if (c.cell && !cfg.cell) {
-          // SVAR's `cell` is an FC<ICellProps>; we adapt by reading
-          // `row` off the props and handing it to the typed cb.
           cfg.cell = ({ row }) => <>{c.cell!(row as Row)}</>;
         }
         return cfg;
       }),
-    [columns, autoWidths, footerLabel]
+    [columns, autoWidths, footerLabel, sort, filters, onSortToggle, onFilterChange]
   );
 
   // Always provide an `id` field on every row; SVAR uses it as the row
@@ -292,16 +517,23 @@ export function SvarDataGrid<Row>(props: SvarDataGridProps<Row>) {
     rowKey: props.rowKey
   };
 
-  const apiRef = useRef<IApi | undefined>(undefined);
   const onInit = (api: IApi): void => {
     apiRef.current = api;
+    // Re-apply any pending sort/filter that was set BEFORE the api was
+    // ready (e.g. the operator quickly opened the popover and typed
+    // before SVAR's `init` callback fired). React's effect order
+    // generally means this is a no-op, but it's cheap insurance.
+    if (sort) {
+      void api.exec("sort-rows", { key: sort.key, order: sort.order });
+    }
+    for (const [key, value] of Object.entries(filters)) {
+      void api.exec("filter-rows", { key, value });
+    }
   };
 
-  // Vanilla DOM scroll listener on SVAR's `.wx-scroll` container — the
-  // version-shifting internal `api.on("scroll", …)` payload didn't
-  // give us a reliable bottom-of-viewport signal, so we just watch
-  // scrollTop / scrollHeight / clientHeight directly. Fires
-  // `onLoadMore()` whenever we're within `THRESHOLD_PX` of the bottom.
+  // Vanilla DOM scroll listener on SVAR's `.wx-scroll` container.
+  // Fires `onLoadMore()` whenever we're within `THRESHOLD_PX` of the
+  // bottom.
   const hostRef = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
     const root = hostRef.current;
@@ -317,15 +549,11 @@ export function SvarDataGrid<Row>(props: SvarDataGridProps<Row>) {
       if (remaining <= THRESHOLD_PX) cur.onLoadMore();
     };
     scroller.addEventListener("scroll", check, { passive: true });
-    // Also check after layout in case the initial page didn't fill the
-    // viewport (then scroll never fires and the user is stuck).
     const id = requestAnimationFrame(check);
     return () => {
       scroller.removeEventListener("scroll", check);
       cancelAnimationFrame(id);
     };
-    // Re-bind whenever the loaded row count changes — SVAR re-renders
-    // the scroller and the previous listener target gets detached.
   }, [rows.length]);
 
   return (
@@ -344,26 +572,13 @@ export function SvarDataGrid<Row>(props: SvarDataGridProps<Row>) {
             <Grid
               data={data}
               columns={svarColumns}
-              // No autoRowHeight: SVAR's virtual scroll only kicks in
-              // with fixed-height rows. With autoRowHeight the grid
-              // measures and renders every loaded row in DOM, the
-              // table overflows the viewport, and the scroll-bottom
-              // event we hook for the next-page fetch never fires.
               footer
-              // filterValues is the initial filter state. SVAR mutates
-              // its own copy as the user types in the header filters,
-              // so we hand back an empty object on every mount — the
-              // filter inputs we declared per column do the real work.
               filterValues={{}}
               init={onInit}
             />
           )}
         </Willow>
       </div>
-      {/* Virtual scroll auto-fetches via the `init`-bound scroll
-          listener above; a small status line tells the user when more
-          rows are inbound. No button — that would defeat the
-          continuous-scroll affordance. */}
       {props.isLoadingMore && (
         <div className="svar-grid-loadmore" aria-live="polite">
           Loading more rows…

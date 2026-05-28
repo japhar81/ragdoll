@@ -2783,6 +2783,109 @@ kbd {
   justify-content: center;
   padding: 10px 0 4px;
 }
+
+/* SvarDataGrid custom header (title + sort arrow + filter button popover).
+ * Replaces SVAR's default text header so we own the sort indicator
+ * placement and can put a filter-popover button next to the title. */
+.grid-hcell {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  width: 100%;
+  height: 100%;
+  /* Anchor for the absolutely-positioned filter popover. */
+  position: relative;
+  padding: 0 6px 0 0;
+  box-sizing: border-box;
+}
+.grid-hcell-title {
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  background: transparent;
+  border: 0;
+  padding: 6px 4px 6px 8px;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: default;
+  border-radius: 4px;
+}
+.grid-hcell-title.sortable { cursor: pointer; }
+.grid-hcell-title.sortable:hover { background: rgba(15, 23, 42, 0.04); }
+.grid-hcell-text {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.grid-hcell-sort {
+  font-size: 9px;
+  line-height: 1;
+  color: #2563eb;
+  min-width: 9px;
+  text-align: center;
+}
+.grid-hcell-filter-btn {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: transparent;
+  color: #64748b;
+  cursor: pointer;
+}
+.grid-hcell-filter-btn:hover {
+  background: rgba(15, 23, 42, 0.06);
+  color: #0f172a;
+}
+.grid-hcell-filter-btn.open {
+  background: rgba(37, 99, 235, 0.10);
+  color: #2563eb;
+  border-color: rgba(37, 99, 235, 0.4);
+}
+.grid-hcell-filter-btn.active {
+  background: #2563eb;
+  color: white;
+  border-color: #1d4ed8;
+}
+.grid-hcell-filter-pop {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  margin-top: 4px;
+  z-index: 50;
+  background: white;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  box-shadow: 0 6px 24px rgba(15, 23, 42, 0.15);
+  padding: 6px;
+  min-width: 200px;
+}
+.grid-hcell-filter-input {
+  width: 100%;
+  padding: 5px 8px;
+  border: 1px solid #cbd5e1;
+  border-radius: 4px;
+  font: inherit;
+  font-size: 13px;
+  background: white;
+  color: #0f172a;
+  box-sizing: border-box;
+}
+.grid-hcell-filter-input:focus {
+  outline: none;
+  border-color: #2563eb;
+  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.15);
+}
+
 .row-system {
   background: #f8fafc;
 }
