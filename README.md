@@ -29,6 +29,12 @@ run with **zero install**.
   `postgres_exec`) for pulling rows from / writing rows to a
   tenant-owned Postgres. Pooled connections keyed by resolved DSN,
   parameterised SQL by construction, hard DDL gate. See ADR 0020.
+- Email-RAG plugin family (`email_preprocess`, `thread_aggregate`,
+  `extract_entities`, `entity_resolve`, `chunk_contextual`,
+  `query_classify`, `summarize_event`, `action_status_refresh`,
+  `tone_profile_build`, `compose_with_style`) — generic plugins
+  that compose into event-query / action-item / tone-matched-reply
+  pipelines over any message corpus.
 - External-plugin HTTP transport (contract v1) with an optional Python
   crawler sidecar (`crawl4ai_crawler`, `scrapy_spider`) gated on
   `PYTHON_PLUGIN_URL`, with a default-deny SSRF guard (ADR 0010).
