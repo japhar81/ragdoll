@@ -201,6 +201,17 @@ export const basicPromptTemplatePlugin: InProcessPlugin = {
           default: "Answer using only the context.\n\nContext:\n{{context}}\n\nQuestion: {{question}}",
           description:
             "Prompt template. {{context}} and {{question}} are substituted before sending to the model."
+        },
+        documentFields: {
+          type: "array",
+          items: { type: "string" },
+          description:
+            "Optional whitelist of fields to keep on each document before it is stringified into {{context}}. Use to drop large fields the LLM doesn't need (e.g. embeddings or full bodies)."
+        },
+        documentBodyMaxChars: {
+          type: "integer",
+          description:
+            "If set (and >0), truncate any string-typed field on each document to this many characters before stringification. Targets long-form fields like `body_text` to keep prompt size under the model's context window."
         }
       },
       additionalProperties: false
@@ -220,7 +231,30 @@ export const basicPromptTemplatePlugin: InProcessPlugin = {
   },
   async execute({ inputs, config }) {
     const question = String((inputs.input as any)?.question ?? inputs.question ?? "");
-    const context = JSON.stringify(inputs.documents ?? (inputs.retrieve as any)?.documents ?? []);
+    const rawDocs = (inputs.documents ?? (inputs.retrieve as any)?.documents ?? []) as unknown;
+    const fieldWhitelist = Array.isArray(config.documentFields)
+      ? (config.documentFields as string[])
+      : null;
+    const bodyMax =
+      typeof config.documentBodyMaxChars === "number" && config.documentBodyMaxChars > 0
+        ? Math.floor(config.documentBodyMaxChars)
+        : 0;
+    const projected = Array.isArray(rawDocs)
+      ? (rawDocs as Array<Record<string, unknown>>).map((doc) => {
+          if (!doc || typeof doc !== "object") return doc;
+          const out: Record<string, unknown> = {};
+          for (const [k, v] of Object.entries(doc)) {
+            if (fieldWhitelist && !fieldWhitelist.includes(k)) continue;
+            if (bodyMax > 0 && typeof v === "string" && v.length > bodyMax) {
+              out[k] = v.slice(0, bodyMax) + "…";
+            } else {
+              out[k] = v;
+            }
+          }
+          return out;
+        })
+      : rawDocs;
+    const context = JSON.stringify(projected);
     const template = String(config.template ?? "Answer using only the context.\n\nContext:\n{{context}}\n\nQuestion: {{question}}");
     return {
       outputs: {
