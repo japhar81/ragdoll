@@ -2856,18 +2856,18 @@ kbd {
   color: white;
   border-color: #1d4ed8;
 }
+/* Popover is rendered at the SvarDataGrid wrapper top-level (NOT
+ * inside the column cell) with `position: fixed` + inline top/left
+ * from the trigger button's getBoundingClientRect. Lives in a stable
+ * React tree so neither the popover nor its <input> is unmounted when
+ * SVAR re-renders the header cells on every keystroke. */
 .grid-hcell-filter-pop {
-  position: absolute;
-  top: 100%;
-  right: 0;
-  margin-top: 4px;
   z-index: 50;
   background: white;
   border: 1px solid #cbd5e1;
   border-radius: 6px;
   box-shadow: 0 6px 24px rgba(15, 23, 42, 0.15);
   padding: 6px;
-  min-width: 200px;
 }
 .grid-hcell-filter-input {
   width: 100%;
