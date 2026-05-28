@@ -1,0 +1,100 @@
+# Podman variant of the OTel Collector config (otelcol-config.yaml).
+#
+# Podman doesn't expose `/var/run/docker.sock` or
+# `/var/lib/docker/containers`, so the two host-coupled receivers from the
+# Docker config — `filelog` (tails per-container JSON logs) and
+# `docker_stats` (scrapes the engine socket) — are dropped here. Everything
+# else (OTLP push from the API/worker, prometheus scrapes against
+# postgres-exporter / redis-exporter / the collector's own metrics) works
+# identically because those flow through the network, not the host
+# filesystem.
+#
+# Trade-off: under podman the Grafana "container CPU/memory" panels and
+# the per-container stdout/stderr log stream are empty. The app's OTLP
+# logs/metrics/traces still land in Loki/Mimir/Tempo as before — only
+# the host-scraped slice is missing. Operators who want full parity on
+# podman can run the `podman.socket` user service and mount it explicitly
+# (see docs/admin/podman.md for the recipe).
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+  prometheus/collector:
+    config:
+      scrape_configs:
+        - job_name: "otelcol-self"
+          scrape_interval: 5s
+          static_configs:
+            - targets: ["127.0.0.1:8888"]
+
+  prometheus/exporters:
+    config:
+      scrape_configs:
+        - job_name: "postgres-exporter"
+          scrape_interval: 15s
+          static_configs:
+            - targets: ["postgres-exporter:9187"]
+        - job_name: "redis-exporter"
+          scrape_interval: 15s
+          static_configs:
+            - targets: ["redis-exporter:9121"]
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+    path: "/ready"
+
+processors:
+  batch:
+
+  resource/container:
+    attributes:
+      - key: service.namespace
+        action: insert
+        value: ragdoll
+
+exporters:
+  otlphttp/metrics:
+    endpoint: http://127.0.0.1:9090/api/v1/otlp
+    tls:
+      insecure: true
+  otlphttp/traces:
+    endpoint: http://127.0.0.1:4418
+    tls:
+      insecure: true
+  otlphttp/logs:
+    endpoint: http://127.0.0.1:3100/otlp
+    tls:
+      insecure: true
+  otlp/profiles:
+    endpoint: http://127.0.0.1:4040
+    tls:
+      insecure: true
+
+service:
+  extensions: [health_check]
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlphttp/traces]
+    metrics:
+      # Same as Docker config minus docker_stats — no engine socket on podman.
+      receivers: [otlp, prometheus/collector, prometheus/exporters]
+      processors: [resource/container, batch]
+      exporters: [otlphttp/metrics]
+    logs:
+      # Same as Docker config minus filelog — no /var/lib/docker/containers
+      # on podman. The OTLP path (api/worker SDK log exporters) still feeds
+      # Loki normally.
+      receivers: [otlp]
+      processors: [resource/container, batch]
+      exporters: [otlphttp/logs]
+    profiles:
+      receivers: [otlp]
+      exporters: [otlp/profiles]

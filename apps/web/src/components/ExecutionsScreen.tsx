@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import { api } from "../lib/api.ts";
+import { useLookups } from "../lib/lookups.ts";
 import type { ExecutionRecord } from "../lib/types.ts";
 import { Screen } from "./Screen.tsx";
 import { SvarDataGrid, type SvarColumn } from "./SvarDataGrid.tsx";
@@ -133,6 +134,7 @@ export function ExecutionsScreen() {
   // Cursor-paginated executions list. Page size 50 keeps the first paint
   // snappy on accounts with thousands of rows; the sentinel at the
   // bottom of the DataGrid loads the next page as the user scrolls.
+  const lookups = useLookups();
   const executions = useInfiniteQuery({
     queryKey: ["executions", "page"],
     queryFn: ({ pageParam }) =>
@@ -204,13 +206,41 @@ export function ExecutionsScreen() {
             {
               id: "executionId",
               header: "Execution",
-              width: 160,
-              cell: (e) => <code>{e.executionId.slice(0, 12)}…</code>
+              // Show the full execution id — never truncate. Mono font
+              // + an explicit title fall-back means it stays selectable
+              // and copyable even when narrow.
+              cell: (e) => (
+                <code title={e.executionId} className="cell-mono">
+                  {e.executionId}
+                </code>
+              )
             },
             {
-              id: "pipelineId",
+              id: "pipeline",
               header: "Pipeline",
-              cell: (e) => <code>{e.pipelineId.slice(0, 12)}…</code>
+              // Resolves pipelineId → "Display Name (slug)" via the
+              // shared lookups hook. Falls back to the raw id when the
+              // pipeline can't be resolved (deleted / RBAC-hidden).
+              cell: (e) => (
+                <span title={e.pipelineId} className="cell-name">
+                  {lookups.pipelineLabel(e.pipelineId)}
+                </span>
+              )
+            },
+            {
+              id: "tenant",
+              header: "Tenant",
+              cell: (e) => (
+                <span title={e.tenantId} className="cell-name">
+                  {lookups.tenantLabel(e.tenantId)}
+                </span>
+              )
+            },
+            {
+              id: "environment",
+              header: "Environment",
+              width: 120,
+              cell: (e) => e.environment ?? "—"
             },
             {
               id: "status",
@@ -292,16 +322,22 @@ export function ExecutionsScreen() {
                 </div>
                 <div className="metric">
                   <div className="muted">Pipeline / Version</div>
-                  <div>
-                    {ex.pipelineId}
+                  <div title={ex.pipelineId}>
+                    {lookups.pipelineLabel(ex.pipelineId)}
                     <br />
-                    {ex.pipelineVersionId}
+                    <code>{ex.pipelineVersionId}</code>
                   </div>
                 </div>
                 <div className="metric">
                   <div className="muted">Tenant</div>
-                  <div>{ex.tenantId}</div>
+                  <div title={ex.tenantId}>{lookups.tenantLabel(ex.tenantId)}</div>
                 </div>
+                {ex.environment && (
+                  <div className="metric">
+                    <div className="muted">Environment</div>
+                    <div>{ex.environment}</div>
+                  </div>
+                )}
               </div>
 
               {ex.error ? (

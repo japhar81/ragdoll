@@ -2,11 +2,13 @@ import { useMemo } from "react";
 import { useInfiniteQuery } from "@tanstack/react-query";
 import { api } from "../lib/api.ts";
 import type { AuditRow } from "../lib/api.ts";
+import { useLookups } from "../lib/lookups.ts";
 import { Screen } from "./Screen.tsx";
 import { SvarDataGrid, type SvarColumn } from "./SvarDataGrid.tsx";
 
 /** Audit admin. GET /api/audit returns the redacted audit log list. */
 export function AuditScreen() {
+  const lookups = useLookups();
   const audit = useInfiniteQuery({
     queryKey: ["audit", "page"],
     queryFn: ({ pageParam }) =>
@@ -25,6 +27,15 @@ export function AuditScreen() {
   // the cursor), so pluck it off the first one.
   const totalRows = audit.data?.pages[0]?.total;
 
+  // When the audit row's targetType is "pipeline", the targetId is a
+  // pipeline uuid we can render as a friendly name. Anything else (user,
+  // role, secret, …) stays as the raw id — those have no shared lookup.
+  const targetLabel = (l: AuditRow): string => {
+    if (l.targetType === "pipeline") return lookups.pipelineLabel(l.targetId);
+    if (l.targetType === "tenant") return lookups.tenantLabel(l.targetId);
+    return l.targetId;
+  };
+
   const columns: SvarColumn<AuditRow>[] = [
     {
       id: "createdAt",
@@ -38,17 +49,27 @@ export function AuditScreen() {
       cell: (l) => l.actorId ?? "—"
     },
     {
-      id: "tenantId",
+      id: "tenant",
       header: "Tenant",
       cell: (l) =>
-        l.tenantId ? <code>{l.tenantId.slice(0, 8)}…</code> : "—"
+        l.tenantId ? (
+          <span title={l.tenantId} className="cell-name">
+            {lookups.tenantLabel(l.tenantId)}
+          </span>
+        ) : (
+          "—"
+        )
     },
     { id: "action", header: "Action" },
     { id: "targetType", header: "Target type" },
     {
       id: "targetId",
-      header: "Target ID",
-      cell: (l) => <code>{l.targetId}</code>
+      header: "Target",
+      cell: (l) => (
+        <span title={l.targetId} className="cell-name">
+          {targetLabel(l)}
+        </span>
+      )
     }
   ];
 

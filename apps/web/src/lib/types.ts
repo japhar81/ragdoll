@@ -152,6 +152,10 @@ export interface ExecutionRecord {
   tenantId: string;
   pipelineId: string;
   pipelineVersionId: string;
+  /** Environment name (e.g. "dev", "prod") the run was bound to. Optional
+   *  on the wire for back-compat: older executions written before the
+   *  field was surfaced may not include it. */
+  environment?: string;
   status: "running" | "succeeded" | "failed" | "cancelled";
   startedAt: string;
   completedAt?: string;
