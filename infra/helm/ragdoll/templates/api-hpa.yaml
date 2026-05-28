@@ -1,0 +1,31 @@
+{{- if .Values.api.autoscaling.enabled }}
+# API autoscaler. Safe to enable because every shared state goes through
+# Redis when REDIS_URL is set (change-event bus, BullMQ queue, SSO
+# pending-state cache) — session tokens are stateless HMACs. Defaults
+# conservative: min 2 / max 6 / 70% CPU.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: ragdoll-api
+  labels:
+    app: ragdoll-api
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: ragdoll-api
+  minReplicas: {{ .Values.api.autoscaling.minReplicas }}
+  maxReplicas: {{ .Values.api.autoscaling.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.api.autoscaling.targetCPUUtilizationPercentage }}
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 30
+    scaleDown:
+      stabilizationWindowSeconds: 180
+{{- end }}

@@ -1,0 +1,42 @@
+{{- if .Values.worker.followers.autoscaling.enabled }}
+# Worker follower autoscaler.
+#
+# Only the follower deployment is scaled. The leader stays at
+# replicas: 1 because its built-in cron scheduler must be single-fire
+# — autoscaling it would re-introduce the "fire every cron N times"
+# bug the leader/follower split was created to solve.
+#
+# Defaults: min 1 / max 10 / 70% CPU. Override per-env via the
+# `worker.followers.autoscaling.*` values. Requires the metrics-server
+# addon (or an equivalent metrics provider) on the cluster.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: ragdoll-worker-follower
+  labels:
+    app: ragdoll-worker
+    role: follower
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: ragdoll-worker-follower
+  minReplicas: {{ .Values.worker.followers.autoscaling.minReplicas }}
+  maxReplicas: {{ .Values.worker.followers.autoscaling.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.worker.followers.autoscaling.targetCPUUtilizationPercentage }}
+  # Stabilisation defaults: scale up promptly (60s) but cool down
+  # slowly (5m) so a brief lull from BullMQ doesn't churn pods.
+  # BullMQ jobs are long-tailed, and a freshly-started worker pays
+  # the Ollama-warmer cost — we'd rather keep capacity than thrash.
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 60
+    scaleDown:
+      stabilizationWindowSeconds: 300
+{{- end }}

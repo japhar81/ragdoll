@@ -1,0 +1,25 @@
+{{- if .Values.web.autoscaling.enabled }}
+# Web autoscaler. The web container is stateless nginx — scales freely.
+# Defaults: min 2 / max 6 / 80% CPU (nginx is light on CPU; the
+# threshold is higher than api/worker to avoid scaling on noise).
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: ragdoll-web
+  labels:
+    app: ragdoll-web
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: ragdoll-web
+  minReplicas: {{ .Values.web.autoscaling.minReplicas }}
+  maxReplicas: {{ .Values.web.autoscaling.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.web.autoscaling.targetCPUUtilizationPercentage }}
+{{- end }}
