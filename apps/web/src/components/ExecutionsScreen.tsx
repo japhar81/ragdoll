@@ -182,6 +182,8 @@ export function ExecutionsScreen() {
               id: "actions",
               header: "",
               sort: false,
+              filter: false,
+              resize: false,
               width: 110,
               cell: (e) => {
                 const isOpen = selected === e.executionId;
@@ -208,12 +210,15 @@ export function ExecutionsScreen() {
               header: "Execution",
               // Show the full execution id — never truncate. Mono font
               // + an explicit title fall-back means it stays selectable
-              // and copyable even when narrow.
+              // and copyable even when narrow. `measure` returns the
+              // raw id so the auto-sizer picks a width that fits a
+              // full UUID.
               cell: (e) => (
                 <code title={e.executionId} className="cell-mono">
                   {e.executionId}
                 </code>
-              )
+              ),
+              measure: (e) => e.executionId
             },
             {
               id: "pipeline",
@@ -221,11 +226,15 @@ export function ExecutionsScreen() {
               // Resolves pipelineId → "Display Name (slug)" via the
               // shared lookups hook. Falls back to the raw id when the
               // pipeline can't be resolved (deleted / RBAC-hidden).
+              // `measure` returns the same resolved label the cell
+              // renders so the auto-sizer picks a width that fits the
+              // visible text, not the underlying UUID.
               cell: (e) => (
                 <span title={e.pipelineId} className="cell-name">
                   {lookups.pipelineLabel(e.pipelineId)}
                 </span>
-              )
+              ),
+              measure: (e) => lookups.pipelineLabel(e.pipelineId)
             },
             {
               id: "tenant",
@@ -234,33 +243,35 @@ export function ExecutionsScreen() {
                 <span title={e.tenantId} className="cell-name">
                   {lookups.tenantLabel(e.tenantId)}
                 </span>
-              )
+              ),
+              measure: (e) => lookups.tenantLabel(e.tenantId)
             },
             {
               id: "environment",
               header: "Environment",
-              width: 120,
-              cell: (e) => e.environment ?? "—"
+              cell: (e) => e.environment ?? "—",
+              measure: (e) => e.environment ?? "—"
             },
             {
               id: "status",
               header: "Status",
-              width: 120,
               cell: (e) => (
                 <span className={`status status-${e.status}`}>{e.status}</span>
-              )
+              ),
+              measure: (e) => e.status
             },
             {
               id: "startedAt",
               header: "Started",
-              width: 180,
-              cell: (e) => new Date(e.startedAt).toLocaleString()
+              cell: (e) => new Date(e.startedAt).toLocaleString(),
+              measure: (e) => new Date(e.startedAt).toLocaleString()
             },
             {
               id: "completedAt",
               header: "Completed",
-              width: 180,
               cell: (e) =>
+                e.completedAt ? new Date(e.completedAt).toLocaleString() : "—",
+              measure: (e) =>
                 e.completedAt ? new Date(e.completedAt).toLocaleString() : "—"
             }
           ] satisfies SvarColumn<ExecutionRecord>[]
