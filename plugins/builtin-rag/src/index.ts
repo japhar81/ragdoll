@@ -1568,3 +1568,42 @@ export {
   postgresExecPlugin,
   buildBatchUpsert
 } from "./plugins/postgres.ts";
+
+// Email pre-processing family — pure text, no LLM, no I/O.
+// `preprocessEmailBody` and `aggregateThreads` are pure helpers re-
+// exported for unit tests.
+export {
+  emailPreprocessPlugin,
+  threadAggregatePlugin,
+  preprocessEmailBody,
+  aggregateThreads,
+  detectLanguage
+} from "./plugins/email-preprocess.ts";
+
+// Anthropic Contextual Retrieval chunker — generic over document type.
+export { chunkContextualPlugin } from "./plugins/contextual-chunker.ts";
+
+// Schema-driven extraction + entity resolution. `fuzzySimilarity` and
+// `resolveMention` are exported as pure helpers for unit tests.
+export {
+  extractEntitiesPlugin,
+  entityResolvePlugin,
+  fuzzySimilarity,
+  resolveMention
+} from "./plugins/extraction.ts";
+
+// Synchronous-pipeline LLM glue: NL→args classifier, structured event
+// summariser, action-item status refresher.
+export {
+  queryClassifyPlugin,
+  summarizeEventPlugin,
+  actionStatusRefreshPlugin
+} from "./plugins/sync-llm.ts";
+
+// Tone profile + composition. `curateExemplars` is exported as a pure
+// helper for unit tests.
+export {
+  toneProfileBuildPlugin,
+  composeWithStylePlugin,
+  curateExemplars
+} from "./plugins/tone.ts";
