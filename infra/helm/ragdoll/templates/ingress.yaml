@@ -1,0 +1,40 @@
+{{- if .Values.ingress.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: ragdoll
+  labels:
+    app: ragdoll-web
+  {{- with .Values.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- with .Values.ingress.className }}
+  ingressClassName: {{ . | quote }}
+  {{- end }}
+  {{- with .Values.ingress.tls }}
+  tls:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  rules:
+    {{- range .Values.ingress.hosts }}
+    - host: {{ .host | quote }}
+      http:
+        paths:
+          {{- range .paths }}
+          - path: {{ .path | quote }}
+            pathType: {{ .pathType | default "Prefix" }}
+            backend:
+              service:
+                # All public traffic terminates at the web (nginx) Service;
+                # nginx reverse-proxies /api → ragdoll-api internally so the
+                # ingress only needs one backend. WebSocket upgrades for
+                # /api/events are honoured because the web container's
+                # nginx config sets the Upgrade/Connection headers.
+                name: ragdoll-web
+                port:
+                  number: 80
+          {{- end }}
+    {{- end }}
+{{- end }}
