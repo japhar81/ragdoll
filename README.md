@@ -156,6 +156,13 @@ make refresh
 make down
 ```
 
+The dev scripts auto-detect the container runtime: `docker compose`,
+`podman compose` (4.7+), `podman-compose`, and legacy `docker-compose`
+all work. Force a specific one with `COMPOSE="podman compose" make up`.
+On podman, a compose override file disables the otel-collector's docker-
+socket scrape (no equivalent path on podman); the app's own
+logs/metrics/traces still flow normally. See [docs/admin/podman.md](docs/admin/podman.md).
+
 Tests:
 
 ```sh

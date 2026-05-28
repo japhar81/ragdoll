@@ -1,0 +1,34 @@
+# Podman-specific compose override. Auto-included by scripts/_compose.sh
+# when the detected compose runtime is podman. Hand-merged onto
+# docker-compose.yml using `-f docker-compose.yml -f docker-compose.podman.yml`.
+#
+# Why this file exists: Podman doesn't expose `/var/run/docker.sock` or
+# `/var/lib/docker/containers`. The Docker config bind-mounts both into
+# the otel-collector so it can scrape engine metrics and tail per-container
+# logs. With podman, those paths don't exist on the host — without an
+# override, compose either fails to mount (rootless) or the collector
+# starts up reading nothing and spams errors.
+#
+# This override:
+#   1. Replaces the otelcol config mount to point at the podman-specific
+#      variant (drops the filelog + docker_stats receivers).
+#   2. Drops the docker.sock + /var/lib/docker/containers bind mounts.
+#
+# Compose's merge behaviour for `volumes` is REPLACE-the-list (not
+# element-wise diff), so this file lists every mount the otel-collector
+# still needs.
+#
+# Operators who want full container-log/metrics parity on podman can run
+# the `podman.socket` user service and write their own override; see
+# docs/admin/podman.md.
+
+services:
+  otel-collector:
+    volumes:
+      - lgtm-data:/data
+      - ../grafana/provisioning:/otel-lgtm/grafana/conf/provisioning:ro
+      - ../grafana/dashboards:/etc/grafana/dashboards:ro
+      - ../otel/otelcol-config.podman.yaml:/otel-lgtm/otelcol-config.yaml:ro
+
+volumes:
+  lgtm-data:
