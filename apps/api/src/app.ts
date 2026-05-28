@@ -551,7 +551,16 @@ export function createApp(deps: AppDeps): App {
 
   registerAuthRoutes({ route }, { deps, audit, accounts, passwords, users, rbacPolicies });
   registerApiKeysRoutes({ route }, { deps, audit, apiKeys, environments, rbacPolicies });
-  registerAuthSsoRoutes({ route }, { deps, accounts, identityProviders, buildSsoProvider });
+  registerAuthSsoRoutes(
+    { route },
+    {
+      deps,
+      accounts,
+      identityProviders,
+      buildSsoProvider,
+      ssoStateStore: deps.ssoStateStore
+    }
+  );
   registerUsersRoutes({ route }, { audit, users, passwords, rbacPolicies, authorizer });
   registerRolesRoutes({ route }, { audit, rbacPolicies, roleCatalog, authorizer });
   registerIdentityProvidersRoutes({ route }, { audit, identityProviders });

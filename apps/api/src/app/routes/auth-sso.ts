@@ -3,19 +3,22 @@
  * flow + GET/POST callback handlers. The OIDC/SAML provider machinery
  * is built per-request from the identity_providers row.
  *
- * The in-process `ssoStates` map is intentionally process-local: SSO
- * state TTL is 10 minutes, and a multi-replica deploy would need a
- * shared cache (Redis) to handle a callback landing on a different
- * pod than the start. For now the local map is good enough and the
- * worst-case is a re-auth.
+ * Pending state (10-minute TTL — start → IdP → callback) goes through
+ * the injected `ssoStates: SsoStateStore`. Server.ts wires the
+ * Redis-backed implementation when REDIS_URL is set so a callback that
+ * lands on a different api pod than the start still finds the entry;
+ * single-pod / offline test paths use the in-memory store. ADR
+ * 0005 has the full reasoning.
  */
 import {
   OidcProvider,
   SamlProvider,
   randomToken,
   AccountDisabledError,
+  InMemorySsoStateStore,
   type AccountService,
-  type SsoIdentity
+  type SsoIdentity,
+  type SsoStateStore
 } from "../../../../../packages/auth/src/index.ts";
 import type {
   IdentityProviderRepository,
@@ -31,13 +34,10 @@ interface SsoServices {
   accounts?: AccountService;
   identityProviders: IdentityProviderRepository;
   buildSsoProvider: (row: IdentityProviderRow) => OidcProvider | SamlProvider;
-}
-
-interface SsoPending {
-  slug: string;
-  nonce: string;
-  redirectUri: string;
-  at: number;
+  /** Optional Redis-backed (or otherwise injected) store. When omitted,
+   *  falls back to an InMemorySsoStateStore so single-pod / test paths
+   *  keep working unchanged. */
+  ssoStateStore?: SsoStateStore;
 }
 
 const SSO_STATE_TTL_MS = 10 * 60 * 1000;
@@ -47,7 +47,7 @@ export function registerAuthSsoRoutes(
   svc: SsoServices
 ): void {
   const { deps, accounts, identityProviders, buildSsoProvider } = svc;
-  const ssoStates = new Map<string, SsoPending>();
+  const ssoStates: SsoStateStore = svc.ssoStateStore ?? new InMemorySsoStateStore();
 
   api.route("GET", "/api/auth/providers", async () => {
     const list = await identityProviders.listEnabled();
@@ -70,7 +70,11 @@ export function registerAuthSsoRoutes(
       `${origin}/api/auth/sso/${row.slug}/callback`;
     const state = randomToken();
     const nonce = randomToken();
-    ssoStates.set(state, { slug: row.slug, nonce, redirectUri, at: Date.now() });
+    await ssoStates.set(
+      state,
+      { slug: row.slug, nonce, redirectUri, at: Date.now() },
+      SSO_STATE_TTL_MS
+    );
     if (provider instanceof OidcProvider) {
       const url = await provider.authorizationUrl({ redirectUri, state, nonce });
       return { status: 302, body: undefined, headers: { location: url } };
@@ -86,11 +90,15 @@ export function registerAuthSsoRoutes(
   ): Promise<AppResponse> {
     if (!accounts) return error(501, "auth_not_configured");
     const state = stateParam ?? samlBody?.RelayState;
-    const pending = state ? ssoStates.get(state) : undefined;
+    const pending = state ? await ssoStates.get(state) : undefined;
+    // The Redis store enforces TTL server-side (`EX` seconds), so an
+    // expired entry returns undefined. The in-memory store also expires
+    // lazily on get. Keep the elapsed-time check as a defence-in-depth
+    // for stores that don't enforce TTL themselves.
     if (!state || !pending || Date.now() - pending.at > SSO_STATE_TTL_MS) {
       return error(400, "sso_state_invalid");
     }
-    ssoStates.delete(state);
+    await ssoStates.delete(state);
     const row = await identityProviders.findBySlug(pending.slug);
     if (!row || !row.enabled) return error(404, "provider_not_found");
     const provider = buildSsoProvider(row);

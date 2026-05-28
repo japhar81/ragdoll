@@ -24,7 +24,10 @@ import {
   BuiltinPolicyEngine,
   createCasbinEngine,
   PasswordService,
-  type PolicyEngine
+  InMemorySsoStateStore,
+  createRedisSsoStateStore,
+  type PolicyEngine,
+  type SsoStateStore
 } from "../../../packages/auth/src/index.ts";
 import {
   defaultCatalogRows
@@ -180,6 +183,16 @@ async function buildDeps(): Promise<{
   logger.info("change_bus_ready", {
     transport: redisUrl ? "redis" : "in-process"
   });
+  // SSO state store: Redis when configured so a callback that lands on
+  // a different api pod than the start step still finds the entry.
+  // In-process otherwise (single-pod / tests). 10-minute TTL enforced
+  // server-side via Redis EX.
+  const ssoStateStore: SsoStateStore = redisUrl
+    ? await createRedisSsoStateStore({ redisUrl })
+    : new InMemorySsoStateStore();
+  logger.info("sso_state_store_ready", {
+    transport: redisUrl ? "redis" : "in-process"
+  });
   const { plugins: pluginRegistry, providers: providerRegistry } = loadRegistries();
   // When REDIS_URL is set, enqueue onto the SAME BullMQ queue the separate
   // worker container consumes (both default to "ragdoll-jobs"); otherwise an
@@ -280,6 +293,7 @@ async function buildDeps(): Promise<{
       auth,
       apiKeys,
       changeBus,
+      ssoStateStore,
       sessions,
       queue,
       secretProvider: new DatabaseEncryptedSecretProvider(
@@ -332,6 +346,7 @@ async function buildDeps(): Promise<{
       auth,
       apiKeys,
       changeBus,
+      ssoStateStore,
       sessions,
       queue,
       secretProvider: new DatabaseEncryptedSecretProvider(
