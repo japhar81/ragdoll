@@ -293,20 +293,22 @@ function FilterPopover(props: FilterPopoverProps) {
     if (el) el.setSelectionRange(el.value.length, el.value.length);
   }, []);
 
-  // Click-outside closes (without clearing). The button's own click
-  // handler runs FIRST (its target is outside this popover too), and
-  // it routes through the wrapper's `onFilterButtonClick` which sets
-  // `popState = undefined`, so we don't double-close. Anywhere else
-  // outside the popover just closes.
+  // Click-outside closes the popover without clearing the filter —
+  // but with ONE explicit exception: clicks that land on ANY header
+  // filter button. Those buttons own the open / clear / switch
+  // toggle themselves (see `onFilterButtonClick` in the wrapper).
+  // Without this skip, our microtask-deferred onClose would land
+  // BEFORE the button's onClick, leaving popState=undefined; the
+  // button would then read that and open the popover instead of
+  // clearing it. The race was the cause of the "clear doesn't
+  // work" bug.
   useEffect(() => {
     const handler = (e: MouseEvent) => {
       const root = rootRef.current;
-      if (root && !root.contains(e.target as Node)) {
-        // Defer to next tick so a same-event click on the trigger
-        // button can run its own toggle (which would otherwise be
-        // pre-empted by us calling onClose first).
-        queueMicrotask(onClose);
-      }
+      if (!root || root.contains(e.target as Node)) return;
+      const target = e.target as HTMLElement | null;
+      if (target && target.closest(".grid-hcell-filter-btn")) return;
+      queueMicrotask(onClose);
     };
     document.addEventListener("mousedown", handler);
     return () => document.removeEventListener("mousedown", handler);
