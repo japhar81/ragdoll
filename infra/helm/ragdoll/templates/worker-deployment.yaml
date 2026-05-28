@@ -63,7 +63,8 @@ spec:
             limits:
               cpu: {{ .Values.worker.leader.resources.limits.cpu | quote }}
               memory: {{ .Values.worker.leader.resources.limits.memory }}
-{{- if gt (int .Values.worker.followers.replicas) 0 }}
+{{- $followerAuto := .Values.worker.followers.autoscaling.enabled -}}
+{{- if or $followerAuto (gt (int .Values.worker.followers.replicas) 0) }}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -73,7 +74,9 @@ metadata:
     app: ragdoll-worker
     role: follower
 spec:
+  {{- if not $followerAuto }}
   replicas: {{ .Values.worker.followers.replicas }}
+  {{- end }}
   selector:
     matchLabels:
       app: ragdoll-worker

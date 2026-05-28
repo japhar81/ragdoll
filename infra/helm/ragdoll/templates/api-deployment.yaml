@@ -5,7 +5,12 @@ metadata:
   labels:
     app: ragdoll-api
 spec:
+  # When autoscaling is on the HPA owns the replica count — omitting
+  # `replicas` here keeps helm from resetting the scale on every
+  # upgrade.
+  {{- if not .Values.api.autoscaling.enabled }}
   replicas: {{ .Values.api.replicas }}
+  {{- end }}
   selector:
     matchLabels:
       app: ragdoll-api

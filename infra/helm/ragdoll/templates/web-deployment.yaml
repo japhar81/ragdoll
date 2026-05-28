@@ -5,7 +5,9 @@ metadata:
   labels:
     app: ragdoll-web
 spec:
+  {{- if not .Values.web.autoscaling.enabled }}
   replicas: {{ .Values.web.replicas }}
+  {{- end }}
   selector:
     matchLabels:
       app: ragdoll-web

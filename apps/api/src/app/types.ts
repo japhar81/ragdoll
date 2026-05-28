@@ -54,6 +54,7 @@ import type {
   SessionTokenService
 } from "../../../../packages/auth/src/index.ts";
 import type { ChangeBus } from "../../../../packages/events/src/index.ts";
+import type { SsoStateStore } from "../../../../packages/auth/src/index.ts";
 
 /**
  * The shared queue contract specifies `QueueJob.type` includes `"run_pipeline"`
@@ -200,6 +201,14 @@ export interface AppDeps {
    * `createApp` falls back to in-process pubsub (single-replica + tests).
    */
   changeBus?: ChangeBus;
+  /**
+   * Store for pending SSO state (10-minute TTL between OIDC/SAML start and
+   * callback). Multi-replica deploys MUST pass a Redis-backed store so a
+   * callback that lands on a different api pod than the start can find
+   * the entry; when omitted, the auth-sso route falls back to an
+   * in-process Map (single-replica + tests). See ADR 0005.
+   */
+  ssoStateStore?: SsoStateStore;
 }
 
 export interface App {

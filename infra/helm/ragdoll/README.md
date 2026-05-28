@@ -61,6 +61,46 @@ The api/worker pods wait for `db-init` to finish via an init container
 that polls the `schema_migrations` table — pods stay `PodInitializing`
 until the schema is ready, then start cleanly.
 
+## Horizontal scaling
+
+The chart is built for multi-pod workloads from the start. Three
+HorizontalPodAutoscaler resources are available; the worker one is on
+by default, api/web are opt-in.
+
+| Workload | HPA default | min | max | Notes |
+| --- | --- | --- | --- | --- |
+| `ragdoll-worker-follower` | **on** | 1 | 10 | Scales on CPU @ 70%. Leader stays at 1 replica. |
+| `ragdoll-api` | off | 2 | 6 | Enable with `api.autoscaling.enabled=true`. Requires Redis. |
+| `ragdoll-web` | off | 2 | 6 | Enable with `web.autoscaling.enabled=true`. Stateless nginx, always safe. |
+
+Override per-env via the `*.autoscaling.{min,max}Replicas` and
+`targetCPUUtilizationPercentage` values. When autoscaling is enabled
+the chart omits the `replicas` field on the Deployment so a helm
+upgrade doesn't reset the HPA's current scale.
+
+HPAs require the metrics-server addon (or an equivalent metrics
+provider) on the cluster.
+
+### Shared state — what makes multi-pod safe
+
+Every process-local state that would otherwise break across pods has
+a Redis-backed implementation, picked when `REDIS_URL` is set on the
+existing secret:
+
+- **Change-event bus** (`/api/events` WebSocket fan-out) →
+  Redis pubsub channel `ragdoll:changes`.
+- **Job queue** (worker fan-out, retry, scheduling) → BullMQ on
+  Redis.
+- **SSO pending-state cache** (10-min TTL between OIDC/SAML start
+  and callback) → Redis with server-side `EX` TTL. Without this
+  a callback that lands on a different api pod than the start
+  would fail with `sso_state_invalid`.
+- **Session tokens** are stateless HMACs (no shared session table
+  required).
+
+Single-pod / offline test installs that omit `REDIS_URL` fall back to
+in-process implementations of each — the contract is identical.
+
 ## Worker scheduler split
 
 The worker has a built-in cron scheduler (croner) that ticks every
@@ -70,9 +110,9 @@ splits the workload into:
 
 - **`ragdoll-worker-leader`** (`replicas: 1`, `WORKER_SCHEDULER_ENABLED=true`)
   — single pod, owns the cron scheduler AND consumes BullMQ jobs.
-- **`ragdoll-worker-follower`** (`replicas: N`, `WORKER_SCHEDULER_ENABLED=false`)
-  — N pods, consume jobs only. Scale `worker.followers.replicas` for
-  throughput.
+  NOT autoscaled — the scheduler must be single-fire.
+- **`ragdoll-worker-follower`** (HPA min 1 / max 10 by default,
+  `WORKER_SCHEDULER_ENABLED=false`) — N pods, consume jobs only.
 
 If the leader pod crashes the scheduler pauses until it restarts;
 queued jobs continue to drain via the followers. There is no
@@ -109,9 +149,24 @@ api:
   replicas: 4
   webBaseUrl: "https://ragdoll.acme.example"
 
+api:
+  autoscaling:
+    enabled: true
+    minReplicas: 3
+    maxReplicas: 12
+
+web:
+  autoscaling:
+    enabled: true
+    minReplicas: 3
+    maxReplicas: 8
+
 worker:
   followers:
-    replicas: 6   # scale for higher throughput
+    autoscaling:
+      enabled: true
+      minReplicas: 2     # always keep some warm capacity
+      maxReplicas: 30    # peak ingestion bursts
   ollamaWarmModels: ""   # production uses a hosted LLM, not Ollama
 
 pythonPlugins:
