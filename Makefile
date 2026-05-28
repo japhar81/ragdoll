@@ -25,8 +25,11 @@ test:
 # Build + start only the Python crawler plugin service. Kept separate from
 # `refresh` because the image bundles a headless Chromium and is slow to
 # build — rebuild it explicitly, not on every code-refresh.
+#
+# `scripts/compose.sh` auto-detects docker compose / podman compose / etc.
+# (see scripts/_compose.sh).
 crawl-up:
-	docker compose -f infra/docker/docker-compose.yml up -d --build python-plugins
+	./scripts/compose.sh up -d --build python-plugins
 
 # Same as crawl-up, but also installs the `reranker` poetry group so the
 # rerank_bge plugin's `provider: local` branch works. Adds ~2GB of torch
@@ -34,10 +37,10 @@ crawl-up:
 # local cross-encoder inference need this. Hosted HF API (the default
 # `provider: hf-api`) needs no extra deps.
 crawl-up-reranker:
-	docker compose -f infra/docker/docker-compose.yml build \
+	./scripts/compose.sh build \
 	  --build-arg POETRY_INSTALL_ARGS='--no-root --only main --with reranker' \
 	  python-plugins
-	docker compose -f infra/docker/docker-compose.yml up -d python-plugins
+	./scripts/compose.sh up -d python-plugins
 
 # Print (and on macOS open) the local Grafana URL. The all-in-one LGTM
 # container (otel-collector service) hosts Grafana on :3300; logs / metrics

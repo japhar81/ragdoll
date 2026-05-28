@@ -10,13 +10,13 @@
 #     make down && make up
 #
 # Optionally pass explicit service names: ./scripts/dev-refresh.sh api
+#
+# Works with docker compose, podman compose, podman-compose, and legacy
+# docker-compose — see scripts/_compose.sh.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-# --env-file only when one exists, so fresh checkouts before `cp .env.example
-# .env` still come up — every env var has a sensible default in compose.
-ENV_ARGS=()
-[[ -f .env ]] && ENV_ARGS=(--env-file ./.env)
-COMPOSE=(docker compose "${ENV_ARGS[@]}" -f infra/docker/docker-compose.yml)
+# shellcheck source=./_compose.sh
+source "$(dirname "$0")/_compose.sh"
 SERVICES=("${@:-api worker-1 worker-2 web file-watcher}")
 
 "${COMPOSE[@]}" up -d --build ${SERVICES[@]}
