@@ -94,6 +94,25 @@ A well-behaved client should:
 2. Show the ⚠ prefix verbatim in any approval UI.
 3. Refuse to call a destructive tool autonomously without a human signal.
 
+## Operator policy: external-database plugins
+
+MCP exposure is decided per **pipeline** (`metadata.mcpExpose: true`),
+not per plugin. The contract has no per-plugin "MCP-ineligible" flag
+today — see [ADR 0021](../adr/0021-external-connections-registry.md)
+for the proposed registry that would add one. Until then, operator
+policy:
+
+| Plugin            | MCP-exposable pipeline? | Reason |
+| ----------------- | ----------------------- | ------ |
+| `postgres_query`  | ✅ Yes                  | Read-only, parameterised, bounded by `maxRows`. This is the intended retrieval shape for chat pipelines. |
+| `postgres_upsert` | ⚠️ Discouraged          | Write-path. Should not be reachable as an LLM tool. |
+| `postgres_exec`   | ❌ Never                | DDL / destructive. Pipelines containing this node MUST keep the default `mcpExpose: false`. |
+
+Auditors can grep pipeline specs for the `capabilities: ["dangerous"]`
+flag on referenced plugins to find risky combinations; surfacing this
+in `validate_pipeline_spec` as a warning is on the roadmap (tracked
+alongside [ADR 0021](../adr/0021-external-connections-registry.md)).
+
 ## Building pipelines
 
 The plugin tools give an LLM everything it needs to author a pipeline spec

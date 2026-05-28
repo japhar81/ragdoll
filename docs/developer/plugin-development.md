@@ -384,6 +384,98 @@ External plugins are still subject to the standard security rules below;
 because resolved secret values cross the wire, the sidecar must be
 cluster-internal and trusted (ADR 0010, kubernetes-deployment doc).
 
+## External-resource plugin pattern
+
+Plugins that talk to a tenant-owned external system (a Postgres database,
+a customer's HTTP API, an S3 bucket they provisioned) follow a specific
+shape so they're safe by construction. The `postgres_*` family is the
+reference implementation; see [ADR 0020](../adr/0020-external-database-plugins.md)
+for the full architectural rationale.
+
+### Pooled-core sibling module
+
+Multi-node families (e.g. `postgres_query` + `postgres_upsert` +
+`postgres_exec`) share connection state via a **sibling core module**
+that lives next to the plugin files:
+
+```
+plugins/builtin-rag/src/
+  postgres-core.ts            # shared pool cache + identifier validator
+  plugins/postgres.ts         # the three plugin exports
+```
+
+The core module:
+
+- Holds a module-scoped `Map<resourceKey, ResourceEntry>` cache, built
+  lazily on first use.
+- Keys by a **hash of the resolved secret value**, not by the operator-
+  facing label. Two nodes pointing at the same DSN share one pool;
+  identical labels resolving to different DSNs (e.g. dev vs prod) stay
+  isolated.
+- Installs once-per-process shutdown hooks
+  (`SIGTERM` / `SIGINT` / `beforeExit`) that flush every cached entry.
+- Exports a test seam (`__setPoolFactory` or equivalent) so the plugin's
+  unit tests can substitute a fake driver without pulling in the real
+  client library.
+- Stays import-safe in offline environments. The real driver is loaded
+  via dynamic `import("…")` (see `packages/db/src/pool.ts` for the
+  precedent), not a top-level import.
+
+### Secret-ref for the connection
+
+Connections are NEVER inline in plugin config. The plugin declares a
+`secretsSchema` with a `secret-ref` field for the credential (DSN, API
+key, OAuth token), and `config` carries only the operator-facing label:
+
+```ts
+secretsSchema: {
+  type: "object",
+  required: ["dsn"],
+  properties: {
+    dsn: { type: "string", format: "secret-ref", description: "…" }
+  }
+}
+```
+
+This makes the same pipeline portable across environments: the operator
+swaps the resolved secret per env (`tenant`, `tenant_provider`,
+`environment` — see ADR 0003), not the spec.
+
+### Identifier validation, not interpolation
+
+If the plugin builds SQL or path strings that include operator-supplied
+identifiers (table names, column names, bucket names), validate them
+against a strict regex and quote them before splicing. NEVER accept the
+identifier verbatim. `postgres-core.quoteIdentifier` is the reference:
+it allows `[A-Za-z_][A-Za-z0-9_$]{0,62}` and rejects quoted
+identifiers, then double-quotes the validated value.
+
+Runtime values from upstream nodes flow ONLY through bound parameters
+(`$1`, `$2`, …) — there's no path by which `inputs.params` reaches the
+SQL string itself. This is the property that makes the family
+injection-proof by construction.
+
+### Read-only by default
+
+Retrieval-shaped plugins should open a read-only transaction (or the
+external system's equivalent) before running the operator's SQL. This
+is the authoritative defence — a pre-flight statement-keyword check is
+helpful for clearer errors, but the txn / equivalent is what we trust.
+
+### Dangerous capabilities are loud
+
+DDL / migration / destructive-action plugins should:
+
+- Declare `capabilities: ["dangerous", …]` in the manifest.
+- Hard-gate execution on a literal `true` config flag (e.g.
+  `config.allowDDL === true`), not a truthy value. A templating bug
+  that produces `"true"` (string) shouldn't enable the gate.
+- Document that they're not appropriate inside MCP-exposed or
+  synchronous pipelines. MCP exposure is per-pipeline today (see
+  [`docs/admin/mcp.md`](../admin/mcp.md)); a future
+  [external-connections registry](../adr/0021-external-connections-registry.md)
+  could make this enforceable at the contract layer.
+
 ## Security rules
 
 - Never log raw secrets.

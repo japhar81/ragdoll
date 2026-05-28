@@ -21,10 +21,14 @@ run with **zero install**.
   lock enforcement, tenant/runtime override policy, and redaction.
 - Encrypted secret provider (AES-256-GCM, tenant-scoped) backed by
   Postgres or in-memory; pipeline specs hold references only.
-- Plugin loader auto-discovering 25 built-in in-process plugins covering
+- Plugin loader auto-discovering 25+ built-in in-process plugins covering
   ingest, chunk, embed, upsert, retrieve, prompt, chat, parse,
   guardrail, evaluation, plus OpenSearch BM25 / vector / hybrid retrievers,
   webhook trigger / output, and a tiny sample transformer.
+- External-database plugin family (`postgres_query`, `postgres_upsert`,
+  `postgres_exec`) for pulling rows from / writing rows to a
+  tenant-owned Postgres. Pooled connections keyed by resolved DSN,
+  parameterised SQL by construction, hard DDL gate. See ADR 0020.
 - External-plugin HTTP transport (contract v1) with an optional Python
   crawler sidecar (`crawl4ai_crawler`, `scrapy_spider`) gated on
   `PYTHON_PLUGIN_URL`, with a default-deny SSRF guard (ADR 0010).

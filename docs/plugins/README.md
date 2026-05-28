@@ -73,6 +73,9 @@ treatment as long as their `id` matches a bundled markdown filename.
 | opensearch_vector_retriever | retriever | [opensearch_vector_retriever.md](opensearch_vector_retriever.md) |
 | path_classifier | router | [path_classifier.md](path_classifier.md) |
 | pipeline_call | tool | [pipeline_call.md](pipeline_call.md) |
+| postgres_exec | tool | [postgres_exec.md](postgres_exec.md) |
+| postgres_query | tool | [postgres_query.md](postgres_query.md) |
+| postgres_upsert | sink | [postgres_upsert.md](postgres_upsert.md) |
 | provider_chat | llm | [provider_chat.md](provider_chat.md) |
 | provider_embeddings | embedder | [provider_embeddings.md](provider_embeddings.md) |
 | qdrant_delete | sink | [qdrant_delete.md](qdrant_delete.md) |
