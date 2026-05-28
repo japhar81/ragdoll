@@ -1,12 +1,34 @@
 import React, { useMemo } from "react";
-import { useInfiniteQuery } from "@tanstack/react-query";
+import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import { api } from "../lib/api.ts";
 import type { UsageRow } from "../lib/api.ts";
+import type { ExecutionRecord } from "../lib/types.ts";
+import { useLookups } from "../lib/lookups.ts";
 import { Screen } from "./Screen.tsx";
 import { SvarDataGrid, type SvarColumn } from "./SvarDataGrid.tsx";
 
 /** Usage admin. GET /api/usage returns an aggregated summary + raw records. */
 export function UsageScreen() {
+  const lookups = useLookups();
+  // Usage rows only carry `executionId` + `tenantId` — pipelineId is not in
+  // the wire shape today. We fetch the most recent executions page (default
+  // 50) and build an id→pipeline lookup so the table can show a pipeline
+  // name for rows whose execution is on that page. Anything older shows
+  // "—" rather than a truncated UUID; the per-execution drill-down still
+  // works from the executions screen.
+  const recentExecutions = useQuery({
+    queryKey: ["usage", "recent-executions"],
+    queryFn: () => api.listExecutions({ limit: 50 }),
+    staleTime: 30_000
+  });
+  const execIndex = useMemo(() => {
+    const map = new Map<string, ExecutionRecord>();
+    for (const e of recentExecutions.data?.executions ?? []) {
+      map.set(e.executionId, e);
+    }
+    return map;
+  }, [recentExecutions.data]);
+
   const usage = useInfiniteQuery({
     queryKey: ["usage", "page"],
     queryFn: ({ pageParam }) =>
@@ -76,15 +98,48 @@ export function UsageScreen() {
             {
               id: "executionId",
               header: "Execution",
-              width: 180,
               cell: (r) =>
-                r.executionId ? <code>{r.executionId.slice(0, 12)}…</code> : "—"
+                r.executionId ? (
+                  <code title={r.executionId} className="cell-mono">
+                    {r.executionId}
+                  </code>
+                ) : (
+                  "—"
+                )
             },
             {
-              id: "tenantId",
+              id: "pipeline",
+              header: "Pipeline",
+              cell: (r) => {
+                const ex = r.executionId ? execIndex.get(r.executionId) : undefined;
+                if (!ex) return <span className="muted">—</span>;
+                return (
+                  <span title={ex.pipelineId} className="cell-name">
+                    {lookups.pipelineLabel(ex.pipelineId)}
+                  </span>
+                );
+              }
+            },
+            {
+              id: "tenant",
               header: "Tenant",
               cell: (r) =>
-                r.tenantId ? <code>{r.tenantId.slice(0, 8)}…</code> : "—"
+                r.tenantId ? (
+                  <span title={r.tenantId} className="cell-name">
+                    {lookups.tenantLabel(r.tenantId)}
+                  </span>
+                ) : (
+                  "—"
+                )
+            },
+            {
+              id: "environment",
+              header: "Environment",
+              width: 120,
+              cell: (r) => {
+                const ex = r.executionId ? execIndex.get(r.executionId) : undefined;
+                return ex?.environment ?? "—";
+              }
             },
             {
               id: "inputTokens",

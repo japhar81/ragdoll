@@ -2328,6 +2328,16 @@ table.datagrid tbody tr.row-highlighted {
 .filters input { padding: 4px 8px; font-size: 12px; }
 
 .cell-stack { display: flex; flex-direction: column; gap: 2px; }
+
+/* Activity-table cell helpers. Used by Executions / Audit / Usage to render
+ * UN-TRUNCATED pipeline/tenant labels and full execution ids. SVAR's grid
+ * fixes the row height for virtualization (no autoRowHeight), so wrapping
+ * would clip — instead we keep cells one line, never ellipsize, and the
+ * grid pushes the column wider OR adds horizontal scroll as needed. The
+ * raw id is mirrored on the title attribute so it's hover-visible and
+ * stays copy-friendly. */
+.cell-name { white-space: nowrap; }
+.cell-mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; white-space: nowrap; }
 .sched-grid-table td { vertical-align: top; }
 
 /* ===== Embedded help (Layers 1-3) ======================================= */
