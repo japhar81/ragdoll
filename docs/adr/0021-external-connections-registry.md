@@ -1,0 +1,162 @@
+# ADR 0021: External Connections Registry (Proposed)
+
+## Status
+
+Proposed. No code lands with this ADR; it captures the design we'd
+adopt the next time a non-Postgres external backend (MySQL, ClickHouse,
+an HTTP-as-DB API, a tenant-owned S3 bucket) needs to participate in a
+pipeline.
+
+## Context
+
+ADR 0020 introduced the first external-database plugin family
+(`postgres_*`) and established four invariants: domain data lives
+outside Ragdoll's DB, SQL-as-config / params-as-data, connections-as-
+secrets, and a shared pool keyed by resolved DSN. Today the
+plumbing is implemented in `plugins/builtin-rag/src/postgres-core.ts` —
+a single internal module that the three Postgres plugins import.
+
+This shape is fine for ONE backend type. The instant we add a second —
+say a `mysql_query` family that also wants pooled, secret-resolved,
+named connections — we'd either:
+
+  - Duplicate `postgres-core` into `mysql-core` with `mysql2` instead
+    of `pg`, or
+  - Extract a generic-but-internal "connection cache" abstraction
+    that each external-DB family imports.
+
+Neither is wrong, but neither names the underlying concept that
+*operators* care about: **"this is a connection to Acme's reporting
+warehouse; it has a name, an owner, health, and an RBAC scope."**
+Datasets already get this treatment (ADR 0016). External connections
+should too.
+
+## Proposal
+
+Add a first-class **ExternalConnection** resource alongside Dataset:
+
+```ts
+interface ExternalConnection {
+  id: UUID;
+  scope: "global" | "tenant" | "environment";
+  tenantId?: string;
+  environmentId?: string;
+
+  slug: string;                       // operator-facing name
+  displayName: string;
+  description?: string;
+
+  kind: "postgres" | "mysql" | "clickhouse" | "http" | string;
+
+  // Reference to the managed secret containing the DSN / API key.
+  // Resolved through the existing scope inheritance walk.
+  secretRef: SecretRef;
+
+  // Per-kind structured config (max connections, default schema, …).
+  options?: Record<string, unknown>;
+
+  archivedAt?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+```
+
+### Pipeline spec shape
+
+A node references a connection the way it already references a dataset:
+
+```yaml
+nodes:
+  - id: outages
+    plugin: { category: tool, id: postgres_query, version: 1.0.0 }
+    connection: { slug: acme-reporting }       # NEW
+    config:
+      sql: "SELECT * FROM outages WHERE project = $1"
+```
+
+The runtime resolves `connection.slug` via the same env → tenant →
+global walk used for datasets, hands the plugin a
+`ResolvedExternalConnection` containing the secret-resolved DSN, and
+the plugin uses the existing pool cache.
+
+### What this buys
+
+- **Naming.** Operators see `acme-reporting` in the UI and in pipeline
+  exports — not a free-text label that means whatever the author typed.
+- **Health.** A nightly job can probe every connection and surface red
+  health badges in the Builder before a pipeline run fails on a dead
+  DSN.
+- **RBAC.** A new permission, `external_connection:use`, scoped per
+  (tenant, environment, connection_id), gates which pipelines can
+  reference which connections. Today there is no such gate —
+  *anything* with a `secrets.dsn` reference can connect.
+- **Audit.** Connection-level access logs (who ran what against which
+  external DB, when) become easy because the connection has an id.
+- **Pool isolation by intent, not by accident.** The pool cache keys
+  off `connection.id` once the resource exists; today it keys off the
+  resolved DSN. Both are correct, but the registry version is
+  *explainable*.
+- **Multi-backend uniformity.** The pattern works for `mysql`,
+  `clickhouse`, an `http` JSON API, an S3 bucket, etc. without each
+  plugin family reinventing connection management.
+
+### Backwards compatibility
+
+The current "secret-ref in the node" path keeps working — a node with
+NO `connection:` field falls back to the existing `secrets.dsn` shape.
+That keeps every Postgres pipeline written under ADR 0020 valid
+unchanged. Migrating a pipeline to the registry-aware path is a one-
+line spec edit.
+
+### Migration of `postgres-core`
+
+`plugins/builtin-rag/src/postgres-core.ts` becomes a thin consumer of
+the registry rather than the owner of the pool cache. The cache moves
+into a `packages/external-connections` package alongside the registry
+client; per-driver factories (postgres, mysql, …) register themselves
+the way provider adapters register today (ADR 0008 / providers
+package).
+
+## Decision (deferred)
+
+This ADR is **Proposed**, not Accepted. We adopt it the next time a
+second external-DB plugin family lands — that's the point at which the
+cost of duplication exceeds the cost of building the registry. Until
+then, ADR 0020's internal core is the right abstraction.
+
+## Consequences (if accepted)
+
+- New top-level resource, new API surface
+  (`/api/external-connections`), new permission, new CLI commands
+  (`ragdoll connections list / create / probe / archive`), new
+  Builder picker.
+- Existing Postgres plugins gain an optional `connection: { slug }`
+  field that takes precedence over the legacy `secrets.dsn` path. No
+  changes to plugins that don't opt in.
+- One more thing for operators to learn — but it's symmetric with
+  datasets, so the conceptual load is bounded.
+
+## Alternatives considered
+
+1. **Keep the per-family internal core forever.** Works fine while
+   Postgres is the only external DB. Becomes a copy-paste hazard the
+   moment a second family lands.
+
+2. **Generalise the existing Dataset resource to cover external
+   connections too.** Tempting because of the surface symmetry, but
+   datasets carry an embedding profile, chunk schema, and modality
+   slots that a raw DB connection just doesn't have. The naming would
+   confuse more than it clarified.
+
+3. **Use the existing Secret resource as the connection identifier.**
+   The secret is half of what a connection is (the credential); the
+   other half is the kind + per-kind options + health + RBAC scope.
+   Conflating them robs us of the audit / RBAC / health surface.
+
+## References
+
+- ADR 0016 — Datasets (the resource shape this proposal mirrors).
+- ADR 0019 — Plugin contract v2 (where `ResolvedDataset` is delivered
+  to v2 plugins; `ResolvedExternalConnection` would follow the same
+  shape).
+- ADR 0020 — External-database plugins.
