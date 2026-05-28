@@ -12,15 +12,24 @@
  *    palette out of the box;
  *  - exposes a `Column<Row>` type that maps to SVAR's IColumnConfig
  *    with a typed `cell` renderer, so screens stay TypeScript-strict;
- *  - surfaces a `LoadMoreButton` below the grid for cursor-paged
- *    callers (the activity screens use this with `useInfiniteQuery`);
+ *  - turns sort, resize, and header-filter ON BY DEFAULT — every
+ *    column gets a draggable resize handle, a clickable sort header,
+ *    and a text-filter input below the title. Per-column opt-outs
+ *    (`sort: false`, `filter: false`, `resize: false`) cover the
+ *    odd action column;
+ *  - auto-sizes columns without an explicit `width` to fit their
+ *    content (canvas-measured against the first page of rows, then
+ *    frozen so subsequent page loads don't reshape the grid);
+ *  - surfaces a "Load more" affordance via virtual-scroll auto-fetch
+ *    for cursor-paged callers (the activity screens use this with
+ *    `useInfiniteQuery`);
  *  - falls back to an empty-state row instead of an empty viewport,
  *    matching the look of the rest of the app.
  *
  * Heavy CSS (`@svar-ui/react-grid/all.css`) is imported once from
  * `main.tsx` so the bundle only pays for it on app boot.
  */
-import { type ReactNode, useEffect, useMemo, useRef } from "react";
+import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import {
   Grid,
   Willow,
@@ -35,9 +44,24 @@ export interface SvarColumn<Row> {
   /** Optional custom renderer. Receives the row directly (NOT SVAR's
    *  `ICellProps`) so the cell prop reads like our previous DataGrid. */
   cell?: (row: Row) => ReactNode;
+  /** Pixel width. When set, takes precedence over the auto-sizer. */
   width?: number;
   /** Defaults to true — flip to false to keep this column from sorting. */
   sort?: boolean;
+  /** Header filter widget. Defaults to a text input. Set `false` for
+   *  columns where filtering makes no sense (e.g. an actions column). */
+  filter?: false | "text" | "richselect";
+  /** Defaults to true — flip false to lock the column width. */
+  resize?: boolean;
+  /** Defaults to true when no explicit `width` is set; opts the column
+   *  into the canvas-measured auto-sizer. Set false to fall back to
+   *  SVAR's default flex-grow distribution. */
+  autoWidth?: boolean;
+  /** Returns the plain-text content the auto-sizer should measure for
+   *  a given row. Used when the `cell` renderer derives content from
+   *  outside the row (e.g. an id → name lookup) — without this the
+   *  sizer would measure the raw UUID and pick the wrong width. */
+  measure?: (row: Row) => string;
   align?: "left" | "right" | "center";
 }
 
@@ -65,11 +89,82 @@ export interface SvarDataGridProps<Row> {
   onLoadMore?: () => void;
 }
 
+// ---------------------------------------------------------------------------
+// Auto-width measurement
+// ---------------------------------------------------------------------------
+
+/**
+ * Number of leading rows the auto-sizer measures to derive each
+ * column's width. Big enough to cover the realistic worst case in the
+ * first page, small enough that the measurement loop stays under a
+ * frame. Subsequent pages do NOT trigger a re-measurement.
+ */
+const AUTO_WIDTH_SAMPLE = 80;
+/** Min and max widths the auto-sizer will assign. */
+const AUTO_WIDTH_MIN = 80;
+const AUTO_WIDTH_MAX = 480;
+/** Padding around the measured text inside a cell, plus the sort/
+ *  filter icons in the header. */
+const CELL_PADDING_PX = 24;
+const HEADER_PADDING_PX = 56;
+/** Canvas font used for measurement — matches the SVAR Willow theme's
+ *  body font. */
+const MEASURE_FONT = "13px system-ui, -apple-system, 'Segoe UI', sans-serif";
+
+let measureCanvas: HTMLCanvasElement | undefined;
+function measureText(text: string): number {
+  if (typeof document === "undefined") return text.length * 8;
+  if (!measureCanvas) measureCanvas = document.createElement("canvas");
+  const ctx = measureCanvas.getContext("2d");
+  if (!ctx) return text.length * 8;
+  ctx.font = MEASURE_FONT;
+  return ctx.measureText(text).width;
+}
+
+function measureCellText<Row>(row: Row, col: SvarColumn<Row>): string {
+  if (col.measure) return col.measure(row);
+  const raw = (row as Record<string, unknown>)[col.id];
+  if (raw === null || raw === undefined) return "";
+  // Stringify primitives directly; for objects fall back to JSON so the
+  // sizer doesn't trip on `[object Object]` (and still bounds at MAX).
+  if (typeof raw === "object") {
+    try {
+      return JSON.stringify(raw);
+    } catch {
+      return "";
+    }
+  }
+  return String(raw);
+}
+
+function computeAutoWidths<Row>(
+  columns: SvarColumn<Row>[],
+  rows: Row[]
+): Record<string, number> {
+  const out: Record<string, number> = {};
+  const sample = rows.slice(0, AUTO_WIDTH_SAMPLE);
+  for (const col of columns) {
+    if (col.width !== undefined) continue;
+    if (col.autoWidth === false) continue;
+    let maxPx = measureText(col.header) + HEADER_PADDING_PX;
+    for (const row of sample) {
+      const text = measureCellText(row, col);
+      const px = measureText(text) + CELL_PADDING_PX;
+      if (px > maxPx) maxPx = px;
+    }
+    out[col.id] = Math.round(
+      Math.min(AUTO_WIDTH_MAX, Math.max(AUTO_WIDTH_MIN, maxPx))
+    );
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// Component
+// ---------------------------------------------------------------------------
+
 export function SvarDataGrid<Row>(props: SvarDataGridProps<Row>) {
   const { rows, columns } = props;
-  // Map our typed Column<Row> into SVAR's IColumnConfig. SVAR's cell FC
-  // receives ICellProps with `.row` typed loosely — wrap with our
-  // typed `cell` callback so column definitions stay type-safe.
   const rowNoun = props.rowNoun ?? "row";
   // Footer text logic:
   //   - if the API gave us a total AND it differs from the loaded
@@ -82,25 +177,58 @@ export function SvarDataGrid<Row>(props: SvarDataGridProps<Row>) {
     props.totalRows !== undefined && props.totalRows !== rows.length
       ? `${loadedFmt} of ${props.totalRows.toLocaleString()} ${rowNoun}s`
       : `${loadedFmt} ${noun}`;
+
+  // Auto-width: measure ONCE per columns identity, the first time we
+  // see a non-empty rows array. Subsequent rows changes (paginated
+  // loads) don't trigger a remeasure — that would reshape the grid out
+  // from under the operator. User resizes via SVAR's drag handle are
+  // preserved by the grid's internal state regardless of what we set
+  // here.
+  const [autoWidths, setAutoWidths] = useState<Record<string, number>>({});
+  const measuredKey = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    if (rows.length === 0) return;
+    const key = columns.map((c) => `${c.id}:${c.width ?? ""}`).join("|");
+    if (measuredKey.current === key) return;
+    measuredKey.current = key;
+    setAutoWidths(computeAutoWidths(columns, rows));
+  }, [columns, rows]);
+
+  // Map our typed Column<Row> into SVAR's IColumnConfig.
   const svarColumns = useMemo<IColumnConfig[]>(
     () =>
       columns.map((c, idx) => {
+        const wantsFilter = c.filter !== false;
+        const filterType = c.filter === false ? undefined : c.filter ?? "text";
+        // SVAR's filter input lives on the HEADER cell, not on the
+        // column directly. To get a filterable header we have to pass
+        // the structured `IHeaderCell` shape instead of a plain
+        // string. The `text` field becomes the title shown above the
+        // filter input.
+        const headerCell = wantsFilter
+          ? [{ text: c.header, filter: filterType }]
+          : c.header;
         const cfg: IColumnConfig = {
           id: c.id,
-          header: c.header,
+          header: headerCell,
           sort: c.sort !== false,
+          resize: c.resize !== false,
           // Footer cell: SVAR pins it to the bottom of the grid when
           // `footer={true}` is set on <Grid>. We put the loaded-row
           // count in the first column and leave the rest blank.
           footer: idx === 0 ? footerLabel : ""
         };
-        if (c.width !== undefined) {
-          cfg.width = c.width;
+        const explicit = c.width;
+        const measured = autoWidths[c.id];
+        if (explicit !== undefined) {
+          cfg.width = explicit;
+        } else if (measured !== undefined) {
+          cfg.width = measured;
         } else {
-          // No explicit width → let the column flex-grow to fill any
-          // remaining horizontal space in the viewport. Without this
-          // SVAR sizes each unsized column to its content default
-          // (~120px) and leaves a band of empty space on the right.
+          // Pre-measurement (no rows yet) — flex-grow so the row line
+          // still reaches the right edge instead of leaving a band of
+          // empty space. As soon as the first page arrives we switch
+          // to measured widths.
           cfg.flexgrow = 1;
         }
         // SVAR aligns through the cell renderer + flex; we mirror via
@@ -120,7 +248,7 @@ export function SvarDataGrid<Row>(props: SvarDataGridProps<Row>) {
         }
         return cfg;
       }),
-    [columns]
+    [columns, autoWidths, footerLabel]
   );
 
   // Always provide an `id` field on every row; SVAR uses it as the row
@@ -222,6 +350,10 @@ export function SvarDataGrid<Row>(props: SvarDataGridProps<Row>) {
               // table overflows the viewport, and the scroll-bottom
               // event we hook for the next-page fetch never fires.
               footer
+              // filterValues is the initial filter state. SVAR mutates
+              // its own copy as the user types in the header filters,
+              // so we hand back an empty object on every mount — the
+              // filter inputs we declared per column do the real work.
               filterValues={{}}
               init={onInit}
             />

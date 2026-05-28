@@ -40,13 +40,14 @@ export function AuditScreen() {
     {
       id: "createdAt",
       header: "Time",
-      width: 180,
-      cell: (l) => new Date(l.createdAt).toLocaleString()
+      cell: (l) => new Date(l.createdAt).toLocaleString(),
+      measure: (l) => new Date(l.createdAt).toLocaleString()
     },
     {
       id: "actorId",
       header: "Actor",
-      cell: (l) => l.actorId ?? "—"
+      cell: (l) => l.actorId ?? "—",
+      measure: (l) => l.actorId ?? "—"
     },
     {
       id: "tenant",
@@ -58,7 +59,8 @@ export function AuditScreen() {
           </span>
         ) : (
           "—"
-        )
+        ),
+      measure: (l) => (l.tenantId ? lookups.tenantLabel(l.tenantId) : "—")
     },
     { id: "action", header: "Action" },
     { id: "targetType", header: "Target type" },
@@ -69,7 +71,8 @@ export function AuditScreen() {
         <span title={l.targetId} className="cell-name">
           {targetLabel(l)}
         </span>
-      )
+      ),
+      measure: (l) => targetLabel(l)
     }
   ];
 

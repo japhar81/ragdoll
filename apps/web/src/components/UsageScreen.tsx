@@ -105,7 +105,8 @@ export function UsageScreen() {
                   </code>
                 ) : (
                   "—"
-                )
+                ),
+              measure: (r) => r.executionId ?? "—"
             },
             {
               id: "pipeline",
@@ -118,6 +119,10 @@ export function UsageScreen() {
                     {lookups.pipelineLabel(ex.pipelineId)}
                   </span>
                 );
+              },
+              measure: (r) => {
+                const ex = r.executionId ? execIndex.get(r.executionId) : undefined;
+                return ex ? lookups.pipelineLabel(ex.pipelineId) : "—";
               }
             },
             {
@@ -130,13 +135,17 @@ export function UsageScreen() {
                   </span>
                 ) : (
                   "—"
-                )
+                ),
+              measure: (r) => (r.tenantId ? lookups.tenantLabel(r.tenantId) : "—")
             },
             {
               id: "environment",
               header: "Environment",
-              width: 120,
               cell: (r) => {
+                const ex = r.executionId ? execIndex.get(r.executionId) : undefined;
+                return ex?.environment ?? "—";
+              },
+              measure: (r) => {
                 const ex = r.executionId ? execIndex.get(r.executionId) : undefined;
                 return ex?.environment ?? "—";
               }
@@ -144,27 +153,24 @@ export function UsageScreen() {
             {
               id: "inputTokens",
               header: "Input",
-              width: 100,
               align: "right"
             },
             {
               id: "outputTokens",
               header: "Output",
-              width: 100,
               align: "right"
             },
             {
               id: "embeddingTokens",
               header: "Embedding",
-              width: 110,
               align: "right"
             },
             {
               id: "estimatedCostUsd",
               header: "Cost",
-              width: 110,
               align: "right",
-              cell: (r) => `$${r.estimatedCostUsd.toFixed(4)}`
+              cell: (r) => `$${r.estimatedCostUsd.toFixed(4)}`,
+              measure: (r) => `$${r.estimatedCostUsd.toFixed(4)}`
             }
           ] satisfies SvarColumn<UsageRow>[]
         }
