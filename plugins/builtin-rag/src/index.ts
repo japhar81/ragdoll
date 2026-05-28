@@ -1556,3 +1556,15 @@ export {
   openSearchHybridRetrieverPlugin,
   fuseHybridResults
 } from "./plugins/opensearch.ts";
+
+// External-database (Postgres) plugin family. The three plugins share a
+// pooled-connection core in `./postgres-core.ts`; see ADR 0020 for the
+// architectural rules (SQL-as-config, params-as-data, connections-as-secrets).
+// `buildBatchUpsert` is re-exported so the unit tests can assert the
+// generated SQL shape without standing up a database.
+export {
+  postgresQueryPlugin,
+  postgresUpsertPlugin,
+  postgresExecPlugin,
+  buildBatchUpsert
+} from "./plugins/postgres.ts";
