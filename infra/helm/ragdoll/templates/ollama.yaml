@@ -1,0 +1,181 @@
+{{- if .Values.bundledollama.enabled }}
+{{/*
+Bundled Ollama (local CPU LLM + embedder).
+
+Hand-rolled single-replica Deployment + Service + PVC. The trade-offs:
+
+  - Single replica, `strategy: Recreate` — two pods racing the same
+    PVC corrupts the models cache.
+  - Persistence ON by default — models are ~hundreds-of-MB each;
+    losing them on pod restart means a multi-minute cold-pull every
+    time. The worker's warm-models hook runs `ollama pull MODEL` once
+    on boot and the model lands on the PVC, so subsequent restarts
+    are warm.
+  - Runs as UID 0. Ollama's image hard-codes /root/.ollama as its
+    state path and writes binary blobs there. Under OpenShift's
+    restricted-v2 SCC that fails with EACCES. Install with
+    `--set openshift.scc.name=privileged` (matches the qdrant pod's
+    constraint). On vanilla k8s the chart-wide securityContext
+    (runAsNonRoot:true) gets overridden here exactly like qdrant.
+
+For production-scale Ollama (GPU, larger models, replicas behind a
+load balancer) point at an external install: set `bundledollama.enabled:
+false` and `ollama.baseUrl` accordingly.
+*/}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: ragdoll-ollama
+  labels:
+    app: ragdoll-ollama
+    {{- include "ragdoll.commonLabels" . | nindent 4 }}
+  {{- with (include "ragdoll.commonAnnotations" . | trim) }}
+  annotations:
+    {{- . | nindent 4 }}
+  {{- end }}
+spec:
+  selector:
+    app: ragdoll-ollama
+  ports:
+    - name: http
+      port: {{ .Values.bundledollama.port }}
+      targetPort: {{ .Values.bundledollama.port }}
+{{- if .Values.bundledollama.persistence.enabled }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ragdoll-ollama
+  labels:
+    app: ragdoll-ollama
+    {{- include "ragdoll.commonLabels" . | nindent 4 }}
+  {{- with (include "ragdoll.commonAnnotations" . | trim) }}
+  annotations:
+    {{- . | nindent 4 }}
+  {{- end }}
+spec:
+  accessModes:
+    {{- toYaml .Values.bundledollama.persistence.accessModes | nindent 4 }}
+  resources:
+    requests:
+      storage: {{ .Values.bundledollama.persistence.size }}
+  {{- with .Values.bundledollama.persistence.storageClassName }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+{{- end }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ragdoll-ollama
+  labels:
+    app: ragdoll-ollama
+    {{- include "ragdoll.commonLabels" . | nindent 4 }}
+  {{- with (include "ragdoll.commonAnnotations" . | trim) }}
+  annotations:
+    {{- . | nindent 4 }}
+  {{- end }}
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: ragdoll-ollama
+  template:
+    metadata:
+      labels:
+        app: ragdoll-ollama
+        {{- include "ragdoll.commonLabels" . | nindent 8 }}
+      {{- with (include "ragdoll.commonAnnotations" . | trim) }}
+      annotations:
+        {{- . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "ragdoll.serviceAccountName" . }}
+      # Same as qdrant: image hard-codes a path under /root that the
+      # OpenShift namespace-random UID can't write to. Run as root
+      # under `privileged` SCC.
+      securityContext:
+        runAsUser: 0
+        runAsGroup: 0
+        fsGroup: 0
+      containers:
+        - name: ollama
+          image: "{{ .Values.bundledollama.image.repository }}:{{ .Values.bundledollama.image.tag }}"
+          imagePullPolicy: {{ .Values.bundledollama.image.pullPolicy }}
+          # Override the chart-wide containerSecurityContext (runAsNonRoot:
+          # true + drop all caps) — incompatible with Ollama's UID 0 model.
+          securityContext:
+            runAsNonRoot: false
+            runAsUser: 0
+            allowPrivilegeEscalation: true
+            privileged: true
+            capabilities:
+              drop: []
+          ports:
+            - name: http
+              containerPort: {{ .Values.bundledollama.port }}
+          env:
+            # 0.0.0.0 (not 127.0.0.1) so the kube Service routes to it.
+            - name: OLLAMA_HOST
+              value: "0.0.0.0:{{ .Values.bundledollama.port }}"
+          {{- with .Values.bundledollama.preloadModels }}
+          # Pull the demo models in the background once the server is
+          # serving. postStart runs detached so it doesn't block pod
+          # readiness; pulls land on the PVC so subsequent pod restarts
+          # find them cached. Output goes to /tmp/preload.log inside
+          # the pod for triage (`oc exec ragdoll-ollama -- cat /tmp/preload.log`).
+          lifecycle:
+            postStart:
+              exec:
+                command:
+                  - /bin/sh
+                  - -c
+                  - |
+                    (
+                      for i in $(seq 1 60); do
+                        wget -qO- http://127.0.0.1:{{ $.Values.bundledollama.port }}/api/tags >/dev/null 2>&1 && break
+                        sleep 2
+                      done
+                      {{- range . }}
+                      echo "preload: pulling {{ . }}" >> /tmp/preload.log
+                      ollama pull {{ . }} >> /tmp/preload.log 2>&1
+                      {{- end }}
+                      echo "preload: done" >> /tmp/preload.log
+                    ) &
+          {{- end }}
+          volumeMounts:
+            {{- if .Values.bundledollama.persistence.enabled }}
+            - name: models
+              mountPath: /root/.ollama
+            {{- end }}
+          readinessProbe:
+            # Ollama exposes `/api/tags` from startup; `/` returns 404
+            # so we'd false-fail there. Tags is the canonical health
+            # probe in Ollama's own docs.
+            httpGet:
+              path: /api/tags
+              port: {{ .Values.bundledollama.port }}
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /api/tags
+              port: {{ .Values.bundledollama.port }}
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          resources:
+            requests:
+              cpu: {{ .Values.bundledollama.resources.requests.cpu }}
+              memory: {{ .Values.bundledollama.resources.requests.memory }}
+            limits:
+              cpu: {{ .Values.bundledollama.resources.limits.cpu | quote }}
+              memory: {{ .Values.bundledollama.resources.limits.memory }}
+      volumes:
+        {{- if .Values.bundledollama.persistence.enabled }}
+        - name: models
+          persistentVolumeClaim:
+            claimName: ragdoll-ollama
+        {{- end }}
+{{- end }}

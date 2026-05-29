@@ -70,6 +70,24 @@ http://{{ .Release.Name }}-bundledopensearch:9200
 {{- end -}}
 {{- end -}}
 
+{{/* OLLAMA_BASE_URL — bundled service when enabled, override otherwise. */}}
+{{- define "ragdoll.ollamaBaseUrl" -}}
+{{- if .Values.bundledollama.enabled -}}
+http://ragdoll-ollama:{{ .Values.bundledollama.port }}
+{{- else -}}
+{{ .Values.ollama.baseUrl }}
+{{- end -}}
+{{- end -}}
+
+{{/* DGRAPH_URL — bundled service when enabled, override otherwise. */}}
+{{- define "ragdoll.dgraphUrl" -}}
+{{- if .Values.bundleddgraph.enabled -}}
+http://ragdoll-dgraph:{{ .Values.bundleddgraph.httpPort }}
+{{- else -}}
+{{ .Values.dgraph.url }}
+{{- end -}}
+{{- end -}}
+
 {{/*
 Common labels emitted on every resource. Merges the chart's own
 identity labels (`app.kubernetes.io/managed-by`, etc.) with whatever
@@ -152,12 +170,21 @@ Args: . (top-level chart values context).
 - name: OPENSEARCH_URL
   value: {{ $os | quote }}
 {{- end }}
-{{- if .Values.dgraph.url }}
+{{- $dgraph := include "ragdoll.dgraphUrl" . -}}
+{{- if $dgraph }}
 - name: DGRAPH_URL
-  value: {{ .Values.dgraph.url | quote }}
+  value: {{ $dgraph | quote }}
 {{- end }}
 - name: RAGDOLL_VECTOR_BACKEND
   value: {{ .Values.vectorBackend | quote }}
+{{- $ollama := include "ragdoll.ollamaBaseUrl" . -}}
+{{- if $ollama }}
+# Bundled Ollama → resolved automatically; external Ollama → pin
+# `ollama.baseUrl` in values. Used by api LLM/embedder calls AND by
+# the worker's warm-models loop.
+- name: OLLAMA_BASE_URL
+  value: {{ $ollama | quote }}
+{{- end }}
 # OTEL metric/log/trace push path. The endpoint is always set so
 # traces + logs continue to flow even when metric PUSH is off; the
 # OTEL_METRICS_ENABLED flag below specifically gates only the metrics

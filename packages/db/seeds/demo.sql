@@ -40,6 +40,14 @@ INSERT INTO config_definitions (
   ('llm.temperature', 'number', '0.2', ARRAY['global','pipeline','tenant_pipeline','runtime'], true, true, false, false, 'Sampling temperature'),
   ('llm.api_key', 'secret_ref', NULL, ARRAY['tenant','tenant_pipeline'], true, false, true, true, 'Tenant provider API key reference'),
   ('llm.base_url', 'string', NULL, ARRAY['tenant','tenant_pipeline'], true, false, false, false, 'Ollama-compatible base URL'),
+  -- Embedding profile so codebase-ingest demos resolve
+  -- `${config.embedding.*}` cleanly without operator setup. Defaults
+  -- match the bundled Ollama install (nomic-embed-text @ 768d). For
+  -- a hosted embedder, override per-tenant.
+  ('embedding.provider', 'string', '"ollama"', ARRAY['global','environment','pipeline','pipeline_version','tenant','tenant_pipeline','runtime'], true, true, false, false, 'Default embedding provider'),
+  ('embedding.model', 'string', '"nomic-embed-text"', ARRAY['global','environment','pipeline','pipeline_version','tenant','tenant_pipeline','runtime'], true, true, false, false, 'Default embedding model'),
+  ('embedding.dimensions', 'integer', '768', ARRAY['global','pipeline','tenant_pipeline'], true, false, false, false, 'Default embedding dimensionality'),
+  ('embedding.base_url', 'string', NULL, ARRAY['tenant','tenant_pipeline'], true, false, false, false, 'Override base URL for the embedding provider (uses OLLAMA_BASE_URL env when null)'),
   ('retrieval.top_k', 'integer', '5', ARRAY['global','pipeline','tenant_pipeline','runtime'], true, true, false, false, 'Retriever top K'),
   ('chunking.chunk_size', 'integer', '1000', ARRAY['global','pipeline'], false, false, false, false, 'Locked chunk size'),
   ('vector.isolation.mode', 'string', '"collection_per_tenant_pipeline"', ARRAY['global','environment','pipeline'], false, false, false, false, 'Vector isolation mode')

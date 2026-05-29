@@ -148,9 +148,10 @@ worker:
     maxReplicas: 10
     targetCPUUtilizationPercentage: 70
   # Comma-separated list of Ollama models the worker pulls/warms on
-  # boot. Empty disables warm-up (saves cold-start time on installs
-  # that don't use local Ollama).
-  ollamaWarmModels: ""
+  # boot. Default pulls the two demo-default models when bundled Ollama
+  # is on (chart wires this through automatically). Override with a
+  # different model set, or "" to disable warming entirely.
+  ollamaWarmModels: "qwen2.5:0.5b,nomic-embed-text"
   ollamaWarmIntervalMs: 300000
 
 # ---------------------------------------------------------------------------
@@ -214,7 +215,10 @@ opensearch:
 dgraph:
   url: ""
 
-# Optional Ollama (local LLM). Set to "" to disable Ollama-backed plugins.
+# Ollama (local LLM + embedder) base URL — used when `bundledollama.enabled`
+# is FALSE and you've pointed at an external Ollama install. When bundled
+# Ollama is on (the default), the helper auto-computes
+# `http://ragdoll-ollama:11434` and this value is ignored.
 ollama:
   baseUrl: ""
 
@@ -482,12 +486,100 @@ bundledqdrant:
     storageClassName: ""
     accessModes: [ReadWriteOnce]
 
-# OpenSearch — Bitnami legacy chart. Default OFF because it's a
-# heavy install (JVM + 1-3GB heap by default) and most retrieval
-# patterns work without lexical until you scale past pure vector.
-# When you enable this, the chart auto-wires OPENSEARCH_URL.
+# ---------------------------------------------------------------------------
+# Bundled Dgraph (graph backend for the *-knowledge-graph demos)
+# ---------------------------------------------------------------------------
+#
+# Hand-rolled single-replica Deployment + Service + PVC using Dgraph's
+# all-in-one `standalone` image (zero + alpha + ratel in one process).
+# Production deployments split those — use Dgraph's official chart for
+# that and disable this with `--set bundleddgraph.enabled=false`.
+#
+# When bundled, the chart auto-wires `dgraph.url` to the in-cluster
+# service so the dgraph_upsert / dgraph_query plugins work without any
+# operator config.
+bundleddgraph:
+  enabled: true
+  image:
+    repository: dgraph/standalone
+    tag: "v24.0.0"
+    pullPolicy: IfNotPresent
+  # HTTP (alpha REST + DQL) port the api/worker hit. The standalone
+  # image also exposes 9080 (gRPC) and 8000 (Ratel UI) — only HTTP is
+  # wired into the Service since RAGdoll calls the REST endpoints.
+  httpPort: 8080
+  resources:
+    requests: { cpu: 250m, memory: 512Mi }
+    limits: { cpu: "2", memory: 2Gi }
+  persistence:
+    enabled: true
+    # Standalone keeps both badger (alpha) and the zero log here.
+    # 5Gi is a comfortable demo-scale ceiling — bump for real datasets.
+    size: 5Gi
+    storageClassName: ""
+    accessModes: [ReadWriteOnce]
+
+# ---------------------------------------------------------------------------
+# Bundled Ollama (CPU local LLM + embedder)
+# ---------------------------------------------------------------------------
+#
+# Hand-rolled single-replica Deployment + Service + PVC, similar trade-offs
+# to `bundledqdrant`. Defaults ON so the demo pipelines that point at
+# `${config.llm.*}` / `${config.embedding.*}` work end-to-end on a fresh
+# install without the operator having to wire an external LLM.
+#
+# The image runs as UID 0 by default; under OpenShift's restricted-v2
+# SCC that fails. Same pragmatic answer as Qdrant: `--set
+# openshift.scc.name=privileged` and the chart binds the SA to it. For
+# non-OpenShift the default SCC (or no SCC at all) is fine.
+#
+# Two models get warm-pulled by the worker on boot via the existing
+# `worker.ollamaWarmModels` env hook — see that block. Models live on
+# the PVC so re-pulls are skipped across pod restarts.
+#
+# Resource sizing: CPU-only inference. qwen2.5:0.5b runs comfortably on
+# 1 core / 1Gi for chat; embeddings (nomic-embed-text) need similar.
+# Bumping the model size means bumping resources here.
+#
+# Disable with `--set bundledollama.enabled=false` and point `ollama.baseUrl`
+# at an external Ollama install (or set OLLAMA_BASE_URL on the existing
+# secret).
+bundledollama:
+  enabled: true
+  image:
+    repository: ollama/ollama
+    tag: "0.5.7"
+    pullPolicy: IfNotPresent
+  port: 11434
+  resources:
+    requests: { cpu: 500m, memory: 1Gi }
+    limits: { cpu: "2", memory: 4Gi }
+  persistence:
+    enabled: true
+    # The two starter models (qwen2.5:0.5b + nomic-embed-text) total
+    # ~700MB. 5Gi gives operators headroom to pull a larger model.
+    size: 5Gi
+    storageClassName: ""
+    accessModes: [ReadWriteOnce]
+  # Models that the pod's postStart hook `ollama pull`s once the server
+  # is up. Compose has a dedicated `ollama-pull` companion service; in
+  # cluster we fold the same job into a postStart hook so the model
+  # cache lands on the PVC before the worker tries to embed.
+  #
+  # The worker's warm-models hook (worker.ollamaWarmModels) keeps these
+  # resident in RAM via 5-minute keep-alive pings AFTER they're pulled.
+  preloadModels:
+    - qwen2.5:0.5b
+    - nomic-embed-text
+
+# OpenSearch — Bitnami legacy chart. Defaults ON so the codebase-
+# ingest-docs demo (lexical + kNN hybrid) works end-to-end on a fresh
+# install. Heavy at minimum (JVM + ~1-2GB heap); disable with
+# `--set bundledopensearch.enabled=false` if your install doesn't
+# need lexical retrieval. When bundled, the chart auto-wires
+# OPENSEARCH_URL through to the api + worker.
 bundledopensearch:
-  enabled: false
+  enabled: true
   # Repoint to bitnamilegacy (same rationale as bundledpostgres).
   image:
     registry: docker.io

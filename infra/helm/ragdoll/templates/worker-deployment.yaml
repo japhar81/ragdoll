@@ -81,10 +81,9 @@ spec:
                   fieldPath: metadata.name
             - name: OTEL_SERVICE_NAME
               value: "ragdoll-worker"
-            {{- if .Values.ollama.baseUrl }}
-            - name: OLLAMA_BASE_URL
-              value: {{ .Values.ollama.baseUrl | quote }}
-            {{- end }}
+            {{- /* OLLAMA_BASE_URL is emitted by commonBackendEnv below, which
+               picks the bundled-vs-external URL via the helper. The worker's
+               warm-models loop reads the same env var. */ -}}
             {{- if .Values.worker.ollamaWarmModels }}
             - name: OLLAMA_WARM_MODELS
               value: {{ .Values.worker.ollamaWarmModels | quote }}

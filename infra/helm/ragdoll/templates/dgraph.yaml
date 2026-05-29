@@ -1,0 +1,143 @@
+{{- if .Values.bundleddgraph.enabled }}
+{{/*
+Bundled Dgraph (graph backend, all-in-one).
+
+Hand-rolled single-replica Deployment + Service + PVC using Dgraph's
+`standalone` image (zero + alpha + ratel in one process). Trade-offs:
+
+  - Single replica, `strategy: Recreate` — alpha + zero share Badger
+    storage that a second pod racing would corrupt.
+  - Persistence ON by default — graph mutations land here; losing the
+    PVC means losing the dataset.
+  - HTTP only (port 8080). gRPC (9080) and Ratel UI (8000) are exposed
+    by the image but not wired into the Service since RAGdoll's
+    `dgraph_upsert` / `dgraph_query` plugins use the REST API.
+  - Runs as UID 0 (same SCC story as qdrant / ollama on OpenShift —
+    install with `--set openshift.scc.name=privileged`).
+
+For production: split alpha + zero into separate Deployments + add
+replication, snapshots, RBAC. Disable this bundle and use Dgraph's
+official chart instead.
+*/}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: ragdoll-dgraph
+  labels:
+    app: ragdoll-dgraph
+    {{- include "ragdoll.commonLabels" . | nindent 4 }}
+  {{- with (include "ragdoll.commonAnnotations" . | trim) }}
+  annotations:
+    {{- . | nindent 4 }}
+  {{- end }}
+spec:
+  selector:
+    app: ragdoll-dgraph
+  ports:
+    - name: http
+      port: {{ .Values.bundleddgraph.httpPort }}
+      targetPort: {{ .Values.bundleddgraph.httpPort }}
+{{- if .Values.bundleddgraph.persistence.enabled }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ragdoll-dgraph
+  labels:
+    app: ragdoll-dgraph
+    {{- include "ragdoll.commonLabels" . | nindent 4 }}
+  {{- with (include "ragdoll.commonAnnotations" . | trim) }}
+  annotations:
+    {{- . | nindent 4 }}
+  {{- end }}
+spec:
+  accessModes:
+    {{- toYaml .Values.bundleddgraph.persistence.accessModes | nindent 4 }}
+  resources:
+    requests:
+      storage: {{ .Values.bundleddgraph.persistence.size }}
+  {{- with .Values.bundleddgraph.persistence.storageClassName }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+{{- end }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ragdoll-dgraph
+  labels:
+    app: ragdoll-dgraph
+    {{- include "ragdoll.commonLabels" . | nindent 4 }}
+  {{- with (include "ragdoll.commonAnnotations" . | trim) }}
+  annotations:
+    {{- . | nindent 4 }}
+  {{- end }}
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: ragdoll-dgraph
+  template:
+    metadata:
+      labels:
+        app: ragdoll-dgraph
+        {{- include "ragdoll.commonLabels" . | nindent 8 }}
+      {{- with (include "ragdoll.commonAnnotations" . | trim) }}
+      annotations:
+        {{- . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "ragdoll.serviceAccountName" . }}
+      # Same as qdrant + ollama — image hard-codes UID 0 paths; run
+      # under the `privileged` SCC on OpenShift.
+      securityContext:
+        runAsUser: 0
+        runAsGroup: 0
+        fsGroup: 0
+      containers:
+        - name: dgraph
+          image: "{{ .Values.bundleddgraph.image.repository }}:{{ .Values.bundleddgraph.image.tag }}"
+          imagePullPolicy: {{ .Values.bundleddgraph.image.pullPolicy }}
+          securityContext:
+            runAsNonRoot: false
+            runAsUser: 0
+            allowPrivilegeEscalation: true
+            privileged: true
+            capabilities:
+              drop: []
+          ports:
+            - name: http
+              containerPort: {{ .Values.bundleddgraph.httpPort }}
+          volumeMounts:
+            {{- if .Values.bundleddgraph.persistence.enabled }}
+            - name: data
+              mountPath: /dgraph
+            {{- end }}
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: {{ .Values.bundleddgraph.httpPort }}
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: {{ .Values.bundleddgraph.httpPort }}
+            initialDelaySeconds: 60
+            periodSeconds: 30
+          resources:
+            requests:
+              cpu: {{ .Values.bundleddgraph.resources.requests.cpu }}
+              memory: {{ .Values.bundleddgraph.resources.requests.memory }}
+            limits:
+              cpu: {{ .Values.bundleddgraph.resources.limits.cpu | quote }}
+              memory: {{ .Values.bundleddgraph.resources.limits.memory }}
+      volumes:
+        {{- if .Values.bundleddgraph.persistence.enabled }}
+        - name: data
+          persistentVolumeClaim:
+            claimName: ragdoll-dgraph
+        {{- end }}
+{{- end }}
