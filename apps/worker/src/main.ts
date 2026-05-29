@@ -124,7 +124,13 @@ async function buildDeps(): Promise<BuiltDeps> {
       // Phase 5: dataset resolution at executor time.
       datasets: new db.PostgresDatasetRepository(pool),
       datasetVersions: new db.PostgresDatasetVersionRepository(pool),
-      datasetAliases: new db.PostgresDatasetAliasRepository(pool)
+      datasetAliases: new db.PostgresDatasetAliasRepository(pool),
+      // PR3: per-pipeline dataset binding overrides consulted by the
+      // shared resolver. Must be wired here OR the worker will silently
+      // ignore bindings configured via /pipelines/:id/bindings.
+      pipelineDatasetBindings: new db.PostgresPipelineDatasetBindingRepository(
+        pool
+      )
     };
     schedules = new db.PostgresScheduleRepository(pool);
     systemSweeps = createPostgresSystemSweeps(pool);
@@ -150,7 +156,8 @@ async function buildDeps(): Promise<BuiltDeps> {
       // Phase 5: dataset resolution at executor time.
       datasets: new db.InMemoryDatasetRepository(),
       datasetVersions: new db.InMemoryDatasetVersionRepository(),
-      datasetAliases: new db.InMemoryDatasetAliasRepository()
+      datasetAliases: new db.InMemoryDatasetAliasRepository(),
+      pipelineDatasetBindings: new db.InMemoryPipelineDatasetBindingRepository()
     };
     schedules = new InMemoryScheduleRepository();
     secretProvider = new DatabaseEncryptedSecretProvider(

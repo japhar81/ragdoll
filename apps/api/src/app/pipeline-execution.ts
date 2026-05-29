@@ -29,7 +29,7 @@ import {
   effectiveVersionId,
   ActivationResolutionError
 } from "../../../../packages/pipeline-spec/src/index.ts";
-import { DagExecutor } from "../../../../packages/runtime/src/index.ts";
+import { DagExecutor, buildDatasetResolver } from "../../../../packages/runtime/src/index.ts";
 import type {
   PipelineActivationRow,
   PipelineActivationRepository,
@@ -37,8 +37,7 @@ import type {
   PipelineVersionRow
 } from "../../../../packages/db/src/index.ts";
 import type {
-  DatasetResolver,
-  ResolvedDatasetBackend
+  DatasetResolver
 } from "../../../../packages/plugin-sdk/src/index.ts";
 import type { QueueJob } from "../../../worker/src/index.ts";
 import { error, nowIso, isObject } from "./http-utils.ts";
@@ -227,104 +226,18 @@ export function buildApiDatasetResolver(
   if (!deps.datasets || !deps.datasetVersions || !deps.datasetAliases) {
     return undefined;
   }
-  const datasets = deps.datasets;
-  const datasetVersions = deps.datasetVersions;
-  const datasetAliases = deps.datasetAliases;
-  const connections = deps.datasources;
-  const bindings = deps.pipelineDatasetBindings;
-  return {
-    async resolve(args) {
-      // PR3 first hop: check pipeline_dataset_bindings for an
-      // override mapping (pipelineId, tenant, env, sourceSlug=ref.slug)
-      // → a specific dataset row. The binding pins by *row id*, so the
-      // env→tenant→global slug cascade is BYPASSED when a binding
-      // exists. Falls through to the default slug cascade otherwise.
-      let ds: import("../../../../packages/db/src/types.ts").DatasetRow | undefined;
-      if (bindings && args.pipelineId && args.tenantId) {
-        const binding = await bindings.resolveBinding({
-          pipelineId: args.pipelineId,
-          tenantId: args.tenantId,
-          environmentId: args.environmentId,
-          sourceSlug: args.ref.slug
-        });
-        if (binding) {
-          ds = await datasets.get(binding.targetDatasetId);
-        }
-      }
-      if (!ds) {
-        ds = await datasets.resolveSlug({
-          slug: args.ref.slug,
-          tenantId: args.tenantId,
-          environmentId: args.environmentId
-        });
-      }
-      if (!ds) return undefined;
-      const aliasName = args.ref.alias ?? "stable";
-      const aliasRow = await datasetAliases.resolve(ds.id, aliasName);
-      const versionId = aliasRow?.versionId ?? ds.currentVersionId;
-      if (!versionId) return undefined;
-      const ver = await datasetVersions.get(versionId);
-      if (!ver) return undefined;
-
-      // Resolve the per-modality backend blocks. Each block's raw shape
-      // is whatever the operator put in datasets.backends.<modality>; we
-      // pass it through verbatim, then synthesise a `connection` block
-      // when the raw block carries a `connectionName` we can resolve via
-      // the per-(tenant, env) connection cascade.
-      //
-      // Connection lookups always use the CALLER's tenant context, never
-      // the dataset's. A global-scope dataset is shared by every tenant,
-      // but each tenant resolves its connection rows independently — so
-      // a single "codebase-docs" dataset can write to tenant A's
-      // OpenSearch in dev and tenant B's totally separate OpenSearch in
-      // prod with no per-tenant dataset copies.
-      const backends: Record<string, Record<string, unknown>> = {};
-      for (const [modality, raw] of Object.entries(ds.backends ?? {})) {
-        if (!raw || typeof raw !== "object") continue;
-        const block: Record<string, unknown> = { ...(raw as Record<string, unknown>) };
-        const connName =
-          typeof block.connectionName === "string" ? block.connectionName : undefined;
-        if (connName && connections && args.tenantId) {
-          const conn = await connections.resolveForEnv(
-            args.tenantId,
-            args.environmentId,
-            connName
-          );
-          if (conn) {
-            const cfg = conn.configRedacted as { host?: unknown; port?: unknown };
-            block.connection = {
-              name: conn.name,
-              type: conn.datasourceType,
-              host: typeof cfg.host === "string" ? cfg.host : undefined,
-              port: typeof cfg.port === "number" ? cfg.port : undefined,
-              secretRefId: conn.secretRefId ?? null,
-              config: conn.configRedacted,
-              cascadeReason: conn.environmentId ? "env_specific" : "tenant_fallback"
-            };
-          }
-        }
-        backends[modality] = block;
-      }
-
-      return {
-        id: ds.id,
-        slug: ds.slug,
-        scope: ds.scope,
-        tenantId: ds.tenantId ?? undefined,
-        environmentId: ds.environmentId ?? undefined,
-        modalities: ds.modalities,
-        embeddingProfile: ds.embeddingProfile,
-        chunkSchema: ds.chunkSchema,
-        version: {
-          id: ver.id,
-          versionLabel: ver.versionLabel,
-          status: ver.status
-        },
-        backendCollections: ver.backendCollections,
-        backends: backends as Record<string, ResolvedDatasetBackend>
-      };
-    }
-  };
+  // Delegate to the shared builder in packages/runtime so the API and
+  // the worker both run the SAME resolution logic (binding override →
+  // slug cascade → backend connection injection). Earlier attempts
+  // duplicated this inline in handlers.ts and silently dropped the
+  // connection-injection path, which crashed every storage plugin.
+  return buildDatasetResolver({
+    datasets: deps.datasets,
+    datasetVersions: deps.datasetVersions,
+    datasetAliases: deps.datasetAliases,
+    datasources: deps.datasources,
+    pipelineDatasetBindings: deps.pipelineDatasetBindings
+  });
 }
 
 /**
