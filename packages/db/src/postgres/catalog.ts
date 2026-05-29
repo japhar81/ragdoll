@@ -63,9 +63,28 @@ export class PostgresDatasourceConnectionRepository
   }
   async listByTenant(tenantId: string): Promise<T.DatasourceConnectionRow[]> {
     return this.queryRows(
-      `SELECT * FROM datasource_connections WHERE tenant_id = $1`,
+      `SELECT * FROM datasource_connections WHERE tenant_id = $1 ORDER BY name, environment_id NULLS FIRST`,
       [tenantId]
     );
+  }
+  async resolveForEnv(
+    tenantId: string,
+    environmentId: string | undefined,
+    name: string
+  ): Promise<T.DatasourceConnectionRow | undefined> {
+    // ORDER BY environment_id DESC NULLS LAST puts the env-specific row
+    // first when present, falling through to the tenant-wide (NULL) row.
+    // LIMIT 1 picks the winner.
+    const rows = await this.queryRows(
+      `SELECT * FROM datasource_connections
+       WHERE tenant_id = $1
+         AND name = $2
+         AND (environment_id = $3 OR environment_id IS NULL)
+       ORDER BY environment_id DESC NULLS LAST
+       LIMIT 1`,
+      [tenantId, name, environmentId ?? null]
+    );
+    return rows[0];
   }
 }
 

@@ -80,6 +80,20 @@ export class InMemoryDatasourceConnectionRepository
   async listByTenant(tenantId: UUID): Promise<T.DatasourceConnectionRow[]> {
     return (await this.list()).filter((row) => row.tenantId === tenantId);
   }
+  async resolveForEnv(
+    tenantId: UUID,
+    environmentId: string | undefined,
+    name: string
+  ): Promise<T.DatasourceConnectionRow | undefined> {
+    const candidates = (await this.list()).filter(
+      (row) => row.tenantId === tenantId && row.name === name
+    );
+    // Env-specific row wins; fall through to the env=null tenant-wide row.
+    return (
+      candidates.find((r) => r.environmentId === environmentId) ??
+      candidates.find((r) => r.environmentId === null || r.environmentId === undefined)
+    );
+  }
 }
 
 

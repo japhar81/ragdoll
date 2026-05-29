@@ -222,6 +222,7 @@ import { registerFoldersRoutes } from "./app/routes/folders.ts";
 import { registerConfigRoutes } from "./app/routes/config.ts";
 import { registerSchedulesRoutes } from "./app/routes/schedules.ts";
 import { registerDatasetsRoutes } from "./app/routes/datasets.ts";
+import { registerConnectionsRoutes } from "./app/routes/connections.ts";
 import { registerTenantPipelinesRoutes } from "./app/routes/tenant-pipelines.ts";
 import { registerPipelinesRoutes } from "./app/routes/pipelines.ts";
 import { registerPipelineRunsRoutes } from "./app/routes/pipeline-runs.ts";
@@ -485,6 +486,21 @@ export function createApp(deps: AppDeps): App {
   registerConfigRoutes({ route }, { deps, audit });
 
   registerDatasetsRoutes({ route }, { deps, audit, datasets, datasetVersions, datasetAliases, environments, tenantScope });
+
+  // Datasource connections — per-(tenant, env) host/creds registry that
+  // datasets reference by name (PR2 wires the reference into backend
+  // resolution; this PR just lights up CRUD + the cascade resolver).
+  registerConnectionsRoutes(
+    { route },
+    {
+      deps,
+      audit,
+      connections: deps.datasources,
+      environments,
+      tenants: deps.tenants,
+      tenantScope
+    }
+  );
 
   registerSecretsRoutes({ route }, { deps, audit, tenantScope });
   registerExecutionsRoutes({ route }, { deps, tenantScope });
