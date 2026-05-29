@@ -21,10 +21,18 @@ spec:
         checksum/nginx: {{ include (print $.Template.BasePath "/web-nginx-configmap.yaml") . | sha256sum }}
     spec:
       serviceAccountName: {{ include "ragdoll.serviceAccountName" . }}
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       containers:
         - name: web
           image: "{{ .Values.webImage.repository }}:{{ .Values.webImage.tag }}"
           imagePullPolicy: {{ .Values.webImage.pullPolicy }}
+          {{- with .Values.containerSecurityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           ports:
             - containerPort: {{ .Values.web.port }}
           volumeMounts:

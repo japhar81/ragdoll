@@ -20,6 +20,10 @@ spec:
         app: ragdoll-api
     spec:
       serviceAccountName: {{ include "ragdoll.serviceAccountName" . }}
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       # Block startup until the pre-install db-init Job has migrated
       # the schema. Without this guard, the api would fail readiness
       # for several minutes on a fresh install (or worse, crash on
@@ -30,6 +34,10 @@ spec:
         - name: api
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- with .Values.containerSecurityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           command: ["node", "--experimental-strip-types", "apps/api/src/server.ts"]
           ports:
             - containerPort: {{ .Values.api.port }}

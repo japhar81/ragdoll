@@ -13,10 +13,19 @@ spec:
       labels:
         app: {{ .Release.Name }}-python-plugins
     spec:
+      serviceAccountName: {{ include "ragdoll.serviceAccountName" . }}
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       containers:
         - name: python-plugins
           image: "{{ .Values.pythonPlugins.image.repository }}:{{ .Values.pythonPlugins.image.tag }}"
           imagePullPolicy: {{ .Values.pythonPlugins.image.pullPolicy }}
+          {{- with .Values.containerSecurityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           ports:
             - containerPort: {{ .Values.pythonPlugins.port }}
           env:

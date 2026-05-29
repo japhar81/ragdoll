@@ -1,0 +1,37 @@
+{{- if .Values.openshift.route.enabled }}
+# OpenShift Route — the idiomatic OpenShift entrypoint. Mutually
+# exclusive with the standard Ingress: enable one or the other.
+#
+# The router shard reachable from outside the cluster terminates TLS
+# (when `tls.enabled: true, termination: edge` — the default) and
+# proxies plain HTTP to the web service inside the cluster. WebSocket
+# upgrades on `/api/events` ride through because the OpenShift router
+# (HAProxy-based) honours the Connection: upgrade hop-by-hop header
+# without additional config.
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: ragdoll
+  labels:
+    app: ragdoll-web
+  {{- with .Values.openshift.route.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- if .Values.openshift.route.host }}
+  host: {{ .Values.openshift.route.host | quote }}
+  {{- end }}
+  to:
+    kind: Service
+    name: ragdoll-web
+    weight: 100
+  port:
+    targetPort: http
+  {{- if .Values.openshift.route.tls.enabled }}
+  tls:
+    termination: {{ .Values.openshift.route.tls.termination | quote }}
+    insecureEdgeTerminationPolicy: {{ .Values.openshift.route.tls.insecureEdgeTerminationPolicy | quote }}
+  {{- end }}
+  wildcardPolicy: None
+{{- end }}
