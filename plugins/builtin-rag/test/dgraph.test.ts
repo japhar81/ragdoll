@@ -47,6 +47,42 @@ function fakeContext(tenantId = "t-1"): RuntimeContext {
   };
 }
 
+/**
+ * Build a fake ResolvedDataset bound to an in-memory graph "connection".
+ * Plugins now require a resolved connection on the dataset (PR1 of the
+ * requires roll-out) — we synthesise one here pointing at a sentinel
+ * host that the in-memory GraphStore intercepts so tests don't touch
+ * a real Dgraph. Pass `host: "real.example"` to feed a non-sentinel
+ * host (e.g. for tests that want to see the URL flow through).
+ */
+function fakeGraphDataset(host = "memory"): ResolvedDataset {
+  return {
+    id: "ds-test",
+    slug: "test",
+    scope: "global",
+    modalities: ["graph"],
+    embeddingProfile: {},
+    chunkSchema: {},
+    version: { id: "v1", versionLabel: "v1", status: "ready" },
+    backendCollections: {},
+    backends: {
+      graph: {
+        provider: "dgraph",
+        connectionName: "test-dgraph",
+        connection: {
+          name: "test-dgraph",
+          type: "dgraph",
+          host,
+          port: 8080,
+          secretRefId: null,
+          config: { host, port: 8080 },
+          cascadeReason: "tenant_fallback"
+        }
+      }
+    }
+  };
+}
+
 function runPlugin(
   plugin: typeof dgraphUpsertPlugin,
   args: {
@@ -69,7 +105,10 @@ function runPlugin(
     inputs: args.inputs ?? {},
     config: args.config ?? {},
     secrets: {},
-    dataset: args.dataset
+    // Default to a fake graph-backend dataset so individual tests don't
+    // each have to scaffold one. Tests can still pass `dataset:
+    // undefined` explicitly to exercise the missing-binding error path.
+    dataset: args.dataset === undefined ? fakeGraphDataset() : args.dataset
   };
   return plugin.execute(input);
 }

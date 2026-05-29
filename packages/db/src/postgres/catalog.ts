@@ -72,17 +72,75 @@ export class PostgresDatasourceConnectionRepository
     environmentId: string | undefined,
     name: string
   ): Promise<T.DatasourceConnectionRow | undefined> {
-    // ORDER BY environment_id DESC NULLS LAST puts the env-specific row
-    // first when present, falling through to the tenant-wide (NULL) row.
-    // LIMIT 1 picks the winner.
+    // Three-tier cascade. Each tier scored as a small integer so the
+    // single SELECT can pick the winner in one query:
+    //   3 = (tenant=T, env=E)     env-specific match
+    //   2 = (tenant=T, env=NULL)  tenant-wide override
+    //   1 = (tenant=NULL, env=NULL) global default
+    // Anything else (e.g. some other tenant's row) is excluded by the WHERE.
     const rows = await this.queryRows(
-      `SELECT * FROM datasource_connections
-       WHERE tenant_id = $1
-         AND name = $2
-         AND (environment_id = $3 OR environment_id IS NULL)
-       ORDER BY environment_id DESC NULLS LAST
+      `SELECT *,
+              CASE
+                WHEN tenant_id = $1 AND environment_id = $3 THEN 3
+                WHEN tenant_id = $1 AND environment_id IS NULL THEN 2
+                WHEN tenant_id IS NULL AND environment_id IS NULL THEN 1
+                ELSE 0
+              END AS _tier
+       FROM datasource_connections
+       WHERE name = $2
+         AND (
+           (tenant_id = $1 AND (environment_id = $3 OR environment_id IS NULL))
+           OR (tenant_id IS NULL AND environment_id IS NULL)
+         )
+       ORDER BY _tier DESC
        LIMIT 1`,
       [tenantId, name, environmentId ?? null]
+    );
+    return rows[0];
+  }
+}
+
+
+export class PostgresPipelineDatasetBindingRepository
+  extends PostgresCrudRepository<T.PipelineDatasetBindingRow>
+  implements T.PipelineDatasetBindingRepository
+{
+  constructor(pool: PoolLike) {
+    super(pool, "pipeline_dataset_bindings", "pipeline_dataset_binding", []);
+  }
+  async listByPipeline(pipelineId: string): Promise<T.PipelineDatasetBindingRow[]> {
+    return this.queryRows(
+      `SELECT * FROM pipeline_dataset_bindings
+       WHERE pipeline_id = $1
+       ORDER BY tenant_id, environment_id NULLS FIRST, source_slug`,
+      [pipelineId]
+    );
+  }
+  async resolveBinding(args: {
+    pipelineId: string;
+    tenantId: string;
+    environmentId?: string;
+    sourceSlug: string;
+  }): Promise<T.PipelineDatasetBindingRow | undefined> {
+    // Two-tier cascade per the migration's comment block:
+    //   2 = (pipeline, tenant, env=E)         env-specific override
+    //   1 = (pipeline, tenant, env=NULL)      tenant-wide override (all envs)
+    // ORDER BY tier DESC picks the more-specific row.
+    const rows = await this.queryRows(
+      `SELECT *,
+              CASE
+                WHEN environment_id = $3 THEN 2
+                WHEN environment_id IS NULL THEN 1
+                ELSE 0
+              END AS _tier
+       FROM pipeline_dataset_bindings
+       WHERE pipeline_id = $1
+         AND tenant_id = $2
+         AND source_slug = $4
+         AND (environment_id = $3 OR environment_id IS NULL)
+       ORDER BY _tier DESC
+       LIMIT 1`,
+      [args.pipelineId, args.tenantId, args.environmentId ?? null, args.sourceSlug]
     );
     return rows[0];
   }

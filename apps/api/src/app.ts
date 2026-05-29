@@ -223,6 +223,7 @@ import { registerConfigRoutes } from "./app/routes/config.ts";
 import { registerSchedulesRoutes } from "./app/routes/schedules.ts";
 import { registerDatasetsRoutes } from "./app/routes/datasets.ts";
 import { registerConnectionsRoutes } from "./app/routes/connections.ts";
+import { registerPipelineBindingsRoutes } from "./app/routes/pipeline-bindings.ts";
 import { registerTenantPipelinesRoutes } from "./app/routes/tenant-pipelines.ts";
 import { registerPipelinesRoutes } from "./app/routes/pipelines.ts";
 import { registerPipelineRunsRoutes } from "./app/routes/pipeline-runs.ts";
@@ -501,6 +502,26 @@ export function createApp(deps: AppDeps): App {
       tenantScope
     }
   );
+
+  // Per-(pipeline, tenant, env) dataset binding overrides (PR3).
+  // Optional dep — legacy harnesses can skip this without breaking
+  // anything; the runtime resolver falls through to the default
+  // slug cascade when bindings is undefined.
+  if (deps.pipelineDatasetBindings) {
+    registerPipelineBindingsRoutes(
+      { route },
+      {
+        deps,
+        audit,
+        bindings: deps.pipelineDatasetBindings,
+        datasets: datasets,
+        environments,
+        pipelines: deps.pipelines,
+        tenants: deps.tenants,
+        tenantScope
+      }
+    );
+  }
 
   registerSecretsRoutes({ route }, { deps, audit, tenantScope });
   registerExecutionsRoutes({ route }, { deps, tenantScope });

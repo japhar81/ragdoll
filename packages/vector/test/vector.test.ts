@@ -94,6 +94,36 @@ test("createVectorStore returns process-wide in-memory singleton offline", () =>
 test("vectorUpsert -> qdrantRetriever end-to-end via in-memory singleton", async () => {
   resetInMemoryVectorStore();
   const tenantId = "tenant-x";
+  // PR1 of the requires roll-out: every storage plugin requires a
+  // resolved connection. The `memory` sentinel host on a vector
+  // backend tells createVectorStore to route to the in-memory
+  // singleton, so this test exercises the same hard-fail-on-missing-
+  // connection path the production runtime does, without a Qdrant.
+  const fakeVecDataset = {
+    id: "ds-test",
+    slug: "test",
+    scope: "global" as const,
+    modalities: ["vector"],
+    embeddingProfile: {},
+    chunkSchema: {},
+    version: { id: "v1", versionLabel: "v1", status: "ready" as const },
+    backendCollections: {},
+    backends: {
+      vector: {
+        provider: "qdrant",
+        connectionName: "test-qdrant",
+        connection: {
+          name: "test-qdrant",
+          type: "qdrant",
+          host: "memory",
+          port: 6333,
+          secretRefId: null,
+          config: { host: "memory", port: 6333 },
+          cascadeReason: "tenant_fallback" as const
+        }
+      }
+    }
+  };
 
   const upsert = await vectorUpsertPlugin.execute({
     context: makeContext(tenantId),
@@ -111,7 +141,8 @@ test("vectorUpsert -> qdrantRetriever end-to-end via in-memory singleton", async
       ]
     },
     config: { collection: "e2e", distance: "cosine", dimensions: 3 },
-    secrets: {}
+    secrets: {},
+    dataset: fakeVecDataset
   });
   assert.deepEqual(upsert.outputs, { upserted: 3 });
 
@@ -120,7 +151,8 @@ test("vectorUpsert -> qdrantRetriever end-to-end via in-memory singleton", async
     node: { id: "retriever", plugin: { category: "retriever", id: "qdrant_retriever", version: "1.0.0" } },
     inputs: { queryVector: [0.95, 0.05, 0] },
     config: { collection: "e2e", topK: 2 },
-    secrets: {}
+    secrets: {},
+    dataset: fakeVecDataset
   });
   const documents = retrieve.outputs.documents as Array<{ id: string; text: string; score: number }>;
   assert.equal(documents.length, 2);
@@ -132,7 +164,8 @@ test("vectorUpsert -> qdrantRetriever end-to-end via in-memory singleton", async
     node: { id: "retriever", plugin: { category: "retriever", id: "qdrant_retriever", version: "1.0.0" } },
     inputs: { queryVector: [1, 0, 0] },
     config: { collection: "e2e", topK: 5 },
-    secrets: {}
+    secrets: {},
+    dataset: fakeVecDataset
   });
   assert.equal((otherTenant.outputs.documents as unknown[]).length, 0);
 });

@@ -68,6 +68,45 @@ export interface BackendUrlResolution {
   cascadeReason?: "env_specific" | "tenant_fallback";
 }
 
+/**
+ * Strict variant for v2-plus plugins that declare
+ * `requires: [{modality, provider?}]`. Returns the dataset's resolved
+ * connection URL or THROWS with a clear "you need to bind a
+ * connection" error pointing at the offending dataset slug.
+ *
+ * Use this in any plugin that depends on a host being present
+ * (i.e. all storage-touching plugins). The error message is the
+ * preflight signal an operator sees in the execution-node row when
+ * the bind is missing — keep it actionable.
+ */
+export function requireBackendConnection(
+  input: PluginExecutionInput,
+  modality: StorageModality,
+  args: {
+    pluginId: string;
+    /** Used in the URL constructor when the connection lacks a port. */
+    defaultPort?: number;
+    scheme?: string;
+  }
+): { url: string; connectionName: string; cascadeReason: string } {
+  const conn = input.dataset?.backends?.[modality]?.connection;
+  if (!conn?.host) {
+    const slug = input.dataset?.slug ?? "(no dataset bound)";
+    throw new Error(
+      `${args.pluginId} requires a ${modality} connection on dataset "${slug}". ` +
+        `Wire it on the Connections screen (one per (tenant, env)) and reference it from ` +
+        `the dataset's backends.${modality}.connectionName.`
+    );
+  }
+  const port = typeof conn.port === "number" ? conn.port : args.defaultPort;
+  const scheme = args.scheme ?? "http://";
+  return {
+    url: port ? `${scheme}${conn.host}:${port}` : `${scheme}${conn.host}`,
+    connectionName: conn.name,
+    cascadeReason: conn.cascadeReason
+  };
+}
+
 export function pickBackendUrl(
   input: PluginExecutionInput,
   modality: StorageModality,

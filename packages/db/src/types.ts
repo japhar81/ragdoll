@@ -385,12 +385,19 @@ export interface ProviderModelRow {
 
 export interface DatasourceConnectionRow {
   id: UUID;
-  tenantId: UUID;
+  /**
+   * Owning tenant. `null` means "global" — applies to every tenant
+   * as a fallback the per-tenant rows can override. Operators with
+   * `config:edit_global` create globals; tenant-admins can only
+   * create rows scoped to their own tenant.
+   */
+  tenantId?: UUID | null;
   /**
    * Per-environment scope. `null` means "applies to every environment
    * in this tenant" (the tenant-wide fallback). When set to an
    * environment name, this row beats the tenant-wide one for that env.
-   * The resolver cascade is: (tenant, env) → (tenant, null) → not found.
+   * The resolver cascade is:
+   *   (tenant=T, env=E) → (tenant=T, env=null) → (tenant=null, env=null)
    */
   environmentId?: string | null;
   name: string;
@@ -784,6 +791,52 @@ export interface ProviderRepository extends CrudRepository<ProviderRow> {
 
 export interface ProviderModelRepository extends CrudRepository<ProviderModelRow> {
   listByProvider(providerId: UUID): Promise<ProviderModelRow[]>;
+}
+
+/**
+ * Per-(pipeline, tenant, env) dataset binding override.
+ *
+ * Pipeline specs reference datasets by `slug`. The default resolution
+ * (datasets.resolveSlug) walks env→tenant→global; this table lets an
+ * operator pin a specific dataset row for one pipeline under one
+ * (tenant, env) without touching the spec or the global dataset list.
+ *
+ * Use cases:
+ *   - "Tenant A's prod pipeline writes to a totally different OpenSearch
+ *     than its dev/qa pipelines" (point them at different dataset rows).
+ *   - "The 'docs' slug should resolve to the v2-schema dataset for tenant
+ *     B specifically while everyone else stays on v1."
+ */
+export interface PipelineDatasetBindingRow {
+  id: UUID;
+  pipelineId: UUID;
+  tenantId: UUID;
+  /** `null` = applies to every env in this (pipeline, tenant). */
+  environmentId?: string | null;
+  /** The slug as it appears in the pipeline spec. */
+  sourceSlug: string;
+  /** What that slug should actually resolve to for this scope. */
+  targetDatasetId: UUID;
+  createdAt: string;
+  createdBy?: UUID | null;
+  updatedAt: string;
+}
+
+export interface PipelineDatasetBindingRepository
+  extends CrudRepository<PipelineDatasetBindingRow> {
+  listByPipeline(pipelineId: UUID): Promise<PipelineDatasetBindingRow[]>;
+  /**
+   * Resolver hot path. Returns the binding that wins the
+   *   (pipeline, tenant, env, slug) → (pipeline, tenant, null, slug)
+   * cascade, or undefined when no override is set (caller falls through
+   * to the default dataset slug cascade).
+   */
+  resolveBinding(args: {
+    pipelineId: UUID;
+    tenantId: UUID;
+    environmentId?: string;
+    sourceSlug: string;
+  }): Promise<PipelineDatasetBindingRow | undefined>;
 }
 
 export interface DatasourceConnectionRepository extends CrudRepository<DatasourceConnectionRow> {

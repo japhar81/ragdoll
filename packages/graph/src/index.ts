@@ -264,10 +264,18 @@ export class InMemoryGraphStore implements GraphStore {
   }
 }
 
-/** Factory mirroring `createVectorStore`: pick the in-memory store
- *  when `DGRAPH_URL` is unset, the HTTP-backed store otherwise. */
+/** Factory mirroring `createVectorStore`. Picks the in-memory store
+ *  when:
+ *   - the URL is unset, or
+ *   - the URL starts with `memory:` (the test escape hatch — plugin
+ *     unit tests bind a fake connection whose host is `memory` so the
+ *     plugin's hard-fail-on-missing-connection path is still exercised
+ *     end to end while the store side stays in-process).
+ *  Otherwise the HTTP-backed store talks to a real Dgraph alpha. */
 export function createGraphStore(config: DgraphConfig = {}): GraphStore {
   const url = config.url ?? process.env.DGRAPH_URL;
-  if (!url) return new InMemoryGraphStore();
+  if (!url || url.startsWith("http://memory") || url.startsWith("memory:")) {
+    return new InMemoryGraphStore();
+  }
   return new DgraphStore({ ...config, url });
 }

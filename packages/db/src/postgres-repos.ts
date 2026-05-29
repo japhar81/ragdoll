@@ -39,6 +39,7 @@ export {
   PostgresProviderRepository,
   PostgresProviderModelRepository,
   PostgresDatasourceConnectionRepository,
+  PostgresPipelineDatasetBindingRepository,
   PostgresVectorCollectionRepository
 } from "./postgres/catalog.ts";
 

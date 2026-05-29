@@ -384,6 +384,14 @@ export function createVectorStore(config: VectorStoreConfig = {}): VectorStore {
     if (!url) {
       throw new VectorStoreError("qdrant backend requires a url");
     }
+    // Test escape hatch: a URL beginning with `memory:` (or
+    // `http://memory…`) maps to the in-memory store. Lets plugin unit
+    // tests construct a fake dataset whose backend resolves a
+    // connection — exercising the plugin's hard-fail-on-missing-
+    // connection path end-to-end — without standing up a real Qdrant.
+    if (url.startsWith("memory:") || url.startsWith("http://memory")) {
+      return getInMemoryVectorStore();
+    }
     return new QdrantVectorStore({
       url,
       apiKey: config.apiKey ?? process.env.QDRANT_API_KEY

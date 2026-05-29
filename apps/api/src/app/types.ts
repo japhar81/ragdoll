@@ -14,6 +14,7 @@ import type {
   PluginRepository,
   ProviderRepository,
   DatasourceConnectionRepository,
+  PipelineDatasetBindingRepository,
   VectorCollectionRepository,
   TenantRepository,
   PipelineRepository,
@@ -152,6 +153,8 @@ export interface AppDeps {
   plugins: PluginRepository;
   providers: ProviderRepository;
   datasources: DatasourceConnectionRepository;
+  /** Per-(pipeline, tenant, env) dataset binding overrides (PR3). */
+  pipelineDatasetBindings?: PipelineDatasetBindingRepository;
   vectorCollections: VectorCollectionRepository;
   executionStore: ReadableExecutionStore;
   auth: AuthResolver;

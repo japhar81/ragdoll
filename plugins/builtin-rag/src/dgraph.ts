@@ -26,7 +26,7 @@ import {
   type GraphNode,
   type GraphStore
 } from "../../../packages/graph/src/index.ts";
-import { pickBackendUrl } from "./dataset-binding.ts";
+import { requireBackendConnection } from "./dataset-binding.ts";
 
 /** Per-execution store cache: a real Dgraph connection is heavier
  *  than the in-memory store; reuse the same instance for the rest
@@ -49,29 +49,17 @@ export function resetGraphStoreCache(): void {
   STORE_CACHE.clear();
 }
 
-function pickGraphUrl(input: PluginExecutionInput): string | undefined {
-  // PR3: prefer the dataset's resolved connection (host+port → URL),
-  // then legacy `config.url` (with deprecation warn), then env var
-  // fallback. Plugins of contract 2+ should bind via connection on
-  // the Datasets screen — this fallback chain is for in-flight specs
-  // that haven't migrated yet.
-  const resolution = pickBackendUrl(input, "graph", {
-    cfgKey: "url",
-    envFallback: "DGRAPH_URL",
+function pickGraphUrl(input: PluginExecutionInput): string {
+  // PR1 of the requires roll-out: hard-fail on missing connection.
+  // dgraph_upsert / dgraph_query declare `requires: [{graph, dgraph}]`,
+  // so a bound dataset MUST resolve a graph connection. The fallback
+  // chain (config.url, DGRAPH_URL, in-memory store) is gone.
+  const pluginId = (input.node.plugin?.id as string | undefined) ?? "dgraph_plugin";
+  const { url } = requireBackendConnection(input, "graph", {
+    pluginId,
     defaultPort: 8080
   });
-  if (resolution?.source === "config") {
-    console.warn(
-      JSON.stringify({
-        level: "warn",
-        message: "dgraph.legacy_config_url",
-        hint: "Bind the dataset's `graph` backend to a connection via the Connections screen.",
-        nodeId: input.node.id,
-        datasetSlug: input.dataset?.slug
-      })
-    );
-  }
-  return resolution?.url;
+  return url;
 }
 
 // ===========================================================================
@@ -85,17 +73,15 @@ export const dgraphUpsertPlugin: InProcessPlugin = {
     version: "1.0.0",
     category: "sink",
     contract: 2,
+    requires: [{ modality: "graph", provider: "dgraph" }],
     datasetModalities: ["graph"],
     description:
       "Writes nodes (and edges, encoded as nested-object arrays under the predicate name) into Dgraph. Stamps `tenant_id` on every node so multi-tenant isolation is enforced at the storage layer.",
     configSchema: {
+      // PR1 of the requires roll-out: `url` field gone. Dataset's
+      // resolved connection (graph backend) provides the host.
       type: "object",
       properties: {
-        url: {
-          type: "string",
-          description:
-            "Dgraph HTTP endpoint. Falls back to the dataset's graph backend, then to the DGRAPH_URL env, then to the in-memory store."
-        },
         schema: {
           type: "string",
           description:
@@ -166,6 +152,7 @@ export const dgraphQueryPlugin: InProcessPlugin = {
     version: "1.0.0",
     category: "retriever",
     contract: 2,
+    requires: [{ modality: "graph", provider: "dgraph" }],
     datasetModalities: ["graph"],
     description:
       "Runs a DQL query against Dgraph and emits the data block as `results`. The current tenantId is exposed to the query as `$tenant_id` so queries can filter without hardcoding ids.",
@@ -173,11 +160,6 @@ export const dgraphQueryPlugin: InProcessPlugin = {
       type: "object",
       required: ["query"],
       properties: {
-        url: {
-          type: "string",
-          description:
-            "Dgraph HTTP endpoint. Same fallback chain as dgraph_upsert."
-        },
         query: {
           type: "string",
           description:

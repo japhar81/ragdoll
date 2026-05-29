@@ -231,13 +231,33 @@ export function buildApiDatasetResolver(
   const datasetVersions = deps.datasetVersions;
   const datasetAliases = deps.datasetAliases;
   const connections = deps.datasources;
+  const bindings = deps.pipelineDatasetBindings;
   return {
     async resolve(args) {
-      const ds = await datasets.resolveSlug({
-        slug: args.ref.slug,
-        tenantId: args.tenantId,
-        environmentId: args.environmentId
-      });
+      // PR3 first hop: check pipeline_dataset_bindings for an
+      // override mapping (pipelineId, tenant, env, sourceSlug=ref.slug)
+      // → a specific dataset row. The binding pins by *row id*, so the
+      // env→tenant→global slug cascade is BYPASSED when a binding
+      // exists. Falls through to the default slug cascade otherwise.
+      let ds: import("../../../../packages/db/src/types.ts").DatasetRow | undefined;
+      if (bindings && args.pipelineId && args.tenantId) {
+        const binding = await bindings.resolveBinding({
+          pipelineId: args.pipelineId,
+          tenantId: args.tenantId,
+          environmentId: args.environmentId,
+          sourceSlug: args.ref.slug
+        });
+        if (binding) {
+          ds = await datasets.get(binding.targetDatasetId);
+        }
+      }
+      if (!ds) {
+        ds = await datasets.resolveSlug({
+          slug: args.ref.slug,
+          tenantId: args.tenantId,
+          environmentId: args.environmentId
+        });
+      }
       if (!ds) return undefined;
       const aliasName = args.ref.alias ?? "stable";
       const aliasRow = await datasetAliases.resolve(ds.id, aliasName);

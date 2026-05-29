@@ -85,12 +85,54 @@ export class InMemoryDatasourceConnectionRepository
     environmentId: string | undefined,
     name: string
   ): Promise<T.DatasourceConnectionRow | undefined> {
-    const candidates = (await this.list()).filter(
-      (row) => row.tenantId === tenantId && row.name === name
+    const all = (await this.list()).filter((r) => r.name === name);
+    // Three-tier cascade, mirrors postgres CASE-tier query.
+    // Tier 3: this tenant + this env.
+    const t3 = all.find(
+      (r) => r.tenantId === tenantId && r.environmentId === environmentId
     );
-    // Env-specific row wins; fall through to the env=null tenant-wide row.
+    if (t3) return t3;
+    // Tier 2: this tenant + no env (tenant-wide override).
+    const t2 = all.find(
+      (r) => r.tenantId === tenantId && (r.environmentId === null || r.environmentId === undefined)
+    );
+    if (t2) return t2;
+    // Tier 1: no tenant + no env (global default).
+    const t1 = all.find(
+      (r) =>
+        (r.tenantId === null || r.tenantId === undefined) &&
+        (r.environmentId === null || r.environmentId === undefined)
+    );
+    return t1;
+  }
+}
+
+
+export class InMemoryPipelineDatasetBindingRepository
+  extends InMemoryCrudRepository<T.PipelineDatasetBindingRow>
+  implements T.PipelineDatasetBindingRepository
+{
+  constructor() {
+    super("pipeline_dataset_binding");
+  }
+  async listByPipeline(pipelineId: UUID): Promise<T.PipelineDatasetBindingRow[]> {
+    return (await this.list()).filter((r) => r.pipelineId === pipelineId);
+  }
+  async resolveBinding(args: {
+    pipelineId: UUID;
+    tenantId: UUID;
+    environmentId?: string;
+    sourceSlug: string;
+  }): Promise<T.PipelineDatasetBindingRow | undefined> {
+    const candidates = (await this.list()).filter(
+      (r) =>
+        r.pipelineId === args.pipelineId &&
+        r.tenantId === args.tenantId &&
+        r.sourceSlug === args.sourceSlug
+    );
+    // env-specific row beats env=null row.
     return (
-      candidates.find((r) => r.environmentId === environmentId) ??
+      candidates.find((r) => r.environmentId === args.environmentId) ??
       candidates.find((r) => r.environmentId === null || r.environmentId === undefined)
     );
   }

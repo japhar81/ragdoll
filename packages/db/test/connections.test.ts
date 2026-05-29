@@ -18,7 +18,7 @@ import { InMemoryDatasourceConnectionRepository } from "../src/index.ts";
 import type { DatasourceConnectionRow } from "../src/types.ts";
 
 function row(
-  partial: Partial<DatasourceConnectionRow> & { tenantId: string; name: string }
+  partial: Partial<DatasourceConnectionRow> & { tenantId: string | null; name: string }
 ): DatasourceConnectionRow {
   const now = new Date().toISOString();
   return {
@@ -104,4 +104,61 @@ test("listByTenant returns every row for the tenant regardless of env", async ()
   await repo.create(row({ tenantId: "t2", name: "os", environmentId: null }));
   const rows = await repo.listByTenant("t1");
   assert.equal(rows.length, 3);
+});
+
+// ---- Global tier (PR2) ---------------------------------------------------
+
+test("resolveForEnv: global row picked when no tenant override exists", async () => {
+  const repo = new InMemoryDatasourceConnectionRepository();
+  // Global default for the shared "prod-opensearch" cluster.
+  await repo.create(
+    row({ tenantId: null, name: "os", environmentId: null, configRedacted: { host: "shared.example" } })
+  );
+  // Tenant T1 has no override — sees the global row.
+  const t1 = await repo.resolveForEnv("t1", "prod", "os");
+  assert.ok(t1, "global tier resolves when nothing more specific exists");
+  assert.equal((t1?.configRedacted as { host?: string }).host, "shared.example");
+  assert.equal(t1?.tenantId ?? null, null);
+});
+
+test("resolveForEnv: tenant override beats global", async () => {
+  const repo = new InMemoryDatasourceConnectionRepository();
+  await repo.create(
+    row({ tenantId: null, name: "os", environmentId: null, configRedacted: { host: "shared.example" } })
+  );
+  // Tenant T1 has its own row — must beat the global.
+  await repo.create(
+    row({ tenantId: "t1", name: "os", environmentId: null, configRedacted: { host: "t1-private.example" } })
+  );
+  const t1 = await repo.resolveForEnv("t1", "prod", "os");
+  assert.equal((t1?.configRedacted as { host?: string }).host, "t1-private.example");
+  assert.equal(t1?.tenantId, "t1");
+});
+
+test("resolveForEnv: env-specific row beats tenant-wide AND global", async () => {
+  const repo = new InMemoryDatasourceConnectionRepository();
+  await repo.create(
+    row({ tenantId: null, name: "os", environmentId: null, configRedacted: { host: "shared.example" } })
+  );
+  await repo.create(
+    row({ tenantId: "t1", name: "os", environmentId: null, configRedacted: { host: "t1-wide.example" } })
+  );
+  await repo.create(
+    row({ tenantId: "t1", name: "os", environmentId: "prod", configRedacted: { host: "t1-prod.example" } })
+  );
+  const prod = await repo.resolveForEnv("t1", "prod", "os");
+  assert.equal((prod?.configRedacted as { host?: string }).host, "t1-prod.example");
+  // dev has no env-specific override → falls through to tenant-wide, NOT global.
+  const dev = await repo.resolveForEnv("t1", "dev", "os");
+  assert.equal((dev?.configRedacted as { host?: string }).host, "t1-wide.example");
+});
+
+test("resolveForEnv: global tier kicks in for tenants with no row at all", async () => {
+  const repo = new InMemoryDatasourceConnectionRepository();
+  await repo.create(
+    row({ tenantId: null, name: "qdrant", environmentId: null, configRedacted: { host: "global-qdrant" } })
+  );
+  // Random tenant the resolver has never seen → still gets the global default.
+  const winner = await repo.resolveForEnv("brand-new-tenant", "prod", "qdrant");
+  assert.equal((winner?.configRedacted as { host?: string }).host, "global-qdrant");
 });

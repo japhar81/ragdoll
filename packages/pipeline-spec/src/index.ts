@@ -180,13 +180,34 @@ export interface PipelineValidationResult {
  * plugin requires (e.g. opensearch_delete pinned to a vector-only dataset).
  * When omitted, modality mismatches go silently — the worker re-validates
  * at execute time with the real dataset rows.
+ *
+ * @deprecated Pass {@link DatasetBindingIndex} instead — it also surfaces
+ * per-modality providers so the validator can enforce a plugin's `requires`
+ * provider constraint (e.g. opensearch_output stuck on a qdrant dataset).
  */
 export type DatasetModalityIndex = (slug: string) => string[] | undefined;
+
+/**
+ * Richer slug → binding map: both the dataset's modalities AND the
+ * backend provider per modality. Powers the new `requires: [{modality,
+ * provider?}]` plugin-manifest check on top of the existing modality
+ * gate. The validator accepts either type — `DatasetBindingIndex` is
+ * preferred for any caller that has provider info to share.
+ */
+export type DatasetBindingIndex = (
+  slug: string
+) => { modalities: string[]; providers: Record<string, string> } | undefined;
 
 export function validatePipelineSpec(
   spec: PipelineSpec,
   registry?: PluginRegistry,
-  datasetModalityIndex?: DatasetModalityIndex
+  /**
+   * Accept either the legacy modality-only index or the richer binding
+   * index (modalities + per-modality providers). When given the binding
+   * index, the validator additionally enforces plugin manifests'
+   * `requires: [{modality, provider?}]` against the bound dataset.
+   */
+  datasetIndex?: DatasetModalityIndex | DatasetBindingIndex
 ): PipelineValidationResult {
   const issues: ValidationIssue[] = [];
   const requiredSecrets = new Set<string>();
@@ -246,25 +267,63 @@ export function validatePipelineSpec(
         slug: dataset.slug,
         alias: dataset.alias ?? "stable"
       });
-      // Modality mismatch: if both the plugin AND the bound slug declare
-      // their modalities, every one the plugin needs must be present on
-      // the dataset. Reported as an error so the canvas badge lights up
-      // and Run/Deploy are blocked the same way `missing_required_dataset`
+      // Modality + provider check: if both the plugin AND the bound
+      // slug declare their backends, every modality the plugin needs
+      // must be present on the dataset AND any provider constraint must
+      // match. Reported as errors so the canvas badge lights up and
+      // Run/Deploy are blocked the same way `missing_required_dataset`
       // does — operators don't get to ship a doomed wiring.
-      if (node.plugin && datasetModalityIndex) {
+      if (node.plugin && datasetIndex) {
         const manifest = registry?.get(node.plugin)?.manifest as
-          | { datasetModalities?: string[] }
+          | {
+              datasetModalities?: string[];
+              requires?: Array<{ modality: string; provider?: string }>;
+            }
           | undefined;
-        const required = manifest?.datasetModalities ?? [];
-        if (required.length > 0) {
-          const present = datasetModalityIndex(dataset.slug);
-          if (present) {
-            const missing = required.filter((m) => !present.includes(m));
-            if (missing.length > 0) {
+        // Two sources of "what does this plugin need":
+        //   - legacy `datasetModalities: ["vector"]` (modality only)
+        //   - new `requires: [{modality: "vector", provider: "qdrant"}]`
+        //     which can ALSO enforce provider.
+        const legacyMods = manifest?.datasetModalities ?? [];
+        const newRequires = manifest?.requires ?? [];
+        const requiredMods = [
+          ...legacyMods,
+          ...newRequires.map((r) => r.modality)
+        ];
+        // The index callback returns EITHER a string[] (legacy
+        // modality-only) OR a {modalities, providers} object (new
+        // binding index). Normalise to the richer shape.
+        const raw = datasetIndex(dataset.slug);
+        const binding =
+          Array.isArray(raw)
+            ? { modalities: raw, providers: {} as Record<string, string> }
+            : raw;
+        if (binding && requiredMods.length > 0) {
+          const missing = requiredMods.filter(
+            (m) => !binding.modalities.includes(m)
+          );
+          if (missing.length > 0) {
+            issues.push({
+              level: "error",
+              code: "dataset_modality_mismatch",
+              message: `node "${node.id}" needs the ${[...new Set(missing)].join("/")} backend on dataset "${dataset.slug}" but it isn't declared — add it on the Datasets screen or pick a different slug`,
+              nodeId: node.id
+            });
+          }
+        }
+        if (binding && newRequires.length > 0) {
+          for (const req of newRequires) {
+            if (!req.provider) continue;
+            const actual = binding.providers[req.modality];
+            // Skip when actual is unknown (legacy index without
+            // provider info) — Builder rebuilds with the binding
+            // index next render, and the worker re-checks at execute
+            // with real rows.
+            if (actual && actual !== req.provider) {
               issues.push({
                 level: "error",
-                code: "dataset_modality_mismatch",
-                message: `node "${node.id}" needs the ${missing.join("/")} backend on dataset "${dataset.slug}" but it isn't declared — add it on the Datasets screen or pick a different slug`,
+                code: "dataset_provider_mismatch",
+                message: `node "${node.id}" requires the ${req.modality} backend to be provider "${req.provider}", but dataset "${dataset.slug}" has it set to "${actual}" — pick a different dataset or change its backend provider`,
                 nodeId: node.id
               });
             }
