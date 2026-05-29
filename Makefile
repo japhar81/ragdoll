@@ -1,4 +1,4 @@
-.PHONY: up down refresh smoke test crawl-up crawl-up-reranker obs
+.PHONY: up down refresh smoke test crawl-up crawl-up-reranker obs oc-build-api oc-build-web oc-build-python-plugins oc-build-all
 
 # Bring up the full local stack (build + start everything). First run pulls
 # CPU Ollama models and builds images.
@@ -41,6 +41,25 @@ crawl-up-reranker:
 	  --build-arg POETRY_INSTALL_ARGS='--no-root --only main --with reranker' \
 	  python-plugins
 	./scripts/compose.sh up -d python-plugins
+
+# OpenShift: build each app's image inside the cluster (no host Docker
+# required) and push to the project's internal registry. Run once on a
+# fresh cluster; re-run any time the corresponding Dockerfile or its
+# source changes.
+#
+# The unified script (`scripts/oc-build.sh`) takes NAME + DOCKERFILE
+# via env. Each target wires the right pair. `oc-build-all` rebuilds
+# every image — useful after a `git pull` before `helm upgrade`.
+oc-build-api:
+	NAME=ragdoll-api DOCKERFILE=infra/docker/api.Dockerfile ./scripts/oc-build.sh
+
+oc-build-web:
+	NAME=ragdoll-web DOCKERFILE=infra/docker/web.Dockerfile ./scripts/oc-build.sh
+
+oc-build-python-plugins:
+	NAME=ragdoll-python-plugins DOCKERFILE=services/python-plugins/Dockerfile ./scripts/oc-build.sh
+
+oc-build-all: oc-build-api oc-build-web oc-build-python-plugins
 
 # Print (and on macOS open) the local Grafana URL. The all-in-one LGTM
 # container (otel-collector service) hosts Grafana on :3300; logs / metrics

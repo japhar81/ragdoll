@@ -44,19 +44,43 @@ WHERE t.slug = 'tenant-local'
 ON CONFLICT (pipeline_id, environment, tenant_id) DO NOTHING;
 
 -- Tenant-scoped config so the resolver yields the local Ollama profile for
--- this pipeline/tenant: provider=ollama, model=qwen2.5:0.5b,
--- base_url=http://ollama:11434.
+-- this pipeline/tenant. We intentionally DO NOT pin `llm.base_url` /
+-- `embedding.base_url` here — leaving them unset lets the runtime fall
+-- through to the `OLLAMA_BASE_URL` env (`http://ollama:11434` in compose,
+-- `http://ragdoll-ollama:11434` in helm), so the same seed works in
+-- both deploy modes without per-env overrides.
 INSERT INTO config_values (key, value, scope, scope_id, locked)
 SELECT 'llm.provider', '"ollama"'::jsonb, 'tenant', t.id::text, false
 FROM tenants t WHERE t.slug = 'tenant-local'
-ON CONFLICT (key, scope, scope_id) DO NOTHING;
+ON CONFLICT (key, scope, scope_id) DO UPDATE SET value = EXCLUDED.value;
 
 INSERT INTO config_values (key, value, scope, scope_id, locked)
 SELECT 'llm.model', '"qwen2.5:0.5b"'::jsonb, 'tenant', t.id::text, false
 FROM tenants t WHERE t.slug = 'tenant-local'
-ON CONFLICT (key, scope, scope_id) DO NOTHING;
+ON CONFLICT (key, scope, scope_id) DO UPDATE SET value = EXCLUDED.value;
+
+-- Match the bundled-Ollama embedder so codebase-ingest pipelines pick
+-- nomic-embed-text out of the box. Operators who BYO a different
+-- embedder override at tenant scope on the Settings screen.
+INSERT INTO config_values (key, value, scope, scope_id, locked)
+SELECT 'embedding.provider', '"ollama"'::jsonb, 'tenant', t.id::text, false
+FROM tenants t WHERE t.slug = 'tenant-local'
+ON CONFLICT (key, scope, scope_id) DO UPDATE SET value = EXCLUDED.value;
 
 INSERT INTO config_values (key, value, scope, scope_id, locked)
-SELECT 'llm.base_url', '"http://ollama:11434"'::jsonb, 'tenant', t.id::text, false
+SELECT 'embedding.model', '"nomic-embed-text"'::jsonb, 'tenant', t.id::text, false
 FROM tenants t WHERE t.slug = 'tenant-local'
-ON CONFLICT (key, scope, scope_id) DO NOTHING;
+ON CONFLICT (key, scope, scope_id) DO UPDATE SET value = EXCLUDED.value;
+
+INSERT INTO config_values (key, value, scope, scope_id, locked)
+SELECT 'embedding.dimensions', '768'::jsonb, 'tenant', t.id::text, false
+FROM tenants t WHERE t.slug = 'tenant-local'
+ON CONFLICT (key, scope, scope_id) DO UPDATE SET value = EXCLUDED.value;
+
+-- Old installs may have a stale `llm.base_url = "http://ollama:11434"`
+-- (the compose-specific hostname) which would override OLLAMA_BASE_URL
+-- on a helm install. Clear it so the env always wins.
+DELETE FROM config_values
+WHERE key = 'llm.base_url'
+  AND scope = 'tenant'
+  AND scope_id IN (SELECT id::text FROM tenants WHERE slug = 'tenant-local');
