@@ -1,0 +1,60 @@
+{{- if and .Values.prometheus.enabled .Values.prometheus.serviceMonitor.enabled }}
+{{- /*
+ServiceMonitor for the api + worker pods.
+
+Renders ONLY when:
+  - prometheus.enabled (master metrics-pull switch)
+  - prometheus.serviceMonitor.enabled (separate so operators can
+    expose /metrics for in-cluster scraping by something OTHER than
+    prometheus-operator without having to install the CRDs)
+  - the `ServiceMonitor` CRD actually exists in the cluster
+    (`helm lookup`). The CRD ships with prometheus-operator. Without
+    this guard, the chart applies cleanly but `kubectl apply` errors
+    with "no matches for kind ServiceMonitor" — surfacing the issue
+    at template time is much friendlier.
+
+One ServiceMonitor covers both Services; selector matches by
+`app.kubernetes.io/instance` (set by the chart's commonLabels) and
+`prometheus-scrape: "true"` (which we stamp on the api + worker
+Services when prometheus.enabled).
+*/}}
+{{- if not .Values.prometheus.assumeCrdsInstalled }}
+{{- $crd := lookup "apiextensions.k8s.io/v1" "CustomResourceDefinition" "" "servicemonitors.monitoring.coreos.com" -}}
+{{- if not $crd }}
+{{- fail "prometheus.serviceMonitor.enabled=true but the `ServiceMonitor` CRD is not installed on this cluster. Install prometheus-operator (or kube-prometheus-stack), set prometheus.serviceMonitor.enabled=false, or set prometheus.assumeCrdsInstalled=true (escape hatch for offline `helm template` renders)." -}}
+{{- end }}
+{{- end }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: ragdoll
+  labels:
+    app: ragdoll
+    {{- include "ragdoll.commonLabels" . | nindent 4 }}
+    {{- with .Values.prometheus.serviceMonitor.additionalLabels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- with (include "ragdoll.commonAnnotations" . | trim) }}
+  annotations:
+    {{- . | nindent 4 }}
+  {{- end }}
+spec:
+  # Matches the api + worker Services by the scrape marker label the
+  # chart stamps on them when prometheus.enabled is true.
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ .Release.Name | quote }}
+      prometheus-scrape: "true"
+  namespaceSelector:
+    matchNames:
+      - {{ .Release.Namespace | quote }}
+  endpoints:
+    - port: metrics
+      path: /metrics
+      interval: {{ .Values.prometheus.serviceMonitor.interval | quote }}
+      scrapeTimeout: {{ .Values.prometheus.serviceMonitor.scrapeTimeout | quote }}
+      {{- with .Values.prometheus.serviceMonitor.metricRelabelings }}
+      metricRelabelings:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

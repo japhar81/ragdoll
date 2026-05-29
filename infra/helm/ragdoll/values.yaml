@@ -223,12 +223,125 @@ ollama:
 # Per-dataset selection (ADR 0016) overrides this.
 vectorBackend: qdrant
 
+# ---------------------------------------------------------------------------
+# Observability
+# ---------------------------------------------------------------------------
+#
+# Two independent metric paths, freely combinable:
+#
+#   otel.enabled = true  → SDK pushes metrics + logs + traces over OTLP
+#                          to `otel.endpoint`. Existing docker-compose
+#                          LGTM-bundle behaviour.
+#   prometheus.enabled = true
+#                        → SDK additionally serves a `/metrics`
+#                          endpoint on `prometheus.port`. A Prometheus
+#                          ServiceMonitor (optional, gated on the CRD)
+#                          scrapes each pod.
+#
+# Both default to ON for OTel (back-compat) and OFF for Prometheus.
+# Set both true to run in parallel during a migration. Set both false
+# to make `getMeter()` a zero-cost noop — useful for stripped-down
+# installs that don't need metrics at all.
+#
+# CRITICAL: every metric the app code emits goes through ONE shared
+# MeterProvider. Adding/removing a backend never requires touching
+# call sites — `getMeter()` is the single chokepoint.
+# ---------------------------------------------------------------------------
 otel:
+  enabled: true
   endpoint: "http://otel-collector:4318"
   # Service-namespace + environment attributes appended to every span /
   # metric / log. The collector uses them to route to per-tenant
   # dashboards.
   resourceAttributes: "service.namespace=ragdoll,deployment.environment=production"
+
+prometheus:
+  # Master toggle. When false, none of the Prometheus wiring fires —
+  # no /metrics endpoint, no Service port, no ServiceMonitor, no
+  # PrometheusRule. The OTel path is unaffected.
+  enabled: false
+  # The OpenTelemetry SDK's PrometheusExporter starts its own HTTP
+  # listener on this port. 9464 is the SDK's documented default. Each
+  # api / worker container exposes it as a named port `metrics`.
+  port: 9464
+
+  # Set true to bypass the helm `lookup` CRD-existence check used by
+  # the ServiceMonitor + PrometheusRule templates. Required when
+  # rendering OFFLINE (`helm template` with no cluster access, e.g.
+  # in CI pipelines that diff manifests before apply). The default
+  # (false) gives a clear template-time error when the CRD is missing
+  # — much friendlier than apply-time "no matches for kind".
+  assumeCrdsInstalled: false
+
+  # ServiceMonitor (prometheus-operator CRD). Renders only when
+  # prometheus.enabled AND prometheus.serviceMonitor.enabled. We
+  # check for the CRD via helm `lookup` at render time and refuse to
+  # render if the cluster doesn't have prometheus-operator installed —
+  # avoids a confusing apply-time CRD-not-found error.
+  serviceMonitor:
+    enabled: true
+    # Scrape interval. 30s matches Prometheus's default global; tune
+    # down to 15s if you also use the metrics for HPA decisions.
+    interval: 30s
+    scrapeTimeout: 10s
+    # Extra labels for Prometheus's ServiceMonitor selector. Most
+    # operators pin `release: kube-prometheus-stack` (the helm release
+    # name of their prometheus-operator install) so their Prometheus
+    # picks up this ServiceMonitor automatically.
+    additionalLabels: {}
+    # metricRelabelings is the chokepoint for cardinality control.
+    # Default drops nothing — operators add per-env rules to drop or
+    # keep high-cardinality labels (e.g. drop `pipeline_id` when a
+    # tenant has 10k pipelines).
+    metricRelabelings: []
+
+  # PrometheusRule (prometheus-operator CRD). Same CRD-existence gate
+  # as ServiceMonitor. Starter rules ship below; override the whole
+  # `rules` list to replace, or extend it.
+  prometheusRule:
+    enabled: true
+    additionalLabels: {}
+    # Default starter rules. Operators can replace wholesale by
+    # overriding `rules` — these are sensible baselines, not a SLO.
+    rules:
+      - alert: RagdollApiHighErrorRate
+        expr: |
+          sum(rate(ragdoll_api_requests_total{status=~"5.."}[5m])) by (pod)
+            / sum(rate(ragdoll_api_requests_total[5m])) by (pod) > 0.05
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "RAGdoll API 5xx rate > 5% on {{ $labels.pod }}"
+          description: |
+            5xx error ratio is {{ $value | humanizePercentage }} over
+            the last 5 min. Check execution traces and recent deploys.
+      - alert: RagdollWorkerExecutionsStuck
+        expr: ragdoll_worker_inflight > 0 and on(pod) rate(ragdoll_worker_executions_total[10m]) == 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Worker {{ $labels.pod }} has inflight executions but no completions"
+          description: |
+            inflight={{ $value }} but no executions completed in the
+            last 10 min — scheduler / queue / plugin likely stuck.
+      - alert: RagdollSchedulerLeaderMissing
+        # The lease acquire heart-beats are logged, not metricized,
+        # but a leader absence shows as zero scheduled-enqueue rate
+        # for an unexpectedly long window. Tune the threshold to the
+        # tightest schedule you actually run.
+        expr: |
+          absent(sum by () (rate(ragdoll_worker_executions_total{worker_id=~".+"}[10m])))
+        for: 20m
+        labels:
+          severity: warning
+        annotations:
+          summary: "No worker executions for 20 min"
+          description: |
+            Either zero load is real, or the scheduler lease has no
+            holder. Check the worker pods + the `ragdoll:scheduler:leader`
+            key in Redis.
 
 secrets:
   # When `create: true` (the default), the chart generates a Secret

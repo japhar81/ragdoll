@@ -1,0 +1,37 @@
+{{- if and .Values.prometheus.enabled .Values.prometheus.prometheusRule.enabled }}
+{{- /*
+PrometheusRule for RAGdoll's starter alerts. Same gating + CRD
+existence check as the ServiceMonitor above.
+
+The `rules` list in values.yaml is what ships by default; operators
+can replace wholesale or extend. Each rule is a standard
+PrometheusRule entry — `alert`, `expr`, `for`, `labels`, `annotations`.
+We render them verbatim under a single `prometheus` group so they
+share evaluation cadence.
+*/}}
+{{- if not .Values.prometheus.assumeCrdsInstalled }}
+{{- $crd := lookup "apiextensions.k8s.io/v1" "CustomResourceDefinition" "" "prometheusrules.monitoring.coreos.com" -}}
+{{- if not $crd }}
+{{- fail "prometheus.prometheusRule.enabled=true but the `PrometheusRule` CRD is not installed. Install prometheus-operator, set prometheus.prometheusRule.enabled=false, or set prometheus.assumeCrdsInstalled=true (escape hatch for offline `helm template` renders)." -}}
+{{- end }}
+{{- end }}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: ragdoll
+  labels:
+    app: ragdoll
+    {{- include "ragdoll.commonLabels" . | nindent 4 }}
+    {{- with .Values.prometheus.prometheusRule.additionalLabels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- with (include "ragdoll.commonAnnotations" . | trim) }}
+  annotations:
+    {{- . | nindent 4 }}
+  {{- end }}
+spec:
+  groups:
+    - name: ragdoll
+      rules:
+        {{- toYaml .Values.prometheus.prometheusRule.rules | nindent 8 }}
+{{- end }}

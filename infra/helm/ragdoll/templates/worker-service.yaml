@@ -1,0 +1,33 @@
+{{- if .Values.prometheus.enabled }}
+{{- /*
+Headless Service over the worker pods, used ONLY so prometheus-
+operator's ServiceMonitor can discover their /metrics endpoints.
+Workers don't serve inbound HTTP traffic — clusterIP: None means
+no virtual IP / kube-proxy entry, just an Endpoints list of pod IPs
+that the Prometheus scraper iterates directly.
+
+Carries the `prometheus-scrape: "true"` marker label that the
+chart's ServiceMonitor selects on (same convention as the api
+Service). Removed automatically when prometheus.enabled is false.
+*/}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: ragdoll-worker
+  labels:
+    app: ragdoll-worker
+    prometheus-scrape: "true"
+    {{- include "ragdoll.commonLabels" . | nindent 4 }}
+  {{- with (include "ragdoll.commonAnnotations" . | trim) }}
+  annotations:
+    {{- . | nindent 4 }}
+  {{- end }}
+spec:
+  clusterIP: None
+  selector:
+    app: ragdoll-worker
+  ports:
+    - name: metrics
+      port: {{ .Values.prometheus.port }}
+      targetPort: metrics
+{{- end }}

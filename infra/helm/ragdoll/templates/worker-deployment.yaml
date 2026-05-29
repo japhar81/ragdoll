@@ -57,6 +57,16 @@ spec:
           securityContext:
             {{- toYaml . | nindent 12 }}
           {{- end }}
+          {{- if .Values.prometheus.enabled }}
+          # Workers are background-only normally (no inbound HTTP), but
+          # the Prometheus exporter inside wireOtelMetrics still starts
+          # a listener on this port. Worker pods are scraped via the
+          # headless `ragdoll-worker` Service (rendered only when
+          # prometheus.enabled).
+          ports:
+            - name: metrics
+              containerPort: {{ .Values.prometheus.port }}
+          {{- end }}
           envFrom:
             - secretRef:
                 name: {{ include "ragdoll.secretName" . }}

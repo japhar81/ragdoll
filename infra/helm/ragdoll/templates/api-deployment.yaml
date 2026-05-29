@@ -50,7 +50,14 @@ spec:
           {{- end }}
           command: ["node", "--experimental-strip-types", "apps/api/src/server.ts"]
           ports:
-            - containerPort: {{ .Values.api.port }}
+            - name: http
+              containerPort: {{ .Values.api.port }}
+            {{- if .Values.prometheus.enabled }}
+            # Prometheus pull endpoint. The OTel PrometheusExporter
+            # starts its own listener (see wireOtelMetrics).
+            - name: metrics
+              containerPort: {{ .Values.prometheus.port }}
+            {{- end }}
           envFrom:
             # Sensitive vars: DATABASE_URL, REDIS_URL,
             # SECRET_ENCRYPTION_KEY, SESSION_SECRET,
