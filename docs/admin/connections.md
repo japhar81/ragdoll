@@ -156,6 +156,89 @@ DELETE /api/dataset-bindings/:id
 
 `opensearch`, `qdrant`, `dgraph`, `pgvector`, `postgres`, `redis`. Adding a new type means adding a backend in the resolver + a plugin that knows how to consume it.
 
+## Dataset namespace policy
+
+A dataset's `backends.<modality>` block accepts an optional `namespace`
+field that controls how the collection / index / predicate name is
+**isolated across tenants and environments at resolve-time**. The base
+collection name lives on the dataset version
+(`dataset_versions.backend_collections.<modality>`); the resolver
+appends a deterministic, sanitised suffix before any plugin sees it.
+Plugins read the effective name from `ResolvedDataset.backendCollections`
+unchanged — no plugin changes are required to adopt this.
+
+### Why on the dataset, not the connection
+
+The connection is a pure host + credential abstraction. A single
+OpenSearch / Qdrant / Dgraph cluster legitimately hosts both shared
+org-wide indices (e.g. a reference taxonomy every tenant reads from)
+and per-tenant indices (e.g. each tenant's own knowledge base) — anchoring
+the policy on the dataset lets each dataset pick its own isolation level
+without forking the connection.
+
+### The matrix
+
+| Dataset scope | `shared` | `by-tenant` | `by-tenant-env` | `by-env` |
+| ------------- | :------: | :---------: | :-------------: | :------: |
+| global        |    ✓     |     ✓       |        ✓        |    —     |
+| tenant        |    ✓     |     —       |        —        |    ✓     |
+| environment   |    ✓     |     —       |        —        |    —     |
+
+Reasoning:
+
+- **Tenant-scope** rows already pin a tenant on the row itself, so
+  `by-tenant` would add nothing. `by-env` is meaningful and supported.
+- **Environment-scope** rows already pin both, so any non-`shared`
+  policy is a no-op — the validator rejects it at the API to keep the
+  data model honest.
+- **Missing / undefined** policy ALWAYS resolves to `shared` so legacy
+  rows written before this field existed keep their old behaviour
+  exactly.
+
+### Suffix rules
+
+```
+shared          → <base>
+by-tenant       → <base>_<sanitised(tenantSlug)>
+by-tenant-env   → <base>_<sanitised(tenantSlug)>_<sanitised(envName)>
+by-env          → <base>_<sanitised(envName)>
+```
+
+The sanitiser lowercases, collapses any non-alphanumeric to `_`, and
+deduplicates runs — so `Tenant-A` becomes `tenant_a` in the suffix and
+the result is safe to use as an OpenSearch index name, a Qdrant
+collection, or a Dgraph predicate prefix.
+
+If the resolver can't get the required context (e.g. a cluster-admin
+tool calls `resolve()` without a `tenantId` on a `by-tenant` dataset),
+it degrades silently to the base name — preserving the dataset's
+inspectability without fabricating a fake suffix. **This is not a
+loophole** for plugins: every real plugin execution flows through the
+runtime with a wired tenant/env context.
+
+### Setting the policy
+
+UI: Datasets → pick a dataset → "Backend namespace policy" disclosure
+under "Modalities + backends" → per-modality dropdown with a live
+preview of the effective collection name. The validator runs both
+client-side (option list filtered to legal values for the scope) and
+server-side (POST + PATCH both call `validateNamespacePolicyForScope`).
+
+API: include `namespace` on any `backends.<modality>` block in
+`POST /api/datasets` or `PATCH /api/datasets/:id`. Illegal combinations
+return 422 with `path: "backends.<modality>.namespace"`.
+
+### Recommendations
+
+- **Global datasets**: prefer `by-tenant` unless the data is genuinely
+  shared (an org-wide reference index). `shared` on a global dataset
+  means every tenant reads and writes the same collection — almost
+  always a security issue.
+- **Tenant datasets**: prefer `shared` unless you actually need per-env
+  splits. The tenant cascade already isolates by tenant via the
+  connection.
+- **Environment datasets**: nothing to choose — only `shared` applies.
+
 ## Multi-connection per dataset — deferred
 
 For v1, **one (dataset, modality) resolves to exactly one connection**. Read-replica / write-primary splits, multi-region failover, and shard fan-out all need a "give me the *read* connection on this dataset" / "the *write* one" distinction. The model has room for it (a `role: "read" | "write"` field on the dataset's backend connection ref) but the UI + plugin-side selection are out of scope for now.

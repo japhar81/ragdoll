@@ -228,15 +228,19 @@ export function buildApiDatasetResolver(
   }
   // Delegate to the shared builder in packages/runtime so the API and
   // the worker both run the SAME resolution logic (binding override →
-  // slug cascade → backend connection injection). Earlier attempts
-  // duplicated this inline in handlers.ts and silently dropped the
-  // connection-injection path, which crashed every storage plugin.
+  // slug cascade → backend connection injection → namespace policy).
+  // Earlier attempts duplicated this inline in handlers.ts and silently
+  // dropped the connection-injection path, which crashed every storage
+  // plugin. The tenants/environments deps power the PR6 namespace
+  // suffix expansion (`by-tenant`, `by-env`, `by-tenant-env`).
   return buildDatasetResolver({
     datasets: deps.datasets,
     datasetVersions: deps.datasetVersions,
     datasetAliases: deps.datasetAliases,
     datasources: deps.datasources,
-    pipelineDatasetBindings: deps.pipelineDatasetBindings
+    pipelineDatasetBindings: deps.pipelineDatasetBindings,
+    tenants: deps.tenants,
+    environments: deps.environments
   });
 }
 

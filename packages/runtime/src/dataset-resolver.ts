@@ -14,6 +14,7 @@
  * caching / metrics / tracing here, not in every caller.
  */
 import type {
+  DatasetNamespacePolicy,
   DatasetResolver,
   ResolvedDatasetBackend
 } from "../../plugin-sdk/src/index.ts";
@@ -23,8 +24,11 @@ import type {
   DatasetAliasRepository,
   DatasourceConnectionRepository,
   PipelineDatasetBindingRepository,
-  DatasetRow
+  DatasetRow,
+  TenantRepository,
+  EnvironmentRepository
 } from "../../db/src/index.ts";
+import { applyNamespacePolicy } from "./dataset-namespace.ts";
 
 export interface DatasetResolverDeps {
   datasets: DatasetRepository;
@@ -36,6 +40,14 @@ export interface DatasetResolverDeps {
   /** Optional. When set + pipelineId passed to resolve(), the binding
    *  cascade beats the default slug resolution. */
   pipelineDatasetBindings?: PipelineDatasetBindingRepository;
+  /** Optional. When set + a backend block declares a `namespace` policy
+   *  other than `shared`, the resolver looks up the tenant slug here
+   *  to compute the per-tenant collection suffix. Without it, any
+   *  `by-tenant*` policy degrades silently to `shared`. */
+  tenants?: TenantRepository;
+  /** Optional, same rationale as `tenants` — required to expand
+   *  `by-tenant-env` / `by-env` policies. */
+  environments?: EnvironmentRepository;
 }
 
 export function buildDatasetResolver(deps: DatasetResolverDeps): DatasetResolver {
@@ -101,6 +113,61 @@ export function buildDatasetResolver(deps: DatasetResolverDeps): DatasetResolver
         backends[modality] = block;
       }
 
+      // PR6: namespace policy. The base collection name lives on the
+      // version (`backend_collections.<modality>`); the policy lives on
+      // the dataset's per-modality backend block. Apply the suffix HERE
+      // so every plugin reads the effective collection name from
+      // `backendCollections` without knowing the policy exists.
+      //
+      // Tenant slug / env name are looked up lazily — most resolves are
+      // shared-namespace and pay nothing. When `namespace !== "shared"`
+      // we pay one extra SELECT to fetch the slug. The lookup uses the
+      // CALLER's tenant/env so a global dataset's namespace expands per
+      // caller, matching how connection injection already works.
+      const baseCollections = (ver.backendCollections ?? {}) as Record<string, string>;
+      const effectiveCollections: Record<string, string> = {};
+      let tenantSlugCache: string | undefined;
+      let envNameCache: string | undefined;
+      let tenantLookupTried = false;
+      let envLookupTried = false;
+      for (const [modality, base] of Object.entries(baseCollections)) {
+        const block = backends[modality];
+        const policy =
+          block && typeof block.namespace === "string"
+            ? (block.namespace as DatasetNamespacePolicy)
+            : undefined;
+        if (!policy || policy === "shared") {
+          effectiveCollections[modality] = base;
+          continue;
+        }
+        if (
+          !tenantLookupTried &&
+          deps.tenants &&
+          args.tenantId &&
+          (policy === "by-tenant" || policy === "by-tenant-env")
+        ) {
+          tenantLookupTried = true;
+          const t = await deps.tenants.get(args.tenantId);
+          tenantSlugCache = t?.slug;
+        }
+        if (
+          !envLookupTried &&
+          deps.environments &&
+          args.environmentId &&
+          (policy === "by-env" || policy === "by-tenant-env")
+        ) {
+          envLookupTried = true;
+          const e = await deps.environments.get(args.environmentId);
+          envNameCache = e?.name;
+        }
+        effectiveCollections[modality] = applyNamespacePolicy({
+          baseName: base,
+          policy,
+          tenantSlug: tenantSlugCache,
+          environmentName: envNameCache
+        });
+      }
+
       return {
         id: ds.id,
         slug: ds.slug,
@@ -115,7 +182,7 @@ export function buildDatasetResolver(deps: DatasetResolverDeps): DatasetResolver
           versionLabel: ver.versionLabel,
           status: ver.status
         },
-        backendCollections: ver.backendCollections,
+        backendCollections: effectiveCollections,
         backends: backends as Record<string, ResolvedDatasetBackend>
       };
     }

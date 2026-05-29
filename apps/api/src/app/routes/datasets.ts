@@ -22,6 +22,33 @@ import type {
 import { ok, error, isObject, nowIso, headerValue } from "../http-utils.ts";
 import type { AppDeps } from "../types.ts";
 import type { RouteContext, RouteRegistry, AuditWriter } from "./types.ts";
+import { validateNamespacePolicyForScope } from "../../../../../packages/runtime/src/index.ts";
+
+/**
+ * Walk a `backends` JSONB object and validate any `namespace` policy
+ * field against the dataset scope. Mirrors the matrix in
+ * `validateNamespacePolicyForScope` — returns a list of 422 issues, or
+ * an empty list when every modality's policy is legal (or absent).
+ */
+function validateBackendsNamespaceForScope(
+  scope: DatasetRow["scope"],
+  backends: Record<string, unknown>
+): Array<{ path: string; message: string }> {
+  const issues: Array<{ path: string; message: string }> = [];
+  for (const [modality, raw] of Object.entries(backends)) {
+    if (!raw || typeof raw !== "object") continue;
+    const block = raw as Record<string, unknown>;
+    if (!("namespace" in block)) continue;
+    const result = validateNamespacePolicyForScope(scope, block.namespace);
+    if (!result.ok) {
+      issues.push({
+        path: `backends.${modality}.namespace`,
+        message: result.message ?? "invalid namespace policy"
+      });
+    }
+  }
+  return issues;
+}
 
 interface DatasetsServices {
   deps: AppDeps;
@@ -187,6 +214,12 @@ export function registerDatasetsRoutes(
     }
     enforce(ctx.principal, "dataset:admin", { tenantId, environment: environmentId });
 
+    const backends = isObject(body.backends) ? body.backends : {};
+    const nsIssues = validateBackendsNamespaceForScope(scope, backends);
+    if (nsIssues.length > 0) {
+      return error(422, "validation_failed", { issues: nsIssues });
+    }
+
     const now = nowIso();
     const created = await datasets.create({
       id: randomUUID(),
@@ -202,7 +235,7 @@ export function registerDatasetsRoutes(
         Array.isArray(body.modalities) && body.modalities.length > 0
           ? (body.modalities.filter((m) => typeof m === "string") as string[])
           : ["vector"],
-      backends: isObject(body.backends) ? body.backends : {},
+      backends,
       currentVersionId: null,
       archivedAt: null,
       createdAt: now,
@@ -228,7 +261,13 @@ export function registerDatasetsRoutes(
     }
     if (isObject(body.chunkSchema)) patch.chunkSchema = body.chunkSchema;
     if (isObject(body.embeddingProfile)) patch.embeddingProfile = body.embeddingProfile;
-    if (isObject(body.backends)) patch.backends = body.backends;
+    if (isObject(body.backends)) {
+      const nsIssues = validateBackendsNamespaceForScope(before.scope, body.backends);
+      if (nsIssues.length > 0) {
+        return error(422, "validation_failed", { issues: nsIssues });
+      }
+      patch.backends = body.backends;
+    }
     if (Array.isArray(body.modalities) && body.modalities.length > 0) {
       patch.modalities = body.modalities.filter((m) => typeof m === "string") as string[];
     }

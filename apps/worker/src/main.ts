@@ -130,7 +130,13 @@ async function buildDeps(): Promise<BuiltDeps> {
       // ignore bindings configured via /pipelines/:id/bindings.
       pipelineDatasetBindings: new db.PostgresPipelineDatasetBindingRepository(
         pool
-      )
+      ),
+      // PR6: tenant / environment slug lookups for namespace policy
+      // expansion (e.g. `backends.text.namespace: by-tenant` →
+      // `<base>_<tenantSlug>`). Without these, any non-shared policy
+      // silently degrades to the base collection name.
+      tenants: new db.PostgresTenantRepository(pool),
+      environments: new db.PostgresEnvironmentRepository(pool)
     };
     schedules = new db.PostgresScheduleRepository(pool);
     systemSweeps = createPostgresSystemSweeps(pool);
@@ -157,7 +163,9 @@ async function buildDeps(): Promise<BuiltDeps> {
       datasets: new db.InMemoryDatasetRepository(),
       datasetVersions: new db.InMemoryDatasetVersionRepository(),
       datasetAliases: new db.InMemoryDatasetAliasRepository(),
-      pipelineDatasetBindings: new db.InMemoryPipelineDatasetBindingRepository()
+      pipelineDatasetBindings: new db.InMemoryPipelineDatasetBindingRepository(),
+      tenants: new db.InMemoryTenantRepository(),
+      environments: new db.InMemoryEnvironmentRepository()
     };
     schedules = new InMemoryScheduleRepository();
     secretProvider = new DatabaseEncryptedSecretProvider(
