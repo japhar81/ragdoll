@@ -42,7 +42,9 @@ import type {
   DatasetRepository,
   DatasetVersionRepository,
   DatasetAliasRepository,
-  PipelineDatasetBindingRepository
+  PipelineDatasetBindingRepository,
+  TenantRepository,
+  EnvironmentRepository
 } from "../../../../packages/db/src/index.ts";
 import type { QueueJob } from "../index.ts";
 
@@ -91,6 +93,16 @@ export interface WorkerRepositories {
    * specific row per environment without forking the spec.
    */
   pipelineDatasetBindings?: PipelineDatasetBindingRepository;
+  /**
+   * Optional tenant + environment repos (PR6 — namespace policy). The
+   * resolver looks up the caller's tenant slug / env name lazily to
+   * expand a backend block's `namespace: by-tenant | by-env |
+   * by-tenant-env` into a per-scope collection suffix. Without these
+   * wired, any non-`shared` policy degrades silently to the base
+   * collection name — exactly the legacy behaviour pre-PR6.
+   */
+  tenants?: TenantRepository;
+  environments?: EnvironmentRepository;
 }
 
 export interface WorkerDeps {

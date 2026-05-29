@@ -188,7 +188,9 @@ export function createWorker(deps: WorkerDeps): Worker {
           datasetVersions: deps.repositories.datasetVersions,
           datasetAliases: deps.repositories.datasetAliases,
           datasources: deps.repositories.datasourceConnections,
-          pipelineDatasetBindings: deps.repositories.pipelineDatasetBindings
+          pipelineDatasetBindings: deps.repositories.pipelineDatasetBindings,
+          tenants: deps.repositories.tenants,
+          environments: deps.repositories.environments
         })
       : undefined;
 

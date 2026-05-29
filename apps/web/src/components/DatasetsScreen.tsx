@@ -101,6 +101,7 @@ function DatasetDetail(props: { dataset: DatasetView; canAdmin: boolean }) {
           : "no backends declared"}
       </div>
       <DatasetBackendResolutionPanel dataset={props.dataset} />
+      <DatasetBackendNamespaceEditor dataset={props.dataset} canAdmin={props.canAdmin} />
       {props.canAdmin && <AddBackendForm dataset={props.dataset} />}
 
       <h4>Embedding profile</h4>
@@ -1194,4 +1195,205 @@ function BackendResolutionRow(props: {
       <td style={{ color: reasonColor }}>{q.data?.reason ?? "…"}</td>
     </tr>
   );
+}
+
+/**
+ * Per-modality namespace policy editor (PR6).
+ *
+ * Each backend block on the dataset gets a single-select "Namespace"
+ * dropdown whose options come from the validator's scope/policy matrix
+ * (mirrored client-side so the UI never offers an option the API will
+ * 422 on). Changing the policy PATCHes the dataset with a merged
+ * `backends` object that preserves all other backend fields.
+ *
+ * UI affordances:
+ * - Shows the EFFECTIVE collection suffix preview ("docs → docs_<tenant>")
+ *   so operators can sanity-check before saving.
+ * - Read-only when `canAdmin` is false (mirrors the existing pattern in
+ *   DatasetBindingOverridesSection).
+ * - Skipped entirely when the dataset has no backends — nothing to namespace.
+ */
+function DatasetBackendNamespaceEditor(props: {
+  dataset: DatasetView;
+  canAdmin: boolean;
+}) {
+  const { dataset, canAdmin } = props;
+  const backendEntries = Object.entries(dataset.backends ?? {});
+  if (backendEntries.length === 0) return null;
+
+  // Mirror packages/runtime/src/dataset-namespace.ts: same matrix the
+  // API enforces, kept in sync by hand (small + stable surface area).
+  const allowedForScope: Record<DatasetView["scope"], string[]> = {
+    global: ["shared", "by-tenant", "by-tenant-env"],
+    tenant: ["shared", "by-env"],
+    environment: ["shared"]
+  };
+  const allowed = allowedForScope[dataset.scope];
+
+  return (
+    <div style={{ marginTop: 8 }}>
+      <details>
+        <summary className="muted" style={{ cursor: "pointer", fontSize: "0.85em" }}>
+          Backend namespace policy ({allowed.length} option{allowed.length === 1 ? "" : "s"} at {dataset.scope} scope)
+        </summary>
+        <table className="inline-table" style={{ marginTop: 6, fontSize: "0.9em" }}>
+          <thead>
+            <tr>
+              <th>Modality</th>
+              <th>Provider</th>
+              <th>Namespace</th>
+              <th>Preview</th>
+            </tr>
+          </thead>
+          <tbody>
+            {backendEntries.map(([modality, raw]) => {
+              const block = (raw ?? {}) as Record<string, unknown>;
+              const provider = typeof block.provider === "string" ? block.provider : "?";
+              const currentPolicy =
+                typeof block.namespace === "string" ? block.namespace : "shared";
+              return (
+                <BackendNamespaceRow
+                  key={modality}
+                  dataset={dataset}
+                  modality={modality}
+                  provider={provider}
+                  currentPolicy={currentPolicy}
+                  allowed={allowed}
+                  canAdmin={canAdmin}
+                />
+              );
+            })}
+          </tbody>
+        </table>
+        <p className="muted" style={{ fontSize: "0.8em", marginTop: 6 }}>
+          The resolver appends a sanitised <code>_&lt;tenantSlug&gt;</code> /
+          <code>_&lt;envName&gt;</code> suffix to the collection name from
+          the current dataset version. Plugins read the effective name
+          from <code>backendCollections</code> — no plugin changes are
+          required to opt in.
+        </p>
+      </details>
+    </div>
+  );
+}
+
+function BackendNamespaceRow(props: {
+  dataset: DatasetView;
+  modality: string;
+  provider: string;
+  currentPolicy: string;
+  allowed: string[];
+  canAdmin: boolean;
+}) {
+  const qc = useQueryClient();
+  const [policy, setPolicy] = useState(props.currentPolicy);
+  const dirty = policy !== props.currentPolicy;
+  const save = useMutation({
+    mutationFn: async () => {
+      // Preserve every other field on every other modality. JSONB merge
+      // semantics on the server are last-write-wins for the WHOLE
+      // backends object, so reading the existing block + setting only
+      // the field we care about is critical.
+      const nextBackends = { ...(props.dataset.backends ?? {}) } as Record<
+        string,
+        Record<string, unknown>
+      >;
+      const existing = (nextBackends[props.modality] ?? {}) as Record<
+        string,
+        unknown
+      >;
+      const merged: Record<string, unknown> = { ...existing };
+      if (policy === "shared") {
+        // Explicit shared = remove the field, treating absence as the
+        // canonical "shared". Keeps the JSONB blob tidy and indistinguishable
+        // from a row written before this column existed.
+        delete merged.namespace;
+      } else {
+        merged.namespace = policy;
+      }
+      nextBackends[props.modality] = merged;
+      return api.updateDataset(props.dataset.id, { backends: nextBackends });
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["datasets"] });
+      qc.invalidateQueries({ queryKey: ["datasets-all"] });
+    }
+  });
+
+  const preview = previewSuffix(policy, props.dataset);
+  return (
+    <tr>
+      <td>{props.modality}</td>
+      <td>
+        <code>{props.provider}</code>
+      </td>
+      <td>
+        {props.canAdmin ? (
+          <select
+            value={policy}
+            onChange={(e) => setPolicy(e.target.value)}
+            disabled={save.isPending}
+          >
+            {props.allowed.map((opt) => (
+              <option key={opt} value={opt}>
+                {opt}
+              </option>
+            ))}
+          </select>
+        ) : (
+          <code>{policy}</code>
+        )}
+      </td>
+      <td>
+        <code style={{ fontSize: "0.85em" }}>{preview}</code>
+        {props.canAdmin && dirty && (
+          <>
+            {" "}
+            <button
+              className="primary"
+              onClick={() => save.mutate()}
+              disabled={save.isPending}
+              style={{ marginLeft: 4 }}
+            >
+              {save.isPending ? "Saving…" : "Save"}
+            </button>
+            <button
+              type="button"
+              className="link-btn"
+              onClick={() => setPolicy(props.currentPolicy)}
+              style={{ marginLeft: 4 }}
+            >
+              cancel
+            </button>
+          </>
+        )}
+        {save.isError && (
+          <p className="error" style={{ marginTop: 4 }}>
+            {errText(save.error)}
+          </p>
+        )}
+      </td>
+    </tr>
+  );
+}
+
+/**
+ * Render the effective-collection-name preview shown in the namespace
+ * editor. The resolver also applies a sanitiser at runtime — we use
+ * literal placeholder tokens here rather than the real (potentially
+ * unsanitised) tenant slug to keep the preview honest.
+ */
+function previewSuffix(policy: string, dataset: DatasetView): string {
+  const base = "<collection>";
+  switch (policy) {
+    case "by-tenant":
+      return `${base}_<tenantSlug>`;
+    case "by-tenant-env":
+      return `${base}_<tenantSlug>_<envName>`;
+    case "by-env":
+      return `${base}_<envName>`;
+    case "shared":
+    default:
+      return base + (dataset.scope === "global" ? " (shared across all tenants)" : "");
+  }
 }

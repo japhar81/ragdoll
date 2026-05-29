@@ -248,12 +248,41 @@ export interface DatasetRef {
  * reach the backing store from this block — they never see the raw
  * hostname or secret in their own `config`.
  */
+/**
+ * How the dataset's collection / index / predicate name is namespaced
+ * across tenants and environments at resolve-time. See
+ * `applyNamespacePolicy` in @ragdoll/runtime for the suffix rules,
+ * and `validateNamespacePolicyForScope` for the scope/policy matrix.
+ *
+ * - `shared`        — base name verbatim. Every (tenant, env) accessing
+ *                     this dataset writes/reads the same collection.
+ *                     Default for legacy rows; meaningful for org-wide
+ *                     reference data, dangerous for tenant data.
+ * - `by-tenant`     — `<base>_<tenantSlug>`. Only valid on global-scope
+ *                     datasets. Each tenant gets its own collection.
+ * - `by-tenant-env` — `<base>_<tenantSlug>_<envName>`. Only valid on
+ *                     global-scope datasets. Per-(tenant, env) split.
+ * - `by-env`        — `<base>_<envName>`. Only valid on tenant-scope
+ *                     datasets — each env in the tenant gets its own
+ *                     collection (tenant is already implicit in the row).
+ */
+export type DatasetNamespacePolicy =
+  | "shared"
+  | "by-tenant"
+  | "by-tenant-env"
+  | "by-env";
+
 export interface ResolvedDatasetBackend {
   /** "opensearch" | "qdrant" | "dgraph" | "pgvector" | "postgres" | … */
   provider?: string;
   /** Name of the connection the dataset's backend references. Always
    *  carried through from the raw block so the UI can render the chain. */
   connectionName?: string;
+  /** Namespace policy carried through from the raw backend block. The
+   *  resolver has ALREADY applied it to the corresponding entry in
+   *  `ResolvedDataset.backendCollections` — plugins should keep reading
+   *  the collection name from there, not re-derive from this field. */
+  namespace?: DatasetNamespacePolicy;
   /** Resolved connection — only set when `connectionName` was on the raw
    *  block AND the cascade resolver found a matching row. */
   connection?: {
