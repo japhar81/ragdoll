@@ -29,6 +29,32 @@ export function headerValue(
   return Array.isArray(raw) ? raw[0] : raw;
 }
 
+/**
+ * Resolve the originating client IP from a request's headers, suitable for
+ * a Postgres `inet` column on the audit log.
+ *
+ * X-Forwarded-For is a *list*: every proxy on the path appends itself, so
+ * what arrives at the app is `<client>, <hop1>, <hop2>, ...`. The OpenShift
+ * HAProxy router does this verbatim, which is what broke us — Postgres `inet`
+ * rejects the comma-list with SQLSTATE 22P02 and the route surfaced a 400
+ * `invalid_identifier` AFTER the pipeline had already enqueued. The leftmost
+ * entry is the original client (per RFC 7239 / the de-facto XFF convention).
+ *
+ * Falls back to X-Real-IP (set by some ingress controllers) and finally to
+ * undefined. We never want to surface a 400 because we couldn't write the
+ * client IP — audit_logs.source_ip is nullable for exactly this reason.
+ */
+export function clientIp(
+  headers: Record<string, string | string[] | undefined>
+): string | undefined {
+  const xff = headerValue(headers, "x-forwarded-for");
+  if (xff) {
+    const first = xff.split(",")[0]?.trim();
+    if (first) return first;
+  }
+  return headerValue(headers, "x-real-ip")?.trim() || undefined;
+}
+
 export function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }

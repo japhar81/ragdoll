@@ -39,7 +39,8 @@ import {
   error,
   isObject,
   nowIso,
-  headerValue
+  headerValue,
+  clientIp
 } from "../http-utils.ts";
 import { resolveDeployedVersion } from "../spec-helpers.ts";
 import {
@@ -306,7 +307,7 @@ export function registerPipelineRunsRoutes(
         input: redactValue(ctx.request.body)
       },
       requestId: headerValue(ctx.request.headers, "x-request-id") ?? null,
-      sourceIp: headerValue(ctx.request.headers, "x-forwarded-for") ?? null,
+      sourceIp: clientIp(ctx.request.headers) ?? null,
       userAgent: headerValue(ctx.request.headers, "user-agent") ?? null,
       createdAt: nowIso()
     });

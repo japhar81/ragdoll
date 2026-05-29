@@ -195,6 +195,7 @@ import {
   ok,
   error,
   headerValue,
+  clientIp,
   isObject,
   nowIso,
   isUuid,
@@ -380,7 +381,7 @@ export function createApp(deps: AppDeps): App {
       beforeRedacted: before === undefined ? undefined : redactValue(before),
       afterRedacted: after === undefined ? undefined : redactValue(after),
       requestId: headerValue(ctx.request.headers, "x-request-id") ?? null,
-      sourceIp: headerValue(ctx.request.headers, "x-forwarded-for") ?? null,
+      sourceIp: clientIp(ctx.request.headers) ?? null,
       userAgent: headerValue(ctx.request.headers, "user-agent") ?? null,
       createdAt: at
     });
