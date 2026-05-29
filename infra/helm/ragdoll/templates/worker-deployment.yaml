@@ -19,6 +19,11 @@ metadata:
   name: ragdoll-worker
   labels:
     app: ragdoll-worker
+    {{- include "ragdoll.commonLabels" . | nindent 4 }}
+  {{- with (include "ragdoll.commonAnnotations" . | trim) }}
+  annotations:
+    {{- . | nindent 4 }}
+  {{- end }}
 spec:
   {{- if not .Values.worker.autoscaling.enabled }}
   replicas: {{ .Values.worker.replicas }}
@@ -30,6 +35,11 @@ spec:
     metadata:
       labels:
         app: ragdoll-worker
+        {{- include "ragdoll.commonLabels" . | nindent 8 }}
+      {{- with (include "ragdoll.commonAnnotations" . | trim) }}
+      annotations:
+        {{- . | nindent 8 }}
+      {{- end }}
     spec:
       serviceAccountName: {{ include "ragdoll.serviceAccountName" . }}
       {{- with .Values.podSecurityContext }}

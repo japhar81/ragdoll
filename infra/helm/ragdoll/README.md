@@ -15,8 +15,10 @@ sign into the web UI immediately after `helm install` completes.
 Bring-your-own backends:
 
 - **Postgres** (orchestration state) — provide via `DATABASE_URL` on
-  the secret.
-- **Redis** (job queue + event bus) — provide via `REDIS_URL`.
+  the secret. No bundled option; use Bitnami's chart or a managed
+  service.
+- **Redis** (job queue + event bus) — provide via `REDIS_URL`, OR set
+  `redis.enabled: true` for the bundled in-cluster Redis (see below).
 - **Qdrant** / **OpenSearch** / **Dgraph** (vector / lexical / graph
   retrieval) — point at existing services via the URLs in
   `values.yaml`.
@@ -24,8 +26,53 @@ Bring-your-own backends:
   `otel.endpoint`.
 - **Ollama** (local LLM) — optional, set `ollama.baseUrl` to enable.
 
-The chart focuses on the RAGdoll workloads and their wiring. Pair it
-with the upstream Bitnami / Strimzi / etc. charts for the backends.
+### Bundled Redis (opt-in)
+
+Setting `redis.enabled: true` ships a minimal single-replica
+`ragdoll-redis` Deployment + Service + ConfigMap. The config is
+deliberately defensive against the `MISCONF Redis is configured to
+save RDB snapshots, but it's currently unable to persist to disk`
+error operators hit on misconfigured Redises:
+
+- `save ""` — disable RDB snapshots entirely.
+- `stop-writes-on-bgsave-error no` — even if a snapshot somehow runs
+  and fails, writes keep working.
+- `appendonly no` by default (no AOF either).
+
+That's safe for RAGdoll because Redis state is in-flight jobs
+(re-enqueueable on retry), the change-event bus (best-effort fanout),
+the SSO state cache (10-min TTL), and the scheduler lease (10s TTL).
+**None of it is source of truth.** A Redis pod restart loses
+everything in flight and recovers cleanly.
+
+When you DO want persistence, set `redis.persistence.enabled: true` —
+Redis switches to AOF (incremental, no bgsave failure mode) and mounts
+a PVC at `/data`. Strategy is `Recreate` (not RollingUpdate) so two
+pods can never race AOF rewrites against the same PVC.
+
+After enabling, set `REDIS_URL=redis://ragdoll-redis:6379` on the
+`ragdoll-secrets` Secret.
+
+## Custom labels + annotations (Kyverno / Gatekeeper / OPA)
+
+`commonLabels` and `commonAnnotations` get applied to every resource
+the chart renders — Deployments, Services, ConfigMap, Job, HPAs,
+Ingress/Route, SCC RBAC, Redis, the ServiceAccount, all of it. For
+clusters with a Kyverno policy that mandates specific labels on every
+object, set them once:
+
+```yaml
+commonLabels:
+  app.kubernetes.io/part-of: ragdoll
+  environment: prod
+  team: platform
+commonAnnotations:
+  ragdoll.example.com/owner: "team-platform"
+  ragdoll.example.com/cost-center: "rd-100"
+```
+
+If an operator-supplied label key collides with a chart default, the
+operator's value wins so policy labels can't be silently overridden.
 
 ## Quick start
 
@@ -137,6 +184,29 @@ emergency kill-switch (e.g. silence a runaway schedule while
 operators investigate). Setting it on a single pod is harmless — that
 pod just won't fire even if it holds the lease. Setting it on every
 pod stops scheduling.
+
+## API / MCP exposure
+
+The web container's nginx reverse-proxies these paths to the api
+Service internally:
+
+- `/api/*` — REST API (CLI, web UI, third-party clients)
+- `/mcp` — Model Context Protocol endpoint (Claude Desktop, IDE
+  extensions, llm scripts)
+- `/healthz`, `/readyz` — health probes
+
+So one Ingress (vanilla k8s) or Route (OpenShift) on the web Service
+covers all three audiences. CLI users point at
+`https://<your-host>/api/...`; MCP clients point at
+`https://<your-host>/mcp`. WebSocket upgrades for `/api/events` ride
+through because nginx is configured with `Upgrade` / `Connection`
+hop-by-hop headers (and HAProxy on OpenShift honours them by default).
+
+Optional: enable `apiIngress.enabled` (k8s) or
+`openshift.apiRoute.enabled` (OpenShift) for installs that want the
+API on its OWN hostname — e.g. `api.ragdoll.example.com` distinct
+from `ragdoll.example.com` for the web UI. Lets you apply different
+TLS certs, ingress classes, rate limits, or WAF policies.
 
 ## OpenShift
 

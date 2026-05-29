@@ -1,18 +1,44 @@
 # ============================================================================
 # RAGdoll Helm chart values
 #
-# This chart deploys the API, worker (split into a "leader" + N followers so
-# the cron scheduler doesn't fan out), web UI, optional python-plugins
-# sidecar, and a one-shot db-init Job that runs migrations + seeds at
-# install/upgrade time. The first install also provisions a platform-admin
-# user from BOOTSTRAP_ADMIN_EMAIL / BOOTSTRAP_ADMIN_PASSWORD (declared on
-# the existingSecret — see infra/k8s/ragdoll-secrets.example.yaml).
+# This chart deploys the API, autoscaled worker (cron scheduler gated by
+# a Redis lease so workers are interchangeable), web UI, optional
+# python-plugins sidecar, and a one-shot db-init Job that runs
+# migrations + seeds at install/upgrade time. The first install also
+# provisions a platform-admin user from BOOTSTRAP_ADMIN_EMAIL /
+# BOOTSTRAP_ADMIN_PASSWORD (declared on the existingSecret — see
+# infra/k8s/ragdoll-secrets.example.yaml).
 #
 # Bring-your-own backends: Postgres / Redis / Qdrant / OpenSearch / OTel
-# collector are NOT deployed by this chart — point at existing services
-# via the URLs below. The example secret carries the Postgres + Redis DSN;
-# the rest are plain values.
+# collector default to BYO — point at existing services via the URLs
+# below. An optional bundled Redis (`redis.enabled: true`) ships a
+# minimal in-cluster instance for dev / small installs that don't have
+# a managed Redis nearby. Postgres / Qdrant / OpenSearch stay BYO.
 # ============================================================================
+
+# ---------------------------------------------------------------------------
+# Common labels and annotations applied to EVERY resource the chart
+# renders. Intended for cluster policies (Kyverno, Gatekeeper, OPA)
+# that require specific metadata on all objects — e.g.
+# `app.kubernetes.io/part-of`, a cost-allocation tag, a compliance
+# marker, or a Kyverno-mandated `owner` label.
+#
+# Examples:
+#
+#   commonLabels:
+#     app.kubernetes.io/part-of: ragdoll
+#     environment: prod
+#     team: platform
+#   commonAnnotations:
+#     ragdoll.example.com/owner: "team-platform"
+#     ragdoll.example.com/cost-center: "rd-100"
+#
+# These are MERGED with the chart's per-resource labels — if a key
+# collides, the operator-supplied value wins so policy labels can't
+# be silently overridden by the chart.
+# ---------------------------------------------------------------------------
+commonLabels: {}
+commonAnnotations: {}
 
 image:
   repository: ragdoll
@@ -186,6 +212,57 @@ secrets:
   existingSecret: ragdoll-secrets
 
 # ---------------------------------------------------------------------------
+# Optional bundled Redis (dev / small installs).
+#
+# Default OFF — production should use a managed Redis (Elasticache,
+# Memorystore, in-cluster operator) and put REDIS_URL on the existing
+# secret. Enabling this ships a minimal single-replica Redis with a
+# safe configuration that can NEVER hit the
+# `MISCONF Redis is configured to save RDB snapshots, but it's
+# currently unable to persist to disk` error operators have reported
+# from misconfigured Redises:
+#
+#   - `save ""`                       — disable RDB snapshots entirely.
+#   - `stop-writes-on-bgsave-error no` — even if a snapshot somehow runs
+#                                        (e.g. via debug command) and
+#                                        fails, writes keep working.
+#   - `appendonly no`                  — no AOF either, by default.
+#
+# The trade-off: nothing persists across pod restarts. For RAGdoll
+# that's acceptable — Redis state is in-flight jobs (re-enqueueable on
+# retry), the change-event bus (best-effort fanout), the SSO state
+# cache (10-min TTL), and the scheduler lease (10s TTL). NONE of it is
+# source of truth.
+#
+# When you DO want persistence, set `persistence.enabled: true` —
+# Redis switches to AOF (`appendonly yes` with `everysec` fsync) and
+# mounts the PVC at /data. AOF is preferable to RDB for our usage
+# because it writes incrementally and won't ever hit the bgsave-error
+# failure mode.
+#
+# When `enabled: true`, REDIS_URL on the existingSecret can be set to
+# `redis://ragdoll-redis:6379` (the in-cluster Service name).
+# ---------------------------------------------------------------------------
+redis:
+  enabled: false
+  image:
+    repository: redis
+    tag: "7-alpine"
+    pullPolicy: IfNotPresent
+  resources:
+    requests: { cpu: 50m, memory: 64Mi }
+    limits: { cpu: 500m, memory: 512Mi }
+  persistence:
+    # When true, AOF is enabled and the PVC below is mounted at /data.
+    # Default false keeps Redis fully ephemeral — recovers cleanly on
+    # pod restart by re-acquiring its lease + draining any redelivered
+    # BullMQ jobs from the at-least-once stream.
+    enabled: false
+    size: 8Gi
+    storageClassName: ""
+    accessModes: [ReadWriteOnce]
+
+# ---------------------------------------------------------------------------
 # Pod & container security context. Defaults are restrictive enough to
 # pass OpenShift's `restricted-v2` SCC AND vanilla k8s PodSecurity
 # `restricted`. Override per-environment if you need to relax (rare —
@@ -212,6 +289,14 @@ containerSecurityContext:
 # ---------------------------------------------------------------------------
 # Ingress (vanilla Kubernetes). Mutually exclusive with `openshift.route`
 # below — use one or the other depending on your cluster.
+#
+# The web container's nginx reverse-proxies /api/* AND /mcp to the api
+# Service internally, so a single Ingress + hostname serves the web UI,
+# the REST API the CLI hits, and the MCP endpoint Claude Desktop / IDE
+# clients hit. The optional `apiIngress` below is only for installs
+# that want the API on its OWN DNS (e.g. api.example.com vs
+# ragdoll.example.com) to apply different rate limits, WAF rules, or
+# auth.
 # ---------------------------------------------------------------------------
 ingress:
   enabled: false
@@ -225,6 +310,21 @@ ingress:
   tls: []
   # - secretName: ragdoll-tls
   #   hosts: [ragdoll.example.com]
+
+# Optional SEPARATE Ingress for the API service. Most installs leave
+# this off and let the web's nginx proxy serve /api + /mcp through the
+# main Ingress above. Enable when you need a distinct hostname or
+# per-API ingress controller policy.
+apiIngress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: api.ragdoll.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
 
 # ---------------------------------------------------------------------------
 # OpenShift-specific resources. Enable on OpenShift only.
@@ -253,3 +353,16 @@ openshift:
   scc:
     enabled: false
     name: restricted-v2   # ignored when scc.enabled: false
+
+  # Optional SEPARATE Route for the API service. Same trade-off as
+  # `apiIngress` above: most installs leave this off and let the web
+  # Route serve /api + /mcp through the main Route. Enable when API
+  # traffic needs its own hostname or route policy.
+  apiRoute:
+    enabled: false
+    host: ""
+    tls:
+      enabled: true
+      termination: edge
+      insecureEdgeTerminationPolicy: Redirect
+    annotations: {}

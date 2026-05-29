@@ -3,6 +3,13 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: {{ .Release.Name }}-python-plugins
+  labels:
+    app: {{ .Release.Name }}-python-plugins
+    {{- include "ragdoll.commonLabels" . | nindent 4 }}
+  {{- with (include "ragdoll.commonAnnotations" . | trim) }}
+  annotations:
+    {{- . | nindent 4 }}
+  {{- end }}
 spec:
   replicas: {{ .Values.pythonPlugins.replicas }}
   selector:
@@ -12,6 +19,11 @@ spec:
     metadata:
       labels:
         app: {{ .Release.Name }}-python-plugins
+        {{- include "ragdoll.commonLabels" . | nindent 8 }}
+      {{- with (include "ragdoll.commonAnnotations" . | trim) }}
+      annotations:
+        {{- . | nindent 8 }}
+      {{- end }}
     spec:
       serviceAccountName: {{ include "ragdoll.serviceAccountName" . }}
       {{- with .Values.podSecurityContext }}

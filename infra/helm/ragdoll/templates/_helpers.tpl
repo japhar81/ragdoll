@@ -15,6 +15,71 @@ better inlined into the template that needs it.
 {{- end -}}
 
 {{/*
+Common labels emitted on every resource. Merges the chart's own
+identity labels (`app.kubernetes.io/managed-by`, etc.) with whatever
+the operator passed in `commonLabels`. Per-resource templates set
+their `app:` / `role:` labels alongside this — those land on the
+SAME labels map because helm `nindent`s us inside the existing block.
+
+If a key collides between the chart-managed defaults and operator
+commonLabels, the OPERATOR wins (Kyverno policies that mandate a
+specific label value can't be silently overridden by the chart).
+*/}}
+{{- define "ragdoll.commonLabels" -}}
+app.kubernetes.io/managed-by: {{ .Release.Service | quote }}
+app.kubernetes.io/instance: {{ .Release.Name | quote }}
+app.kubernetes.io/part-of: ragdoll
+helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | quote }}
+{{- with .Values.commonLabels }}
+{{ toYaml . }}
+{{- end }}
+{{- end -}}
+
+{{/*
+Common annotations from `commonAnnotations`. Emits nothing when the
+map is empty so empty-annotation blocks don't litter every manifest.
+Use as:
+    metadata:
+      annotations:
+        {{- include "ragdoll.commonAnnotations" . | nindent 4 }}
+*/}}
+{{- define "ragdoll.commonAnnotations" -}}
+{{- with .Values.commonAnnotations -}}
+{{ toYaml . }}
+{{- end -}}
+{{- end -}}
+
+{{/*
+Convenience block for resources whose metadata sets only the standard
+labels + annotations (no per-resource extras). Use as:
+
+    metadata:
+      name: foo
+      {{- include "ragdoll.metadata" . | nindent 2 }}
+
+…which expands to:
+
+      labels:
+        app.kubernetes.io/managed-by: Helm
+        ...
+        <commonLabels>
+      annotations:
+        <commonAnnotations>     # omitted when empty
+
+Templates that need an app-specific label (most of them) inline the
+`labels:` block manually and call `ragdoll.commonLabels` to merge.
+This helper is for the few resources that don't.
+*/}}
+{{- define "ragdoll.metadata" -}}
+labels:
+  {{- include "ragdoll.commonLabels" . | nindent 2 }}
+{{- with (include "ragdoll.commonAnnotations" . | trim) }}
+annotations:
+  {{- . | nindent 2 }}
+{{- end }}
+{{- end -}}
+
+{{/*
 Common env vars used by api and worker. Includes wiring for every
 backend the docker-compose stack passes, so the helm install mirrors
 the compose install instead of falling short. Sensitive values come

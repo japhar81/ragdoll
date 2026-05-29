@@ -2,6 +2,13 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: {{ .Release.Name }}-web-nginx
+  labels:
+    app: ragdoll-web
+    {{- include "ragdoll.commonLabels" . | nindent 4 }}
+  {{- with (include "ragdoll.commonAnnotations" . | trim) }}
+  annotations:
+    {{- . | nindent 4 }}
+  {{- end }}
 data:
   default.conf: |
     # Map the client's `Upgrade` header to the upstream `Connection` value
@@ -45,6 +52,23 @@ data:
         location = /readyz {
             proxy_pass http://ragdoll-api:80/readyz;
             proxy_set_header Host $host;
+        }
+
+        # MCP endpoint — single POST per turn from any MCP client
+        # (Claude Desktop, IDE extensions, llm scripts). Same upstream
+        # as /api/, same timeouts: the tool dispatch can invoke a
+        # synchronous pipeline that runs for minutes against a cold
+        # Ollama. Bound here so external CLI/MCP clients can reach
+        # the API through the same Ingress/Route as the web UI
+        # without a separate hostname.
+        location = /mcp {
+            proxy_pass http://ragdoll-api:80/mcp;
+            proxy_http_version 1.1;
+            proxy_set_header Host $host;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+            proxy_read_timeout 600s;
+            proxy_buffering off;
         }
 
         location / {

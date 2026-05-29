@@ -4,6 +4,11 @@ metadata:
   name: ragdoll-web
   labels:
     app: ragdoll-web
+    {{- include "ragdoll.commonLabels" . | nindent 4 }}
+  {{- with (include "ragdoll.commonAnnotations" . | trim) }}
+  annotations:
+    {{- . | nindent 4 }}
+  {{- end }}
 spec:
   {{- if not .Values.web.autoscaling.enabled }}
   replicas: {{ .Values.web.replicas }}
@@ -15,10 +20,14 @@ spec:
     metadata:
       labels:
         app: ragdoll-web
+        {{- include "ragdoll.commonLabels" . | nindent 8 }}
       annotations:
         # Roll the web pods whenever the nginx config changes (changing
         # the upstream is a no-op until we restart nginx).
         checksum/nginx: {{ include (print $.Template.BasePath "/web-nginx-configmap.yaml") . | sha256sum }}
+        {{- with (include "ragdoll.commonAnnotations" . | trim) }}
+        {{- . | nindent 8 }}
+        {{- end }}
     spec:
       serviceAccountName: {{ include "ragdoll.serviceAccountName" . }}
       {{- with .Values.podSecurityContext }}

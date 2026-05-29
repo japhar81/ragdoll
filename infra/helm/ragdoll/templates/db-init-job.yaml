@@ -13,8 +13,12 @@ metadata:
     "helm.sh/hook": pre-install,pre-upgrade
     "helm.sh/hook-weight": "-5"
     "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+    {{- with (include "ragdoll.commonAnnotations" . | trim) }}
+    {{- . | nindent 4 }}
+    {{- end }}
   labels:
     app: ragdoll-db-init
+    {{- include "ragdoll.commonLabels" . | nindent 4 }}
 spec:
   backoffLimit: 2
   # Migrations should complete in seconds even on a busy cluster. Cap
@@ -25,6 +29,7 @@ spec:
     metadata:
       labels:
         app: ragdoll-db-init
+        {{- include "ragdoll.commonLabels" . | nindent 8 }}
     spec:
       serviceAccountName: {{ include "ragdoll.serviceAccountName" . }}
       {{- with .Values.podSecurityContext }}

@@ -2,6 +2,13 @@ apiVersion: v1
 kind: Service
 metadata:
   name: ragdoll-web
+  labels:
+    app: ragdoll-web
+    {{- include "ragdoll.commonLabels" . | nindent 4 }}
+  {{- with (include "ragdoll.commonAnnotations" . | trim) }}
+  annotations:
+    {{- . | nindent 4 }}
+  {{- end }}
 spec:
   selector:
     app: ragdoll-web
