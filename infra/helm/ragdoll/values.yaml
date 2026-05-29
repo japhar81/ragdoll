@@ -20,7 +20,10 @@ image:
   pullPolicy: IfNotPresent
 
 # Web is built from the same monorepo but ships as a separate nginx image
-# (see infra/docker/web.Dockerfile). Override the suffix to swap repos.
+# (see infra/docker/web.Dockerfile). The default image uses
+# nginx-unprivileged so it binds to a non-privileged port (8080) under a
+# non-root UID — required by OpenShift's restricted-v2 SCC, and harmless
+# everywhere else.
 webImage:
   repository: ragdoll-web
   tag: latest
@@ -75,37 +78,33 @@ api:
     targetCPUUtilizationPercentage: 70
 
 # ---------------------------------------------------------------------------
-# Worker — split to keep the cron scheduler single-fire.
+# Worker
 # ---------------------------------------------------------------------------
 #
-# The worker has a built-in cron scheduler that ticks via croner. Running
-# N replicas of one Deployment would fire every schedule N times. So we
-# run one "leader" pod with WORKER_SCHEDULER_ENABLED=true and N "follower"
-# pods that only consume BullMQ jobs. The split mirrors the docker-compose
-# worker-1 / worker-2 pattern.
+# Single autoscaled Deployment. Workers are interchangeable: every pod
+# runs both the BullMQ consumer AND the cron scheduler timer, but only
+# the pod that currently holds the Redis-backed
+# `ragdoll:scheduler:leader` lease actually enqueues scheduled runs.
+# Failover is automatic (lease TTL 10 s, renewed every ~3 s).
+#
+# The earlier leader/follower split that pinned scheduler-bearing pods
+# to replicas:1 is gone — the lease replaces it and the workers
+# autoscale uniformly.
 worker:
-  leader:
-    replicas: 1
-    resources:
-      requests: { cpu: 250m, memory: 256Mi }
-      limits: { cpu: "1", memory: 1Gi }
-  followers:
-    # Used when autoscaling.enabled is false. When autoscaling is on
-    # the HPA owns the replica count and this value is ignored.
-    replicas: 1
-    resources:
-      requests: { cpu: 250m, memory: 256Mi }
-      limits: { cpu: "1", memory: 1Gi }
-    # CPU-target HorizontalPodAutoscaler for the follower deployment.
-    # The leader stays at replicas:1 because its built-in cron
-    # scheduler must be single-fire — autoscaling it would re-introduce
-    # the "fire every cron N times" bug the leader/follower split
-    # solved. Defaults to min 1 / max 10 / 70% CPU.
-    autoscaling:
-      enabled: true
-      minReplicas: 1
-      maxReplicas: 10
-      targetCPUUtilizationPercentage: 70
+  # Used when autoscaling.enabled is false.
+  replicas: 1
+  resources:
+    requests: { cpu: 250m, memory: 256Mi }
+    limits: { cpu: "1", memory: 1Gi }
+  # CPU-target HorizontalPodAutoscaler. Defaults to min 1 / max 10 /
+  # 70% CPU. Safe to autoscale freely now that the scheduler lease
+  # gates single-fire — earlier the scheduler-bearing pod had to stay
+  # at replicas:1, which is what the leader/follower split solved.
+  autoscaling:
+    enabled: true
+    minReplicas: 1
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 70
   # Comma-separated list of Ollama models the worker pulls/warms on
   # boot. Empty disables warm-up (saves cold-start time on installs
   # that don't use local Ollama).
@@ -117,7 +116,10 @@ worker:
 # ---------------------------------------------------------------------------
 web:
   replicas: 2
-  port: 80
+  # 8080 keeps the container port non-privileged so it works under
+  # OpenShift's restricted-v2 SCC (random non-root UID) without any
+  # extra capability. The web Service still exposes port 80 externally.
+  port: 8080
   resources:
     requests: { cpu: 100m, memory: 128Mi }
     limits: { cpu: 500m, memory: 512Mi }
@@ -184,9 +186,32 @@ secrets:
   existingSecret: ragdoll-secrets
 
 # ---------------------------------------------------------------------------
-# Ingress (optional). When enabled, an Ingress resource is rendered for the
-# web Service. Class + annotations are passthrough so you can wire any
-# controller (nginx, traefik, gce, alb…).
+# Pod & container security context. Defaults are restrictive enough to
+# pass OpenShift's `restricted-v2` SCC AND vanilla k8s PodSecurity
+# `restricted`. Override per-environment if you need to relax (rare —
+# the apps don't need root, privileged caps, or specific UIDs).
+# ---------------------------------------------------------------------------
+podSecurityContext:
+  # `runAsNonRoot: true` matches both restricted-v2 and PodSecurity
+  # restricted. We don't pin runAsUser — let OpenShift assign one from
+  # the namespace's UID range; on vanilla k8s the container image's
+  # USER takes effect (nginx-unprivileged ships as UID 101, node's
+  # `node` user is 1000).
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+
+containerSecurityContext:
+  runAsNonRoot: true
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: false  # too disruptive for nginx temp files; flip per-env if you've validated.
+  capabilities:
+    drop:
+      - ALL
+
+# ---------------------------------------------------------------------------
+# Ingress (vanilla Kubernetes). Mutually exclusive with `openshift.route`
+# below — use one or the other depending on your cluster.
 # ---------------------------------------------------------------------------
 ingress:
   enabled: false
@@ -200,3 +225,31 @@ ingress:
   tls: []
   # - secretName: ragdoll-tls
   #   hosts: [ragdoll.example.com]
+
+# ---------------------------------------------------------------------------
+# OpenShift-specific resources. Enable on OpenShift only.
+# ---------------------------------------------------------------------------
+openshift:
+  # Render an OpenShift Route instead of an Ingress. Routes are the
+  # idiomatic OpenShift entrypoint; the cluster's router shard picks
+  # them up automatically. tls.termination defaults to `edge` (TLS
+  # terminates at the router; the cluster-internal hop to the web
+  # service stays plain HTTP).
+  route:
+    enabled: false
+    host: ""   # empty → OpenShift generates a hostname from the route name
+    tls:
+      enabled: true
+      termination: edge
+      insecureEdgeTerminationPolicy: Redirect
+    annotations: {}
+  # Optional SCC binding. Most installs DON'T need this — the pod/
+  # container securityContext above already satisfies `restricted-v2`,
+  # which every OpenShift namespace gets by default. Enable when you've
+  # had to relax securityContext (e.g. mounted hostPath for a debugging
+  # session) and need to bind the SA to a named SCC like `nonroot-v2`
+  # or `anyuid`. Creates a Role + RoleBinding granting `use` on the
+  # named SCC to the chart's ServiceAccount.
+  scc:
+    enabled: false
+    name: restricted-v2   # ignored when scc.enabled: false
