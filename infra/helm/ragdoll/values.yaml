@@ -561,6 +561,16 @@ bundledollama:
     size: 5Gi
     storageClassName: ""
     accessModes: [ReadWriteOnce]
+  # Models that the pod's postStart hook `ollama pull`s once the server
+  # is up. Compose has a dedicated `ollama-pull` companion service; in
+  # cluster we fold the same job into a postStart hook so the model
+  # cache lands on the PVC before the worker tries to embed.
+  #
+  # The worker's warm-models hook (worker.ollamaWarmModels) keeps these
+  # resident in RAM via 5-minute keep-alive pings AFTER they're pulled.
+  preloadModels:
+    - qwen2.5:0.5b
+    - nomic-embed-text
 
 # OpenSearch — Bitnami legacy chart. Defaults ON so the codebase-
 # ingest-docs demo (lexical + kNN hybrid) works end-to-end on a fresh

@@ -24,11 +24,12 @@ INSERT INTO pipeline_versions (id, pipeline_id, version, status, spec, checksum,
     '00000000-0000-0000-0000-0000000d3010',
     '1.0.0',
     'published',
-    '{"apiVersion":"rag-platform/v1","kind":"Pipeline","metadata":{"name":"local-demo","stages":[{"id":"s_auto_1","label":"Stage 1"},{"id":"s_auto_2","label":"Stage 2"},{"id":"s_auto_3","label":"Stage 3"},{"id":"s_auto_4","label":"Stage 4"}]},"spec":{"nodes":[{"id":"input","type":"input","ui":{"position":{"x":8.71875,"y":40},"stageId":"s_auto_1"}},{"id":"prompt","plugin":{"category":"prompt_template","id":"basic_rag_prompt","version":"1.0.0"},"ui":{"position":{"x":469,"y":40},"stageId":"s_auto_2"}},{"id":"llm","plugin":{"category":"llm","id":"provider_chat","version":"1.0.0"},"config":{"provider":"${config.llm.provider}","model":"${config.llm.model}","baseUrl":"${config.llm.base_url}"},"ui":{"position":{"x":931,"y":40},"stageId":"s_auto_3"}},{"id":"output","type":"output","ui":{"position":{"x":1391.28125,"y":40},"stageId":"s_auto_4"}}],"edges":[{"from":"input","to":"prompt","fromPort":"question","toPort":"question"},{"from":"prompt","to":"llm","fromPort":"messages","toPort":"messages"},{"from":"llm","to":"output"}]}}'::jsonb,
-    'f97a7610',
+    '{"apiVersion":"rag-platform/v1","kind":"Pipeline","metadata":{"name":"local-demo","stages":[{"id":"s_auto_1","label":"Stage 1"},{"id":"s_auto_2","label":"Stage 2"},{"id":"s_auto_3","label":"Stage 3"},{"id":"s_auto_4","label":"Stage 4"}]},"spec":{"nodes":[{"id":"input","type":"input","config":{"default":{"question":"Hello, what''s an example of a great RAG use case?"}},"ui":{"position":{"x":8.71875,"y":40},"stageId":"s_auto_1"}},{"id":"prompt","plugin":{"category":"prompt_template","id":"basic_rag_prompt","version":"1.0.0"},"ui":{"position":{"x":469,"y":40},"stageId":"s_auto_2"}},{"id":"llm","plugin":{"category":"llm","id":"provider_chat","version":"1.0.0"},"config":{"provider":"${config.llm.provider}","model":"${config.llm.model}","baseUrl":"${config.llm.base_url}"},"ui":{"position":{"x":931,"y":40},"stageId":"s_auto_3"}},{"id":"output","type":"output","ui":{"position":{"x":1391.28125,"y":40},"stageId":"s_auto_4"}}],"edges":[{"from":"input","to":"prompt","fromPort":"question","toPort":"question"},{"from":"prompt","to":"llm","fromPort":"messages","toPort":"messages"},{"from":"llm","to":"output"}]}}'::jsonb,
+    'a0f71d8f',
     now()
   )
-ON CONFLICT (pipeline_id, version) DO NOTHING;
+ON CONFLICT (pipeline_id, version) DO UPDATE
+SET spec = EXCLUDED.spec, checksum = EXCLUDED.checksum, status = EXCLUDED.status;
 
 -- Pin the published version to environment 'dev' for tenant 'tenant-local'.
 INSERT INTO pipeline_deployments (id, pipeline_id, pipeline_version_id, environment, tenant_id, status)

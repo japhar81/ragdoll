@@ -120,6 +120,31 @@ spec:
             # 0.0.0.0 (not 127.0.0.1) so the kube Service routes to it.
             - name: OLLAMA_HOST
               value: "0.0.0.0:{{ .Values.bundledollama.port }}"
+          {{- with .Values.bundledollama.preloadModels }}
+          # Pull the demo models in the background once the server is
+          # serving. postStart runs detached so it doesn't block pod
+          # readiness; pulls land on the PVC so subsequent pod restarts
+          # find them cached. Output goes to /tmp/preload.log inside
+          # the pod for triage (`oc exec ragdoll-ollama -- cat /tmp/preload.log`).
+          lifecycle:
+            postStart:
+              exec:
+                command:
+                  - /bin/sh
+                  - -c
+                  - |
+                    (
+                      for i in $(seq 1 60); do
+                        wget -qO- http://127.0.0.1:{{ $.Values.bundledollama.port }}/api/tags >/dev/null 2>&1 && break
+                        sleep 2
+                      done
+                      {{- range . }}
+                      echo "preload: pulling {{ . }}" >> /tmp/preload.log
+                      ollama pull {{ . }} >> /tmp/preload.log 2>&1
+                      {{- end }}
+                      echo "preload: done" >> /tmp/preload.log
+                    ) &
+          {{- end }}
           volumeMounts:
             {{- if .Values.bundledollama.persistence.enabled }}
             - name: models

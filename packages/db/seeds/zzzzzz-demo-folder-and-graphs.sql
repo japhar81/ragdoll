@@ -38,6 +38,24 @@ WHERE slug IN (
   'xml-codec-demo'
 );
 
+-- Backfill `latest_version_id` for every demo pipeline. The pipelines
+-- table's latest pointer is used by `track_latest=true` activations
+-- (which the UI can create by default) — without it, runs return a
+-- 409 `activation_unresolved` even though the deployment row resolves
+-- fine. Picks the most recently published_at version per pipeline so
+-- a re-seed that bumps a spec automatically promotes the new version.
+UPDATE pipelines p
+SET latest_version_id = sub.version_id
+FROM (
+  SELECT DISTINCT ON (pipeline_id) pipeline_id, id AS version_id
+  FROM pipeline_versions
+  WHERE status = 'published'
+  ORDER BY pipeline_id, published_at DESC NULLS LAST
+) sub
+WHERE p.id = sub.pipeline_id
+  AND p.id::text LIKE '00000000-0000-0000-0000-0000000d%'
+  AND (p.latest_version_id IS NULL OR p.latest_version_id != sub.version_id);
+
 -- ---- github-knowledge-graph pipeline -------------------------------------
 
 INSERT INTO pipelines (id, slug, name, description, folder_id) VALUES
@@ -56,11 +74,12 @@ INSERT INTO pipeline_versions (id, pipeline_id, version, status, spec, checksum,
     '00000000-0000-0000-0000-0000000df020',
     '1.0.0',
     'published',
-    '{"apiVersion":"rag-platform/v1","kind":"Pipeline","metadata":{"name":"github-knowledge-graph","description":"Pulls a GitHub repo, extracts entities + relations into a Dgraph graph. Pair with the github-kg-query pipeline to retrieve via DQL.","labels":{"demo":"graph"}},"spec":{"parameters":[{"key":"repo","type":"string","defaultValue":"octocat/Hello-World","allowedScopes":["pipeline","tenant_pipeline","runtime"],"runtimeOverridable":true,"description":"owner/name of the GitHub repository to ingest."}],"nodes":[{"id":"input","type":"input"},{"id":"github","plugin":{"category":"datasource","id":"github_source","version":"1.0.0"},"config":{"repo":"${config.repo}","ref":"HEAD","include":["**/*.md","src/**/*.{ts,js,py}"],"computeHash":true}},{"id":"chunk","plugin":{"category":"chunker","id":"basic_text_chunker","version":"1.0.0"},"config":{"chunkSize":1500,"overlap":100}},{"id":"upsert","plugin":{"category":"sink","id":"dgraph_upsert","version":"1.0.0"},"dataset":{"slug":"github-knowledge-graph","alias":"stable"},"config":{"schema":"tenant_id: string @index(exact) . path: string @index(exact) . text: string @index(fulltext) . repo: string @index(exact) . chunk_of: uid @reverse . dgraph.type: [string] @index(exact) ."}},{"id":"output","type":"output"}],"edges":[{"from":"input","to":"github","fromPort":"question","toPort":"question"},{"from":"github","to":"chunk","fromPort":"documents","toPort":"documents"},{"from":"chunk","to":"upsert","fromPort":"chunks","toPort":"nodes"},{"from":"upsert","to":"output"}]}}'::jsonb,
-    '196cfa3b',
+    '{"apiVersion":"rag-platform/v1","kind":"Pipeline","metadata":{"name":"github-knowledge-graph","description":"Pulls a GitHub repo, extracts entities + relations into a Dgraph graph. Pair with the github-kg-query pipeline to retrieve via DQL.","labels":{"demo":"graph"}},"spec":{"parameters":[{"key":"repo","type":"string","defaultValue":"octocat/Hello-World","allowedScopes":["pipeline","tenant_pipeline","runtime"],"runtimeOverridable":true,"description":"owner/name of the GitHub repository to ingest."}],"nodes":[{"id":"input","type":"input","config":{"default":{"question":""}}},{"id":"github","plugin":{"category":"datasource","id":"github_source","version":"1.0.0"},"config":{"repo":"${config.repo}","ref":"HEAD","include":["**/*.md","src/**/*.{ts,js,py}"],"computeHash":true}},{"id":"chunk","plugin":{"category":"chunker","id":"basic_text_chunker","version":"1.0.0"},"config":{"chunkSize":1500,"overlap":100}},{"id":"upsert","plugin":{"category":"sink","id":"dgraph_upsert","version":"1.0.0"},"dataset":{"slug":"github-knowledge-graph","alias":"stable"},"config":{"schema":"tenant_id: string @index(exact) . path: string @index(exact) . text: string @index(fulltext) . repo: string @index(exact) . chunk_of: uid @reverse . dgraph.type: [string] @index(exact) ."}},{"id":"output","type":"output"}],"edges":[{"from":"input","to":"github","fromPort":"question","toPort":"question"},{"from":"github","to":"chunk","fromPort":"documents","toPort":"documents"},{"from":"chunk","to":"upsert","fromPort":"chunks","toPort":"nodes"},{"from":"upsert","to":"output"}]}}'::jsonb,
+    'f3ccdaa2',
     now()
   )
-ON CONFLICT (pipeline_id, version) DO NOTHING;
+ON CONFLICT (pipeline_id, version) DO UPDATE
+SET spec = EXCLUDED.spec, checksum = EXCLUDED.checksum, status = EXCLUDED.status;
 
 INSERT INTO pipeline_deployments (id, pipeline_id, pipeline_version_id, environment, tenant_id, status)
 SELECT
@@ -92,11 +111,12 @@ INSERT INTO pipeline_versions (id, pipeline_id, version, status, spec, checksum,
     '00000000-0000-0000-0000-0000000df030',
     '1.0.0',
     'published',
-    '{"apiVersion":"rag-platform/v1","kind":"Pipeline","metadata":{"name":"crawl-knowledge-graph","description":"Crawls a public site, chunks each page, and writes the chunks into a Dgraph knowledge graph keyed by URL + chunk index. Pair with dgraph_query to retrieve via DQL.","labels":{"demo":"graph"}},"spec":{"parameters":[{"key":"url","type":"string","defaultValue":"https://en.wikipedia.org/wiki/Knowledge_graph","allowedScopes":["pipeline","tenant_pipeline","runtime"],"runtimeOverridable":true,"description":"Seed URL the crawler starts from."},{"key":"maxPages","type":"integer","defaultValue":5,"allowedScopes":["pipeline","tenant_pipeline","runtime"],"runtimeOverridable":true,"description":"Hard cap on pages fetched (be polite)."}],"nodes":[{"id":"input","type":"input"},{"id":"crawl","plugin":{"category":"datasource","id":"crawl4ai_crawler","version":"1.0.0"},"config":{"url":"${config.url}","maxPages":"${config.maxPages}","maxDepth":1,"sameDomainOnly":true,"extract":"markdown","timeoutMs":60000}},{"id":"chunk","plugin":{"category":"chunker","id":"basic_text_chunker","version":"1.0.0"},"config":{"chunkSize":1200,"overlap":100}},{"id":"upsert","plugin":{"category":"sink","id":"dgraph_upsert","version":"1.0.0"},"dataset":{"slug":"crawl-knowledge-graph","alias":"stable"},"config":{"schema":"tenant_id: string @index(exact) . source_url: string @index(exact) . text: string @index(fulltext) . chunkIndex: int . dgraph.type: [string] @index(exact) ."}},{"id":"output","type":"output"}],"edges":[{"from":"input","to":"crawl","fromPort":"question","toPort":"question"},{"from":"crawl","to":"chunk","fromPort":"documents","toPort":"documents"},{"from":"chunk","to":"upsert","fromPort":"chunks","toPort":"nodes"},{"from":"upsert","to":"output"}]}}'::jsonb,
-    'f57b2dd0',
+    '{"apiVersion":"rag-platform/v1","kind":"Pipeline","metadata":{"name":"crawl-knowledge-graph","description":"Crawls a public site, chunks each page, and writes the chunks into a Dgraph knowledge graph keyed by URL + chunk index. Pair with dgraph_query to retrieve via DQL.","labels":{"demo":"graph"}},"spec":{"parameters":[{"key":"url","type":"string","defaultValue":"https://en.wikipedia.org/wiki/Knowledge_graph","allowedScopes":["pipeline","tenant_pipeline","runtime"],"runtimeOverridable":true,"description":"Seed URL the crawler starts from."},{"key":"maxPages","type":"integer","defaultValue":5,"allowedScopes":["pipeline","tenant_pipeline","runtime"],"runtimeOverridable":true,"description":"Hard cap on pages fetched (be polite)."}],"nodes":[{"id":"input","type":"input","config":{"default":{"question":""}}},{"id":"crawl","plugin":{"category":"datasource","id":"crawl4ai_crawler","version":"1.0.0"},"config":{"url":"${config.url}","maxPages":"${config.maxPages}","maxDepth":1,"sameDomainOnly":true,"extract":"markdown","timeoutMs":60000}},{"id":"chunk","plugin":{"category":"chunker","id":"basic_text_chunker","version":"1.0.0"},"config":{"chunkSize":1200,"overlap":100}},{"id":"upsert","plugin":{"category":"sink","id":"dgraph_upsert","version":"1.0.0"},"dataset":{"slug":"crawl-knowledge-graph","alias":"stable"},"config":{"schema":"tenant_id: string @index(exact) . source_url: string @index(exact) . text: string @index(fulltext) . chunkIndex: int . dgraph.type: [string] @index(exact) ."}},{"id":"output","type":"output"}],"edges":[{"from":"input","to":"crawl","fromPort":"question","toPort":"question"},{"from":"crawl","to":"chunk","fromPort":"documents","toPort":"documents"},{"from":"chunk","to":"upsert","fromPort":"chunks","toPort":"nodes"},{"from":"upsert","to":"output"}]}}'::jsonb,
+    '396745a9',
     now()
   )
-ON CONFLICT (pipeline_id, version) DO NOTHING;
+ON CONFLICT (pipeline_id, version) DO UPDATE
+SET spec = EXCLUDED.spec, checksum = EXCLUDED.checksum, status = EXCLUDED.status;
 
 INSERT INTO pipeline_deployments (id, pipeline_id, pipeline_version_id, environment, tenant_id, status)
 SELECT
