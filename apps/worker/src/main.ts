@@ -23,6 +23,11 @@ import {
   type ChangeBus
 } from "../../../packages/events/src/index.ts";
 import { createScheduler } from "./scheduler.ts";
+import {
+  AlwaysLeader,
+  RedisLeaderElection,
+  type LeaderElection
+} from "./leader-election.ts";
 import { createPostgresSystemSweeps } from "./systemSweeps.ts";
 import { startOllamaWarmer } from "./ollama-warmer.ts";
 import { loadRegistries } from "../../../packages/plugin-loader/src/index.ts";
@@ -254,28 +259,55 @@ export async function main(): Promise<void> {
       redisUrl: process.env.REDIS_URL,
       queueName: process.env.WORKER_QUEUE_NAME
     });
-    // Only ONE replica should run the scheduler — otherwise every cron
-    // tick fires N times (once per replica) and the queue counters get
-    // multiplied by replica count. Honour `WORKER_SCHEDULER_ENABLED`
-    // (default true so single-worker stacks keep working unchanged);
-    // multi-worker compose files flip it to "false" on every replica
-    // except the designated leader. A real distributed leader election
-    // (Redis SETNX with TTL renewal) belongs in a follow-up — see
-    // ./scheduler.ts.
+    // Every worker pod creates its own scheduler timer, BUT only the
+    // holder of the Redis-backed lease actually enqueues. Failover is
+    // automatic: if the current leader pauses or dies, its lease (10s
+    // TTL, renewed every ~3s) expires and the next pod's acquire
+    // succeeds on the next poll. The follower deployment that used to
+    // gate the scheduler with WORKER_SCHEDULER_ENABLED=false is gone —
+    // workers are interchangeable now.
+    //
+    // WORKER_SCHEDULER_ENABLED is preserved as an emergency kill-switch
+    // (e.g. a stuck schedule needs to be silenced cluster-wide while
+    // operators investigate). Default `true`. Setting to `false` on a
+    // single pod is harmless (it just won't fire even if it would have
+    // held the lease); setting on every pod stops scheduling.
     const schedulerEnabled =
       (process.env.WORKER_SCHEDULER_ENABLED ?? "true").toLowerCase() !== "false";
+    let stopLeader: (() => Promise<void>) | undefined;
     if (schedulerEnabled) {
-      const scheduler = createScheduler({ schedules, queue, logger });
+      // We're inside `if (process.env.REDIS_URL)` so REDIS_URL is set;
+      // the in-memory-queue branch below uses AlwaysLeader instead.
+      const leaderElection: LeaderElection = new RedisLeaderElection({
+        redisUrl: process.env.REDIS_URL!,
+        logger
+      });
+      stopLeader = leaderElection.start();
+      const scheduler = createScheduler({
+        schedules,
+        queue,
+        logger,
+        leaderElection
+      });
       stopScheduler = scheduler.start(
         Number(process.env.SCHEDULER_INTERVAL_MS ?? 60000)
       );
-      logger.info("scheduler started (BullMQ enqueue)");
+      logger.info("scheduler started with redis leader election", {
+        leaseKey: "ragdoll:scheduler:leader"
+      });
     } else {
-      logger.info("scheduler disabled on this replica (WORKER_SCHEDULER_ENABLED=false)");
+      logger.info(
+        "scheduler disabled on this pod (WORKER_SCHEDULER_ENABLED=false; emergency kill-switch)"
+      );
     }
     const shutdown = async (): Promise<void> => {
       logger.info("worker shutting down");
       stopScheduler?.();
+      // Release the scheduler lease promptly so a peer can take over
+      // on the next poll instead of waiting for the TTL to expire.
+      // Best-effort: the Lua-fenced release no-ops if we already lost
+      // ownership.
+      await stopLeader?.().catch(() => undefined);
       warmer.stop();
       await consumer.close();
       // Flush metric + log batches before the process dies so the last
@@ -293,7 +325,16 @@ export async function main(): Promise<void> {
     // readiness. The worker remains importable + usable in-process. The
     // scheduler enqueues onto the same in-memory queue.
     const queue = new InMemoryQueue();
-    const scheduler = createScheduler({ schedules, queue, logger });
+    // No Redis → no contention to resolve, so AlwaysLeader is correct
+    // (single in-memory process is by definition the only candidate).
+    const leaderElection = new AlwaysLeader();
+    leaderElection.start();
+    const scheduler = createScheduler({
+      schedules,
+      queue,
+      logger,
+      leaderElection
+    });
     stopScheduler = scheduler.start(
       Number(process.env.SCHEDULER_INTERVAL_MS ?? 60000)
     );

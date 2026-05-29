@@ -1,0 +1,44 @@
+{{- if and .Values.openshift.scc.enabled .Values.serviceAccount.create }}
+# Optional SCC binding for OpenShift.
+#
+# Every pod on OpenShift must satisfy a SecurityContextConstraints
+# (SCC). The default `restricted-v2` SCC, granted automatically to
+# every namespace's ServiceAccounts, already passes for our pods
+# (runAsNonRoot, no privesc, drop ALL caps, RuntimeDefault seccomp —
+# all wired in the pod/container securityContext blocks).
+#
+# Enable this template ONLY when you've relaxed those defaults and
+# need to bind the chart's ServiceAccount to a specific named SCC
+# (`nonroot-v2`, `anyuid`, `hostnetwork-v2`, …) via the
+# `use` verb on `securitycontextconstraints`.
+#
+# Two-doc YAML: a namespaced Role granting `use` on the SCC + a
+# RoleBinding to the chart's ServiceAccount.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: ragdoll-use-scc
+  labels:
+    app: ragdoll
+rules:
+  - apiGroups: ["security.openshift.io"]
+    resources: ["securitycontextconstraints"]
+    resourceNames:
+      - {{ .Values.openshift.scc.name | quote }}
+    verbs: ["use"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: ragdoll-use-scc
+  labels:
+    app: ragdoll
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: ragdoll-use-scc
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "ragdoll.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}

@@ -1,33 +1,41 @@
 {{/*
-Worker leader: single replica, owns the cron scheduler.
+Worker deployment.
 
-The worker has a built-in croner scheduler that ticks every scheduled
-pipeline. Running N replicas with the scheduler enabled would fire
-every cron N times. So we run ONE leader pod with
-WORKER_SCHEDULER_ENABLED=true and N follower pods that only consume
-BullMQ jobs. This is the helm equivalent of the docker-compose
-worker-1 / worker-2 split.
+Workers are interchangeable: every pod runs both the BullMQ consumer
+AND the cron scheduler timer. Only the pod that currently holds the
+Redis-backed `ragdoll:scheduler:leader` lease actually enqueues
+scheduled runs — the others' timers no-op. Failover is automatic
+(lease TTL 10 s, renewed every ~3 s).
+
+The earlier leader/follower split (one Deployment pinned to replicas:1
+for the scheduler, another autoscaled for job throughput) is gone now
+that the lease handles single-fire. A single autoscaled Deployment is
+simpler, scales jobs uniformly, and survives any single pod's loss
+within ~10–15 s.
 */}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: ragdoll-worker-leader
+  name: ragdoll-worker
   labels:
     app: ragdoll-worker
-    role: leader
 spec:
-  replicas: {{ .Values.worker.leader.replicas }}
+  {{- if not .Values.worker.autoscaling.enabled }}
+  replicas: {{ .Values.worker.replicas }}
+  {{- end }}
   selector:
     matchLabels:
       app: ragdoll-worker
-      role: leader
   template:
     metadata:
       labels:
         app: ragdoll-worker
-        role: leader
     spec:
       serviceAccountName: {{ include "ragdoll.serviceAccountName" . }}
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       initContainers:
         {{- include "ragdoll.waitForDbInit" . | nindent 8 }}
       containers:
@@ -35,14 +43,22 @@ spec:
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           command: ["node", "--experimental-strip-types", "apps/worker/src/index.ts"]
+          {{- with .Values.containerSecurityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           envFrom:
             - secretRef:
                 name: {{ .Values.secrets.existingSecret }}
           env:
+            # Per-pod identity for the OTel service.instance.id +
+            # BullMQ worker name + leader-election lease token.
+            # Downward API → pod name keeps each replica distinguishable
+            # and gives the lease a verifiable owner string.
             - name: WORKER_ID
-              value: "worker-leader"
-            - name: WORKER_SCHEDULER_ENABLED
-              value: "true"
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
             - name: OTEL_SERVICE_NAME
               value: "ragdoll-worker"
             {{- if .Values.ollama.baseUrl }}
@@ -58,68 +74,8 @@ spec:
             {{- include "ragdoll.commonBackendEnv" . | nindent 12 }}
           resources:
             requests:
-              cpu: {{ .Values.worker.leader.resources.requests.cpu }}
-              memory: {{ .Values.worker.leader.resources.requests.memory }}
+              cpu: {{ .Values.worker.resources.requests.cpu }}
+              memory: {{ .Values.worker.resources.requests.memory }}
             limits:
-              cpu: {{ .Values.worker.leader.resources.limits.cpu | quote }}
-              memory: {{ .Values.worker.leader.resources.limits.memory }}
-{{- $followerAuto := .Values.worker.followers.autoscaling.enabled -}}
-{{- if or $followerAuto (gt (int .Values.worker.followers.replicas) 0) }}
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: ragdoll-worker-follower
-  labels:
-    app: ragdoll-worker
-    role: follower
-spec:
-  {{- if not $followerAuto }}
-  replicas: {{ .Values.worker.followers.replicas }}
-  {{- end }}
-  selector:
-    matchLabels:
-      app: ragdoll-worker
-      role: follower
-  template:
-    metadata:
-      labels:
-        app: ragdoll-worker
-        role: follower
-    spec:
-      serviceAccountName: {{ include "ragdoll.serviceAccountName" . }}
-      initContainers:
-        {{- include "ragdoll.waitForDbInit" . | nindent 8 }}
-      containers:
-        - name: worker
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
-          imagePullPolicy: {{ .Values.image.pullPolicy }}
-          command: ["node", "--experimental-strip-types", "apps/worker/src/index.ts"]
-          envFrom:
-            - secretRef:
-                name: {{ .Values.secrets.existingSecret }}
-          env:
-            # Per-pod identity for the OTel service.instance.id +
-            # BullMQ worker name. Downward API → pod name keeps each
-            # replica distinguishable in the dashboards.
-            - name: WORKER_ID
-              valueFrom:
-                fieldRef:
-                  fieldPath: metadata.name
-            - name: WORKER_SCHEDULER_ENABLED
-              value: "false"
-            - name: OTEL_SERVICE_NAME
-              value: "ragdoll-worker"
-            {{- if .Values.ollama.baseUrl }}
-            - name: OLLAMA_BASE_URL
-              value: {{ .Values.ollama.baseUrl | quote }}
-            {{- end }}
-            {{- include "ragdoll.commonBackendEnv" . | nindent 12 }}
-          resources:
-            requests:
-              cpu: {{ .Values.worker.followers.resources.requests.cpu }}
-              memory: {{ .Values.worker.followers.resources.requests.memory }}
-            limits:
-              cpu: {{ .Values.worker.followers.resources.limits.cpu | quote }}
-              memory: {{ .Values.worker.followers.resources.limits.memory }}
-{{- end }}
+              cpu: {{ .Values.worker.resources.limits.cpu | quote }}
+              memory: {{ .Values.worker.resources.limits.memory }}

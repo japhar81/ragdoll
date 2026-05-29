@@ -38,6 +38,7 @@ import {
   type Principal
 } from "../../../packages/auth/src/index.ts";
 import type { Authorizer } from "../../../packages/authz/src/index.ts";
+import type { LeaderElection } from "./leader-election.ts";
 
 export interface SchedulerDeps {
   schedules: ScheduleRepository;
@@ -55,6 +56,14 @@ export interface SchedulerDeps {
    * the authorizer the scheduler behaves exactly as today.
    */
   authorizer?: Authorizer;
+  /**
+   * Optional leader-election primitive. When wired, `tick()` short-
+   * circuits with `enqueued: 0` on followers — only the holder of the
+   * Redis lease enqueues for the cluster. Omitting it (or passing
+   * `AlwaysLeader`) preserves the single-instance behaviour for tests
+   * and offline single-pod deployments. See ./leader-election.ts.
+   */
+  leaderElection?: LeaderElection;
 }
 
 export interface Scheduler {
@@ -137,6 +146,14 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
   }
 
   async function tick(): Promise<{ enqueued: number }> {
+    // Cooperative leader election: only the holder of the Redis lease
+    // actually enqueues. Every worker pod still runs its own interval
+    // timer — the gate is per-tick, not per-process — so failover is
+    // simply "the next pod's tick reads isLeader() === true after the
+    // lease expired".
+    if (deps.leaderElection && !deps.leaderElection.isLeader()) {
+      return { enqueued: 0 };
+    }
     const at = now();
     const due = await deps.schedules.listDue(at.toISOString());
     let enqueued = 0;

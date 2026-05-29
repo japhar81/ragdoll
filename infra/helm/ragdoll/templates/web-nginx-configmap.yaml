@@ -14,7 +14,7 @@ data:
     }
 
     server {
-        listen 80;
+        listen {{ .Values.web.port }};
         server_name _;
         root /usr/share/nginx/html;
         index index.html;

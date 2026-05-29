@@ -1,39 +1,37 @@
-{{- if .Values.worker.followers.autoscaling.enabled }}
-# Worker follower autoscaler.
+{{- if .Values.worker.autoscaling.enabled }}
+# Worker autoscaler.
 #
-# Only the follower deployment is scaled. The leader stays at
-# replicas: 1 because its built-in cron scheduler must be single-fire
-# — autoscaling it would re-introduce the "fire every cron N times"
-# bug the leader/follower split was created to solve.
+# Workers are now interchangeable (the cron scheduler is gated by a
+# Redis lease, not by a dedicated leader Deployment), so the whole
+# pool scales freely on CPU. min/max default 1 / 10 per the "ASG"
+# requirement; the lease handles single-fire so even running at min=1
+# doesn't risk duplicate cron tickets when k8s rolls a pod.
 #
-# Defaults: min 1 / max 10 / 70% CPU. Override per-env via the
-# `worker.followers.autoscaling.*` values. Requires the metrics-server
-# addon (or an equivalent metrics provider) on the cluster.
+# Requires the metrics-server addon (vanilla k8s) or Prometheus
+# Adapter (OpenShift) — same `autoscaling/v2` HPA works on both.
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
-  name: ragdoll-worker-follower
+  name: ragdoll-worker
   labels:
     app: ragdoll-worker
-    role: follower
 spec:
   scaleTargetRef:
     apiVersion: apps/v1
     kind: Deployment
-    name: ragdoll-worker-follower
-  minReplicas: {{ .Values.worker.followers.autoscaling.minReplicas }}
-  maxReplicas: {{ .Values.worker.followers.autoscaling.maxReplicas }}
+    name: ragdoll-worker
+  minReplicas: {{ .Values.worker.autoscaling.minReplicas }}
+  maxReplicas: {{ .Values.worker.autoscaling.maxReplicas }}
   metrics:
     - type: Resource
       resource:
         name: cpu
         target:
           type: Utilization
-          averageUtilization: {{ .Values.worker.followers.autoscaling.targetCPUUtilizationPercentage }}
-  # Stabilisation defaults: scale up promptly (60s) but cool down
-  # slowly (5m) so a brief lull from BullMQ doesn't churn pods.
-  # BullMQ jobs are long-tailed, and a freshly-started worker pays
-  # the Ollama-warmer cost — we'd rather keep capacity than thrash.
+          averageUtilization: {{ .Values.worker.autoscaling.targetCPUUtilizationPercentage }}
+  # Scale up promptly (60s) but cool down slowly (5m) — BullMQ jobs
+  # are long-tailed and a freshly started worker pays the Ollama-warmer
+  # cost. We'd rather keep capacity than thrash.
   behavior:
     scaleUp:
       stabilizationWindowSeconds: 60
