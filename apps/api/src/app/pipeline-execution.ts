@@ -36,7 +36,10 @@ import type {
   PipelineRow,
   PipelineVersionRow
 } from "../../../../packages/db/src/index.ts";
-import type { DatasetResolver } from "../../../../packages/plugin-sdk/src/index.ts";
+import type {
+  DatasetResolver,
+  ResolvedDatasetBackend
+} from "../../../../packages/plugin-sdk/src/index.ts";
 import type { QueueJob } from "../../../worker/src/index.ts";
 import { error, nowIso, isObject } from "./http-utils.ts";
 import { resolveDeployedVersion } from "./spec-helpers.ts";
@@ -227,6 +230,7 @@ export function buildApiDatasetResolver(
   const datasets = deps.datasets;
   const datasetVersions = deps.datasetVersions;
   const datasetAliases = deps.datasetAliases;
+  const connections = deps.datasources;
   return {
     async resolve(args) {
       const ds = await datasets.resolveSlug({
@@ -241,6 +245,47 @@ export function buildApiDatasetResolver(
       if (!versionId) return undefined;
       const ver = await datasetVersions.get(versionId);
       if (!ver) return undefined;
+
+      // Resolve the per-modality backend blocks. Each block's raw shape
+      // is whatever the operator put in datasets.backends.<modality>; we
+      // pass it through verbatim, then synthesise a `connection` block
+      // when the raw block carries a `connectionName` we can resolve via
+      // the per-(tenant, env) connection cascade.
+      //
+      // Connection lookups always use the CALLER's tenant context, never
+      // the dataset's. A global-scope dataset is shared by every tenant,
+      // but each tenant resolves its connection rows independently — so
+      // a single "codebase-docs" dataset can write to tenant A's
+      // OpenSearch in dev and tenant B's totally separate OpenSearch in
+      // prod with no per-tenant dataset copies.
+      const backends: Record<string, Record<string, unknown>> = {};
+      for (const [modality, raw] of Object.entries(ds.backends ?? {})) {
+        if (!raw || typeof raw !== "object") continue;
+        const block: Record<string, unknown> = { ...(raw as Record<string, unknown>) };
+        const connName =
+          typeof block.connectionName === "string" ? block.connectionName : undefined;
+        if (connName && connections && args.tenantId) {
+          const conn = await connections.resolveForEnv(
+            args.tenantId,
+            args.environmentId,
+            connName
+          );
+          if (conn) {
+            const cfg = conn.configRedacted as { host?: unknown; port?: unknown };
+            block.connection = {
+              name: conn.name,
+              type: conn.datasourceType,
+              host: typeof cfg.host === "string" ? cfg.host : undefined,
+              port: typeof cfg.port === "number" ? cfg.port : undefined,
+              secretRefId: conn.secretRefId ?? null,
+              config: conn.configRedacted,
+              cascadeReason: conn.environmentId ? "env_specific" : "tenant_fallback"
+            };
+          }
+        }
+        backends[modality] = block;
+      }
+
       return {
         id: ds.id,
         slug: ds.slug,
@@ -255,7 +300,8 @@ export function buildApiDatasetResolver(
           versionLabel: ver.versionLabel,
           status: ver.status
         },
-        backendCollections: ver.backendCollections
+        backendCollections: ver.backendCollections,
+        backends: backends as Record<string, ResolvedDatasetBackend>
       };
     }
   };
