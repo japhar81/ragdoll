@@ -142,20 +142,32 @@ VALUES
     'global',
     'github-knowledge-graph',
     'GitHub Knowledge Graph',
-    'Tenant-scoped graph of code + docs chunks pulled from GitHub.',
+    'Graph of code + docs chunks pulled from GitHub. Global scope with namespace: by-tenant — each tenant writes into its own predicate prefix.',
     ARRAY['graph'],
-    '{"graph":{"provider":"dgraph"}}'::jsonb
+    -- PR6: namespace=by-tenant. The resolver appends `_<tenantSlug>` to
+    -- the base collection name in `backend_collections.graph`, so
+    -- tenant A's writes never overlap tenant B's even though both
+    -- pipelines reference the SAME global dataset slug.
+    '{"graph":{"provider":"dgraph","connectionName":"dgraph","namespace":"by-tenant"}}'::jsonb
   ),
   (
     '00000000-0000-0000-0000-0000000df041',
     'global',
     'crawl-knowledge-graph',
     'Crawl Knowledge Graph',
-    'Tenant-scoped graph of crawled page chunks keyed by source_url.',
+    'Graph of crawled page chunks keyed by source_url. Global scope with namespace: by-tenant — each tenant writes into its own predicate prefix.',
     ARRAY['graph'],
-    '{"graph":{"provider":"dgraph"}}'::jsonb
+    '{"graph":{"provider":"dgraph","connectionName":"dgraph","namespace":"by-tenant"}}'::jsonb
   )
-ON CONFLICT DO NOTHING;
+-- ON CONFLICT (id) DO UPDATE so re-seeding picks up description /
+-- backend / namespace changes on existing installs (see PR6 seed
+-- update notes in zzzz-codebase-ingest.sql).
+ON CONFLICT (id) DO UPDATE
+  SET display_name = EXCLUDED.display_name,
+      description  = EXCLUDED.description,
+      modalities   = EXCLUDED.modalities,
+      backends     = EXCLUDED.backends,
+      updated_at   = now();
 
 INSERT INTO dataset_versions (id, dataset_id, version_label, schema_spec, backend_collections, status, ready_at)
 VALUES
