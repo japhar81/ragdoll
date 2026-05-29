@@ -28,6 +28,7 @@ import {
 import { api, ApiError, type ConnectionView } from "../lib/api.ts";
 import type { JsonSchemaLike } from "../lib/api.ts";
 import { Screen } from "./Screen.tsx";
+import { DataGrid, type DataGridColumn } from "./DataGrid.tsx";
 import { ConfigForm } from "./ConfigForm.tsx";
 import { ScopeTree } from "./ConfigScreen.tsx";
 import { useAuth } from "../auth/AuthContext.tsx";
@@ -410,92 +411,99 @@ function ConnectionTable(props: {
   onDelete: (id: string) => void;
   onOverrideHere: (row: RowView) => void;
 }) {
-  if (props.rows.length === 0) {
-    return (
-      <p className="muted">
-        No connections here yet. Use the form below to add one.
-      </p>
-    );
-  }
-  return (
-    <table className="data-table" style={{ marginTop: 12 }}>
-      <thead>
-        <tr>
-          <th align="left">Name</th>
-          <th align="left">Type</th>
-          <th align="left">Host</th>
-          <th align="left">Source</th>
-          <th align="left">Datasets</th>
-          <th align="left"></th>
-        </tr>
-      </thead>
-      <tbody>
-        {props.rows.map((row) => {
-          const c = row.conn;
-          const host =
-            (c.config as { host?: string }).host ??
-            (c.config as { endpoint?: string }).endpoint ??
-            "—";
-          const port = (c.config as { port?: number }).port;
-          const inherited = row.source === "inherited_from_tenant";
-          const refs = props.datasetsByName[c.name] ?? [];
+  const columns: DataGridColumn<RowView>[] = useMemo(
+    () => [
+      {
+        key: "name",
+        header: "Name",
+        accessor: (r) => r.conn.name,
+        sortable: true,
+        cell: (r) => <code>{r.conn.name}</code>
+      },
+      {
+        key: "type",
+        header: "Type",
+        accessor: (r) => r.conn.datasourceType,
+        sortable: true,
+        filter: "select"
+      },
+      {
+        key: "host",
+        header: "Host",
+        accessor: (r) => {
+          const c = r.conn.config as { host?: string; endpoint?: string; port?: number };
+          const host = c.host ?? c.endpoint ?? "—";
+          return c.port ? `${host}:${c.port}` : host;
+        }
+      },
+      {
+        key: "source",
+        header: "Source",
+        accessor: (r) => r.source,
+        sortable: true,
+        filter: "select",
+        cell: (r) => <SourceBadge source={r.source} />
+      },
+      {
+        key: "datasets",
+        header: "Datasets",
+        accessor: (r) => (props.datasetsByName[r.conn.name]?.length ?? 0).toString(),
+        cell: (r) => {
+          const refs = props.datasetsByName[r.conn.name] ?? [];
+          if (refs.length === 0) return <span className="muted">—</span>;
           return (
-            <tr
-              key={`${c.id}:${row.source}`}
-              style={{ opacity: inherited ? 0.6 : 1 }}
-            >
-              <td>
-                <code>{c.name}</code>
-              </td>
-              <td>{c.datasourceType}</td>
-              <td>
-                {host}
-                {port ? `:${port}` : ""}
-              </td>
-              <td>
-                <SourceBadge source={row.source} />
-              </td>
-              <td>
-                {refs.length === 0 ? (
-                  <span className="muted">—</span>
-                ) : (
-                  <span title={refs.join("\n")}>
-                    {refs.length} dataset{refs.length === 1 ? "" : "s"}
-                  </span>
-                )}
-              </td>
-              <td>
-                {props.canAdmin && inherited && (
-                  <button
-                    className="link-btn"
-                    onClick={() => props.onOverrideHere(row)}
-                    title="Create an env-specific copy of this connection that overrides the inherited tenant-wide row."
-                  >
-                    Override here
-                  </button>
-                )}
-                {props.canAdmin && !inherited && (
-                  <>
-                    <button
-                      className="link-btn"
-                      onClick={() => props.onEdit(c.id)}
-                    >
-                      {props.editingId === c.id ? "Cancel" : "Edit"}
-                    </button>{" "}
-                    <button
-                      className="link-danger"
-                      onClick={() => props.onDelete(c.id)}
-                    >
-                      Delete
-                    </button>
-                  </>
-                )}
-              </td>
-            </tr>
+            <span title={refs.join("\n")}>
+              {refs.length} dataset{refs.length === 1 ? "" : "s"}
+            </span>
           );
-        })}
-      </tbody>
-    </table>
+        }
+      },
+      {
+        key: "actions",
+        header: "",
+        accessor: () => "",
+        cell: (r) => {
+          if (!props.canAdmin) return null;
+          const inherited =
+            r.source === "inherited_from_tenant" || r.source === "inherited_from_global";
+          if (inherited) {
+            return (
+              <button
+                className="link-btn"
+                onClick={() => props.onOverrideHere(r)}
+                title="Create a copy at this scope that overrides the inherited row."
+              >
+                Override here
+              </button>
+            );
+          }
+          return (
+            <>
+              <button className="link-btn" onClick={() => props.onEdit(r.conn.id)}>
+                {props.editingId === r.conn.id ? "Cancel" : "Edit"}
+              </button>{" "}
+              <button className="link-danger" onClick={() => props.onDelete(r.conn.id)}>
+                Delete
+              </button>
+            </>
+          );
+        }
+      }
+    ],
+    [props]
+  );
+  return (
+    <DataGrid
+      columns={columns}
+      rows={props.rows}
+      rowKey={(r) => `${r.conn.id}:${r.source}`}
+      rowClassName={(r) =>
+        r.source === "inherited_from_tenant" || r.source === "inherited_from_global"
+          ? "row-inherited"
+          : undefined
+      }
+      emptyMessage="No connections here yet. Use the form below to add one."
+    />
   );
 }
 

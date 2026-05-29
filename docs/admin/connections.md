@@ -1,91 +1,169 @@
-# Datasource connections
+# Datasource connections + dataset bindings
 
-A **connection** is the per-tenant (and optional per-environment) record carrying the host, port and credentials for a backing store — OpenSearch, Qdrant, Dgraph, Postgres, Redis. **Datasets reference connections by `name`**; plugins resolve the live connection through the dataset's backend block at runtime. As a result plugin code never knows the hostname or secret, and a single pipeline spec runs unmodified across dev / qa / prod and across tenants with totally different infrastructure.
+This doc covers the operator-facing model for **how a pipeline knows where to read and write**. There are three layers — keep them straight and the rest follows.
 
-This doc covers the data model + cascade semantics. The flow operators use day-to-day is the **Connections** screen in the web UI.
-
-## Model
+## The three layers
 
 ```
-┌──────────────────────┐      ┌──────────────────────┐      ┌──────────────────┐
-│ datasource_          │      │ datasets             │      │ Pipeline node    │
-│   connections        │◀─────│   .backends.<mod>    │◀─────│   { plugin,      │
-│ (tenant, env?, name) │   ┌──│     .connectionName  │      │     dataset:     │
-│   host/port/secret   │   │  │     .index/coll/…    │      │       {slug,     │
-└──────────────────────┘   │  └──────────────────────┘      │        alias} }  │
-                           │                                 └──────────────────┘
-                           │ resolved per (tenant, env)
-                           ▼
-                resolver chooses the connection
-                  the plugin will actually use
+                      ┌────────────────────────────┐
+                      │ Plugin (qdrant_vector_store)│
+                      │   requires: [{vector, qdrant}]│
+                      └──────────────┬─────────────┘
+                                     │ no host/url config — just declares what it needs
+                                     ▼
+                ┌────────────────────────────────────┐
+                │ Dataset (slug: "docs")             │
+                │   backends.vector = {              │
+                │     provider: "qdrant",            │
+                │     connectionName: "qdrant-main", │
+                │     collection: "docs_v1"          │
+                │   }                                │
+                └──────────────┬─────────────────────┘
+                               │ pinned per (tenant, env) by the runtime
+                               ▼
+        ┌───────────────────────────────────────────────┐
+        │ Connection (name: "qdrant-main")              │
+        │   tenant=NULL, env=NULL  → host: shared       │
+        │   tenant=A,    env=NULL  → host: a.example    │
+        │   tenant=B,    env=prod  → host: b-prod.example│
+        └───────────────────────────────────────────────┘
 ```
 
-The chart below explains the **cascade** the resolver follows when a dataset asks "give me connection `os-main` for tenant A in environment `prod`":
+**Plugin** — declares the shape of dataset it needs (modality + optional provider) via `requires` in its manifest. Knows NOTHING about hosts, ports, URLs. The runtime hard-fails before the plugin runs if no connection resolves.
+
+**Dataset** — operator-defined logical corpus. Per-modality backend blocks carry the provider, the index/collection name, and a `connectionName` pointer. The dataset is referenced by `{slug, alias}` from pipeline specs; the runtime walks env→tenant→global to pick the actual row. Per-(pipeline, tenant, env) **binding overrides** can pin a specific physical row for one pipeline-on-this-scope.
+
+**Connection** — per-(tenant, env) host + credentials. Globals (tenant=NULL) act as cluster-wide defaults that tenants inherit. Cascade:
 
 ```
-1. row WHERE tenant_id = 'A' AND environment_id = 'prod' AND name = 'os-main'  → use this
-2. else row WHERE tenant_id = 'A' AND environment_id IS NULL AND name = 'os-main' → use this (tenant-wide fallback)
-3. else → resolver returns null, plugin reports "missing connection"
+(tenant=T, env=E)        env-specific match (tier 3)
+   ↓ no match
+(tenant=T, env=NULL)     tenant-wide override (tier 2)
+   ↓ no match
+(tenant=NULL, env=NULL)  global default (tier 1)
+   ↓ no match
+   missing connection — plugin throws preflight
 ```
 
-So a single tenant-wide row applies to every env until an operator deliberately splits one env off.
+## Plugin contract: `requires`
 
-## Example
+Every storage-touching plugin's manifest declares what it needs:
 
-**Tenant A** runs a single OpenSearch cluster shared across dev / prod (admin creds, per-env index):
-
-```sql
--- one connection that applies to every env in tenant A
-name = 'os'
-tenant_id = A
-environment_id = NULL          -- tenant-wide
-datasource_type = 'opensearch'
-config_redacted = { "host": "os.tenantA.example", "port": 9200 }
-secret_ref_id = → admin/admin
+```typescript
+{
+  id: "qdrant_vector_store",
+  contract: 2,
+  requires: [
+    { modality: "vector", provider: "qdrant" }
+  ],
+  configSchema: {
+    // NO host/url/endpoint here. Per-call knobs only.
+    properties: {
+      collection: { type: "string" },
+      distance: { type: "string", enum: ["cosine", "dot", "euclidean"] },
+      dimensions: { type: "integer" }
+    }
+  }
+}
 ```
 
-**Tenant B** has three OpenSearch clusters (one per env, no auth):
+Hybrid plugins list every slot they need:
 
-```sql
-name = 'os', tenant_id = B, environment_id = 'dev',  config = { "host": "os-dev.tenantB.example",  "port": 9200 }
-name = 'os', tenant_id = B, environment_id = 'qa',   config = { "host": "os-qa.tenantB.example",   "port": 9200 }
-name = 'os', tenant_id = B, environment_id = 'prod', config = { "host": "os-prod.tenantB.example", "port": 9200 }
+```typescript
+requires: [
+  { modality: "vector", provider: "opensearch" },
+  { modality: "text",   provider: "opensearch" }
+]
 ```
 
-A pipeline can pin `dataset: {slug: my-docs, alias: stable}` for both tenants — the resolver picks the right host automatically because tenant B has env-specific rows and tenant A's tenant-wide row applies.
+Validation happens twice:
 
-## CRUD
+- **At edit time** (Builder): the spec validator checks the bound dataset's modalities and provider against the plugin's `requires`. Mismatches surface as `dataset_modality_mismatch` and `dataset_provider_mismatch` — Run / Deploy are blocked until fixed.
+- **At execute time** (worker): if the resolved dataset's `backends[modality].connection` doesn't exist, the plugin throws a preflight error pointing at the offending dataset slug. The execution row is marked `failed` before any work runs.
 
-Via UI (Connections screen) or HTTP:
+## Connection cascade
+
+Connections live in `datasource_connections`. The resolver walks three tiers, picking the most-specific match for `(tenant T, env E, name N)`:
+
+| Tier | Row shape                                  | Use case                              |
+| ---- | ------------------------------------------ | ------------------------------------- |
+| 3    | `tenant_id=T, environment_id=E, name=N`    | Per-env override for tenant T         |
+| 2    | `tenant_id=T, environment_id=NULL, name=N` | Tenant-wide override (all envs)       |
+| 1    | `tenant_id=NULL, environment_id=NULL, name=N` | Cluster-wide default for every tenant |
+
+Globals require `config:edit_global`; tenant rows require `dataset:admin` on the tenant.
+
+### Example
+
+Tenant A has one OpenSearch cluster shared across envs; Tenant B has three (one per env):
+
+```
+Connections:
+  name=os, tenant=NULL, env=NULL    → host: dev-default.example   # safety net
+  name=os, tenant=A, env=NULL        → host: os.tenantA.example   # tenant-wide
+  name=os, tenant=B, env=dev         → host: os-dev.tenantB.example
+  name=os, tenant=B, env=prod        → host: os-prod.tenantB.example
+  name=os, tenant=B, env=qa          → host: os-qa.tenantB.example
+```
+
+The pipeline spec just says `dataset: {slug: "docs", alias: "stable"}` and the dataset's `backends.text.connectionName = "os"`. Each tenant resolves "os" to their own cluster — no spec change, no per-tenant dataset copies.
+
+## Dataset binding overrides
+
+Per-(pipeline, tenant, env) overrides live in `pipeline_dataset_bindings`. They beat the default slug cascade when present:
+
+```
+For each `dataset: {slug: S}` in pipeline P running as (tenant T, env E):
+  1. pipeline_dataset_bindings (P, T, E, S)        → use that target dataset row
+  2. pipeline_dataset_bindings (P, T, NULL, S)     → use that target row (all envs)
+  3. datasets.resolveSlug(S, T, E)                 → default env→tenant→global cascade
+```
+
+Common use case: "Tenant B's prod pipeline writes to a schema-v2 dataset; everything else stays on v1." Create one binding row pinning slug `docs` → dataset `docs-v2-tenantB` for (pipeline=ingest, tenant=B, env=prod). No spec change.
+
+Manage via the Datasets screen's "Binding overrides targeting this dataset" section, or the per-pipeline bindings API:
+
+```
+GET    /api/pipelines/:id/dataset-bindings
+POST   /api/pipelines/:id/dataset-bindings
+PATCH  /api/dataset-bindings/:id   { targetDatasetId? }
+DELETE /api/dataset-bindings/:id
+```
+
+## CRUD APIs
+
+### Connections
 
 | Verb   | Path                                | Notes                                                   |
 | ------ | ----------------------------------- | ------------------------------------------------------- |
-| GET    | `/api/connections`                  | requires `x-tenant-id`; optional `?environmentId=X` dedupes by name and surfaces what the cascade would pick |
-| GET    | `/api/connections/:id`              | single row by id                                        |
-| POST   | `/api/connections`                  | `{ name, datasourceType, environmentId?, config, secretRefId? }` |
+| GET    | `/api/connections`                  | with `x-tenant-id`: tenant + inherited globals; without: globals only (admin) |
+| GET    | `/api/connections/:id`              | single row                                              |
+| POST   | `/api/connections`                  | `{ tenantId, environmentId?, name, datasourceType, config, secretRefId? }` — pass `tenantId: null` for a global row |
 | PATCH  | `/api/connections/:id`              | partial update                                          |
 | DELETE | `/api/connections/:id`              | hard delete                                             |
 | GET    | `/api/connections/resolve/:name`    | diagnostic — returns `{ resolved, reason }` where reason is `env_specific`, `tenant_fallback`, or `no_match` |
 
-The list endpoint's `?environmentId=` filter is the same view the UI shows: with an env selected, two connection rows named `os` collapse to whichever the cascade picks. Without an env, every row is listed.
+### Bindings
 
-### `datasourceType` allowed values
+| Verb   | Path                                          | Notes                                                |
+| ------ | --------------------------------------------- | ---------------------------------------------------- |
+| GET    | `/api/pipelines/:id/dataset-bindings`         | all binding rows for a pipeline                      |
+| POST   | `/api/pipelines/:id/dataset-bindings`         | `{ tenantId, environmentId?, sourceSlug, targetDatasetId }` |
+| PATCH  | `/api/dataset-bindings/:id`                   | retarget (`targetDatasetId` only)                    |
+| DELETE | `/api/dataset-bindings/:id`                   |                                                      |
 
-`opensearch`, `qdrant`, `dgraph`, `pgvector`, `postgres`, `redis`. Adding a new one means adding a backend in the cascade + a plugin that knows how to consume it.
+### Supported `datasourceType`
 
-### Secret handling
+`opensearch`, `qdrant`, `dgraph`, `pgvector`, `postgres`, `redis`. Adding a new type means adding a backend in the resolver + a plugin that knows how to consume it.
 
-`secretRefId` points at a row in `secret_refs` (the same table the plugins'
-`secrets:` block uses). The connection row itself never stores plaintext — the
-secret resolves via `DatabaseEncryptedSecretProvider` at runtime, scoped by the
-calling tenant. The `secret_refs` table already supports env-scoping, so a
-single connection can pair with an env-specific secret if you want different
-credentials per env without splitting the connection.
+## Multi-connection per dataset — deferred
 
-## Future cross-refs (PR4)
+For v1, **one (dataset, modality) resolves to exactly one connection**. Read-replica / write-primary splits, multi-region failover, and shard fan-out all need a "give me the *read* connection on this dataset" / "the *write* one" distinction. The model has room for it (a `role: "read" | "write"` field on the dataset's backend connection ref) but the UI + plugin-side selection are out of scope for now.
 
-* Dataset detail → "resolved connection for current tenant/env: `os` → `os-prod.tenantB.example:9200` (env_specific)"
-* Connection detail → "datasets pinning this connection name"
-* Builder node → "this plugin's `dataset` resolves to dataset X → connection Y in env E"
+If you have a real use case for multi-connection, file it with the read/write split details and we'll prioritise. The above sentence is the entire deferral commitment — no implicit fallback semantics, no half-shipped v0.
 
-Wired in PR4.
+## Secret handling
+
+`connection.secretRefId` points at a row in `secret_refs` (same table the plugin `secrets:` block uses). Connection rows never store plaintext — the secret resolves via `DatabaseEncryptedSecretProvider` at runtime, scoped by the calling tenant.
+
+Plugins today still get credentials via their own `secrets:` block in the spec; PR-followup work will let the runtime auto-resolve a connection's `secretRefId` into the plugin's `secrets` map under well-known keys (e.g. `secrets.username`, `secrets.password`). Tracked separately.
