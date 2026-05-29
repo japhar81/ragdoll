@@ -6,11 +6,22 @@
 --
 -- pgvector is bundled in the official `pgvector/pgvector:pg17` image
 -- (and provided by most managed Postgres offerings). On a stock
--- postgres image the CREATE EXTENSION will fail — operators should
--- either switch the docker-compose image to pgvector/pgvector or
--- continue using Qdrant.
+-- postgres image the CREATE EXTENSION will fail because installing
+-- extensions requires superuser. That's *fine* — operators who don't
+-- want a pgvector-enabled Postgres just keep using Qdrant; the
+-- extension is only consumed by the optional PgVectorStore backend.
 --
--- IF NOT EXISTS keeps this idempotent on re-runs and on installations
--- where the extension is provisioned out of band.
+-- The DO block below wraps the CREATE in an exception handler so a
+-- missing extension OR an insufficient_privilege error is logged and
+-- skipped instead of failing the whole migration. IF NOT EXISTS keeps
+-- the call idempotent when the extension IS available.
 
-CREATE EXTENSION IF NOT EXISTS vector;
+DO $$
+BEGIN
+  CREATE EXTENSION IF NOT EXISTS vector;
+EXCEPTION
+  WHEN insufficient_privilege THEN
+    RAISE NOTICE 'pgvector: insufficient privilege to CREATE EXTENSION — skipping. Qdrant remains available; install pgvector out of band if you need the Postgres-only vector backend.';
+  WHEN undefined_file THEN
+    RAISE NOTICE 'pgvector: extension binaries not present in this Postgres image — skipping. Use pgvector/pgvector:pg17 or a managed Postgres with pgvector if you need it.';
+END $$;

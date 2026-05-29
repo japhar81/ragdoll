@@ -7,11 +7,14 @@ metadata:
   # success; failed runs stick around for `kubectl logs`.
   name: {{ .Release.Name }}-db-init-{{ .Release.Revision }}
   annotations:
-    # Run BEFORE every install and every upgrade. Migrations are
-    # idempotent (tracked in `schema_migrations`), seeds use `ON
-    # CONFLICT DO NOTHING`, so re-runs are safe.
-    "helm.sh/hook": pre-install,pre-upgrade
-    "helm.sh/hook-weight": "-5"
+    # POST-install/upgrade so the bundled Postgres has time to start.
+    # Pre-install would race the subchart provisioning and connect
+    # before Postgres is listening. The api/worker pods' own init
+    # containers poll schema_migrations until this Job finishes, so
+    # they stay PodInitializing until migrations are applied —
+    # ordering is preserved without a pre-install dependency.
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "5"
     "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
     {{- with (include "ragdoll.commonAnnotations" . | trim) }}
     {{- . | nindent 4 }}
@@ -37,6 +40,42 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       restartPolicy: OnFailure
+      # Wait for Postgres to accept connections before running
+      # migrations. Bundled Postgres typically needs 30-60s to come
+      # up on a cold install; without this gate the Job would burn
+      # through backoffLimit before the server is reachable.
+      initContainers:
+        - name: wait-for-postgres
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- with .Values.containerSecurityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          envFrom:
+            - secretRef:
+                name: {{ include "ragdoll.secretName" . }}
+          command:
+            - sh
+            - -ec
+            - |
+              i=0
+              until node -e "
+                import('pg').then(async (pg) => {
+                  const p = new (pg.default?.Pool || pg.Pool)({ connectionString: process.env.DATABASE_URL });
+                  await p.query('select 1');
+                  await p.end();
+                }).catch(() => process.exit(1));
+              " 2>/dev/null; do
+                i=$((i + 1))
+                if [ "$i" -gt 60 ]; then
+                  echo "wait-for-postgres: gave up after 60 attempts (~2m)" >&2
+                  exit 1
+                fi
+                echo "wait-for-postgres: attempt $i — db not ready, sleeping 2s"
+                sleep 2
+              done
+              echo "wait-for-postgres: connected; starting migrations"
       containers:
         - name: db-init
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"

@@ -14,19 +14,22 @@ Sign in
 {{- if .Values.secrets.create }}
 
 The bootstrap admin user is provisioned on the first api boot.
-Credentials live on Secret `{{ include "ragdoll.secretName" . }}`
-(annotated `helm.sh/resource-policy: keep` so they survive
-`helm uninstall`).
+Credentials live on the dedicated `ragdoll-admin` Secret (annotated
+`helm.sh/resource-policy: keep` so they survive `helm uninstall`).
 
-  kubectl -n {{ .Release.Namespace }} get secret {{ include "ragdoll.secretName" . }} \
-    -o jsonpath='{.data.BOOTSTRAP_ADMIN_EMAIL}' | base64 -d ; echo
-  kubectl -n {{ .Release.Namespace }} get secret {{ include "ragdoll.secretName" . }} \
-    -o jsonpath='{.data.BOOTSTRAP_ADMIN_PASSWORD}' | base64 -d ; echo
+  kubectl -n {{ .Release.Namespace }} get secret ragdoll-admin \
+    -o jsonpath='{.data.email}' | base64 -d ; echo
+  kubectl -n {{ .Release.Namespace }} get secret ragdoll-admin \
+    -o jsonpath='{.data.password}' | base64 -d ; echo
+
+The same password is mirrored onto `{{ include "ragdoll.secretName" . }}` as
+`BOOTSTRAP_ADMIN_PASSWORD` (consumed by the api via envFrom). Both
+Secrets stay in sync on every render.
 
 To reset to a new random password (note: invalidates the existing
 session tokens on rotation):
 
-  kubectl -n {{ .Release.Namespace }} delete secret {{ include "ragdoll.secretName" . }}
+  kubectl -n {{ .Release.Namespace }} delete secret ragdoll-admin {{ include "ragdoll.secretName" . }}
   helm -n {{ .Release.Namespace }} upgrade {{ .Release.Name }} <chart> --reuse-values
 {{- else }}
 

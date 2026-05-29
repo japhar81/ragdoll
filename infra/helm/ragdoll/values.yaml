@@ -268,6 +268,25 @@ bundledpostgres:
   # OPERATOR ACTION for production: override `auth.password` AND
   # `auth.postgresPassword` (the superuser) with strong unique
   # values. The defaults below are suitable ONLY for dev installs.
+  #
+  # Image overrides point at `bitnamilegacy` — the still-free image
+  # registry mirroring the pre-paywall Bitnami catalog. The default
+  # `bitnami/postgresql` repository is now paywalled and pulls will
+  # fail with `403 Forbidden`.
+  image:
+    registry: docker.io
+    repository: bitnamilegacy/postgresql
+  # `os-shell` is used by the chart's init scripts.
+  volumePermissions:
+    image:
+      registry: docker.io
+      repository: bitnamilegacy/os-shell
+  # Optional `postgres-exporter` sidecar — disabled by default but
+  # repointed too so a flip-on doesn't break.
+  metrics:
+    image:
+      registry: docker.io
+      repository: bitnamilegacy/postgres-exporter
   auth:
     username: ragdoll
     database: ragdoll
@@ -291,6 +310,30 @@ bundledredis:
   architecture: standalone
   auth:
     enabled: false
+  # Repoint to bitnamilegacy (same rationale as bundledpostgres).
+  image:
+    registry: docker.io
+    repository: bitnamilegacy/redis
+  sentinel:
+    image:
+      registry: docker.io
+      repository: bitnamilegacy/redis-sentinel
+  metrics:
+    image:
+      registry: docker.io
+      repository: bitnamilegacy/redis-exporter
+  volumePermissions:
+    image:
+      registry: docker.io
+      repository: bitnamilegacy/os-shell
+  sysctl:
+    image:
+      registry: docker.io
+      repository: bitnamilegacy/os-shell
+  kubectl:
+    image:
+      registry: docker.io
+      repository: bitnamilegacy/kubectl
   master:
     persistence:
       enabled: false   # nothing in Redis is source of truth
@@ -332,6 +375,29 @@ bundledqdrant:
 # When you enable this, the chart auto-wires OPENSEARCH_URL.
 bundledopensearch:
   enabled: false
+  # Repoint to bitnamilegacy (same rationale as bundledpostgres).
+  image:
+    registry: docker.io
+    repository: bitnamilegacy/opensearch
+  dashboards:
+    image:
+      registry: docker.io
+      repository: bitnamilegacy/opensearch-dashboards
+  sysctlImage:
+    registry: docker.io
+    repository: bitnamilegacy/os-shell
+  volumePermissions:
+    image:
+      registry: docker.io
+      repository: bitnamilegacy/os-shell
+  metrics:
+    image:
+      registry: docker.io
+      repository: bitnamilegacy/opensearch-exporter
+  snapshots:
+    image:
+      registry: docker.io
+      repository: bitnamilegacy/os-shell
   security:
     enabled: false  # internal cluster only
   master:
