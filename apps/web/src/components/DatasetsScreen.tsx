@@ -180,7 +180,88 @@ function DatasetDetail(props: { dataset: DatasetView; canAdmin: boolean }) {
 
       {props.canAdmin && <CreateVariantForm slug={props.dataset.slug} />}
       <DatasetPipelinesSection dataset={props.dataset} />
+      <DatasetBindingOverridesSection dataset={props.dataset} canAdmin={props.canAdmin} />
     </div>
+  );
+}
+
+/**
+ * PR3 cross-ref: every pipeline_dataset_binding row that pins THIS
+ * dataset as its target. Shows the operator at a glance "if I delete
+ * or archive this dataset, these (pipeline, tenant, env) tuples
+ * break". Pulled by walking every pipeline's bindings — small N for
+ * the install sizes we target; if it ever scales we'd add an
+ * /api/datasets/:id/binding-refs endpoint.
+ */
+function DatasetBindingOverridesSection(props: { dataset: DatasetView; canAdmin: boolean }) {
+  const pipelines = useQuery({
+    queryKey: ["pipelines"],
+    queryFn: () => api.listPipelines()
+  });
+  const rows = pipelines.data?.pipelines ?? [];
+  // Fan out to /api/pipelines/:id/dataset-bindings for each pipeline.
+  const bindingQueries = useQuery({
+    queryKey: ["dataset-bindings-by-dataset", props.dataset.id, rows.map((p) => p.id).join(",")],
+    queryFn: async () => {
+      const lists = await Promise.all(
+        rows.map((p) => api.listPipelineBindings(p.id).then((r) => ({ pipeline: p, bindings: r.bindings })))
+      );
+      return lists.flatMap(({ pipeline, bindings }) =>
+        bindings
+          .filter((b) => b.targetDatasetId === props.dataset.id)
+          .map((b) => ({ pipeline, binding: b }))
+      );
+    },
+    enabled: rows.length > 0
+  });
+  const items = bindingQueries.data ?? [];
+  return (
+    <>
+      <h4 style={{ marginTop: 16 }}>Binding overrides targeting this dataset</h4>
+      <p className="muted" style={{ fontSize: "0.85em" }}>
+        Per-(pipeline, tenant, env) overrides that pin a slug to this dataset.
+        Removing this dataset breaks them — review before archiving.
+      </p>
+      {bindingQueries.isLoading && <p className="muted">Loading…</p>}
+      {items.length === 0 && !bindingQueries.isLoading && (
+        <p className="muted">No binding overrides target this dataset.</p>
+      )}
+      {items.length > 0 && (
+        <Table
+          columns={["Pipeline", "Tenant", "Env", "From slug", ""]}
+          rows={items.map(({ pipeline, binding }) => [
+            <code key="p">{pipeline.slug ?? pipeline.id.slice(0, 8)}</code>,
+            <code key="t">{binding.tenantId.slice(0, 8)}…</code>,
+            binding.environmentId ?? <em key="e">(all envs)</em>,
+            <code key="s">{binding.sourceSlug}</code>,
+            props.canAdmin ? (
+              <BindingDeleteButton key="d" id={binding.id} />
+            ) : (
+              ""
+            )
+          ])}
+        />
+      )}
+    </>
+  );
+}
+
+function BindingDeleteButton(props: { id: string }) {
+  const qc = useQueryClient();
+  const del = useMutation({
+    mutationFn: () => api.deletePipelineBinding(props.id),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["dataset-bindings-by-dataset"] })
+  });
+  return (
+    <button
+      className="link-danger"
+      onClick={() => {
+        if (window.confirm("Delete this binding override?")) del.mutate();
+      }}
+      disabled={del.isPending}
+    >
+      Delete
+    </button>
   );
 }
 

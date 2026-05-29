@@ -55,6 +55,7 @@ import {
   PostgresConfigValueRepository,
   PostgresProviderRepository,
   PostgresDatasourceConnectionRepository,
+  PostgresPipelineDatasetBindingRepository,
   PostgresVectorCollectionRepository,
   PostgresAuditLogRepository,
   PostgresUsageRecordRepository,
@@ -93,6 +94,7 @@ import {
   InMemoryPluginRepository,
   InMemoryProviderRepository,
   InMemoryDatasourceConnectionRepository,
+  InMemoryPipelineDatasetBindingRepository,
   InMemoryVectorCollectionRepository,
   InMemoryExecutionStore,
   type PoolLike
@@ -285,6 +287,7 @@ async function buildDeps(): Promise<{
       plugins: new InMemoryPluginRepository(),
       providers: new PostgresProviderRepository(pool),
       datasources: new PostgresDatasourceConnectionRepository(pool),
+      pipelineDatasetBindings: new PostgresPipelineDatasetBindingRepository(pool),
       vectorCollections: new PostgresVectorCollectionRepository(pool),
       // Single Postgres store: the worker writes executions here and the
       // control-plane read routes query the same tables, so GET
@@ -341,6 +344,7 @@ async function buildDeps(): Promise<{
       plugins: new InMemoryPluginRepository(),
       providers: new InMemoryProviderRepository(),
       datasources: new InMemoryDatasourceConnectionRepository(),
+      pipelineDatasetBindings: new InMemoryPipelineDatasetBindingRepository(),
       vectorCollections: new InMemoryVectorCollectionRepository(),
       executionStore: new InMemoryExecutionStore(),
       auth,

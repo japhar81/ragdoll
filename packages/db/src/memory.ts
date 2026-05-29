@@ -36,6 +36,7 @@ export {
   InMemoryProviderRepository,
   InMemoryProviderModelRepository,
   InMemoryDatasourceConnectionRepository,
+  InMemoryPipelineDatasetBindingRepository,
   InMemoryVectorCollectionRepository
 } from "./memory/catalog.ts";
 

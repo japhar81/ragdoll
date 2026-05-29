@@ -108,6 +108,37 @@ export class InMemoryDatasourceConnectionRepository
 }
 
 
+export class InMemoryPipelineDatasetBindingRepository
+  extends InMemoryCrudRepository<T.PipelineDatasetBindingRow>
+  implements T.PipelineDatasetBindingRepository
+{
+  constructor() {
+    super("pipeline_dataset_binding");
+  }
+  async listByPipeline(pipelineId: UUID): Promise<T.PipelineDatasetBindingRow[]> {
+    return (await this.list()).filter((r) => r.pipelineId === pipelineId);
+  }
+  async resolveBinding(args: {
+    pipelineId: UUID;
+    tenantId: UUID;
+    environmentId?: string;
+    sourceSlug: string;
+  }): Promise<T.PipelineDatasetBindingRow | undefined> {
+    const candidates = (await this.list()).filter(
+      (r) =>
+        r.pipelineId === args.pipelineId &&
+        r.tenantId === args.tenantId &&
+        r.sourceSlug === args.sourceSlug
+    );
+    // env-specific row beats env=null row.
+    return (
+      candidates.find((r) => r.environmentId === args.environmentId) ??
+      candidates.find((r) => r.environmentId === null || r.environmentId === undefined)
+    );
+  }
+}
+
+
 export class InMemoryVectorCollectionRepository
   extends InMemoryCrudRepository<T.VectorCollectionRow>
   implements T.VectorCollectionRepository

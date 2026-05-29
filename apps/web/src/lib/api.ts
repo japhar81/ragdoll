@@ -904,6 +904,40 @@ export const api = {
    * name in this env?" Used by the UI's `Datasets` and `Builder` panels
    * to show which connection a dataset references.
    */
+  // ---- pipeline dataset bindings (PR3) ---------------------------------
+  // Per-(pipeline, tenant, env, source-slug) overrides — pin which
+  // dataset row a slug resolves to for one specific scope. The
+  // runtime's resolver consults these BEFORE the env→tenant→global
+  // dataset cascade, so a binding can swap the physical dataset
+  // without touching the pipeline spec.
+  listPipelineBindings: (pipelineId: string) =>
+    request<{ bindings: PipelineDatasetBindingView[] }>(
+      "GET",
+      `/api/pipelines/${encodeURIComponent(pipelineId)}/dataset-bindings`
+    ),
+  createPipelineBinding: (
+    pipelineId: string,
+    input: {
+      tenantId: string;
+      environmentId?: string | null;
+      sourceSlug: string;
+      targetDatasetId: string;
+    }
+  ) =>
+    request<{ binding: PipelineDatasetBindingView }>(
+      "POST",
+      `/api/pipelines/${encodeURIComponent(pipelineId)}/dataset-bindings`,
+      input
+    ),
+  updatePipelineBinding: (id: string, patch: { targetDatasetId?: string }) =>
+    request<{ binding: PipelineDatasetBindingView }>(
+      "PATCH",
+      `/api/dataset-bindings/${encodeURIComponent(id)}`,
+      patch
+    ),
+  deletePipelineBinding: (id: string) =>
+    request<void>("DELETE", `/api/dataset-bindings/${encodeURIComponent(id)}`),
+
   resolveConnection: (
     tenantId: string,
     name: string,
@@ -922,6 +956,18 @@ export const api = {
       }
     )
 };
+
+export interface PipelineDatasetBindingView {
+  id: string;
+  pipelineId: string;
+  tenantId: string;
+  environmentId: string | null;
+  sourceSlug: string;
+  targetDatasetId: string;
+  createdAt: string;
+  createdBy: string | null;
+  updatedAt: string;
+}
 
 export interface ConnectionView {
   id: string;

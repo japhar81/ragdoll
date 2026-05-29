@@ -320,6 +320,15 @@ export interface DatasetResolver {
     ref: DatasetRef;
     tenantId?: string;
     environmentId?: string;
+    /**
+     * Pipeline id of the calling execution (PR3). When set, the
+     * resolver first checks `pipeline_dataset_bindings` for an
+     * override mapping `(pipelineId, tenant, env, sourceSlug=ref.slug)`
+     * → a specific dataset row. Falls through to the normal scope
+     * cascade when no binding exists. Omitted by callers without a
+     * pipeline context (e.g. preview / listing tools).
+     */
+    pipelineId?: string;
   }): Promise<ResolvedDataset | undefined>;
 }
 
