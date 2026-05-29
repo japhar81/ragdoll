@@ -1,0 +1,45 @@
+{{- if .Values.apiIngress.enabled }}
+# Optional dedicated Ingress for the API service. Most installs leave
+# this disabled — the web container's nginx reverse-proxies /api/* AND
+# /mcp through the main Ingress above, so the same hostname serves
+# UI + CLI + MCP clients. This template only renders when the operator
+# wants the API on its own DNS (different TLS cert, ingress class,
+# rate-limit policy, …).
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: ragdoll-api
+  {{- with .Values.apiIngress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+{{- include "ragdoll.metadata" . | nindent 0 }}
+spec:
+  {{- with .Values.apiIngress.className }}
+  ingressClassName: {{ . | quote }}
+  {{- end }}
+  {{- with .Values.apiIngress.tls }}
+  tls:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  rules:
+    {{- range .Values.apiIngress.hosts }}
+    - host: {{ .host | quote }}
+      http:
+        paths:
+          {{- range .paths }}
+          - path: {{ .path | quote }}
+            pathType: {{ .pathType | default "Prefix" }}
+            backend:
+              service:
+                # All API paths terminate at the api Service directly
+                # (no nginx proxy intermediary). /mcp and /api/* both
+                # land here. WebSocket upgrade for /api/events works
+                # because most controllers honour the Upgrade /
+                # Connection headers by default.
+                name: ragdoll-api
+                port:
+                  number: 80
+          {{- end }}
+    {{- end }}
+{{- end }}

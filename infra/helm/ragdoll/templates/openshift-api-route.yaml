@@ -1,0 +1,32 @@
+{{- if .Values.openshift.apiRoute.enabled }}
+# Optional dedicated OpenShift Route for the API service. Same trade-
+# off as `apiIngress` for vanilla k8s: most installs leave this off
+# and let the main web Route serve /api + /mcp through the bundled
+# nginx proxy. Enable for installs that need the API on its own
+# hostname / TLS cert / router policy.
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: ragdoll-api
+  {{- with .Values.openshift.apiRoute.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+{{- include "ragdoll.metadata" . | nindent 0 }}
+spec:
+  {{- if .Values.openshift.apiRoute.host }}
+  host: {{ .Values.openshift.apiRoute.host | quote }}
+  {{- end }}
+  to:
+    kind: Service
+    name: ragdoll-api
+    weight: 100
+  port:
+    targetPort: http
+  {{- if .Values.openshift.apiRoute.tls.enabled }}
+  tls:
+    termination: {{ .Values.openshift.apiRoute.tls.termination | quote }}
+    insecureEdgeTerminationPolicy: {{ .Values.openshift.apiRoute.tls.insecureEdgeTerminationPolicy | quote }}
+  {{- end }}
+  wildcardPolicy: None
+{{- end }}
