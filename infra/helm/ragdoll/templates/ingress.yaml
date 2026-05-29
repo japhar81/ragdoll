@@ -5,10 +5,14 @@ metadata:
   name: ragdoll
   labels:
     app: ragdoll-web
-  {{- with .Values.ingress.annotations }}
+    {{- include "ragdoll.commonLabels" . | nindent 4 }}
   annotations:
+    {{- with .Values.ingress.annotations }}
     {{- toYaml . | nindent 4 }}
-  {{- end }}
+    {{- end }}
+    {{- with (include "ragdoll.commonAnnotations" . | trim) }}
+    {{- . | nindent 4 }}
+    {{- end }}
 spec:
   {{- with .Values.ingress.className }}
   ingressClassName: {{ . | quote }}

@@ -15,6 +15,11 @@ metadata:
   name: ragdoll-worker
   labels:
     app: ragdoll-worker
+    {{- include "ragdoll.commonLabels" . | nindent 4 }}
+  {{- with (include "ragdoll.commonAnnotations" . | trim) }}
+  annotations:
+    {{- . | nindent 4 }}
+  {{- end }}
 spec:
   scaleTargetRef:
     apiVersion: apps/v1

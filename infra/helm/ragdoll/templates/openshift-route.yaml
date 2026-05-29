@@ -14,10 +14,14 @@ metadata:
   name: ragdoll
   labels:
     app: ragdoll-web
-  {{- with .Values.openshift.route.annotations }}
+    {{- include "ragdoll.commonLabels" . | nindent 4 }}
   annotations:
+    {{- with .Values.openshift.route.annotations }}
     {{- toYaml . | nindent 4 }}
-  {{- end }}
+    {{- end }}
+    {{- with (include "ragdoll.commonAnnotations" . | trim) }}
+    {{- . | nindent 4 }}
+    {{- end }}
 spec:
   {{- if .Values.openshift.route.host }}
   host: {{ .Values.openshift.route.host | quote }}
