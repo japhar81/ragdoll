@@ -119,25 +119,39 @@ VALUES
     'global',
     'codebase-ingest-code',
     'Codebase Ingest (code)',
-    'Backing dataset for codebase-ingest-code — Qdrant vector index of polyglot source code chunks.',
+    'Global dataset of polyglot source-code chunks. Each tenant gets its own Qdrant collection (`codebase_<tenantSlug>`) via the by-tenant namespace policy.',
     '{"provider":"ollama","model":"nomic-embed-text","dimensions":768,"distance":"cosine"}'::jsonb,
     ARRAY['vector'],
-    '{"vector":{"provider":"qdrant"}}'::jsonb
+    -- PR6: by-tenant namespace + connectionName wired up-front. Every
+    -- tenant inherits the global `qdrant` connection (seeded in
+    -- zzzzzzz-demo-connections.sql) and writes into its own
+    -- per-tenant Qdrant collection — no operator copy-paste per tenant.
+    '{"vector":{"provider":"qdrant","connectionName":"qdrant","namespace":"by-tenant"}}'::jsonb
   ),
   (
     '00000000-0000-0000-0000-0000000d40d2',
     'global',
     'codebase-ingest-docs',
     'Codebase Ingest (docs)',
-    'Backing dataset for codebase-ingest-docs — OpenSearch BM25 + kNN index of doc text.',
+    'Global dataset of doc text. Each tenant gets its own OpenSearch index (`codebase_docs_<tenantSlug>`) via the by-tenant namespace policy.',
     -- nomic-embed-text emits 768-d vectors; the opensearch_output's KNN
     -- index config (in the pipeline spec above) must match this. 1536
     -- was the legacy value from an earlier text-embedding-ada-002 default.
     '{"provider":"ollama","model":"nomic-embed-text","dimensions":768,"distance":"cosine"}'::jsonb,
     ARRAY['text', 'vector'],
-    '{"text":{"provider":"opensearch"},"vector":{"provider":"opensearch"}}'::jsonb
+    '{"text":{"provider":"opensearch","connectionName":"opensearch","namespace":"by-tenant"},"vector":{"provider":"opensearch","connectionName":"opensearch","namespace":"by-tenant"}}'::jsonb
   )
-ON CONFLICT DO NOTHING;
+-- ON CONFLICT (id) DO UPDATE so re-seeding picks up description /
+-- backend / namespace changes on an existing install. New installs
+-- get the row fresh; upgrades get the PR6 namespace + connectionName
+-- merged in without losing any operator-added fields elsewhere.
+ON CONFLICT (id) DO UPDATE
+  SET display_name      = EXCLUDED.display_name,
+      description       = EXCLUDED.description,
+      embedding_profile = EXCLUDED.embedding_profile,
+      modalities        = EXCLUDED.modalities,
+      backends          = EXCLUDED.backends,
+      updated_at        = now();
 
 INSERT INTO dataset_versions (id, dataset_id, version_label, schema_spec, backend_collections, status, ready_at)
 VALUES

@@ -59,7 +59,14 @@ commonAnnotations: {}
 image:
   repository: ragdoll
   tag: latest
-  pullPolicy: IfNotPresent
+  # `Always` (not IfNotPresent) because we ship `tag: latest` by default
+  # and operators rebuild + rollout through `oc-build-api` without
+  # bumping a semver tag. With IfNotPresent the kubelet keeps whatever
+  # digest each node first pulled, so `oc rollout restart` re-runs the
+  # SAME image and silently drops PR changes on the floor. Pinning a
+  # semver tag in production is the right answer there — operators
+  # set `image.tag: 0.3.1` + flip this to IfNotPresent if they care.
+  pullPolicy: Always
 
 # Web is built from the same monorepo but ships as a separate nginx image
 # (see infra/docker/web.Dockerfile). The default image uses
@@ -69,7 +76,7 @@ image:
 webImage:
   repository: ragdoll-web
   tag: latest
-  pullPolicy: IfNotPresent
+  pullPolicy: Always
 
 # Service-account used by every workload. Leave name empty to let helm
 # generate `<release>-ragdoll`; create: false skips creation if you've
@@ -186,7 +193,10 @@ pythonPlugins:
   image:
     repository: ragdoll-python-plugins
     tag: latest
-    pullPolicy: IfNotPresent
+    # Same rationale as image.pullPolicy above: `tag: latest` + cached
+    # IfNotPresent silently drops PR changes when operators rebuild +
+    # rollout. Pin to a digest / semver and flip this when needed.
+    pullPolicy: Always
   timeoutMs: 300000
   resources:
     requests: { cpu: 250m, memory: 512Mi }
