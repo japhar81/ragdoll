@@ -29,3 +29,7 @@ npm-debug.log*
 .claude/
 .test-output/
 tests/playwright/.test-output/
+
+# Helm chart subchart tarballs — pulled by 'helm dependency update'
+infra/helm/*/charts/
+

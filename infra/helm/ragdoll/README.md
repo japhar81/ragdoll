@@ -1,57 +1,112 @@
 # RAGdoll Helm Chart
 
-Deploys the RAGdoll API, worker (split into a cron-scheduler "leader"
-plus N stateless "followers"), web UI, optional Python plugin sidecar,
-and a one-shot `db-init` Job that migrates the schema + seeds defaults
-on every install/upgrade.
+`helm install ragdoll ./infra/helm/ragdoll` stands up a complete,
+working RAGdoll stack: api + autoscaling worker + web UI + bundled
+Postgres + bundled Redis + bundled Qdrant + a generated Secret with
+random crypto keys and a bootstrap admin user. No external services
+required, no Secret to pre-apply.
 
-The first install also provisions a single platform-admin user from
-`BOOTSTRAP_ADMIN_EMAIL` / `BOOTSTRAP_ADMIN_PASSWORD` (see the
-[example secret](../../k8s/ragdoll-secrets.example.yaml)) so you can
-sign into the web UI immediately after `helm install` completes.
+Bring your own backend at any time by flipping the corresponding
+`bundled<X>.enabled: false`; everything else keeps working.
 
-## What this chart does NOT deploy
+## Install
 
-Bring-your-own backends:
+```sh
+# 1. Pull the Bitnami legacy subcharts (postgres, redis, opensearch).
+#    Re-run only when bumping chart versions.
+helm dependency update infra/helm/ragdoll
 
-- **Postgres** (orchestration state) — provide via `DATABASE_URL` on
-  the secret. No bundled option; use Bitnami's chart or a managed
-  service.
-- **Redis** (job queue + event bus) — provide via `REDIS_URL`, OR set
-  `redis.enabled: true` for the bundled in-cluster Redis (see below).
-- **Qdrant** / **OpenSearch** / **Dgraph** (vector / lexical / graph
-  retrieval) — point at existing services via the URLs in
-  `values.yaml`.
-- **OpenTelemetry collector** — point at your existing endpoint via
-  `otel.endpoint`.
-- **Ollama** (local LLM) — optional, set `ollama.baseUrl` to enable.
+# 2. Install. With defaults, this also provisions a fully running
+#    Postgres + Redis + Qdrant — nothing else to configure.
+helm install ragdoll infra/helm/ragdoll \
+  --namespace ragdoll --create-namespace
 
-### Bundled Redis (opt-in)
+# 3. The NOTES.txt from the install prints the bootstrap admin
+#    credentials (random per install, preserved across upgrades).
+kubectl -n ragdoll get secret ragdoll-ragdoll-secrets \
+  -o jsonpath='{.data.BOOTSTRAP_ADMIN_PASSWORD}' | base64 -d ; echo
 
-Setting `redis.enabled: true` ships a minimal single-replica
-`ragdoll-redis` Deployment + Service + ConfigMap. The config is
-deliberately defensive against the `MISCONF Redis is configured to
-save RDB snapshots, but it's currently unable to persist to disk`
-error operators hit on misconfigured Redises:
+# 4. Expose externally:
+#    Vanilla k8s
+helm upgrade ragdoll infra/helm/ragdoll -n ragdoll \
+  --reuse-values \
+  --set ingress.enabled=true \
+  --set 'ingress.hosts[0].host=ragdoll.example.com' \
+  --set 'ingress.hosts[0].paths[0].path=/' \
+  --set 'ingress.hosts[0].paths[0].pathType=Prefix'
 
-- `save ""` — disable RDB snapshots entirely.
-- `stop-writes-on-bgsave-error no` — even if a snapshot somehow runs
-  and fails, writes keep working.
-- `appendonly no` by default (no AOF either).
+#    OpenShift
+helm upgrade ragdoll infra/helm/ragdoll -n ragdoll \
+  --reuse-values \
+  --set openshift.route.enabled=true
+```
 
-That's safe for RAGdoll because Redis state is in-flight jobs
-(re-enqueueable on retry), the change-event bus (best-effort fanout),
-the SSO state cache (10-min TTL), and the scheduler lease (10s TTL).
-**None of it is source of truth.** A Redis pod restart loses
-everything in flight and recovers cleanly.
+## Bundled vs BYO matrix
 
-When you DO want persistence, set `redis.persistence.enabled: true` —
-Redis switches to AOF (incremental, no bgsave failure mode) and mounts
-a PVC at `/data`. Strategy is `Recreate` (not RollingUpdate) so two
-pods can never race AOF rewrites against the same PVC.
+| Backend | Default | How it ships | How to BYO |
+| --- | --- | --- | --- |
+| Postgres | bundled | Bitnami `postgresql` subchart (`oci://registry-1.docker.io/bitnamicharts/postgresql:16.7.4`) | `bundledpostgres.enabled=false` + set `DATABASE_URL` on your Secret + `secrets.create=false` |
+| Redis | bundled | Bitnami `redis` subchart, standalone, snapshot-failure-proof `redis.conf` | `bundledredis.enabled=false` + `REDIS_URL` |
+| Qdrant | bundled | hand-rolled `ragdoll-qdrant` Deployment + Service + PVC (no Bitnami chart exists) | `bundledqdrant.enabled=false` + `qdrant.url` |
+| OpenSearch | **disabled** | Bitnami `opensearch` subchart, off by default (heavy install) | `bundledopensearch.enabled=true` to enable, OR `opensearch.url` for BYO |
+| Dgraph | n/a | not shipped | `dgraph.url` |
+| Ollama | n/a | not shipped | `ollama.baseUrl` |
+| OTel Collector | n/a | not shipped | `otel.endpoint` |
 
-After enabling, set `REDIS_URL=redis://ragdoll-redis:6379` on the
-`ragdoll-secrets` Secret.
+A fully-BYO install pins everything to your own services:
+
+```sh
+helm install ragdoll infra/helm/ragdoll \
+  --set bundledpostgres.enabled=false \
+  --set bundledredis.enabled=false \
+  --set bundledqdrant.enabled=false \
+  --set secrets.create=false \
+  --set secrets.existingSecret=my-ragdoll-secret
+```
+
+## Generated Secret
+
+When `secrets.create: true` (default), the chart generates
+`<release>-ragdoll-secrets` on first install with:
+
+- `SECRET_ENCRYPTION_KEY` — random 64-char, **preserved across
+  upgrades** via the `lookup`-with-fallback pattern. Rotating
+  invalidates every encrypted secret-at-rest in the platform's own
+  secret store, so this stays sticky.
+- `SESSION_SECRET` — random 64-char, preserved. Rotating logs
+  everyone out.
+- `BOOTSTRAP_ADMIN_PASSWORD` — random 24-char, preserved.
+  `BOOTSTRAP_ADMIN_EMAIL` comes from `api.bootstrapAdmin.email`
+  (default `admin@change-me.local` — override per env).
+- `DATABASE_URL` / `REDIS_URL` / `OPENSEARCH_URL` — computed from
+  the bundled subchart Service names + the values you set for
+  `bundledpostgres.auth.*` etc. **Always overwritten** on each
+  render so flipping a `bundled*.enabled` tracks through cleanly.
+
+The generated Secret is annotated `helm.sh/resource-policy: keep` —
+it survives `helm uninstall` so a re-install reuses the same crypto
+material. Delete it explicitly (`kubectl delete secret …`) to roll.
+
+When `secrets.create: false`, the chart references the operator-
+supplied Secret named `secrets.existingSecret` instead — same shape
+as [the example](../../k8s/ragdoll-secrets.example.yaml).
+
+## ⚠ Production overrides
+
+The bundled Postgres ships with a placeholder password
+(`ragdoll-please-override`) so the chart installs cleanly out of the
+box. **Override before any non-dev install**:
+
+```yaml
+bundledpostgres:
+  auth:
+    password: <strong-1>
+    postgresPassword: <different-strong-2>
+```
+
+The chart's generated Secret reads these same values when computing
+`DATABASE_URL`, so the api/worker always see the same password
+Postgres provisions itself with.
 
 ## Custom labels + annotations (Kyverno / Gatekeeper / OPA)
 

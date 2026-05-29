@@ -2,5 +2,36 @@ apiVersion: v2
 name: ragdoll
 description: Multi-tenant RAG pipeline platform
 type: application
-version: 0.1.0
+version: 0.2.0
 appVersion: "0.1.0"
+
+# Subchart dependencies. Each is gated on a `<alias>.enabled` flag in
+# values.yaml so operators with a managed Postgres / Redis / OpenSearch
+# can disable individual bundles and BYO via the corresponding URL on
+# the existing secret. Default: every must-have bundle ON so a fresh
+# `helm install` stands up a complete, working stack with no external
+# dependencies beyond the cluster itself.
+#
+# Pulled from the publicly-accessible `bitnamicharts` OCI registry
+# (open-source legacy charts still mirrored after Bitnami's
+# subscription move). Run `helm dependency update infra/helm/ragdoll`
+# once before install/upgrade to pull tarballs into charts/.
+#
+# Pinned to specific minor versions verified to work with our value
+# overrides; bumps land via a single helm dep update + a test render.
+dependencies:
+  - name: postgresql
+    version: "16.7.4"
+    repository: oci://registry-1.docker.io/bitnamicharts
+    alias: bundledpostgres
+    condition: bundledpostgres.enabled
+  - name: redis
+    version: "21.0.0"
+    repository: oci://registry-1.docker.io/bitnamicharts
+    alias: bundledredis
+    condition: bundledredis.enabled
+  - name: opensearch
+    version: "1.5.0"
+    repository: oci://registry-1.docker.io/bitnamicharts
+    alias: bundledopensearch
+    condition: bundledopensearch.enabled

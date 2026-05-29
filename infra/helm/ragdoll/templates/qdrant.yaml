@@ -1,0 +1,150 @@
+{{- if .Values.bundledqdrant.enabled }}
+{{/*
+Bundled Qdrant.
+
+No Bitnami chart exists for Qdrant, so we ship a hand-rolled
+single-replica Deployment + Service + (optional) PVC. The trade-offs:
+
+  - Single replica with `strategy: Recreate` so a rolling upgrade
+    can't end up with two pods racing the same PVC.
+  - Persistence ON by default — Qdrant IS source of truth for the
+    vector index. Losing it on pod restart means re-embedding every
+    document, which is expensive even on small corpora.
+  - No auth (cluster-internal Service). Operators who need auth set
+    `bundledqdrant.apiKey` and the api/worker pick it up from the
+    generated secret automatically.
+
+For production-scale Qdrant (sharding, replication, snapshots) point
+at Qdrant's official chart instead: set `bundledqdrant.enabled: false`
+and `qdrant.url` to the external service.
+*/}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: ragdoll-qdrant
+  labels:
+    app: ragdoll-qdrant
+    {{- include "ragdoll.commonLabels" . | nindent 4 }}
+  {{- with (include "ragdoll.commonAnnotations" . | trim) }}
+  annotations:
+    {{- . | nindent 4 }}
+  {{- end }}
+spec:
+  selector:
+    app: ragdoll-qdrant
+  ports:
+    - name: http
+      port: 6333
+      targetPort: 6333
+    - name: grpc
+      port: 6334
+      targetPort: 6334
+{{- if .Values.bundledqdrant.persistence.enabled }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ragdoll-qdrant
+  labels:
+    app: ragdoll-qdrant
+    {{- include "ragdoll.commonLabels" . | nindent 4 }}
+  {{- with (include "ragdoll.commonAnnotations" . | trim) }}
+  annotations:
+    {{- . | nindent 4 }}
+  {{- end }}
+spec:
+  accessModes:
+    {{- toYaml .Values.bundledqdrant.persistence.accessModes | nindent 4 }}
+  resources:
+    requests:
+      storage: {{ .Values.bundledqdrant.persistence.size }}
+  {{- with .Values.bundledqdrant.persistence.storageClassName }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+{{- end }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ragdoll-qdrant
+  labels:
+    app: ragdoll-qdrant
+    {{- include "ragdoll.commonLabels" . | nindent 4 }}
+  {{- with (include "ragdoll.commonAnnotations" . | trim) }}
+  annotations:
+    {{- . | nindent 4 }}
+  {{- end }}
+spec:
+  replicas: 1
+  strategy:
+    # Recreate (not RollingUpdate) — a second pod sharing the storage
+    # PVC corrupts the index. Single-writer guarantee enforced at the
+    # strategy level.
+    type: Recreate
+  selector:
+    matchLabels:
+      app: ragdoll-qdrant
+  template:
+    metadata:
+      labels:
+        app: ragdoll-qdrant
+        {{- include "ragdoll.commonLabels" . | nindent 8 }}
+      {{- with (include "ragdoll.commonAnnotations" . | trim) }}
+      annotations:
+        {{- . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "ragdoll.serviceAccountName" . }}
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: qdrant
+          image: "{{ .Values.bundledqdrant.image.repository }}:{{ .Values.bundledqdrant.image.tag }}"
+          imagePullPolicy: {{ .Values.bundledqdrant.image.pullPolicy }}
+          {{- with .Values.containerSecurityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          ports:
+            - name: http
+              containerPort: 6333
+            - name: grpc
+              containerPort: 6334
+          {{- if .Values.bundledqdrant.apiKey }}
+          env:
+            - name: QDRANT__SERVICE__API_KEY
+              value: {{ .Values.bundledqdrant.apiKey | quote }}
+          {{- end }}
+          volumeMounts:
+            {{- if .Values.bundledqdrant.persistence.enabled }}
+            - name: storage
+              mountPath: /qdrant/storage
+            {{- end }}
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 6333
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 6333
+            initialDelaySeconds: 15
+            periodSeconds: 15
+          resources:
+            requests:
+              cpu: {{ .Values.bundledqdrant.resources.requests.cpu }}
+              memory: {{ .Values.bundledqdrant.resources.requests.memory }}
+            limits:
+              cpu: {{ .Values.bundledqdrant.resources.limits.cpu | quote }}
+              memory: {{ .Values.bundledqdrant.resources.limits.memory }}
+      volumes:
+        {{- if .Values.bundledqdrant.persistence.enabled }}
+        - name: storage
+          persistentVolumeClaim:
+            claimName: ragdoll-qdrant
+        {{- end }}
+{{- end }}

@@ -3,17 +3,33 @@
 #
 # This chart deploys the API, autoscaled worker (cron scheduler gated by
 # a Redis lease so workers are interchangeable), web UI, optional
-# python-plugins sidecar, and a one-shot db-init Job that runs
-# migrations + seeds at install/upgrade time. The first install also
-# provisions a platform-admin user from BOOTSTRAP_ADMIN_EMAIL /
-# BOOTSTRAP_ADMIN_PASSWORD (declared on the existingSecret — see
-# infra/k8s/ragdoll-secrets.example.yaml).
+# python-plugins sidecar, a one-shot db-init Job that runs migrations +
+# seeds at install/upgrade time, and a generated Secret that auto-
+# provisions a platform-admin user on first install.
 #
-# Bring-your-own backends: Postgres / Redis / Qdrant / OpenSearch / OTel
-# collector default to BYO — point at existing services via the URLs
-# below. An optional bundled Redis (`redis.enabled: true`) ships a
-# minimal in-cluster instance for dev / small installs that don't have
-# a managed Redis nearby. Postgres / Qdrant / OpenSearch stay BYO.
+# A default `helm install` stands up a COMPLETE stack: Bitnami-legacy
+# subcharts for Postgres + Redis ship enabled, an in-chart Qdrant
+# Deployment ships enabled, the Secret is generated with random keys.
+# OpenSearch is also bundled (via Bitnami legacy) but defaults OFF
+# because it's heavy and most installs don't need lexical retrieval
+# on day one.
+#
+# BYO each backend by flipping the corresponding `bundled*.enabled:
+# false` and providing the URL on `secrets.existingSecret`. The two
+# extremes are both supported and well-tested:
+#
+#   helm install ragdoll ./infra/helm/ragdoll
+#     → bundled Postgres + Redis + Qdrant, generated Secret. Done.
+#
+#   helm install ragdoll ./infra/helm/ragdoll \
+#       --set bundledpostgres.enabled=false \
+#       --set bundledredis.enabled=false \
+#       --set bundledqdrant.enabled=false \
+#       --set secrets.create=false
+#     → fully BYO; you provide the Secret with every URL pre-wired.
+#
+# Run `helm dependency update infra/helm/ragdoll` ONCE before the
+# first install to pull the Bitnami subchart tarballs.
 # ============================================================================
 
 # ---------------------------------------------------------------------------
@@ -176,15 +192,23 @@ pythonPlugins:
     limits: { cpu: "2", memory: 2Gi }
 
 # ---------------------------------------------------------------------------
-# Backend wiring. Sensitive URLs (DATABASE_URL, REDIS_URL,
-# SECRET_ENCRYPTION_KEY, SESSION_SECRET, BOOTSTRAP_ADMIN_*) live on
-# `secrets.existingSecret`; non-secret URLs go here.
+# Backend wiring. When the corresponding `bundled*.enabled` is true,
+# DATABASE_URL / REDIS_URL / QDRANT_URL / OPENSEARCH_URL are auto-
+# computed and pushed into the generated Secret — operators don't
+# need to set anything here. When you flip a `bundled*.enabled: false`
+# to BYO, point these URLs at your external service AND set
+# `secrets.create: false` so the chart uses your existing Secret.
 # ---------------------------------------------------------------------------
 qdrant:
-  url: "http://qdrant:6333"
+  # Used when bundledqdrant.enabled is false. The bundled Qdrant lives
+  # at `http://ragdoll-qdrant:6333` cluster-internally.
+  url: "http://ragdoll-qdrant:6333"
 
 opensearch:
-  url: "http://opensearch:9200"
+  # Used when bundledopensearch.enabled is false. The bundled
+  # OpenSearch service is `<release>-bundledopensearch:9200` because
+  # the Bitnami subchart names its Service from the release + alias.
+  url: ""
 
 # Optional graph backend. Set to "" to disable the graph modality.
 dgraph:
@@ -207,60 +231,120 @@ otel:
   resourceAttributes: "service.namespace=ragdoll,deployment.environment=production"
 
 secrets:
-  # Name of the Kubernetes Secret holding sensitive env vars. See
-  # infra/k8s/ragdoll-secrets.example.yaml for the required keys.
-  existingSecret: ragdoll-secrets
+  # When `create: true` (the default), the chart generates a Secret
+  # named `<release>-ragdoll-secrets` on first install with random
+  # SECRET_ENCRYPTION_KEY / SESSION_SECRET / BOOTSTRAP_ADMIN_PASSWORD
+  # and auto-wired DATABASE_URL / REDIS_URL pointed at the bundled
+  # subchart services. On `helm upgrade` the existing values are
+  # PRESERVED (via the lookup-with-fallback pattern) so rotating
+  # passwords doesn't invalidate every secret-at-rest.
+  #
+  # When `create: false`, the chart uses the operator-managed Secret
+  # named below — same shape as infra/k8s/ragdoll-secrets.example.yaml.
+  create: true
+  existingSecret: ""   # ignored when create: true; defaults to <release>-ragdoll-secrets
 
 # ---------------------------------------------------------------------------
-# Optional bundled Redis (dev / small installs).
+# Bundled backends (subchart dependencies).
 #
-# Default OFF — production should use a managed Redis (Elasticache,
-# Memorystore, in-cluster operator) and put REDIS_URL on the existing
-# secret. Enabling this ships a minimal single-replica Redis with a
-# safe configuration that can NEVER hit the
-# `MISCONF Redis is configured to save RDB snapshots, but it's
-# currently unable to persist to disk` error operators have reported
-# from misconfigured Redises:
-#
-#   - `save ""`                       — disable RDB snapshots entirely.
-#   - `stop-writes-on-bgsave-error no` — even if a snapshot somehow runs
-#                                        (e.g. via debug command) and
-#                                        fails, writes keep working.
-#   - `appendonly no`                  — no AOF either, by default.
-#
-# The trade-off: nothing persists across pod restarts. For RAGdoll
-# that's acceptable — Redis state is in-flight jobs (re-enqueueable on
-# retry), the change-event bus (best-effort fanout), the SSO state
-# cache (10-min TTL), and the scheduler lease (10s TTL). NONE of it is
-# source of truth.
-#
-# When you DO want persistence, set `persistence.enabled: true` —
-# Redis switches to AOF (`appendonly yes` with `everysec` fsync) and
-# mounts the PVC at /data. AOF is preferable to RDB for our usage
-# because it writes incrementally and won't ever hit the bgsave-error
-# failure mode.
-#
-# When `enabled: true`, REDIS_URL on the existingSecret can be set to
-# `redis://ragdoll-redis:6379` (the in-cluster Service name).
+# Each bundled* block toggles a backend ON (default) or OFF (BYO via
+# the existingSecret + URL values above). When ON, the chart auto-
+# wires DATABASE_URL / REDIS_URL / QDRANT_URL / OPENSEARCH_URL into
+# the generated Secret so workloads find the backend with no extra
+# config.
 # ---------------------------------------------------------------------------
-redis:
-  enabled: false
-  image:
-    repository: redis
-    tag: "7-alpine"
-    pullPolicy: IfNotPresent
-  resources:
-    requests: { cpu: 50m, memory: 64Mi }
-    limits: { cpu: 500m, memory: 512Mi }
-  persistence:
-    # When true, AOF is enabled and the PVC below is mounted at /data.
-    # Default false keeps Redis fully ephemeral — recovers cleanly on
-    # pod restart by re-acquiring its lease + draining any redelivered
-    # BullMQ jobs from the at-least-once stream.
+
+# Postgres — Bitnami legacy chart. Holds RAGdoll's orchestration
+# state (pipelines, runs, secrets, RBAC). The db-init Job migrates
+# the schema on every helm install/upgrade.
+bundledpostgres:
+  enabled: true
+  # Bitnami subchart overrides. The auth block here is consumed BOTH
+  # by the Bitnami subchart (which provisions postgres with these
+  # creds) AND by our generated Secret (which embeds the password
+  # into DATABASE_URL). Both ends always agree because they read the
+  # same single source of truth — these values.
+  #
+  # OPERATOR ACTION for production: override `auth.password` AND
+  # `auth.postgresPassword` (the superuser) with strong unique
+  # values. The defaults below are suitable ONLY for dev installs.
+  auth:
+    username: ragdoll
+    database: ragdoll
+    password: "ragdoll-please-override"
+    postgresPassword: "ragdoll-please-override-admin"
+  primary:
+    persistence:
+      enabled: true
+      size: 10Gi
+    resources:
+      requests: { cpu: 250m, memory: 512Mi }
+      limits: { cpu: "2", memory: 2Gi }
+
+# Redis — Bitnami legacy chart. Backs BullMQ (job queue + leader
+# election + dead-letter), the change-event bus, the SSO state cache.
+# All of those are re-derivable on Redis restart so persistence is
+# optional. Single replica, standalone, auth disabled — the cluster
+# network namespace is the security boundary.
+bundledredis:
+  enabled: true
+  architecture: standalone
+  auth:
     enabled: false
-    size: 8Gi
+  master:
+    persistence:
+      enabled: false   # nothing in Redis is source of truth
+    resources:
+      requests: { cpu: 50m, memory: 64Mi }
+      limits: { cpu: 500m, memory: 512Mi }
+    # SAFE-by-construction config: even if a snapshot somehow runs
+    # and fails, writes keep working. Prevents the
+    # `MISCONF stop-writes-on-bgsave-error` failure mode entirely.
+    configuration: |-
+      save ""
+      stop-writes-on-bgsave-error no
+      appendonly no
+
+# Qdrant — hand-rolled inline (no Bitnami chart exists). Persistence
+# defaults ON because Qdrant IS source of truth for the vector index;
+# losing it on pod restart costs full re-embedding.
+bundledqdrant:
+  enabled: true
+  image:
+    repository: qdrant/qdrant
+    tag: "v1.12.4"
+    pullPolicy: IfNotPresent
+  # Optional API key. When set, gets pushed into the generated secret
+  # so the api/worker include it in QDRANT_URL → header.
+  apiKey: ""
+  resources:
+    requests: { cpu: 100m, memory: 256Mi }
+    limits: { cpu: "1", memory: 1Gi }
+  persistence:
+    enabled: true
+    size: 10Gi
     storageClassName: ""
     accessModes: [ReadWriteOnce]
+
+# OpenSearch — Bitnami legacy chart. Default OFF because it's a
+# heavy install (JVM + 1-3GB heap by default) and most retrieval
+# patterns work without lexical until you scale past pure vector.
+# When you enable this, the chart auto-wires OPENSEARCH_URL.
+bundledopensearch:
+  enabled: false
+  security:
+    enabled: false  # internal cluster only
+  master:
+    replicaCount: 1
+    resources:
+      requests: { cpu: 250m, memory: 1Gi }
+      limits: { cpu: "2", memory: 2Gi }
+  data:
+    replicaCount: 1
+  coordinating:
+    replicaCount: 0
+  ingest:
+    replicaCount: 0
 
 # ---------------------------------------------------------------------------
 # Pod & container security context. Defaults are restrictive enough to

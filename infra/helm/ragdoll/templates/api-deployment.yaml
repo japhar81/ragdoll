@@ -57,7 +57,7 @@ spec:
             # BOOTSTRAP_ADMIN_EMAIL, BOOTSTRAP_ADMIN_PASSWORD.
             # See infra/k8s/ragdoll-secrets.example.yaml.
             - secretRef:
-                name: {{ .Values.secrets.existingSecret }}
+                name: {{ include "ragdoll.secretName" . }}
           env:
             - name: PORT
               value: {{ .Values.api.port | quote }}
