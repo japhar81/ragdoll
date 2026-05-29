@@ -59,7 +59,7 @@ spec:
           {{- end }}
           envFrom:
             - secretRef:
-                name: {{ .Values.secrets.existingSecret }}
+                name: {{ include "ragdoll.secretName" . }}
           env:
             # Per-pod identity for the OTel service.instance.id +
             # BullMQ worker name + leader-election lease token.

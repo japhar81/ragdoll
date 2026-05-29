@@ -207,8 +207,8 @@ hanging forever.
         }).catch(() => process.exit(3));
       " 2>/dev/null; do
         i=$((i + 1))
-        if [ "$i" -gt 60 ]; then
-          echo "wait-for-db-init: gave up after 60 attempts (~2m)" >&2
+        if [ "$i" -gt 180 ]; then
+          echo "wait-for-db-init: gave up after 180 attempts (~6m)" >&2
           exit 1
         fi
         echo "wait-for-db-init: attempt $i — schema_migrations not ready, sleeping 2s"

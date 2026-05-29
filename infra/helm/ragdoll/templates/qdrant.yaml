@@ -95,18 +95,39 @@ spec:
       {{- end }}
     spec:
       serviceAccountName: {{ include "ragdoll.serviceAccountName" . }}
-      {{- with .Values.podSecurityContext }}
+      # Qdrant's image writes to BOTH the mounted PVC at /qdrant/storage
+      # AND to /qdrant/snapshots on the image's own filesystem. Under
+      # OpenShift's namespace-random UID enforcement we got
+      # "Can't create Snapshots directory: PermissionDenied" even
+      # after pinning UID 1000 + fsGroup — SELinux MCS labelling
+      # blocks writes into the image's filesystem paths regardless
+      # of POSIX permissions.
+      #
+      # Pragmatic operator-approved path: run qdrant as UID/GID 0
+      # under the `privileged` SCC. Bypasses the SELinux MCS
+      # constraint and the namespace UID range entirely. Deploy with
+      # `--set openshift.scc.name=privileged` so the chart's SCC
+      # RoleBinding binds the SA to `privileged`.
       securityContext:
-        {{- toYaml . | nindent 8 }}
-      {{- end }}
+        runAsUser: 0
+        runAsGroup: 0
+        fsGroup: 0
       containers:
         - name: qdrant
           image: "{{ .Values.bundledqdrant.image.repository }}:{{ .Values.bundledqdrant.image.tag }}"
           imagePullPolicy: {{ .Values.bundledqdrant.image.pullPolicy }}
-          {{- with .Values.containerSecurityContext }}
+          # The chart-wide containerSecurityContext defaults set
+          # runAsNonRoot:true + drop ALL caps — both incompatible
+          # with the privileged-as-root model qdrant needs on
+          # OpenShift. Override here with the smallest set of fields
+          # the `privileged` SCC requires us to relax.
           securityContext:
-            {{- toYaml . | nindent 12 }}
-          {{- end }}
+            runAsNonRoot: false
+            runAsUser: 0
+            allowPrivilegeEscalation: true
+            privileged: true
+            capabilities:
+              drop: []
           ports:
             - name: http
               containerPort: 6333
