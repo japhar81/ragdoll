@@ -154,7 +154,7 @@ export function wouldCycle(
 
 // ---- Config / Secrets scope navigator -----------------------------------
 
-export type ScopeKind = "global" | "tenant" | "pipeline";
+export type ScopeKind = "global" | "tenant" | "environment" | "pipeline";
 
 /** A node in the Global -> Tenant -> Pipeline scope tree. */
 export interface ScopeNode {
@@ -174,34 +174,62 @@ export interface TenantLike {
 }
 
 /**
- * Build the scope navigator: a single Global root, each tenant beneath it,
- * and every pipeline beneath each tenant. Pipelines are shared across tenants
- * (the platform has no per-tenant pipeline list at this layer) so each tenant
- * lists the full pipeline set — selecting one yields scope="pipeline".
+ * Build the scope navigator: a single Global root, each tenant beneath
+ * it, the tenant's environments beneath that, and every pipeline at the
+ * leaves. The shape is Global > Tenant > (Env)? > Pipeline.
+ *
+ * Each environment node carries `scope: "environment"` with the env
+ * name as `scopeId` — that matches the config-resolver's
+ * `matchesScope("environment")` which compares scope_id to
+ * `input.environment` (the name). Per-env values seeded under
+ * `(tenant T, env E)` therefore resolve at that node.
+ *
+ * `envsByTenant` is optional — when omitted (legacy callers, smaller
+ * test scaffolds), the tree skips the env tier and looks exactly like
+ * the pre-PR4 shape so nothing breaks.
  */
 export function buildScopeTree(
   tenants: TenantLike[],
-  pipelines: PipelineLike[]
+  pipelines: PipelineLike[],
+  envsByTenant?: Record<string, string[]>
 ): ScopeNode {
   const sortedPipes = [...pipelines].sort((a, b) => a.name.localeCompare(b.name));
   const sortedTenants = [...tenants].sort((a, b) => a.name.localeCompare(b.name));
+
+  const pipelineChildren = (_tenantId: string, envKeyPrefix: string) =>
+    sortedPipes.map((p) => ({
+      key: `${envKeyPrefix}|pipeline:${p.id}`,
+      label: p.name,
+      scope: "pipeline" as const,
+      scopeId: p.id,
+      children: []
+    }));
+
   return {
     key: "global",
     label: "Global",
     scope: "global",
-    children: sortedTenants.map((t) => ({
-      key: `tenant:${t.id}`,
-      label: t.name,
-      scope: "tenant" as const,
-      scopeId: t.id,
-      children: sortedPipes.map((p) => ({
-        key: `tenant:${t.id}|pipeline:${p.id}`,
-        label: p.name,
-        scope: "pipeline" as const,
-        scopeId: p.id,
-        children: []
-      }))
-    }))
+    children: sortedTenants.map((t) => {
+      const envs = envsByTenant?.[t.id] ?? [];
+      const envChildren: ScopeNode[] = envs.map((envName) => ({
+        key: `tenant:${t.id}|env:${envName}`,
+        label: envName,
+        scope: "environment" as const,
+        // Env name (not id) — matches resolver's matchesScope() semantics.
+        scopeId: envName,
+        children: pipelineChildren(t.id, `tenant:${t.id}|env:${envName}`)
+      }));
+      // Tenant node ALWAYS lists pipelines too (so a "tenant-wide,
+      // any-env" config value remains a one-click select). Envs sit
+      // alongside as additional, more-specific scopes.
+      return {
+        key: `tenant:${t.id}`,
+        label: t.name,
+        scope: "tenant" as const,
+        scopeId: t.id,
+        children: [...envChildren, ...pipelineChildren(t.id, `tenant:${t.id}`)]
+      };
+    })
   };
 }
 

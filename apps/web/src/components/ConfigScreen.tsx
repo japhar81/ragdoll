@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../lib/api.ts";
 import type { ConfigDefinitionRow, ConfigValueRow } from "../lib/api.ts";
 import {
@@ -33,13 +33,38 @@ export function ConfigScreen() {
     queryFn: () => api.listConfigDefinitions()
   });
 
+  // Load each tenant's env list so the scope tree can render
+  // Tenant > Env > Pipeline. Each query keys on ["environments", tid]
+  // so the EnvironmentSelect on Scheduler / Tenants / Builder shares
+  // the same cache and we don't re-fetch.
+  const tenantRows = tenants.data?.tenants ?? [];
+  const envQueries = useQueries({
+    queries: tenantRows.map((t) => ({
+      queryKey: ["environments", t.id],
+      queryFn: () => api.listEnvironments(t.id),
+      enabled: !!t.id,
+      staleTime: 30_000
+    }))
+  });
+  const envsByTenant = useMemo<Record<string, string[]>>(() => {
+    const out: Record<string, string[]> = {};
+    tenantRows.forEach((t, i) => {
+      const data = envQueries[i]?.data;
+      if (data?.environments) {
+        out[t.id] = data.environments.map((e) => e.name);
+      }
+    });
+    return out;
+  }, [tenantRows, envQueries]);
+
   const scopeRoot = useMemo(
     () =>
       buildScopeTree(
         tenants.data?.tenants ?? [],
-        pipelines.data?.pipelines ?? []
+        pipelines.data?.pipelines ?? [],
+        envsByTenant
       ),
-    [tenants.data, pipelines.data]
+    [tenants.data, pipelines.data, envsByTenant]
   );
   const node = findScopeNode(scopeRoot, selectedKey) ?? scopeRoot;
 

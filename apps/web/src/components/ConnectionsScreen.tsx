@@ -65,6 +65,32 @@ export function ConnectionsScreen() {
     enabled: Boolean(effectiveTenantId)
   });
 
+  // Back-reference: every dataset visible at (tenant, env), so we can
+  // count how many of them pin each connection name. Lazy — only
+  // fires when an env is selected (otherwise the dataset list is
+  // ambiguous and the count would mix tenant-wide + env-specific).
+  const datasets = useQuery({
+    queryKey: ["datasets", effectiveTenantId, envId],
+    queryFn: () =>
+      api.listDatasets({
+        tenantId: effectiveTenantId,
+        environmentId: envId || undefined
+      }),
+    enabled: Boolean(effectiveTenantId)
+  });
+  const datasetsByConnectionName = useMemo(() => {
+    const out: Record<string, string[]> = {};
+    for (const ds of datasets.data?.datasets ?? []) {
+      for (const [, backend] of Object.entries(ds.backends ?? {})) {
+        const cn = (backend as { connectionName?: string })?.connectionName;
+        if (typeof cn === "string") {
+          (out[cn] ??= []).push(ds.slug);
+        }
+      }
+    }
+    return out;
+  }, [datasets.data]);
+
   const canAdmin = auth.can("dataset:admin");
 
   const createMut = useMutation({
@@ -125,6 +151,24 @@ export function ConnectionsScreen() {
         accessor: (r) => (r.secretRefId ? "✓" : "—")
       },
       {
+        key: "datasets",
+        header: "Datasets",
+        // PR4 back-ref. Shows how many datasets in the active view
+        // reference this connection by name, with a tooltip listing
+        // their slugs — operators can spot "this connection is wired
+        // to 3 datasets, deleting will orphan them" before clicking.
+        accessor: (r) => (datasetsByConnectionName[r.name]?.length ?? 0).toString(),
+        cell: (r) => {
+          const refs = datasetsByConnectionName[r.name] ?? [];
+          if (refs.length === 0) return <span className="muted">—</span>;
+          return (
+            <span title={refs.join("\n")}>
+              {refs.length} dataset{refs.length === 1 ? "" : "s"}
+            </span>
+          );
+        }
+      },
+      {
         key: "actions",
         header: "",
         accessor: () => "",
@@ -144,7 +188,7 @@ export function ConnectionsScreen() {
           ) : null
       }
     ],
-    [canAdmin, deleteMut]
+    [canAdmin, deleteMut, datasetsByConnectionName]
   );
 
   return (
