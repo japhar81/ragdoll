@@ -41,7 +41,8 @@ import type {
   PipelineActivationRepository,
   DatasetRepository,
   DatasetVersionRepository,
-  DatasetAliasRepository
+  DatasetAliasRepository,
+  PipelineDatasetBindingRepository
 } from "../../../../packages/db/src/index.ts";
 import type { QueueJob } from "../index.ts";
 
@@ -82,6 +83,14 @@ export interface WorkerRepositories {
   datasets?: DatasetRepository;
   datasetVersions?: DatasetVersionRepository;
   datasetAliases?: DatasetAliasRepository;
+  /**
+   * Optional per-(pipeline, tenant, env) dataset binding overrides
+   * (PR3). When wired, the shared resolver consults the binding
+   * cascade BEFORE the default slug → env→tenant→global lookup, so
+   * operators can pin a pipeline's logical dataset slug to a
+   * specific row per environment without forking the spec.
+   */
+  pipelineDatasetBindings?: PipelineDatasetBindingRepository;
 }
 
 export interface WorkerDeps {
