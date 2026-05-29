@@ -26,6 +26,7 @@ import {
 } from "../../../packages/vector/src/index.ts";
 import type { IngestStateStore, PluginExecutionInput } from "../../../packages/plugin-sdk/src/index.ts";
 import type { RuntimeContext } from "../../../packages/core/src/index.ts";
+import { fakeVectorDataset } from "./test-helpers.ts";
 
 /** Minimal RuntimeContext built per-test — only the fields the plugins
  *  read (tenantId, resolvedConfig.values). Everything else is shimmed. */
@@ -548,7 +549,8 @@ test("qdrant_delete removes points by id from the (in-memory) store", async () =
     node: { id: "del", plugin: qdrantDeletePlugin.manifest, config: {}, secrets: {} },
     inputs: { deleted: [{ docId: "a.ts" }] },
     config: { collection: "codebase" },
-    secrets: {}
+    secrets: {},
+    dataset: fakeVectorDataset()
   } as unknown as PluginExecutionInput);
   assert.equal(result.outputs.deletedCount, 1);
   const remaining = await store.query("codebase", { vector: [1, 0, 0, 0], topK: 10, tenantId: "t" });
@@ -563,7 +565,8 @@ test("qdrant_delete tolerates empty input", async () => {
     node: { id: "del", plugin: qdrantDeletePlugin.manifest, config: {}, secrets: {} },
     inputs: { deleted: [] },
     config: { collection: "codebase" },
-    secrets: {}
+    secrets: {},
+    dataset: fakeVectorDataset()
   } as unknown as PluginExecutionInput);
   assert.equal(result.outputs.deletedCount, 0);
 });

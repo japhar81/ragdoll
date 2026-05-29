@@ -104,8 +104,42 @@ export interface PluginManifest {
    * both `["vector", "text"]`; vector-only plugins list `["vector"]`. Leave
    * undeclared on plugins that pick their modality from config at runtime
    * (e.g. dataset_search) — those skip the gate.
+   *
+   * @deprecated Prefer {@link requires} which also enforces backend provider.
+   * `datasetModalities` is kept for v1 plugins that haven't moved over.
    */
   datasetModalities?: DatasetModality[];
+  /**
+   * Stronger version of `datasetModalities`: declares the modality slot(s)
+   * the plugin uses AND optionally the backend provider it expects. The
+   * spec validator enforces:
+   *   - bound dataset declares each required modality (same as
+   *     `datasetModalities`), AND
+   *   - when `provider` is set, `dataset.backends[modality].provider`
+   *     matches.
+   *
+   * Plugins that declare `requires` MUST NOT expose host / port / URL
+   * fields in their `configSchema` — the dataset's resolved connection
+   * is the single source of truth for where to connect. The runtime
+   * hard-fails any node whose dataset doesn't resolve a connection for
+   * a required modality. Per-plugin behavioural knobs (batch sizes,
+   * retry counts, top-k) still live in `configSchema`.
+   *
+   * Multi-modal plugins (e.g. opensearch_hybrid_retriever) list each
+   * required slot — the validator enforces ALL of them.
+   *
+   * Multi-connection-per-dataset (R/W split, multi-region failover)
+   * is intentionally deferred to v2: today one `(dataset, modality)`
+   * resolves to exactly one connection. Document the chosen role
+   * convention (e.g. always-write, always-read) if it matters for a
+   * specific plugin family.
+   */
+  requires?: Array<{
+    modality: DatasetModality;
+    /** Optional. When set, validator + runtime check the bound
+     *  dataset's `backends[modality].provider` matches. */
+    provider?: string;
+  }>;
   configSchema?: JsonSchemaLike;
   secretsSchema?: JsonSchemaLike;
   inputSchema?: JsonSchemaLike;

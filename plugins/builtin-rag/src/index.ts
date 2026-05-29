@@ -1,6 +1,10 @@
 import { createHash } from "node:crypto";
 import type { InProcessPlugin } from "../../../packages/plugin-sdk/src/index.ts";
-import { pickBackendName, pickBackendUrl } from "./dataset-binding.ts";
+import {
+  pickBackendName,
+  pickBackendUrl,
+  requireBackendConnection
+} from "./dataset-binding.ts";
 import type { PipelineSpec } from "../../../packages/core/src/index.ts";
 import { OpenAIProvider, AnthropicProvider, OllamaCompatibleProvider, ProviderRegistry } from "../../../packages/providers/src/index.ts";
 
@@ -585,23 +589,24 @@ export const qdrantRetrieverPlugin: InProcessPlugin = {
     version: "1.0.0",
     category: "retriever",
     contract: 2,
+    // `requires` pins both the modality AND the provider. The Builder
+    // hides datasets that don't match, the spec validator surfaces
+    // mismatches at edit time, and the runtime hard-fails any node
+    // whose dataset doesn't resolve a `vector` connection.
+    requires: [{ modality: "vector", provider: "qdrant" }],
     datasetModalities: ["vector"],
-    description: "Queries a vector store (Qdrant or in-memory) for the top-K most similar documents.",
+    description: "Queries a Qdrant vector store for the top-K most similar documents.",
     configSchema: {
+      // PR1 of the requires roll-out: DSN fields (url/apiKey for cluster
+      // auth) are gone — the dataset's resolved connection is the only
+      // place those live now. What stays here is per-call behaviour
+      // (collection name fallback, topK, filter, query embedder choice).
       type: "object",
       properties: {
-        url: {
-          type: "string",
-          description: "Qdrant URL. Falls back to the in-memory store when unset."
-        },
-        apiKey: {
-          type: "string",
-          description: "Qdrant API key (passed to the vector store client)."
-        },
         collection: {
           type: "string",
           default: "default",
-          description: "Collection to query."
+          description: "Collection to query. Override per node when the dataset version's backend_collections mapping doesn't fit."
         },
         topK: {
           type: "integer",
@@ -658,25 +663,13 @@ export const qdrantRetrieverPlugin: InProcessPlugin = {
   },
   async execute(input) {
     const { inputs, config, secrets, context } = input;
-    const urlResolution = pickBackendUrl(input, "vector", {
-      cfgKey: "url",
-      envFallback: "QDRANT_URL",
+    const { url } = requireBackendConnection(input, "vector", {
+      pluginId: "qdrant_retriever",
       defaultPort: 6333
     });
-    if (urlResolution?.source === "config") {
-      console.warn(
-        JSON.stringify({
-          level: "warn",
-          message: "qdrant_retriever.legacy_config_url",
-          hint: "Bind the dataset's backend to a connection via the Connections screen.",
-          nodeId: input.node.id,
-          datasetSlug: input.dataset?.slug
-        })
-      );
-    }
     const store = createVectorStore({
-      url: urlResolution?.url,
-      apiKey: config.apiKey ? String(config.apiKey) : undefined
+      url,
+      apiKey: secrets.apiKey ? String(secrets.apiKey) : undefined
     });
     const collection = String(
       pickBackendName(input, "vector") ??
@@ -722,19 +715,15 @@ export const vectorUpsertPlugin: InProcessPlugin = {
     version: "1.0.0",
     category: "sink",
     contract: 2,
+    requires: [{ modality: "vector", provider: "qdrant" }],
     datasetModalities: ["vector"],
-    description: "Ensures a collection exists and upserts embedded chunks into the vector store.",
+    description: "Ensures a Qdrant collection exists and upserts embedded chunks into it.",
     configSchema: {
+      // PR1 of the requires roll-out: DSN fields (url/apiKey) are gone.
+      // The dataset's resolved connection provides them. What stays is
+      // per-call behaviour (collection name, distance metric, dim, id prefix).
       type: "object",
       properties: {
-        url: {
-          type: "string",
-          description: "Qdrant URL. Falls back to the in-memory store when unset."
-        },
-        apiKey: {
-          type: "string",
-          description: "Qdrant API key (passed to the vector store client)."
-        },
         collection: {
           type: "string",
           default: "default",
@@ -776,26 +765,11 @@ export const vectorUpsertPlugin: InProcessPlugin = {
   },
   async execute(input) {
     const { inputs, config, context } = input;
-    const urlResolution = pickBackendUrl(input, "vector", {
-      cfgKey: "url",
-      envFallback: "QDRANT_URL",
+    const { url } = requireBackendConnection(input, "vector", {
+      pluginId: "vector_upsert",
       defaultPort: 6333
     });
-    if (urlResolution?.source === "config") {
-      console.warn(
-        JSON.stringify({
-          level: "warn",
-          message: "vector_upsert.legacy_config_url",
-          hint: "Bind the dataset's backend to a connection via the Connections screen.",
-          nodeId: input.node.id,
-          datasetSlug: input.dataset?.slug
-        })
-      );
-    }
-    const store = createVectorStore({
-      url: urlResolution?.url,
-      apiKey: config.apiKey ? String(config.apiKey) : undefined
-    });
+    const store = createVectorStore({ url });
     const collection = String(
       pickBackendName(input, "vector") ??
         context.resolvedConfig.values["vector.collection"]?.value ??
@@ -1030,16 +1004,16 @@ export const qdrantVectorStorePlugin: InProcessPlugin = {
     version: "1.0.0",
     category: "vector_store",
     contract: 2,
+    requires: [{ modality: "vector", provider: "qdrant" }],
     datasetModalities: ["vector"],
     description:
-      "Ensures a collection exists and upserts embedded chunks/vectors into the vector store (Qdrant or in-memory).",
+      "Ensures a Qdrant collection exists and upserts embedded chunks/vectors into it.",
     configSchema: {
+      // PR1 of the requires roll-out: DSN fields (url) are gone. The
+      // dataset's resolved connection provides them. What stays is
+      // per-call behaviour (collection, distance metric, dimensions).
       type: "object",
       properties: {
-        url: {
-          type: "string",
-          description: "Qdrant URL. Falls back to the in-memory store when unset."
-        },
         collection: {
           type: "string",
           default: "default",
@@ -1090,30 +1064,12 @@ export const qdrantVectorStorePlugin: InProcessPlugin = {
   },
   async execute(input) {
     const { inputs, config, secrets, context } = input;
-    // PR3: the dataset's resolved connection wins. Falls back to
-    // legacy `config.url` / env when no connection is bound — that
-    // path emits a deprecation warning so operators see they should
-    // migrate the dataset to a connection. Plugins themselves know
-    // nothing about the host string except as a passthrough to the
-    // qdrant client.
-    const urlResolution = pickBackendUrl(input, "vector", {
-      cfgKey: "url",
-      envFallback: "QDRANT_URL",
+    const { url } = requireBackendConnection(input, "vector", {
+      pluginId: "qdrant_vector_store",
       defaultPort: 6333
     });
-    if (urlResolution?.source === "config") {
-      console.warn(
-        JSON.stringify({
-          level: "warn",
-          message: "qdrant_vector_store.legacy_config_url",
-          hint: "Bind the dataset's backend to a connection via the Connections screen to remove this warning.",
-          nodeId: input.node.id,
-          datasetSlug: input.dataset?.slug
-        })
-      );
-    }
     const store = createVectorStore({
-      url: urlResolution?.url,
+      url,
       apiKey: secrets.apiKey ? String(secrets.apiKey) : undefined
     });
     const collection = String(

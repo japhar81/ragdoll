@@ -9,6 +9,7 @@ import {
   openSearchHybridRetrieverPlugin
 } from "../src/index.ts";
 import type { RuntimeContext } from "../../../packages/core/src/index.ts";
+import { fakeTextDataset, fakeHybridDataset } from "./test-helpers.ts";
 
 function ctx(tenantId = "t1"): RuntimeContext {
   return {
@@ -121,6 +122,8 @@ test("opensearch_input maps hits to documents and filters by tenant when configu
     inputs: {},
     config: { ...CFG, index: "kb", query: "hello", textField: "text", tenantField: "tenantId" },
     secrets: {}
+,
+    dataset: fakeTextDataset({ host: "os.test" })
   });
   assert.equal(calls.length, 1);
   assert.deepEqual(searchBody.query.bool.must[0], { query_string: { query: "hello" } });
@@ -156,6 +159,8 @@ test("opensearch_output bulk-indexes documents, stamps tenantId, provisions kNN 
       distance: "cosine"
     },
     secrets: {}
+,
+    dataset: fakeTextDataset({ host: "os.test" })
   });
   assert.deepEqual(out.outputs, { indexed: 1 });
   const put = calls.find((c) => c.method === "PUT")!;
@@ -184,6 +189,8 @@ test("opensearch_bm25_retriever issues multi_match with tenant filter", async (t
     inputs: { question: "how do I reset?" },
     config: { ...CFG, index: "kb", fields: ["text", "title"], topK: 4 },
     secrets: {}
+,
+    dataset: fakeTextDataset({ host: "os.test" })
   });
   assert.equal(body.size, 4);
   assert.deepEqual(body.query.bool.must[0].multi_match.fields, ["text", "title"]);
@@ -218,6 +225,8 @@ test("opensearch_vector_retriever queries kNN and strips vector/tenant from payl
     inputs: { queryVector: [1, 0] },
     config: { ...CFG, index: "kb", topK: 5 },
     secrets: {}
+,
+    dataset: fakeTextDataset({ host: "os.test" })
   });
   assert.deepEqual(out.outputs.documents, [{ id: "p1", score: 0.8, text: "doc" }]);
 });
@@ -253,6 +262,8 @@ test("opensearch_hybrid_retriever applies user filter clauses to both arms", asy
       ]
     },
     secrets: {}
+,
+    dataset: fakeTextDataset({ host: "os.test" })
   });
   // Lexical arm: tenant filter (index 0) is followed by the raw clauses.
   assert.deepEqual(bodies.lexical.query.bool.filter[1], {
@@ -279,6 +290,8 @@ test("opensearch_hybrid_retriever applies user filter clauses to both arms", asy
       filter: { lang: "en", tag: ["a", "b"] }
     },
     secrets: {}
+,
+    dataset: fakeTextDataset({ host: "os.test" })
   });
   assert.deepEqual(bodies.lexical.query.bool.filter[1], { term: { lang: "en" } });
   assert.deepEqual(bodies.lexical.query.bool.filter[2], { terms: { tag: ["a", "b"] } });
@@ -314,6 +327,8 @@ test("opensearch_hybrid_retriever fuses lexical + kNN arms", async (t) => {
     inputs: { queryVector: [1, 0], question: "q" },
     config: { ...CFG, index: "kb", mode: "rrf", topK: 3 },
     secrets: {}
+,
+    dataset: fakeTextDataset({ host: "os.test" })
   });
   // Two _search calls (lexical + knn).
   assert.equal(calls.filter((c) => c.url.endsWith("/_search")).length, 2);

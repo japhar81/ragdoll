@@ -22,6 +22,7 @@ import {
   enrichQdrantError
 } from "../src/index.ts";
 import type { RuntimeContext } from "../../../packages/core/src/index.ts";
+import { fakeTextDataset, fakeHybridDataset } from "./test-helpers.ts";
 
 function ctx(tenantId = "t1"): RuntimeContext {
   return {
@@ -93,6 +94,8 @@ test("opensearch_output omits the vector field when vectors[i] is undefined", as
     inputs: { documents: [{ id: "a" }, { id: "b" }], vectors: [[1, 0]] },
     config: { ...CFG, index: "kb", vectorField: "vector", dimensions: 2 },
     secrets: {}
+,
+      dataset: fakeTextDataset({ host: "os.test" })
   });
   const bulk = calls.find((c) => c.url.includes("/_bulk"))!;
   const lines = (bulk.body as string).trim().split("\n");
@@ -116,6 +119,8 @@ test("opensearch_output drops empty-array vectors and counts them as skippedVect
     },
     config: { ...CFG, index: "kb", vectorField: "vector", dimensions: 2 },
     secrets: {}
+,
+      dataset: fakeTextDataset({ host: "os.test" })
   });
   // The empty-array vector is the poison shape that earlier rendered as
   // `null` in the OpenSearch bulk error preview. We dropped it instead.
@@ -140,6 +145,8 @@ test("opensearch_output drops wrong-length vectors when dimensions is declared",
     },
     config: { ...CFG, index: "kb", vectorField: "vector", dimensions: 2 },
     secrets: {}
+,
+      dataset: fakeTextDataset({ host: "os.test" })
   });
   assert.equal(out.outputs.skippedVectors, 1);
 });
@@ -183,6 +190,8 @@ test("opensearch_hybrid_retriever degrades to BM25-only when kNN arm 400s on mis
     inputs: { question: "anything", queryVector: [0.1, 0.2] },
     config: { ...CFG, index: "email_corpus", topK: 5, fields: ["text"] },
     secrets: {}
+,
+      dataset: fakeTextDataset({ host: "os.test" })
   });
   // Pipeline did NOT throw. Result includes the BM25 hit and signals
   // the degradation in output + metadata.
@@ -219,7 +228,8 @@ test("opensearch_hybrid_retriever still throws on unrelated 400s (real query bug
       node: { id: "ret", plugin: { category: "retriever", id: "opensearch_hybrid_retriever", version: "1.0.0" } },
       inputs: { question: "x", queryVector: [0.1] },
       config: { ...CFG, index: "email_corpus", topK: 5, fields: ["text"] },
-      secrets: {}
+      secrets: {},
+      dataset: fakeHybridDataset({ host: "os.test" })
     }),
     /HTTP 400/
   );

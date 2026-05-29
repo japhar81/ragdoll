@@ -16,7 +16,7 @@ import {
   OpenSearchVectorStore,
   createOpenSearchClient
 } from "../../../../packages/opensearch/src/index.ts";
-import { pickBackendName, pickBackendUrl } from "../dataset-binding.ts";
+import { pickBackendName, requireBackendConnection } from "../dataset-binding.ts";
 import { embedTexts } from "../helpers.ts";
 
 const OPENSEARCH_SECRETS_SCHEMA = {
@@ -42,49 +42,31 @@ const OPENSEARCH_SECRETS_SCHEMA = {
 } as const;
 
 /**
- * Build an OpenSearch client from loosely-typed plugin config + secrets, or throw.
+ * Build an OpenSearch client from the dataset's resolved connection.
+ * Throws when no connection is bound — every opensearch_* plugin
+ * declares `requires: [{modality, provider: "opensearch"}]`, and the
+ * spec validator catches a missing dataset binding at edit time, so
+ * a missing connection at execute time is a fatal install error
+ * (operator forgot to seed a connection row).
  *
- * Resolution order (PR3):
- *   1. `input.dataset.backends.text.connection` — the resolved
- *      per-(tenant, env) connection injected by the dataset resolver.
- *      `connection.config.scheme` (default "http://") + `host` + `port`
- *      builds the endpoint. Credentials still arrive via the plugin's
- *      own `secrets:` block — connection just provides the host so the
- *      same dataset can point at a tenant's specific OpenSearch host
- *      across envs.
- *   2. Legacy: `config.endpoint` — surfaced via deprecation warn so
- *      operators see they should migrate.
- *   3. `resolved["opensearch.url"]` — the original config-resolver
- *      fall-through.
- *   4. `process.env.OPENSEARCH_URL` — last resort, set by helm.
+ * Credentials still arrive via the plugin's `secrets:` block — connection
+ * holds the host so the same pipeline runs against tenant A's cluster
+ * in dev and tenant B's different cluster in prod with no spec changes.
+ * (`connection.secretRefId` integration is a follow-up; today the spec's
+ * secrets block is still where auth lives.)
  */
 function openSearchClientFrom(
   input: PluginExecutionInput,
   secrets: Record<string, string>
 ): OpenSearchClient {
-  const resolution = pickBackendUrl(input, "text", {
-    cfgKey: "endpoint",
-    envFallback: "OPENSEARCH_URL",
+  // PR1 of the requires roll-out: hard-fail on missing connection.
+  // No more config.endpoint fallback, no opensearch.url, no env var.
+  // The dataset's `text` backend MUST resolve a connection.
+  const pluginId = (input.node.plugin?.id as string | undefined) ?? "opensearch_plugin";
+  const { url: endpoint } = requireBackendConnection(input, "text", {
+    pluginId,
     defaultPort: 9200
   });
-  if (resolution?.source === "config") {
-    console.warn(
-      JSON.stringify({
-        level: "warn",
-        message: "opensearch.legacy_config_endpoint",
-        hint: "Bind the dataset's `text` backend to a connection via the Connections screen.",
-        nodeId: input.node.id,
-        datasetSlug: input.dataset?.slug
-      })
-    );
-  }
-  let endpoint = resolution?.url;
-  // Original config-resolver fall-through (preserved as a 4th-priority
-  // path so installs that still seed `opensearch.url` keep working).
-  if (!endpoint) {
-    const fromResolved = input.context.resolvedConfig.values["opensearch.url"]?.value;
-    if (typeof fromResolved === "string") endpoint = fromResolved;
-  }
   const client = createOpenSearchClient({
     endpoint,
     username: secrets.username,
@@ -93,7 +75,7 @@ function openSearchClientFrom(
   });
   if (!client) {
     throw new Error(
-      "OpenSearch endpoint not configured: bind the dataset's `text` backend to a connection, set config.endpoint, the opensearch.url config value, or the OPENSEARCH_URL env var."
+      `${pluginId}: failed to construct OpenSearch client from resolved endpoint ${endpoint}`
     );
   }
   return client;
@@ -273,15 +255,13 @@ export const openSearchInputPlugin: InProcessPlugin = {
     version: "1.0.0",
     category: "datasource",
     contract: 2,
+    requires: [{ modality: "text", provider: "opensearch" }],
+    datasetModalities: ["text"],
     description:
       "Reads documents from an OpenSearch index (optionally filtered by a query_string) and emits them for ingestion or context.",
     configSchema: {
       type: "object",
       properties: {
-        endpoint: {
-          type: "string",
-          description: "OpenSearch base URL. Falls back to the opensearch.url config value / OPENSEARCH_URL env."
-        },
         index: { type: "string", default: "default", description: "Index to read from." },
         query: {
           type: "string",
@@ -349,16 +329,13 @@ export const openSearchOutputPlugin: InProcessPlugin = {
     version: "1.0.0",
     category: "sink",
     contract: 2,
+    requires: [{ modality: "text", provider: "opensearch" }],
     datasetModalities: ["text"],
     description:
       "Bulk-indexes documents (or embedded chunks) into an OpenSearch index. Tags each doc with the tenant id and can provision a kNN index.",
     configSchema: {
       type: "object",
       properties: {
-        endpoint: {
-          type: "string",
-          description: "OpenSearch base URL. Falls back to the opensearch.url config value / OPENSEARCH_URL env."
-        },
         index: { type: "string", default: "default", description: "Target index." },
         idField: {
           type: "string",
@@ -549,16 +526,13 @@ export const openSearchBm25RetrieverPlugin: InProcessPlugin = {
     version: "1.0.0",
     category: "retriever",
     contract: 2,
+    requires: [{ modality: "text", provider: "opensearch" }],
     datasetModalities: ["text"],
     description:
       "Lexical (BM25) retrieval over an OpenSearch index using multi_match, scoped to the execution tenant.",
     configSchema: {
       type: "object",
       properties: {
-        endpoint: {
-          type: "string",
-          description: "OpenSearch base URL. Falls back to the opensearch.url config value / OPENSEARCH_URL env."
-        },
         index: { type: "string", default: "default", description: "Index to search." },
         fields: {
           type: "array",
@@ -637,6 +611,7 @@ export const openSearchVectorRetrieverPlugin: InProcessPlugin = {
     name: "OpenSearch Vector Retriever",
     version: "1.0.0",
     category: "retriever",
+    requires: [{ modality: "vector", provider: "opensearch" }],
     datasetModalities: ["vector"],
     contract: 2,
     description:
@@ -644,10 +619,6 @@ export const openSearchVectorRetrieverPlugin: InProcessPlugin = {
     configSchema: {
       type: "object",
       properties: {
-        endpoint: {
-          type: "string",
-          description: "OpenSearch base URL. Falls back to the opensearch.url config value / OPENSEARCH_URL env."
-        },
         index: { type: "string", default: "default", description: "kNN index to query." },
         topK: { type: "integer", default: 5, description: "Number of nearest documents to return." },
         filter: {
@@ -755,16 +726,16 @@ export const openSearchHybridRetrieverPlugin: InProcessPlugin = {
     version: "1.0.0",
     category: "retriever",
     contract: 2,
+    requires: [
+      { modality: "vector", provider: "opensearch" },
+      { modality: "text", provider: "opensearch" }
+    ],
     datasetModalities: ["vector", "text"],
     description:
       "Hybrid retrieval: runs BM25 lexical and kNN vector search over one OpenSearch index and fuses them (RRF or weighted).",
     configSchema: {
       type: "object",
       properties: {
-        endpoint: {
-          type: "string",
-          description: "OpenSearch base URL. Falls back to the opensearch.url config value / OPENSEARCH_URL env."
-        },
         index: {
           type: "string",
           default: "default",
