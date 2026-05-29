@@ -15,6 +15,62 @@ better inlined into the template that needs it.
 {{- end -}}
 
 {{/*
+Effective Secret name used by envFrom on every workload. Matches what
+the generated `secret.yaml` produces (when secrets.create) OR the
+operator-supplied name (when secrets.existingSecret is set).
+*/}}
+{{- define "ragdoll.secretName" -}}
+{{- if .Values.secrets.create -}}
+{{ printf "%s-ragdoll-secrets" .Release.Name }}
+{{- else -}}
+{{ default "ragdoll-secrets" .Values.secrets.existingSecret }}
+{{- end -}}
+{{- end -}}
+
+{{/*
+DATABASE_URL the chart pushes into the generated Secret. When bundled
+Postgres is on, points at the subchart's Service (named
+`<release>-bundledpostgres` — Bitnami's pattern is
+`<release>-<alias>`). Otherwise empty so the operator's secret
+provides it.
+*/}}
+{{- define "ragdoll.databaseUrl" -}}
+{{- if .Values.bundledpostgres.enabled -}}
+{{- $user := .Values.bundledpostgres.auth.username | default "ragdoll" -}}
+{{- $db := .Values.bundledpostgres.auth.database | default "ragdoll" -}}
+{{- $pwd := .Values.bundledpostgres.auth.password -}}
+{{- $host := printf "%s-bundledpostgres" .Release.Name -}}
+postgres://{{ $user }}:{{ $pwd | urlquery }}@{{ $host }}:5432/{{ $db }}
+{{- end -}}
+{{- end -}}
+
+{{/* REDIS_URL pointing at the Bitnami redis subchart. */}}
+{{- define "ragdoll.redisUrl" -}}
+{{- if .Values.bundledredis.enabled -}}
+{{- $host := printf "%s-bundledredis-master" .Release.Name -}}
+redis://{{ $host }}:6379
+{{- end -}}
+{{- end -}}
+
+{{/* QDRANT_URL when the bundled Qdrant is on. */}}
+{{- define "ragdoll.qdrantUrl" -}}
+{{- if .Values.bundledqdrant.enabled -}}
+http://ragdoll-qdrant:6333
+{{- else -}}
+{{ .Values.qdrant.url }}
+{{- end -}}
+{{- end -}}
+
+{{/* OPENSEARCH_URL when the bundled OpenSearch is on. */}}
+{{- define "ragdoll.opensearchUrl" -}}
+{{- if .Values.bundledopensearch.enabled -}}
+http://{{ .Release.Name }}-bundledopensearch:9200
+{{- else -}}
+{{ .Values.opensearch.url }}
+{{- end -}}
+{{- end -}}
+
+{{/*
 Common labels emitted on every resource. Merges the chart's own
 identity labels (`app.kubernetes.io/managed-by`, etc.) with whatever
 the operator passed in `commonLabels`. Per-resource templates set
@@ -90,10 +146,11 @@ Args: . (top-level chart values context).
 */}}
 {{- define "ragdoll.commonBackendEnv" -}}
 - name: QDRANT_URL
-  value: {{ .Values.qdrant.url | quote }}
-{{- if .Values.opensearch.url }}
+  value: {{ include "ragdoll.qdrantUrl" . | quote }}
+{{- $os := include "ragdoll.opensearchUrl" . -}}
+{{- if $os }}
 - name: OPENSEARCH_URL
-  value: {{ .Values.opensearch.url | quote }}
+  value: {{ $os | quote }}
 {{- end }}
 {{- if .Values.dgraph.url }}
 - name: DGRAPH_URL
@@ -131,7 +188,7 @@ hanging forever.
   imagePullPolicy: {{ .Values.image.pullPolicy }}
   envFrom:
     - secretRef:
-        name: {{ .Values.secrets.existingSecret }}
+        name: {{ include "ragdoll.secretName" . }}
   command:
     - sh
     - -ec

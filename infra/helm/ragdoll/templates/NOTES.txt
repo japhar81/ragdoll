@@ -1,0 +1,92 @@
+RAGdoll installed.
+
+────────────────────────────────────────────────────────────────────────────
+Status of bundled backends
+────────────────────────────────────────────────────────────────────────────
+{{ if .Values.bundledpostgres.enabled }}  Postgres   → bundled  ({{ .Release.Name }}-bundledpostgres:5432){{ else }}  Postgres   → BYO     (configure DATABASE_URL on Secret {{ include "ragdoll.secretName" . }}){{ end }}
+{{ if .Values.bundledredis.enabled    }}  Redis      → bundled  ({{ .Release.Name }}-bundledredis-master:6379){{ else }}  Redis      → BYO     (configure REDIS_URL on Secret {{ include "ragdoll.secretName" . }}){{ end }}
+{{ if .Values.bundledqdrant.enabled   }}  Qdrant     → bundled  (ragdoll-qdrant:6333){{ else }}  Qdrant     → BYO     ({{ .Values.qdrant.url }}){{ end }}
+{{ if .Values.bundledopensearch.enabled }}  OpenSearch → bundled  ({{ .Release.Name }}-bundledopensearch:9200){{ else }}  OpenSearch → disabled (set bundledopensearch.enabled=true OR opensearch.url){{ end }}
+
+────────────────────────────────────────────────────────────────────────────
+Sign in
+────────────────────────────────────────────────────────────────────────────
+{{- if .Values.secrets.create }}
+
+The bootstrap admin user is provisioned on the first api boot.
+Credentials live on Secret `{{ include "ragdoll.secretName" . }}`
+(annotated `helm.sh/resource-policy: keep` so they survive
+`helm uninstall`).
+
+  kubectl -n {{ .Release.Namespace }} get secret {{ include "ragdoll.secretName" . }} \
+    -o jsonpath='{.data.BOOTSTRAP_ADMIN_EMAIL}' | base64 -d ; echo
+  kubectl -n {{ .Release.Namespace }} get secret {{ include "ragdoll.secretName" . }} \
+    -o jsonpath='{.data.BOOTSTRAP_ADMIN_PASSWORD}' | base64 -d ; echo
+
+To reset to a new random password (note: invalidates the existing
+session tokens on rotation):
+
+  kubectl -n {{ .Release.Namespace }} delete secret {{ include "ragdoll.secretName" . }}
+  helm -n {{ .Release.Namespace }} upgrade {{ .Release.Name }} <chart> --reuse-values
+{{- else }}
+
+The bootstrap admin user is provisioned on the first api boot from
+BOOTSTRAP_ADMIN_EMAIL / BOOTSTRAP_ADMIN_PASSWORD on the secret you
+provided (`{{ .Values.secrets.existingSecret }}`).
+{{- end }}
+
+────────────────────────────────────────────────────────────────────────────
+Reaching the web UI / CLI / MCP
+────────────────────────────────────────────────────────────────────────────
+{{- if .Values.openshift.route.enabled }}
+
+OpenShift Route is enabled. Get the URL with:
+
+  oc -n {{ .Release.Namespace }} get route ragdoll -o jsonpath='{.spec.host}' ; echo
+
+The web UI, /api/* (CLI), and /mcp all land at this hostname through
+the bundled nginx proxy.
+{{- else if .Values.ingress.enabled }}
+
+Ingress is enabled. The web UI, /api/* (CLI), and /mcp all reach the
+cluster through the configured hostname(s):
+
+  {{- range .Values.ingress.hosts }}
+  - {{ .host }}
+  {{- end }}
+{{- else }}
+
+No external entrypoint is configured. Either:
+
+  • Enable Ingress (vanilla k8s):
+      helm upgrade {{ .Release.Name }} <chart> --set ingress.enabled=true \
+        --set ingress.hosts[0].host=ragdoll.example.com \
+        --set ingress.hosts[0].paths[0].path=/
+
+  • Enable an OpenShift Route:
+      helm upgrade {{ .Release.Name }} <chart> --set openshift.route.enabled=true
+
+  • Port-forward locally for quick testing:
+      kubectl -n {{ .Release.Namespace }} port-forward svc/ragdoll-web 8080:80
+      open http://localhost:8080
+{{- end }}
+
+────────────────────────────────────────────────────────────────────────────
+Production reminders
+────────────────────────────────────────────────────────────────────────────
+{{- if .Values.bundledpostgres.enabled }}
+{{- if or (eq .Values.bundledpostgres.auth.password "ragdoll-please-override") (eq .Values.bundledpostgres.auth.postgresPassword "ragdoll-please-override-admin") }}
+
+⚠  Bundled Postgres is using the chart's DEFAULT password. Override
+   for any non-throwaway install:
+
+     --set bundledpostgres.auth.password=<strong>
+     --set bundledpostgres.auth.postgresPassword=<different-strong>
+{{- end }}
+{{- end }}
+{{- if and .Values.bundledredis.enabled (not .Values.bundledredis.auth.enabled) }}
+
+   Bundled Redis runs without auth (cluster-internal Service only). If
+   your cluster shares the namespace with untrusted workloads, enable
+   `bundledredis.auth.enabled=true` and update REDIS_URL accordingly.
+{{- end }}
