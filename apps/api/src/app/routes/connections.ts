@@ -45,7 +45,7 @@ interface ConnectionsServices {
 function publicConnection(row: DatasourceConnectionRow): Record<string, unknown> {
   return {
     id: row.id,
-    tenantId: row.tenantId,
+    tenantId: row.tenantId ?? null,
     environmentId: row.environmentId ?? null,
     name: row.name,
     datasourceType: row.datasourceType,
@@ -76,15 +76,25 @@ export function registerConnectionsRoutes(
   // List — optional `?environmentId=` filter narrows to "rows that win
   // in this env" (env-specific + tenant-wide fallback). Without the
   // filter, lists every connection in the tenant.
+  //
+  // PR2: also includes global rows (tenantId IS NULL) so the UI can
+  // render the full cascade (Global → Tenant → Env) at every node.
+  // Listing without x-tenant-id surfaces ONLY globals (admin view).
   api.route("GET", "/api/connections", async (ctx) => {
     enforce(ctx.principal, "dataset:read");
     const tenantId = tenantScope(ctx);
     if (!tenantId) {
-      return error(400, "tenant_required", {
-        message: "x-tenant-id header required"
-      });
+      // No tenant context: admin "globals only" view.
+      const all = await connections.list();
+      const globals = all.filter((r) => !r.tenantId);
+      return ok({ connections: globals.map(publicConnection) });
     }
-    const rows = await connections.listByTenant(tenantId);
+    const [tenantRows, allRows] = await Promise.all([
+      connections.listByTenant(tenantId),
+      connections.list()
+    ]);
+    const globals = allRows.filter((r) => !r.tenantId);
+    const rows = [...globals, ...tenantRows];
     const envFilter =
       typeof ctx.request.query?.environmentId === "string"
         ? ctx.request.query.environmentId
@@ -112,7 +122,7 @@ export function registerConnectionsRoutes(
   api.route("GET", "/api/connections/:id", async (ctx) => {
     const row = await connections.get(ctx.params.id);
     if (!row) return error(404, "not_found", { message: "connection not found" });
-    enforce(ctx.principal, "dataset:read", { tenantId: row.tenantId });
+    enforce(ctx.principal, "dataset:read", { tenantId: row.tenantId ?? undefined });
     return ok({ connection: publicConnection(row) });
   });
 
@@ -121,11 +131,20 @@ export function registerConnectionsRoutes(
     if (!isObject(body)) {
       return error(422, "validation_failed", { issues: [{ message: "body required" }] });
     }
+    // Three scopes are valid for a connection:
+    //   - explicit `tenantId: null` in the body → global (admin-only)
+    //   - explicit `tenantId: "<uuid>"` → that tenant
+    //   - omitted → falls back to x-tenant-id header
+    // Global creation requires the operator's principal to hold
+    // `config:edit_global` (enforced below alongside dataset:admin).
+    const explicitGlobal = body.tenantId === null;
     const tenantId =
-      (typeof body.tenantId === "string" && body.tenantId) || tenantScope(ctx);
-    if (!tenantId) {
+      explicitGlobal
+        ? null
+        : (typeof body.tenantId === "string" && body.tenantId) || tenantScope(ctx) || null;
+    if (!explicitGlobal && !tenantId) {
       return error(422, "validation_failed", {
-        issues: [{ path: "tenantId", message: "tenantId required" }]
+        issues: [{ path: "tenantId", message: "tenantId required (or pass null for a global connection)" }]
       });
     }
     if (typeof body.name !== "string" || !/^[a-z0-9][a-z0-9_-]{0,62}$/.test(body.name)) {
@@ -145,21 +164,36 @@ export function registerConnectionsRoutes(
         ? body.environmentId
         : null;
 
-    const tenant = await tenants.get(tenantId);
-    if (!tenant) {
-      return error(422, "validation_failed", {
-        issues: [{ path: "tenantId", message: "unknown tenant" }]
-      });
-    }
-    if (environmentId) {
-      const envs = await environments.listByTenant(tenantId);
-      if (!envs.find((e) => e.name === environmentId)) {
+    if (tenantId) {
+      const tenant = await tenants.get(tenantId);
+      if (!tenant) {
         return error(422, "validation_failed", {
-          issues: [{ path: "environmentId", message: `unknown environment: ${environmentId}` }]
+          issues: [{ path: "tenantId", message: "unknown tenant" }]
         });
       }
+      if (environmentId) {
+        const envs = await environments.listByTenant(tenantId);
+        if (!envs.find((e) => e.name === environmentId)) {
+          return error(422, "validation_failed", {
+            issues: [{ path: "environmentId", message: `unknown environment: ${environmentId}` }]
+          });
+        }
+      }
+    } else if (environmentId) {
+      // Global rows can't carry an env scope — there's no tenant whose
+      // env catalog would validate it, and the cascade resolver only
+      // looks at (NULL, NULL) for the global tier.
+      return error(422, "validation_failed", {
+        issues: [{ path: "environmentId", message: "global connections cannot carry an environment" }]
+      });
     }
-    enforce(ctx.principal, "dataset:admin", { tenantId, environment: environmentId ?? undefined });
+    // Global creation needs config:edit_global (it affects every tenant).
+    // Tenant-scoped creation needs dataset:admin on that tenant.
+    enforce(
+      ctx.principal,
+      tenantId ? "dataset:admin" : "config:edit_global",
+      tenantId ? { tenantId, environment: environmentId ?? undefined } : {}
+    );
 
     const now = nowIso();
     const created = await connections.create({
@@ -186,10 +220,13 @@ export function registerConnectionsRoutes(
   api.route("PATCH", "/api/connections/:id", async (ctx) => {
     const before = await connections.get(ctx.params.id);
     if (!before) return error(404, "not_found", { message: "connection not found" });
-    enforce(ctx.principal, "dataset:admin", {
-      tenantId: before.tenantId,
-      environment: before.environmentId ?? undefined
-    });
+    enforce(
+      ctx.principal,
+      before.tenantId ? "dataset:admin" : "config:edit_global",
+      before.tenantId
+        ? { tenantId: before.tenantId, environment: before.environmentId ?? undefined }
+        : {}
+    );
     const body = ctx.request.body;
     if (!isObject(body)) {
       return error(422, "validation_failed", { issues: [{ message: "body required" }] });
@@ -229,10 +266,13 @@ export function registerConnectionsRoutes(
   api.route("DELETE", "/api/connections/:id", async (ctx) => {
     const before = await connections.get(ctx.params.id);
     if (!before) return error(404, "not_found", { message: "connection not found" });
-    enforce(ctx.principal, "dataset:admin", {
-      tenantId: before.tenantId,
-      environment: before.environmentId ?? undefined
-    });
+    enforce(
+      ctx.principal,
+      before.tenantId ? "dataset:admin" : "config:edit_global",
+      before.tenantId
+        ? { tenantId: before.tenantId, environment: before.environmentId ?? undefined }
+        : {}
+    );
     await connections.delete(before.id);
     await audit(ctx, "connection.delete", "connection", before.id, publicConnection(before), undefined);
     return { status: 204, body: undefined, headers: {} };

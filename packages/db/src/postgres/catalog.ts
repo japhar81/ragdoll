@@ -72,15 +72,27 @@ export class PostgresDatasourceConnectionRepository
     environmentId: string | undefined,
     name: string
   ): Promise<T.DatasourceConnectionRow | undefined> {
-    // ORDER BY environment_id DESC NULLS LAST puts the env-specific row
-    // first when present, falling through to the tenant-wide (NULL) row.
-    // LIMIT 1 picks the winner.
+    // Three-tier cascade. Each tier scored as a small integer so the
+    // single SELECT can pick the winner in one query:
+    //   3 = (tenant=T, env=E)     env-specific match
+    //   2 = (tenant=T, env=NULL)  tenant-wide override
+    //   1 = (tenant=NULL, env=NULL) global default
+    // Anything else (e.g. some other tenant's row) is excluded by the WHERE.
     const rows = await this.queryRows(
-      `SELECT * FROM datasource_connections
-       WHERE tenant_id = $1
-         AND name = $2
-         AND (environment_id = $3 OR environment_id IS NULL)
-       ORDER BY environment_id DESC NULLS LAST
+      `SELECT *,
+              CASE
+                WHEN tenant_id = $1 AND environment_id = $3 THEN 3
+                WHEN tenant_id = $1 AND environment_id IS NULL THEN 2
+                WHEN tenant_id IS NULL AND environment_id IS NULL THEN 1
+                ELSE 0
+              END AS _tier
+       FROM datasource_connections
+       WHERE name = $2
+         AND (
+           (tenant_id = $1 AND (environment_id = $3 OR environment_id IS NULL))
+           OR (tenant_id IS NULL AND environment_id IS NULL)
+         )
+       ORDER BY _tier DESC
        LIMIT 1`,
       [tenantId, name, environmentId ?? null]
     );

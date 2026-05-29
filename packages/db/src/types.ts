@@ -385,12 +385,19 @@ export interface ProviderModelRow {
 
 export interface DatasourceConnectionRow {
   id: UUID;
-  tenantId: UUID;
+  /**
+   * Owning tenant. `null` means "global" — applies to every tenant
+   * as a fallback the per-tenant rows can override. Operators with
+   * `config:edit_global` create globals; tenant-admins can only
+   * create rows scoped to their own tenant.
+   */
+  tenantId?: UUID | null;
   /**
    * Per-environment scope. `null` means "applies to every environment
    * in this tenant" (the tenant-wide fallback). When set to an
    * environment name, this row beats the tenant-wide one for that env.
-   * The resolver cascade is: (tenant, env) → (tenant, null) → not found.
+   * The resolver cascade is:
+   *   (tenant=T, env=E) → (tenant=T, env=null) → (tenant=null, env=null)
    */
   environmentId?: string | null;
   name: string;

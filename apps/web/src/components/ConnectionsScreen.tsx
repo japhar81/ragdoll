@@ -153,7 +153,12 @@ const CONNECTION_SCHEMAS: Record<string, JsonSchemaLike> = {
  */
 interface RowView {
   conn: ConnectionView;
-  source: "env_specific" | "tenant_wide" | "inherited_from_tenant";
+  source:
+    | "env_specific"
+    | "tenant_wide"
+    | "global"
+    | "inherited_from_tenant"
+    | "inherited_from_global";
 }
 
 export function ConnectionsScreen() {
@@ -188,36 +193,31 @@ export function ConnectionsScreen() {
     () => buildScopeTree(tenantRows, [], envsByTenant),
     [tenantRows, envsByTenant]
   );
+  // Default to the Global root — PR2's whole point is that global is
+  // now a real first-class scope, not the dead end it was before.
   const [selectedKey, setSelectedKey] = useState<string>("global");
-  // Auto-select the first tenant once the list loads so the screen
-  // isn't sitting on the "pick a tenant" prompt — global root has
-  // nothing useful to show for connections (they're per-tenant).
-  useEffect(() => {
-    if (selectedKey === "global" && tenantRows.length > 0) {
-      setSelectedKey(`tenant:${tenantRows[0].id}`);
-    }
-  }, [tenantRows, selectedKey]);
   const node = findScopeNode(scopeRoot, selectedKey) ?? scopeRoot;
 
   // Resolve the (tenantId, envId) the right panel operates on.
-  // Tenant root → (T, null=tenant-wide rows). Env node → (T, env).
-  // Global → no tenant yet, prompt to pick one.
-  const ctx = useMemo<{ tenantId?: string; envId?: string }>(() => {
-    if (node.scope === "tenant") return { tenantId: node.scopeId };
+  //   Global root  → no tenant scope (admin "global rows" view)
+  //   Tenant root  → (T, null=tenant-wide rows)
+  //   Env node     → (T, env)
+  const ctx = useMemo<{ tenantId?: string; envId?: string; isGlobal: boolean }>(() => {
+    if (node.scope === "global") return { isGlobal: true };
+    if (node.scope === "tenant") return { tenantId: node.scopeId, isGlobal: false };
     if (node.scope === "environment") {
       // Walk up the key to find the tenant — key shape `tenant:T|env:E`.
       const m = node.key.match(/^tenant:([^|]+)\|env:(.+)$/);
-      return { tenantId: m?.[1], envId: m?.[2] };
+      return { tenantId: m?.[1], envId: m?.[2], isGlobal: false };
     }
-    return {};
+    return { isGlobal: false };
   }, [node]);
 
-  // Always list every connection for the tenant; the right panel
-  // filters/synthesises the view per scope.
+  // Always list every connection in scope (the list endpoint already
+  // mixes globals in when a tenant is set).
   const connections = useQuery({
-    queryKey: ["connections", ctx.tenantId],
-    queryFn: () => api.listConnections({ tenantId: ctx.tenantId! }),
-    enabled: !!ctx.tenantId
+    queryKey: ["connections", ctx.tenantId ?? "global"],
+    queryFn: () => api.listConnections({ tenantId: ctx.tenantId ?? "" })
   });
 
   // Back-ref data — every dataset in the tenant scope that pins a
@@ -244,26 +244,42 @@ export function ConnectionsScreen() {
 
   const rowViews = useMemo<RowView[]>(() => {
     const all = connections.data?.connections ?? [];
+    // Global root: only show rows that are themselves global.
+    if (ctx.isGlobal) {
+      return all
+        .filter((c) => !c.tenantId)
+        .map<RowView>((c) => ({ conn: c, source: "global" }));
+    }
     if (!ctx.tenantId) return [];
     if (!ctx.envId) {
-      // Tenant root: show ONLY the tenant-wide rows (env=null). Env-
-      // specific rows belong under their env nodes.
-      return all
-        .filter((c) => !c.environmentId)
-        .map((c) => ({ conn: c, source: "tenant_wide" as const }));
+      // Tenant root: show tenant-wide rows (env=null, tenant=T) and
+      // inherited globals whose name isn't also defined at tenant scope.
+      const tenantWide = all.filter((c) => c.tenantId === ctx.tenantId && !c.environmentId);
+      const tenantNames = new Set(tenantWide.map((c) => c.name));
+      const inheritedGlobals = all
+        .filter((c) => !c.tenantId && !tenantNames.has(c.name))
+        .map<RowView>((c) => ({ conn: c, source: "inherited_from_global" }));
+      return [
+        ...tenantWide.map<RowView>((c) => ({ conn: c, source: "tenant_wide" })),
+        ...inheritedGlobals
+      ];
     }
-    // Env node: env-specific rows for this env + inherited tenant-wide
-    // rows whose name ISN'T also defined env-specifically.
-    const envRows = all.filter((c) => c.environmentId === ctx.envId);
-    const definedNames = new Set(envRows.map((c) => c.name));
-    const inherited = all
-      .filter((c) => !c.environmentId && !definedNames.has(c.name))
-      .map<RowView>((c) => ({ conn: c, source: "inherited_from_tenant" }));
+    // Env node: env-specific rows + inherited tenant-wide rows +
+    // inherited globals, in cascade order. Inherited rows are filtered
+    // so any name with a more-specific row doesn't double-render.
+    const envRows = all.filter((c) => c.tenantId === ctx.tenantId && c.environmentId === ctx.envId);
+    const envNames = new Set(envRows.map((c) => c.name));
+    const tenantWide = all.filter(
+      (c) => c.tenantId === ctx.tenantId && !c.environmentId && !envNames.has(c.name)
+    );
+    const tenantWideNames = new Set([...envNames, ...tenantWide.map((c) => c.name)]);
+    const inheritedGlobals = all.filter((c) => !c.tenantId && !tenantWideNames.has(c.name));
     return [
       ...envRows.map<RowView>((c) => ({ conn: c, source: "env_specific" })),
-      ...inherited
+      ...tenantWide.map<RowView>((c) => ({ conn: c, source: "inherited_from_tenant" })),
+      ...inheritedGlobals.map<RowView>((c) => ({ conn: c, source: "inherited_from_global" }))
     ];
-  }, [connections.data, ctx.tenantId, ctx.envId]);
+  }, [connections.data, ctx.tenantId, ctx.envId, ctx.isGlobal]);
 
   const canAdmin = auth.can("dataset:admin");
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -336,9 +352,9 @@ export function ConnectionsScreen() {
             />
           )}
 
-          {ctx.tenantId && canAdmin && (
+          {(ctx.tenantId || ctx.isGlobal) && canAdmin && (
             <ConnectionEditor
-              tenantId={ctx.tenantId}
+              tenantId={ctx.tenantId ?? null}
               envId={ctx.envId}
               editingConn={
                 editingId
@@ -349,7 +365,7 @@ export function ConnectionsScreen() {
               onDone={() => {
                 setEditingId(null);
                 setPrefill(null);
-                qc.invalidateQueries({ queryKey: ["connections", ctx.tenantId] });
+                qc.invalidateQueries({ queryKey: ["connections"] });
               }}
             />
           )}
@@ -360,17 +376,24 @@ export function ConnectionsScreen() {
 }
 
 function ScopeHeader({ node }: { node: ScopeNode }) {
+  if (node.scope === "global") {
+    return (
+      <h2>
+        <strong>Global</strong> · cluster-wide defaults inherited by every tenant
+      </h2>
+    );
+  }
   if (node.scope === "tenant") {
     return (
       <h2>
-        Tenant <strong>{node.label}</strong> · tenant-wide connections (env=null)
+        Tenant <strong>{node.label}</strong> · tenant-wide connections + inherited globals
       </h2>
     );
   }
   if (node.scope === "environment") {
     return (
       <h2>
-        Env <strong>{node.label}</strong> · effective (env-specific + inherited)
+        Env <strong>{node.label}</strong> · effective (env-specific + inherited tenant + inherited global)
       </h2>
     );
   }
@@ -480,8 +503,13 @@ function SourceBadge(props: { source: RowView["source"] }) {
   const map: Record<RowView["source"], { label: string; color: string }> = {
     env_specific: { label: "env-specific", color: "var(--status-succeeded)" },
     tenant_wide: { label: "tenant-wide", color: "var(--status-running)" },
+    global: { label: "global", color: "var(--accent)" },
     inherited_from_tenant: {
-      label: "inherited",
+      label: "inherited (tenant)",
+      color: "var(--text-muted)"
+    },
+    inherited_from_global: {
+      label: "inherited (global)",
       color: "var(--text-muted)"
     }
   };
@@ -511,7 +539,8 @@ function SourceBadge(props: { source: RowView["source"] }) {
  *   - both null → POST a blank new row
  */
 function ConnectionEditor(props: {
-  tenantId: string;
+  /** `null` → creating/editing a global connection (tenantId=null). */
+  tenantId: string | null;
   envId?: string;
   editingConn: ConnectionView | null;
   prefill: Partial<ConnectionView> | null;
@@ -542,18 +571,21 @@ function ConnectionEditor(props: {
 
   const createMut = useMutation({
     mutationFn: () =>
-      api.createConnection(props.tenantId, {
+      // tenantId === null → POST with `tenantId: null` so the API
+      // creates a global row (admin-only path).
+      api.createConnection(props.tenantId ?? "", {
         name,
         datasourceType: type,
         environmentId: props.envId ?? null,
-        config
+        config,
+        ...(props.tenantId === null ? { tenantId: null } : {})
       }),
     onSuccess: () => props.onDone(),
     onError: (e) => setErr(errText(e))
   });
   const updateMut = useMutation({
     mutationFn: () =>
-      api.updateConnection(props.editingConn!.id, props.tenantId, {
+      api.updateConnection(props.editingConn!.id, props.tenantId ?? "", {
         name,
         datasourceType: type,
         config
@@ -570,7 +602,11 @@ function ConnectionEditor(props: {
           : props.prefill
             ? `Overriding "${props.prefill.name}" for env ${props.envId}`
             : `New connection${
-                props.envId ? ` (env: ${props.envId})` : " (tenant-wide)"
+                props.tenantId === null
+                  ? " (global)"
+                  : props.envId
+                    ? ` (env: ${props.envId})`
+                    : " (tenant-wide)"
               }`}
       </h3>
       <div className="form-row">

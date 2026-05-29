@@ -241,9 +241,69 @@ test("PATCH and DELETE round-trip", async () => {
   assert.equal(after.status, 404);
 });
 
-test("GET /api/connections returns 400 without x-tenant-id", async () => {
+test("GET /api/connections without x-tenant-id returns ONLY global rows (admin view)", async () => {
+  // PR2: no tenant header → admin "globals only" view. Empty list is fine.
   const h = buildHarness();
   const res = await h.request({ method: "GET", path: "/api/connections" });
-  assert.equal(res.status, 400);
-  assert.equal(res.body.error, "tenant_required");
+  assert.equal(res.status, 200);
+  // No tenants seeded → empty list (no globals either).
+  assert.deepEqual(res.body.connections, []);
+});
+
+test("POST /api/connections with `tenantId: null` creates a global row", async () => {
+  // PR2: `tenantId: null` in the body opts into a global connection
+  // that every tenant inherits. dataset:admin / config:edit_global
+  // gating is enforced server-side; the dev harness's default role
+  // (platform_admin) holds both, so the create lands.
+  const h = buildHarness();
+  const res = await h.request({
+    method: "POST",
+    path: "/api/connections",
+    body: {
+      tenantId: null,
+      name: "os",
+      datasourceType: "opensearch",
+      config: { host: "shared.example", port: 9200 }
+    }
+  });
+  assert.equal(res.status, 201, `expected 201, got ${res.status}: ${JSON.stringify(res.body).slice(0, 200)}`);
+  assert.equal(res.body.connection.tenantId, null);
+  assert.equal(res.body.connection.name, "os");
+});
+
+test("POST global with environmentId rejects — globals can't carry env scope", async () => {
+  const h = buildHarness();
+  const res = await h.request({
+    method: "POST",
+    path: "/api/connections",
+    body: {
+      tenantId: null,
+      environmentId: "prod",
+      name: "os",
+      datasourceType: "opensearch",
+      config: {}
+    }
+  });
+  assert.equal(res.status, 422);
+  assert.match(JSON.stringify(res.body), /global connections cannot carry an environment/);
+});
+
+test("GET /api/connections with x-tenant-id includes inherited globals", async () => {
+  const h = buildHarness();
+  const tenantId = await seedTenantAndEnvs(h);
+  // Seed one global row.
+  await h.request({
+    method: "POST",
+    path: "/api/connections",
+    body: { tenantId: null, name: "shared-os", datasourceType: "opensearch", config: { host: "g.example" } }
+  });
+  // Tenant view should list the global row too.
+  const res = await h.request({
+    method: "GET",
+    path: "/api/connections",
+    headers: { "x-tenant-id": tenantId }
+  });
+  assert.equal(res.status, 200);
+  const names = res.body.connections.map((c: { name: string }) => c.name);
+  assert.ok(names.includes("shared-os"), "global row visible to the tenant");
 });

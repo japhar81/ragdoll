@@ -838,13 +838,14 @@ export const api = {
   // Per-(tenant, env) host + creds for backing stores. The list endpoint's
   // optional env filter dedupes by name and surfaces the row the cascade
   // resolver would actually pick (env-specific > tenant-wide fallback).
-  listConnections: (filter: { tenantId: string; environmentId?: string }) =>
+  listConnections: (filter: { tenantId?: string; environmentId?: string }) =>
     request<{ connections: ConnectionView[] }>(
       "GET",
       `/api/connections${qs({ environmentId: filter.environmentId })}`,
       undefined,
       {
-        "x-tenant-id": filter.tenantId,
+        // Empty tenantId → admin-only "globals" view; no header sent.
+        ...(filter.tenantId ? { "x-tenant-id": filter.tenantId } : {}),
         ...(filter.environmentId ? { "x-environment": filter.environmentId } : {})
       }
     ),
@@ -858,6 +859,8 @@ export const api = {
     input: {
       name: string;
       datasourceType: string;
+      /** Pass `null` in the body to create a global connection. */
+      tenantId?: string | null;
       environmentId?: string | null;
       secretRefId?: string | null;
       config?: Record<string, unknown>;
@@ -869,7 +872,7 @@ export const api = {
       "POST",
       "/api/connections",
       input,
-      { "x-tenant-id": tenantId }
+      tenantId ? { "x-tenant-id": tenantId } : {}
     ),
   updateConnection: (
     id: string,
