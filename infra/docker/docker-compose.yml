@@ -70,6 +70,13 @@ services:
       - "6333:6333"
     volumes:
       - qdrant-data:/qdrant/storage
+    # Network alias so the bundled-demo connection seeds (which use the
+    # helm-style hostnames) resolve here too. Same trick on every
+    # bundled backing service below — one seeded `connection.host` then
+    # works unmodified in BOTH compose AND helm.
+    networks:
+      default:
+        aliases: ["ragdoll-qdrant"]
 
   # Dgraph standalone (zero + alpha in one container) for the graph
   # modality — used by the dgraph_upsert / dgraph_query plugins.
@@ -83,6 +90,9 @@ services:
       - "9081:9080"
     volumes:
       - dgraph-data:/dgraph
+    networks:
+      default:
+        aliases: ["ragdoll-dgraph"]
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8080/health || exit 1"]
       interval: 10s
@@ -118,6 +128,9 @@ services:
       - "9200:9200"
     volumes:
       - opensearch-data:/usr/share/opensearch/data
+    networks:
+      default:
+        aliases: ["ragdoll-bundledopensearch"]
     healthcheck:
       test:
         [
@@ -135,6 +148,9 @@ services:
       - "11434:11434"
     volumes:
       - ollama-data:/root/.ollama
+    networks:
+      default:
+        aliases: ["ragdoll-ollama"]
 
   # One-shot: wait for Ollama, then pull the CPU models the demo needs.
   ollama-pull:
