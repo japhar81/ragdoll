@@ -8,7 +8,7 @@
  * lines including the secrets schema, client factory, and question
  * extraction) out of the main barrel.
  */
-import type { InProcessPlugin } from "../../../../packages/plugin-sdk/src/index.ts";
+import type { InProcessPlugin, PluginExecutionInput } from "../../../../packages/plugin-sdk/src/index.ts";
 import type { DistanceMetric } from "../../../../packages/vector/src/index.ts";
 import {
   OpenSearchClient,
@@ -16,7 +16,7 @@ import {
   OpenSearchVectorStore,
   createOpenSearchClient
 } from "../../../../packages/opensearch/src/index.ts";
-import { pickBackendName } from "../dataset-binding.ts";
+import { pickBackendName, pickBackendUrl } from "../dataset-binding.ts";
 import { embedTexts } from "../helpers.ts";
 
 const OPENSEARCH_SECRETS_SCHEMA = {
@@ -41,15 +41,50 @@ const OPENSEARCH_SECRETS_SCHEMA = {
   additionalProperties: false
 } as const;
 
-/** Build an OpenSearch client from loosely-typed plugin config + secrets, or throw. */
+/**
+ * Build an OpenSearch client from loosely-typed plugin config + secrets, or throw.
+ *
+ * Resolution order (PR3):
+ *   1. `input.dataset.backends.text.connection` — the resolved
+ *      per-(tenant, env) connection injected by the dataset resolver.
+ *      `connection.config.scheme` (default "http://") + `host` + `port`
+ *      builds the endpoint. Credentials still arrive via the plugin's
+ *      own `secrets:` block — connection just provides the host so the
+ *      same dataset can point at a tenant's specific OpenSearch host
+ *      across envs.
+ *   2. Legacy: `config.endpoint` — surfaced via deprecation warn so
+ *      operators see they should migrate.
+ *   3. `resolved["opensearch.url"]` — the original config-resolver
+ *      fall-through.
+ *   4. `process.env.OPENSEARCH_URL` — last resort, set by helm.
+ */
 function openSearchClientFrom(
-  config: Record<string, unknown>,
-  secrets: Record<string, string>,
-  resolved: Record<string, { value: unknown } | undefined>
+  input: PluginExecutionInput,
+  secrets: Record<string, string>
 ): OpenSearchClient {
-  const endpoint =
-    (config.endpoint ? String(config.endpoint) : undefined) ??
-    (resolved["opensearch.url"]?.value as string | undefined);
+  const resolution = pickBackendUrl(input, "text", {
+    cfgKey: "endpoint",
+    envFallback: "OPENSEARCH_URL",
+    defaultPort: 9200
+  });
+  if (resolution?.source === "config") {
+    console.warn(
+      JSON.stringify({
+        level: "warn",
+        message: "opensearch.legacy_config_endpoint",
+        hint: "Bind the dataset's `text` backend to a connection via the Connections screen.",
+        nodeId: input.node.id,
+        datasetSlug: input.dataset?.slug
+      })
+    );
+  }
+  let endpoint = resolution?.url;
+  // Original config-resolver fall-through (preserved as a 4th-priority
+  // path so installs that still seed `opensearch.url` keep working).
+  if (!endpoint) {
+    const fromResolved = input.context.resolvedConfig.values["opensearch.url"]?.value;
+    if (typeof fromResolved === "string") endpoint = fromResolved;
+  }
   const client = createOpenSearchClient({
     endpoint,
     username: secrets.username,
@@ -58,7 +93,7 @@ function openSearchClientFrom(
   });
   if (!client) {
     throw new Error(
-      "OpenSearch endpoint not configured (set config.endpoint, the opensearch.url config value, or the OPENSEARCH_URL env var)."
+      "OpenSearch endpoint not configured: bind the dataset's `text` backend to a connection, set config.endpoint, the opensearch.url config value, or the OPENSEARCH_URL env var."
     );
   }
   return client;
@@ -283,7 +318,7 @@ export const openSearchInputPlugin: InProcessPlugin = {
   },
   async execute(input) {
     const { config, secrets, context } = input;
-    const client = openSearchClientFrom(config, secrets, context.resolvedConfig.values);
+    const client = openSearchClientFrom(input, secrets);
     const index = String(pickBackendName(input, "keyword") ?? "default");
     const size = Math.max(1, Number(config.size ?? 100));
     const textField = String(config.textField ?? "text");
@@ -377,7 +412,7 @@ export const openSearchOutputPlugin: InProcessPlugin = {
   },
   async execute(input) {
     const { inputs, config, secrets, context } = input;
-    const client = openSearchClientFrom(config, secrets, context.resolvedConfig.values);
+    const client = openSearchClientFrom(input, secrets);
     const index = String(pickBackendName(input, "keyword") ?? "default");
     const idField = config.idField ? String(config.idField) : undefined;
     const vectorField = config.vectorField ? String(config.vectorField) : undefined;
@@ -565,7 +600,7 @@ export const openSearchBm25RetrieverPlugin: InProcessPlugin = {
   },
   async execute(input) {
     const { inputs, config, secrets, context } = input;
-    const client = openSearchClientFrom(config, secrets, context.resolvedConfig.values);
+    const client = openSearchClientFrom(input, secrets);
     const index = String(pickBackendName(input, "keyword") ?? "default");
     const topK = Math.max(1, Number(config.topK ?? 5));
     const fields = Array.isArray(config.fields) ? (config.fields as string[]) : ["text"];
@@ -670,7 +705,7 @@ export const openSearchVectorRetrieverPlugin: InProcessPlugin = {
   },
   async execute(input) {
     const { inputs, config, secrets, context } = input;
-    const client = openSearchClientFrom(config, secrets, context.resolvedConfig.values);
+    const client = openSearchClientFrom(input, secrets);
     const store = new OpenSearchVectorStore({ client });
     // OpenSearch's "index" is the same physical store name regardless of
     // whether it's used for vector or keyword reads; the dataset's
@@ -824,7 +859,7 @@ export const openSearchHybridRetrieverPlugin: InProcessPlugin = {
   },
   async execute(input) {
     const { inputs, config, secrets, context } = input;
-    const client = openSearchClientFrom(config, secrets, context.resolvedConfig.values);
+    const client = openSearchClientFrom(input, secrets);
     const index = String(
       pickBackendName(input, "keyword") ??
         pickBackendName(input, "vector") ??

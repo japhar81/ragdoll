@@ -100,6 +100,7 @@ function DatasetDetail(props: { dataset: DatasetView; canAdmin: boolean }) {
               .join(", ")
           : "no backends declared"}
       </div>
+      <DatasetBackendResolutionPanel dataset={props.dataset} />
       {props.canAdmin && <AddBackendForm dataset={props.dataset} />}
 
       <h4>Embedding profile</h4>
@@ -997,5 +998,119 @@ function EditableDisplayName(props: {
         cancel
       </button>
     </span>
+  );
+}
+
+/**
+ * Cross-ref panel (PR4): for each modality on the dataset whose
+ * backend block carries a `connectionName`, resolve the connection
+ * with the cascade endpoint for the current tenant + env, and render
+ * a chip with the host + cascade reason + a "open in Connections"
+ * link. Lets operators trace dataset → connection in one click.
+ *
+ * `useTenants().selectedId` + the URL's `?env=` give the active
+ * (tenant, env) view; both are part of the dataset detail's existing
+ * scope picker.
+ */
+function DatasetBackendResolutionPanel(props: { dataset: DatasetView }) {
+  const tenants = useTenants();
+  // Active tenant for the resolution view: the dataset's own tenant
+  // if scoped, otherwise the first tenant in the list (global datasets
+  // have no inherent tenant — the operator picks one to see what the
+  // cascade would pick for THAT tenant).
+  const tenantList = tenants.tenants;
+  const tenantId = props.dataset.tenantId ?? tenantList[0]?.id;
+  // Active env: dataset-scoped if env-scoped, else the URL query, else "dev".
+  const url = new URL(window.location.href);
+  const env =
+    props.dataset.environmentId ?? url.searchParams.get("env") ?? "dev";
+
+  // Each modality with a `connectionName` gets one resolve query.
+  const backendEntries = Object.entries(props.dataset.backends ?? {}).filter(
+    ([, raw]) => typeof (raw as { connectionName?: string })?.connectionName === "string"
+  );
+  if (backendEntries.length === 0) return null;
+
+  return (
+    <>
+      <h4 style={{ marginTop: 16 }}>Resolved connections (tenant: {tenantId?.slice(0, 8)}…, env: {env})</h4>
+      <table className="muted" style={{ fontSize: "0.9em", marginTop: 4 }}>
+        <thead>
+          <tr>
+            <th align="left">Modality</th>
+            <th align="left">Connection</th>
+            <th align="left">Resolved host</th>
+            <th align="left">Cascade</th>
+          </tr>
+        </thead>
+        <tbody>
+          {backendEntries.map(([modality, raw]) => {
+            const connName = (raw as { connectionName: string }).connectionName;
+            return (
+              <BackendResolutionRow
+                key={modality}
+                modality={modality}
+                connectionName={connName}
+                tenantId={tenantId}
+                env={env}
+              />
+            );
+          })}
+        </tbody>
+      </table>
+    </>
+  );
+}
+
+function BackendResolutionRow(props: {
+  modality: string;
+  connectionName: string;
+  tenantId: string | undefined;
+  env: string;
+}) {
+  const navigate = useNavigate();
+  const q = useQuery({
+    queryKey: ["connection-resolve", props.tenantId, props.connectionName, props.env],
+    queryFn: () =>
+      api.resolveConnection(props.tenantId!, props.connectionName, props.env),
+    enabled: !!props.tenantId
+  });
+  if (!props.tenantId) {
+    return (
+      <tr>
+        <td>{props.modality}</td>
+        <td>{props.connectionName}</td>
+        <td colSpan={2} style={{ color: "var(--text-muted)" }}>(no active tenant)</td>
+      </tr>
+    );
+  }
+  const reasonColor =
+    q.data?.reason === "env_specific"
+      ? "var(--status-succeeded)"
+      : q.data?.reason === "tenant_fallback"
+        ? "var(--status-running)"
+        : "var(--status-cancelled)";
+  const host = q.data?.resolved
+    ? `${(q.data.resolved.config as { host?: string }).host ?? "?"}${
+        (q.data.resolved.config as { port?: number }).port
+          ? `:${(q.data.resolved.config as { port?: number }).port}`
+          : ""
+      }`
+    : "—";
+  return (
+    <tr>
+      <td>{props.modality}</td>
+      <td>
+        <button
+          className="link-btn"
+          onClick={() => navigate("/connections")}
+          title="Open in Connections"
+        >
+          {props.connectionName}
+        </button>
+      </td>
+      <td>{q.isLoading ? "…" : host}</td>
+      <td style={{ color: reasonColor }}>{q.data?.reason ?? "…"}</td>
+    </tr>
   );
 }

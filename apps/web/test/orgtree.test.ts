@@ -148,6 +148,40 @@ test("buildScopeTree builds Global -> Tenant -> Pipeline", () => {
   assert.equal(pipe.key, "tenant:t1|pipeline:p1");
 });
 
+test("buildScopeTree inserts env tier between tenant and pipeline when envsByTenant given", () => {
+  // Two tenants, each with a different env list. Tenant Beta has no
+  // envs (omitted from the map) so its node skips the env tier
+  // entirely — proves the "legacy callers see the original shape"
+  // promise of the optional arg.
+  const root = buildScopeTree(
+    [
+      { id: "t1", name: "Acme" },
+      { id: "t2", name: "Beta Inc" }
+    ],
+    [{ id: "p1", name: "Support RAG" }],
+    { t1: ["dev", "prod"] }
+  );
+  const acme = root.children[0];
+  // tenant has env children FIRST (more-specific) then pipeline
+  // children (tenant-wide scope), interleaved.
+  const childKinds = acme.children.map((c) => c.scope);
+  assert.deepEqual(childKinds, ["environment", "environment", "pipeline"]);
+  const dev = acme.children[0];
+  assert.equal(dev.scope, "environment");
+  assert.equal(dev.scopeId, "dev", "env scopeId is the env NAME, matching the resolver's matchesScope()");
+  assert.equal(dev.key, "tenant:t1|env:dev");
+  // Env nodes carry pipeline children with env-prefixed keys so an
+  // env-scoped pipeline-scope value is still selectable separately.
+  const devPipe = dev.children[0];
+  assert.equal(devPipe.scope, "pipeline");
+  assert.equal(devPipe.key, "tenant:t1|env:dev|pipeline:p1");
+  // Tenant Beta has no envs in the map → falls back to the legacy
+  // shape (tenant -> pipeline directly, no env tier).
+  const beta = root.children[1];
+  assert.equal(beta.children.length, 1);
+  assert.equal(beta.children[0].scope, "pipeline");
+});
+
 test("findScopeNode locates nodes by key", () => {
   const root = buildScopeTree(
     [{ id: "t1", name: "Acme" }],

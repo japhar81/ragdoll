@@ -19,6 +19,7 @@ import { routeToDoc, type HelpDocSlug } from "./lib/help.ts";
 import { PipelineBuilder } from "./components/PipelineBuilder.tsx";
 import { PipelinesScreen } from "./components/PipelinesScreen.tsx";
 import { DatasetsScreen } from "./components/DatasetsScreen.tsx";
+import { ConnectionsScreen } from "./components/ConnectionsScreen.tsx";
 import { SchedulerScreen } from "./components/SchedulerScreen.tsx";
 import { TenantsScreen } from "./components/TenantsScreen.tsx";
 import { ConfigScreen } from "./components/ConfigScreen.tsx";
@@ -154,7 +155,11 @@ const NAV_GROUPS: Array<{ group: string; items: NavItem[] }> = [
         label: "Config",
         perms: ["config:edit_global", "config:edit_tenant", "config:edit_pipeline"]
       },
-      { path: "/secrets", label: "Secrets", perms: ["secret:manage_tenant"] }
+      { path: "/secrets", label: "Secrets", perms: ["secret:manage_tenant"] },
+      // Per-(tenant, env) backing-store host + creds registry. Datasets
+      // reference these by name; plugins resolve them through the dataset
+      // and never see the host directly.
+      { path: "/connections", label: "Connections", perms: ["dataset:read"] }
     ]
   },
   {
@@ -342,6 +347,7 @@ function Shell() {
         <Route path="/tenants" element={<TenantsScreen />} />
         <Route path="/config" element={<ConfigScreen />} />
         <Route path="/secrets" element={<SecretsScreen />} />
+        <Route path="/connections" element={<ConnectionsScreen />} />
         <Route path="/executions" element={<ExecutionsScreen />} />
         <Route path="/audit" element={<AuditScreen />} />
         <Route path="/usage" element={<UsageScreen />} />

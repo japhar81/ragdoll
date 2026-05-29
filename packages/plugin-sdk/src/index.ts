@@ -204,6 +204,46 @@ export interface DatasetRef {
  * `backendCollections` so the plugin's existing read/write code path
  * keeps working unchanged.
  */
+/**
+ * Per-modality backend block on a resolved dataset. The shape mirrors the
+ * raw `datasets.backends.<modality>` JSONB (so `provider`, `index`,
+ * `collection`, etc. flow through), with one synthetic addition: when the
+ * raw block carries `connectionName`, the resolver looks up the matching
+ * connection for the current (tenant, env), and stamps the host / port /
+ * creds onto `connection` here. Plugins read everything they need to
+ * reach the backing store from this block — they never see the raw
+ * hostname or secret in their own `config`.
+ */
+export interface ResolvedDatasetBackend {
+  /** "opensearch" | "qdrant" | "dgraph" | "pgvector" | "postgres" | … */
+  provider?: string;
+  /** Name of the connection the dataset's backend references. Always
+   *  carried through from the raw block so the UI can render the chain. */
+  connectionName?: string;
+  /** Resolved connection — only set when `connectionName` was on the raw
+   *  block AND the cascade resolver found a matching row. */
+  connection?: {
+    /** Connection name (= connectionName for back-reference). */
+    name: string;
+    /** Datasource type, e.g. "opensearch". */
+    type: string;
+    /** Host and port surfaced for convenience; full config lives in
+     *  `config` (the raw connection.configRedacted). */
+    host?: string;
+    port?: number;
+    /** Secret reference the plugin uses to fetch credentials via the
+     *  existing SecretProvider. Plugins never see plaintext here. */
+    secretRefId?: string | null;
+    config: Record<string, unknown>;
+    /** Diagnostic — `env_specific` when an env override was applied,
+     *  `tenant_fallback` when the env=null tenant-wide row was used. */
+    cascadeReason: "env_specific" | "tenant_fallback";
+  };
+  /** Any other modality-specific fields from the raw block (collection,
+   *  index, table name, etc.) come through unchanged. */
+  [key: string]: unknown;
+}
+
 export interface ResolvedDataset {
   id: string;
   slug: string;
@@ -220,8 +260,15 @@ export interface ResolvedDataset {
     status: "building" | "ready" | "archived";
   };
   /** Backend collection / index names per modality, as recorded on the
-   *  resolved version. e.g. `{ vector: "rag_acme_kb_v3" }`. */
+   *  resolved version. e.g. `{ vector: "rag_acme_kb_v3" }`. Plugins that
+   *  use `pickBackendName()` keep reading this for the collection name. */
   backendCollections: Record<string, string>;
+  /** Per-modality resolved backend blocks (PR2). Each block carries the
+   *  provider + any backend-specific fields, plus an optional resolved
+   *  `connection` (host/port/creds) when the dataset's backend pointed at
+   *  a connection name. v2+ plugins read `connection.host` / `secretRefId`
+   *  from here instead of taking them as their own `config.url` etc. */
+  backends: Record<string, ResolvedDatasetBackend>;
 }
 
 /**

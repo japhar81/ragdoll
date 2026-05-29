@@ -832,8 +832,107 @@ export const api = {
       "PATCH",
       `/api/datasets/${encodeURIComponent(datasetId)}/aliases/${encodeURIComponent(alias)}`,
       { versionId }
+    ),
+
+  // ---- datasource connections ------------------------------------------
+  // Per-(tenant, env) host + creds for backing stores. The list endpoint's
+  // optional env filter dedupes by name and surfaces the row the cascade
+  // resolver would actually pick (env-specific > tenant-wide fallback).
+  listConnections: (filter: { tenantId: string; environmentId?: string }) =>
+    request<{ connections: ConnectionView[] }>(
+      "GET",
+      `/api/connections${qs({ environmentId: filter.environmentId })}`,
+      undefined,
+      {
+        "x-tenant-id": filter.tenantId,
+        ...(filter.environmentId ? { "x-environment": filter.environmentId } : {})
+      }
+    ),
+  getConnection: (id: string) =>
+    request<{ connection: ConnectionView }>(
+      "GET",
+      `/api/connections/${encodeURIComponent(id)}`
+    ),
+  createConnection: (
+    tenantId: string,
+    input: {
+      name: string;
+      datasourceType: string;
+      environmentId?: string | null;
+      secretRefId?: string | null;
+      config?: Record<string, unknown>;
+      allowedHosts?: string[];
+      denyPrivateNetworks?: boolean;
+    }
+  ) =>
+    request<{ connection: ConnectionView }>(
+      "POST",
+      "/api/connections",
+      input,
+      { "x-tenant-id": tenantId }
+    ),
+  updateConnection: (
+    id: string,
+    tenantId: string,
+    patch: {
+      name?: string;
+      datasourceType?: string;
+      secretRefId?: string | null;
+      config?: Record<string, unknown>;
+      allowedHosts?: string[];
+      denyPrivateNetworks?: boolean;
+    }
+  ) =>
+    request<{ connection: ConnectionView }>(
+      "PATCH",
+      `/api/connections/${encodeURIComponent(id)}`,
+      patch,
+      { "x-tenant-id": tenantId }
+    ),
+  deleteConnection: (id: string, tenantId: string) =>
+    request<void>(
+      "DELETE",
+      `/api/connections/${encodeURIComponent(id)}`,
+      undefined,
+      { "x-tenant-id": tenantId }
+    ),
+  /**
+   * Diagnostic: "what does the cascade resolver actually pick for this
+   * name in this env?" Used by the UI's `Datasets` and `Builder` panels
+   * to show which connection a dataset references.
+   */
+  resolveConnection: (
+    tenantId: string,
+    name: string,
+    environmentId?: string
+  ) =>
+    request<{
+      resolved: ConnectionView | null;
+      reason: "env_specific" | "tenant_fallback" | "no_match";
+    }>(
+      "GET",
+      `/api/connections/resolve/${encodeURIComponent(name)}${qs({ environmentId })}`,
+      undefined,
+      {
+        "x-tenant-id": tenantId,
+        ...(environmentId ? { "x-environment": environmentId } : {})
+      }
     )
 };
+
+export interface ConnectionView {
+  id: string;
+  tenantId: string;
+  environmentId: string | null;
+  name: string;
+  datasourceType: string;
+  secretRefId: string | null;
+  config: Record<string, unknown>;
+  allowedHosts: string[];
+  denyPrivateNetworks: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
 
 // ---- response row shapes (loosely typed; only fields the UI reads) -------
 

@@ -386,6 +386,13 @@ export interface ProviderModelRow {
 export interface DatasourceConnectionRow {
   id: UUID;
   tenantId: UUID;
+  /**
+   * Per-environment scope. `null` means "applies to every environment
+   * in this tenant" (the tenant-wide fallback). When set to an
+   * environment name, this row beats the tenant-wide one for that env.
+   * The resolver cascade is: (tenant, env) → (tenant, null) → not found.
+   */
+  environmentId?: string | null;
   name: string;
   datasourceType: string;
   secretRefId?: UUID | null;
@@ -781,6 +788,19 @@ export interface ProviderModelRepository extends CrudRepository<ProviderModelRow
 
 export interface DatasourceConnectionRepository extends CrudRepository<DatasourceConnectionRow> {
   listByTenant(tenantId: UUID): Promise<DatasourceConnectionRow[]>;
+  /**
+   * Cascade resolver. Returns the most-specific connection matching
+   * `name` for the given (tenantId, environmentId): an env-specific
+   * row wins; otherwise the tenant-wide row with `environment_id IS
+   * NULL`; otherwise undefined. Mirrors the dataset resolver's
+   * env→tenant→global fall-through (datasets have one extra global
+   * tier; connections stop at tenant).
+   */
+  resolveForEnv(
+    tenantId: UUID,
+    environmentId: string | undefined,
+    name: string
+  ): Promise<DatasourceConnectionRow | undefined>;
 }
 
 export interface VectorCollectionRepository extends CrudRepository<VectorCollectionRow> {
