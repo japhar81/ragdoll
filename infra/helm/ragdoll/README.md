@@ -296,6 +296,55 @@ router (`edge`), with insecure HTTP redirected. Override
 `openshift.route.tls.termination` to `passthrough` / `reencrypt` if
 your security model needs end-to-end TLS.
 
+## Observability — OTel push vs Prometheus pull
+
+RAGdoll's observability path is built on the OpenTelemetry SDK with a
+single shared `MeterProvider`. The chart lets you attach **either or
+both** backends — every metric the app code emits via `getMeter()`
+fans out to whichever readers are active. No call site needs to know
+which backend is on.
+
+| `otel.enabled` | `prometheus.enabled` | Behaviour |
+| --- | --- | --- |
+| `true` (default) | `false` (default) | Legacy single-OTLP-push to `otel.endpoint`. Identical to the docker-compose LGTM bundle. |
+| `false` | `true` | Pull-only — `/metrics` on each pod, scraped by a `ServiceMonitor`. Use when prometheus-operator is your platform-standard. |
+| `true` | `true` | **Both readers attached to the same MeterProvider.** Use during a migration between systems, or to feed Prometheus for HPA decisions while keeping OTLP for tracing/log correlation. |
+| `false` | `false` | Metrics fully off — `getMeter()` returns a `NoopMeter`. Zero-cost calls; useful for stripped-down installs. |
+
+Logs + traces continue to push over OTLP regardless of either toggle
+(controlled by `OTEL_LOGS_ENABLED` / `OTEL_TRACES_ENABLED` env vars
+on the deployments).
+
+Enable Prometheus scraping:
+
+```sh
+helm upgrade ragdoll infra/helm/ragdoll \
+  --set prometheus.enabled=true
+```
+
+This adds a named `metrics` port (default 9464) on the api + worker
+Services + Deployments, a marker label `prometheus-scrape: "true"`,
+a headless `ragdoll-worker` Service so the operator's Prometheus can
+discover the worker pods, plus a `ServiceMonitor` and starter
+`PrometheusRule`. The latter two CRDs ship with prometheus-operator
+— the chart runs a `helm lookup` at template time and fails with a
+clear message if the CRD isn't installed. Override
+`prometheus.assumeCrdsInstalled=true` to bypass the check when
+rendering offline (e.g. `helm template` in CI).
+
+Pin the ServiceMonitor's `release` label so your Prometheus picks it
+up:
+
+```sh
+helm upgrade ragdoll infra/helm/ragdoll \
+  --set prometheus.enabled=true \
+  --set 'prometheus.serviceMonitor.additionalLabels.release=kube-prometheus-stack'
+```
+
+See [`docs/admin/prometheus.md`](../../../docs/admin/prometheus.md)
+for the operator-side guide (installing kube-prometheus-stack, label
+discovery, cardinality controls, default starter alerts).
+
 ## Bootstrap admin
 
 `server.ts` runs `bootstrapAccessControl()` on every boot. If a user

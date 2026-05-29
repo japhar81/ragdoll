@@ -4,6 +4,12 @@ metadata:
   name: ragdoll-api
   labels:
     app: ragdoll-api
+    {{- if .Values.prometheus.enabled }}
+    # Marker label the chart's ServiceMonitor selects on. Only stamped
+    # when prometheus.enabled so disabling the pull path also removes
+    # the api from the ServiceMonitor's match set.
+    prometheus-scrape: "true"
+    {{- end }}
     {{- include "ragdoll.commonLabels" . | nindent 4 }}
   {{- with (include "ragdoll.commonAnnotations" . | trim) }}
   annotations:
@@ -16,3 +22,8 @@ spec:
     - name: http
       port: 80
       targetPort: {{ .Values.api.port }}
+    {{- if .Values.prometheus.enabled }}
+    - name: metrics
+      port: {{ .Values.prometheus.port }}
+      targetPort: metrics
+    {{- end }}

@@ -158,10 +158,26 @@ Args: . (top-level chart values context).
 {{- end }}
 - name: RAGDOLL_VECTOR_BACKEND
   value: {{ .Values.vectorBackend | quote }}
+# OTEL metric/log/trace push path. The endpoint is always set so
+# traces + logs continue to flow even when metric PUSH is off; the
+# OTEL_METRICS_ENABLED flag below specifically gates only the metrics
+# reader in wireOtelMetrics() (see packages/observability/src/index.ts).
 - name: OTEL_EXPORTER_OTLP_ENDPOINT
   value: {{ .Values.otel.endpoint | quote }}
 - name: OTEL_RESOURCE_ATTRIBUTES
   value: {{ .Values.otel.resourceAttributes | quote }}
+- name: OTEL_METRICS_ENABLED
+  value: {{ ternary "true" "false" (default true .Values.otel.enabled) | quote }}
+# Prometheus pull path. When enabled, the OTel SDK additionally
+# attaches a PrometheusExporter that starts an HTTP listener on the
+# configured port and serves the SAME metric stream as the OTLP push
+# (single MeterProvider, multiple readers — no double-invocation).
+- name: PROMETHEUS_METRICS_ENABLED
+  value: {{ ternary "true" "false" .Values.prometheus.enabled | quote }}
+{{- if .Values.prometheus.enabled }}
+- name: PROMETHEUS_METRICS_PORT
+  value: {{ .Values.prometheus.port | quote }}
+{{- end }}
 {{- if .Values.pythonPlugins.enabled }}
 - name: PYTHON_PLUGIN_URL
   value: "http://{{ .Release.Name }}-python-plugins:{{ .Values.pythonPlugins.port }}"

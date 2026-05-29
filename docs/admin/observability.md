@@ -5,6 +5,12 @@ RAGdoll ships a fully wired observability stack in the local Docker compose:
 `grafana/otel-lgtm` container that also hosts the OpenTelemetry Collector
 the API and worker push to. One container, three signals, one URL.
 
+> **In Kubernetes?** This doc covers the local docker-compose LGTM
+> bundle. In-cluster, RAGdoll's metrics can be EITHER pushed to an
+> OTel collector OR pulled by an existing Prometheus / prometheus-
+> operator install (or both at once during a migration). See
+> [`prometheus.md`](./prometheus.md) for the operator-side guide.
+
 ## What's in the box
 
 | Signal      | Backend     | What you see                                                |

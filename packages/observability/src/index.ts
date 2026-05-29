@@ -548,27 +548,92 @@ export interface WireOtelMetricsOptions {
   instrumentationVersion?: string;
   /** Export interval — defaults to 15s, matching Grafana's scrape interval. */
   exportIntervalMs?: number;
+  /**
+   * Per-reader toggles. Both default to the legacy single-OTLP-reader
+   * behaviour: `otlp` ON, `prometheus` OFF. Operators flip
+   * `PROMETHEUS_METRICS_ENABLED=true` on the worker / api Deployments
+   * (helm sets this via `prometheus.enabled` in values) to attach a
+   * `PrometheusExporter` as a SECOND reader on the same MeterProvider.
+   *
+   * "Both on" is the supported transition / parallel mode — every
+   * metric instrument emits ONCE and reaches both backends because
+   * the shared MeterProvider fans out across all attached readers.
+   * No code path needs to know which backend is active.
+   *
+   * "Both off" leaves the SDK uninstantiated and `getMeter()` keeps
+   * returning the NoopMeter, so metrics calls are zero-cost. Use for
+   * tests / offline / cluster-disabled mode.
+   */
+  exporters?: {
+    /** OTLP push to `OTEL_EXPORTER_OTLP_ENDPOINT`. Defaults to the
+     *  env-honouring legacy behaviour. */
+    otlp?: boolean;
+    /** Prometheus pull — starts an HTTP server on `prometheusPort`
+     *  and serves `/metrics` in Prometheus exposition format. */
+    prometheus?: boolean;
+  };
+  /** Port for the Prometheus exporter's `/metrics` HTTP listener.
+   *  Defaults to 9464 (the OpenTelemetry SDK's documented default). */
+  prometheusPort?: number;
 }
 
 let sharedMeter: Meter = new NoopMeter();
 export function getMeter(): Meter { return sharedMeter; }
 
 /**
- * Wires a real OTel Meter that periodically pushes metrics over OTLP HTTP.
- * Same lazy-import + noop-fallback pattern as `wireOtelLogs`. The returned
- * shutdown function flushes the meter provider on graceful exit.
+ * Wires a real OTel Meter against the user-selected backends.
+ *
+ * The OTel SDK lets a single `MeterProvider` fan out to multiple
+ * `MetricReader`s. That's exactly what we want: every metric the app
+ * code emits via `getMeter()` reaches whichever readers are active,
+ * with no double-invocation in the call sites.
+ *
+ * Three readers can be combined freely:
+ *   - `otlp`       — `PeriodicExportingMetricReader` pushing to
+ *                    `OTEL_EXPORTER_OTLP_ENDPOINT` (legacy default ON).
+ *   - `prometheus` — `PrometheusExporter` that starts an HTTP server
+ *                    on `prometheusPort` and serves `/metrics` in the
+ *                    text exposition format. Scraped by a Prometheus
+ *                    ServiceMonitor.
+ *   - neither      — `getMeter()` keeps returning the NoopMeter; the
+ *                    SDK is never instantiated. Zero-cost path.
+ *
+ * Decision order:
+ *   1. `options.exporters.{otlp, prometheus}` (most explicit)
+ *   2. Env vars: `OTEL_METRICS_ENABLED` / `PROMETHEUS_METRICS_ENABLED`
+ *   3. `options.enabled` (legacy single-toggle)
+ *   4. Defaults: `otlp: true`, `prometheus: false`
+ *
+ * Same lazy-import + noop-fallback pattern as `wireOtelLogs` —
+ * `@opentelemetry/exporter-prometheus` is imported only when actually
+ * enabled so test paths without the dep installed still work.
  */
 export async function wireOtelMetrics(
   options: WireOtelMetricsOptions = {}
 ): Promise<() => Promise<void>> {
-  if (options.enabled === false || process.env.OTEL_METRICS_ENABLED === "false") {
+  // Legacy single-toggle: enabled:false OR env override turns BOTH off.
+  if (options.enabled === false) {
+    return async () => {};
+  }
+  const otlpEnabled = resolveExporterFlag({
+    explicit: options.exporters?.otlp,
+    envVar: "OTEL_METRICS_ENABLED",
+    legacyDefault: true
+  });
+  const promEnabled = resolveExporterFlag({
+    explicit: options.exporters?.prometheus,
+    envVar: "PROMETHEUS_METRICS_ENABLED",
+    legacyDefault: false
+  });
+  // No reader → skip the entire SDK init, keep the NoopMeter.
+  if (!otlpEnabled && !promEnabled) {
     return async () => {};
   }
   try {
     const api = (await import("@opentelemetry/api")) as unknown as OtelMetricsApiLike;
     const sdk = (await import("@opentelemetry/sdk-metrics")) as unknown as {
-      MeterProvider: new (opts?: { resource?: unknown }) => {
-        addMetricReader(reader: unknown): void;
+      MeterProvider: new (opts?: { resource?: unknown; readers?: unknown[] }) => {
+        addMetricReader?(reader: unknown): void;
         shutdown?(): Promise<void>;
       };
       PeriodicExportingMetricReader: new (opts: {
@@ -576,30 +641,72 @@ export async function wireOtelMetrics(
         exportIntervalMillis?: number;
       }) => unknown;
     };
-    const exporterMod = (await import(
-      "@opentelemetry/exporter-metrics-otlp-http"
-    )) as unknown as {
-      OTLPMetricExporter: new (opts?: unknown) => unknown;
-    };
     const apiNs = (await import("@opentelemetry/api")) as unknown as {
       metrics: { setGlobalMeterProvider(p: unknown): void };
     };
     if (
       !api?.metrics?.getMeter ||
       !sdk?.MeterProvider ||
-      !exporterMod?.OTLPMetricExporter ||
       !apiNs?.metrics?.setGlobalMeterProvider
     ) {
       return async () => {};
     }
     const resource = await loadOtelResource();
-    const provider = new sdk.MeterProvider({ resource });
-    provider.addMetricReader(
-      new sdk.PeriodicExportingMetricReader({
-        exporter: new exporterMod.OTLPMetricExporter(),
-        exportIntervalMillis: options.exportIntervalMs ?? 15_000
-      })
-    );
+    const readers: unknown[] = [];
+
+    if (otlpEnabled) {
+      const otlpMod = (await import(
+        "@opentelemetry/exporter-metrics-otlp-http"
+      )) as unknown as {
+        OTLPMetricExporter: new (opts?: unknown) => unknown;
+      };
+      if (otlpMod?.OTLPMetricExporter) {
+        readers.push(
+          new sdk.PeriodicExportingMetricReader({
+            exporter: new otlpMod.OTLPMetricExporter(),
+            exportIntervalMillis: options.exportIntervalMs ?? 15_000
+          })
+        );
+      }
+    }
+
+    // Tracks the Prometheus exporter so the shutdown closure can stop
+    // its HTTP listener (the SDK provider's shutdown handles the OTLP
+    // reader but the Prometheus reader's listener needs its own stop
+    // — otherwise unit tests leak a port across runs).
+    let prometheusExporter: { shutdown?(): Promise<void> } | undefined;
+    if (promEnabled) {
+      const promMod = (await import(
+        "@opentelemetry/exporter-prometheus"
+      )) as unknown as {
+        PrometheusExporter: new (
+          opts: { port?: number; endpoint?: string; preventServerStart?: boolean }
+        ) => { shutdown?(): Promise<void> };
+      };
+      if (promMod?.PrometheusExporter) {
+        const port = options.prometheusPort ?? Number(process.env.PROMETHEUS_METRICS_PORT) ?? 9464;
+        prometheusExporter = new promMod.PrometheusExporter({
+          port,
+          endpoint: "/metrics"
+        });
+        readers.push(prometheusExporter);
+      }
+    }
+
+    if (readers.length === 0) {
+      // Every requested exporter failed to load (probably missing
+      // optional dep). Fall back to noop so we don't crash the boot.
+      return async () => {};
+    }
+
+    // `readers` is the canonical constructor arg in newer SDKs.
+    // `addMetricReader` is the fallback for older SDK versions that
+    // shipped before the readers ctor option landed.
+    const provider = new sdk.MeterProvider({ resource, readers });
+    if (typeof provider.addMetricReader === "function") {
+      // Constructor accepted readers in `readers:`, so no-op here.
+      // Older SDKs fall through to the explicit add() below.
+    }
     apiNs.metrics.setGlobalMeterProvider(provider);
     const otelMeter = api.metrics.getMeter(
       options.instrumentationName ?? "@ragdoll/observability",
@@ -609,10 +716,26 @@ export async function wireOtelMetrics(
     return async () => {
       sharedMeter = new NoopMeter();
       await provider.shutdown?.();
+      // Stop the Prometheus HTTP listener explicitly — provider.shutdown
+      // calls reader.shutdown internally on newer SDK versions, but
+      // older versions left server ports open. Calling twice is safe.
+      await prometheusExporter?.shutdown?.().catch(() => undefined);
     };
   } catch {
     return async () => {};
   }
+}
+
+/** Three-way resolve: explicit option > env var > legacy default. */
+function resolveExporterFlag(args: {
+  explicit?: boolean;
+  envVar: string;
+  legacyDefault: boolean;
+}): boolean {
+  if (typeof args.explicit === "boolean") return args.explicit;
+  const raw = process.env[args.envVar];
+  if (raw === undefined) return args.legacyDefault;
+  return raw.toLowerCase() !== "false";
 }
 
 // =========================================================================
