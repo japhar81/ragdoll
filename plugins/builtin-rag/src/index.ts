@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import type { InProcessPlugin } from "../../../packages/plugin-sdk/src/index.ts";
-import { pickBackendName } from "./dataset-binding.ts";
+import { pickBackendName, pickBackendUrl } from "./dataset-binding.ts";
 import type { PipelineSpec } from "../../../packages/core/src/index.ts";
 import { OpenAIProvider, AnthropicProvider, OllamaCompatibleProvider, ProviderRegistry } from "../../../packages/providers/src/index.ts";
 
@@ -658,8 +658,24 @@ export const qdrantRetrieverPlugin: InProcessPlugin = {
   },
   async execute(input) {
     const { inputs, config, secrets, context } = input;
+    const urlResolution = pickBackendUrl(input, "vector", {
+      cfgKey: "url",
+      envFallback: "QDRANT_URL",
+      defaultPort: 6333
+    });
+    if (urlResolution?.source === "config") {
+      console.warn(
+        JSON.stringify({
+          level: "warn",
+          message: "qdrant_retriever.legacy_config_url",
+          hint: "Bind the dataset's backend to a connection via the Connections screen.",
+          nodeId: input.node.id,
+          datasetSlug: input.dataset?.slug
+        })
+      );
+    }
     const store = createVectorStore({
-      url: config.url ? String(config.url) : undefined,
+      url: urlResolution?.url,
       apiKey: config.apiKey ? String(config.apiKey) : undefined
     });
     const collection = String(
@@ -760,8 +776,24 @@ export const vectorUpsertPlugin: InProcessPlugin = {
   },
   async execute(input) {
     const { inputs, config, context } = input;
+    const urlResolution = pickBackendUrl(input, "vector", {
+      cfgKey: "url",
+      envFallback: "QDRANT_URL",
+      defaultPort: 6333
+    });
+    if (urlResolution?.source === "config") {
+      console.warn(
+        JSON.stringify({
+          level: "warn",
+          message: "vector_upsert.legacy_config_url",
+          hint: "Bind the dataset's backend to a connection via the Connections screen.",
+          nodeId: input.node.id,
+          datasetSlug: input.dataset?.slug
+        })
+      );
+    }
     const store = createVectorStore({
-      url: config.url ? String(config.url) : undefined,
+      url: urlResolution?.url,
       apiKey: config.apiKey ? String(config.apiKey) : undefined
     });
     const collection = String(
@@ -1058,8 +1090,30 @@ export const qdrantVectorStorePlugin: InProcessPlugin = {
   },
   async execute(input) {
     const { inputs, config, secrets, context } = input;
+    // PR3: the dataset's resolved connection wins. Falls back to
+    // legacy `config.url` / env when no connection is bound — that
+    // path emits a deprecation warning so operators see they should
+    // migrate the dataset to a connection. Plugins themselves know
+    // nothing about the host string except as a passthrough to the
+    // qdrant client.
+    const urlResolution = pickBackendUrl(input, "vector", {
+      cfgKey: "url",
+      envFallback: "QDRANT_URL",
+      defaultPort: 6333
+    });
+    if (urlResolution?.source === "config") {
+      console.warn(
+        JSON.stringify({
+          level: "warn",
+          message: "qdrant_vector_store.legacy_config_url",
+          hint: "Bind the dataset's backend to a connection via the Connections screen to remove this warning.",
+          nodeId: input.node.id,
+          datasetSlug: input.dataset?.slug
+        })
+      );
+    }
     const store = createVectorStore({
-      url: config.url ? String(config.url) : undefined,
+      url: urlResolution?.url,
       apiKey: secrets.apiKey ? String(secrets.apiKey) : undefined
     });
     const collection = String(

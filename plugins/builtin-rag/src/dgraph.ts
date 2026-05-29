@@ -26,6 +26,7 @@ import {
   type GraphNode,
   type GraphStore
 } from "../../../packages/graph/src/index.ts";
+import { pickBackendUrl } from "./dataset-binding.ts";
 
 /** Per-execution store cache: a real Dgraph connection is heavier
  *  than the in-memory store; reuse the same instance for the rest
@@ -49,19 +50,28 @@ export function resetGraphStoreCache(): void {
 }
 
 function pickGraphUrl(input: PluginExecutionInput): string | undefined {
-  // Three ways to point the plugin at a Dgraph endpoint, in order:
-  //   1. explicit `config.url` on the node;
-  //   2. the resolved dataset's `backends.graph.url` (so a per-env
-  //      override on the Datasets screen flows through);
-  //   3. the platform default DGRAPH_URL env, picked by
-  //      createGraphStore when the explicit ones are missing.
-  const cfgUrl = (input.config as { url?: unknown } | undefined)?.url;
-  if (typeof cfgUrl === "string" && cfgUrl) return cfgUrl;
-  const backend = (input.dataset as
-    | { backends?: { graph?: { url?: string } } }
-    | undefined)?.backends?.graph;
-  if (backend?.url) return backend.url;
-  return undefined;
+  // PR3: prefer the dataset's resolved connection (host+port → URL),
+  // then legacy `config.url` (with deprecation warn), then env var
+  // fallback. Plugins of contract 2+ should bind via connection on
+  // the Datasets screen — this fallback chain is for in-flight specs
+  // that haven't migrated yet.
+  const resolution = pickBackendUrl(input, "graph", {
+    cfgKey: "url",
+    envFallback: "DGRAPH_URL",
+    defaultPort: 8080
+  });
+  if (resolution?.source === "config") {
+    console.warn(
+      JSON.stringify({
+        level: "warn",
+        message: "dgraph.legacy_config_url",
+        hint: "Bind the dataset's `graph` backend to a connection via the Connections screen.",
+        nodeId: input.node.id,
+        datasetSlug: input.dataset?.slug
+      })
+    );
+  }
+  return resolution?.url;
 }
 
 // ===========================================================================

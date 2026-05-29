@@ -16,7 +16,7 @@
 import type { PluginExecutionInput } from "../../../packages/plugin-sdk/src/index.ts";
 
 /** Modality keys used in `dataset.backendCollections`. */
-export type StorageModality = "vector" | "keyword";
+export type StorageModality = "vector" | "keyword" | "graph" | "text";
 
 /**
  * Returns the backend collection name for the given modality.
@@ -38,4 +38,71 @@ export function pickBackendName(
   const key = cfgKey ?? (modality === "vector" ? "collection" : "index");
   const fromConfig = input.config[key];
   return typeof fromConfig === "string" ? fromConfig : undefined;
+}
+
+/**
+ * PR3 helper: pick the BASE URL for a storage backend given the
+ * execution input. Mirrors `pickBackendName` but for hostnames + ports.
+ *
+ * Resolution order:
+ *   1. `input.dataset.backends.<modality>.connection.{host, port}`
+ *      — set by the dataset resolver when the backend block referenced
+ *      a connection by name and that connection was found.
+ *   2. Legacy: `input.config[cfgKey]` (e.g. `config.url` for qdrant,
+ *      `config.endpoint` for opensearch) — surfaced via the `source`
+ *      field so callers can log a deprecation hint.
+ *   3. `process.env[envFallback]` — last-resort env var (e.g.
+ *      QDRANT_URL) so installs that pin a single backend cluster don't
+ *      have to define connections at all.
+ *
+ * Returns undefined when nothing matches; the caller decides whether
+ * to throw or default further (e.g. to localhost).
+ */
+export interface BackendUrlResolution {
+  url: string;
+  /** Where the URL came from — for diagnostic logging. */
+  source: "dataset_connection" | "config" | "env";
+  /** When source === "dataset_connection", the connection name +
+   *  cascade reason so the call site can include them in logs. */
+  connectionName?: string;
+  cascadeReason?: "env_specific" | "tenant_fallback";
+}
+
+export function pickBackendUrl(
+  input: PluginExecutionInput,
+  modality: StorageModality,
+  args: {
+    /** Legacy config key on the node, e.g. "url" / "endpoint". */
+    cfgKey: string;
+    /** Env var fallback, e.g. "QDRANT_URL". */
+    envFallback?: string;
+    /** When the resolved connection lacks an explicit port, append
+     *  this default before constructing the URL. */
+    defaultPort?: number;
+    /** Scheme to use when constructing from host+port. Defaults to
+     *  "http://" since cluster-internal traffic is the common path. */
+    scheme?: string;
+  }
+): BackendUrlResolution | undefined {
+  const conn = input.dataset?.backends?.[modality]?.connection;
+  if (conn && typeof conn.host === "string") {
+    const port = typeof conn.port === "number" ? conn.port : args.defaultPort;
+    const scheme = args.scheme ?? "http://";
+    const url = port ? `${scheme}${conn.host}:${port}` : `${scheme}${conn.host}`;
+    return {
+      url,
+      source: "dataset_connection",
+      connectionName: conn.name,
+      cascadeReason: conn.cascadeReason
+    };
+  }
+  const cfg = input.config[args.cfgKey];
+  if (typeof cfg === "string" && cfg) {
+    return { url: cfg, source: "config" };
+  }
+  if (args.envFallback) {
+    const env = process.env[args.envFallback];
+    if (env) return { url: env, source: "env" };
+  }
+  return undefined;
 }
