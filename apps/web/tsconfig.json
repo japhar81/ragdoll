@@ -9,5 +9,12 @@
     "allowImportingTsExtensions": true,
     "noEmit": true
   },
-  "include": ["src/**/*.ts", "src/**/*.tsx", "test/**/*.ts", "vite.config.ts"]
+  "include": ["src/**/*.ts", "src/**/*.tsx", "test/**/*.ts", "vite.config.ts"],
+  // Override the root tsconfig's `exclude` (which lists `apps/web` so the
+  // root project doesn't try to compile this workspace with its NodeNext
+  // module + no-JSX settings). Without this override, the web project
+  // inherits the parent exclude and ends up excluding ITSELF — every
+  // file in apps/web is both included by this project and excluded by
+  // the inherited list, which the TypeScript LSP refuses to load.
+  "exclude": ["node_modules"]
 }
