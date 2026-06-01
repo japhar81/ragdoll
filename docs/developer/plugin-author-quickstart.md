@@ -1,13 +1,21 @@
-# Plugin author quickstart (Node)
+# Plugin author quickstart
 
-This guide walks an author through shipping a *Node-side external plugin* on
-top of the connect-rpc transport (ADR
+This guide walks an author through shipping an *external plugin* on top of
+the connect-rpc transport (ADR
 [0022](../adr/0022-connect-rpc-plugin-transport.md)). The runtime invokes
 your plugin over Connect HTTP/JSON, native gRPC, or gRPC-Web — same handler,
 client picks the wire.
 
-The Python equivalent (`ragdoll-plugin-py`) ships in Phase B with an
-identical surface; this guide will gain a Python column at that point.
+Two language SDKs ship today with identical surface area:
+
+- **Node**: `@ragdoll/plugin-sdk/author` — covered below in sections 1-8.
+- **Python**: `ragdoll-plugin-py` — covered in sections 9-12; same .proto
+  contract, same `default_interceptors()` semantics, same one-call
+  `create_plugin_server()` shape.
+
+Pick whichever your plugin happens to be written in. The runtime treats them
+identically — every `RegisteredPlugin` entry with an `external.baseUrl` is
+called via the same dispatcher regardless of which language served it.
 
 ## 1. Define the manifest
 
@@ -232,3 +240,193 @@ config in `buf.yaml` enforces this.
   transports. Copy what you need.
 - **Heavy work in `health`.** `Health` is a cheap probe; do the minimum to
   prove your plugin is ready. The runtime polls it on a tight cadence.
+
+---
+
+# Plugin author quickstart (Python)
+
+The Python SDK ships as `ragdoll-plugin-py` in `packages/plugin-py/`. The
+runtime calls Python plugins over the same connect-rpc contract the Node
+side uses — operators register the plugin endpoint exactly the same way
+(`mode: "external"`, `external: { baseUrl, ... }`); the runtime doesn't
+care which language served the handler.
+
+The bundled `services/python-plugins` sidecar (crawl4ai + scrapy +
+rerank_bge) is the reference consumer; copy the pattern when you write a
+new Python plugin.
+
+## 9. Install + manifest
+
+```sh
+pip install ragdoll-plugin-py          # core (Connect over ASGI)
+pip install ragdoll-plugin-py[otel]    # + OpenTelemetry traceparent propagation
+```
+
+Intel-Mac dev needs Rust (the `pyqwest` transitive dep doesn't ship an
+Intel-mac wheel) — `brew install rust`. Apple Silicon + Linux + every prod
+target install from wheels with no Rust. See the main README.
+
+Manifests are declared on the Node side (the runtime owns the catalog).
+Tell the runtime your plugin exists by registering it from any Node
+bootstrap path:
+
+```ts
+registry.register({
+  mode: "external",
+  manifest: {
+    id: "my_python_plugin",
+    name: "My Python Plugin",
+    version: "0.1.0",
+    category: "transformer",
+    description: "..."
+  },
+  external: { baseUrl: "http://my-python-plugin:8000", timeoutMs: 60_000 }
+});
+```
+
+## 10. Implement the server
+
+```python
+# my_server.py
+import asyncio
+from hypercorn.asyncio import serve
+from hypercorn.config import Config
+
+from ragdoll_plugin_py import create_plugin_server
+from ragdoll_plugin_py.proto.plugin_pb2 import ExecuteRequest, ExecuteResponse
+from google.protobuf.struct_pb2 import Struct
+
+async def execute(req: ExecuteRequest, ctx) -> ExecuteResponse:
+    # req.inputs is a google.protobuf.Struct; convert to a dict via
+    # google.protobuf.json_format.MessageToDict if you need plain values,
+    # OR access fields directly via the Struct accessors.
+    from google.protobuf.json_format import MessageToDict
+    inputs = MessageToDict(req.inputs) if req.HasField("inputs") else {}
+    text = inputs.get("text", "")
+    outputs = Struct(); outputs.update({"echoed": text, "length": len(text)})
+    return ExecuteResponse(outputs=outputs)
+
+app = create_plugin_server(
+    plugin_id="my_python_plugin",
+    version="0.1.0",
+    handlers={"execute": execute},
+)
+
+if __name__ == "__main__":
+    config = Config()
+    config.bind = ["0.0.0.0:8000"]
+    asyncio.run(serve(app, config))
+```
+
+`create_plugin_server` returns an ASGI app you can `serve()` directly with
+Hypercorn (for HTTP/2 + native gRPC + full-duplex bidi support) or mount
+inside Starlette / FastAPI for sharing the listener with other routes. The
+bundled `services/python-plugins/app/main.py` demonstrates the
+shared-listener pattern (legacy FastAPI `/healthz` + `/execute` + Connect
+RPCs on the same port).
+
+## 11. Streaming + the other RPC kinds
+
+The handler signatures mirror the Node SDK:
+
+```python
+from typing import AsyncIterator
+from ragdoll_plugin_py.proto.plugin_pb2 import ExecuteChunk
+
+async def execute_server_stream(req: ExecuteRequest, ctx) -> AsyncIterator[ExecuteChunk]:
+    prompt = MessageToDict(req.inputs).get("prompt", "")
+    for word in prompt.split():
+        yield ExecuteChunk(token=word + " ", node_id=req.node_id)
+        await asyncio.sleep(0.03)
+    # Optional final envelope; if omitted, the runtime synthesises one.
+    final = ExecuteResponse(outputs=Struct(value={"text": prompt}))
+    yield ExecuteChunk(final=final, node_id=req.node_id)
+
+app = create_plugin_server(
+    plugin_id="my_streamer",
+    version="0.1.0",
+    handlers={
+        "execute": ...,
+        "execute_server_stream": execute_server_stream,
+    },
+)
+```
+
+Pass `execute_client_stream` and `execute_bidi` if you need them. Default
+fallbacks: client-stream calls `execute` on the last request seen; bidi
+emits one response chunk per request (unary chain).
+
+## 12. Shared concerns (auth, tenant, allow-list, OTel)
+
+`create_plugin_server` bundles `default_interceptors()` automatically.
+Configuration is env-driven and degrades to no-op when unset:
+
+```sh
+export RAGDOLL_PLUGIN_TOKEN=...                # required bearer on every RPC
+export RAGDOLL_PLUGIN_REQUIRE_TENANT=1         # reject calls without x-ragdoll-tenant
+export RAGDOLL_PLUGIN_HOST_ALLOWLIST=foo,bar   # reject calls from off-list x-forwarded-host
+```
+
+OpenTelemetry traceparent propagation activates automatically when the
+`[otel]` extra is installed.
+
+To add your own interceptors, pass them via `interceptors=` — they run
+BEFORE the defaults (so you can short-circuit, e.g. for a custom rate-limit
+check before auth is even attempted):
+
+```python
+app = create_plugin_server(
+    plugin_id="my_plugin",
+    version="0.1.0",
+    handlers={"execute": execute},
+    interceptors=[MyRateLimitInterceptor(), MyAuditLogInterceptor()],
+)
+```
+
+## 13. Testing your Python plugin
+
+A good test starts your `create_plugin_server` app on an ephemeral port
+and hits it with the SDK's Connect client. The pattern from the bundled
+sidecar:
+
+```python
+import asyncio
+import httpx
+import pytest
+from hypercorn.asyncio import serve
+from hypercorn.config import Config
+
+from my_server import app  # the ASGI app returned by create_plugin_server
+
+@pytest.mark.asyncio
+async def test_execute_echoes_inputs():
+    config = Config()
+    config.bind = ["127.0.0.1:0"]  # ephemeral
+    server_task = asyncio.create_task(serve(app, config))
+    try:
+        # ... resolve the bound port from hypercorn's lifespan signals,
+        # then httpx.post() at /ragdoll.plugin.v1.PluginRuntime/Execute
+        ...
+    finally:
+        server_task.cancel()
+```
+
+For a higher-fidelity test that exercises the FULL Node-runtime → Python
+sidecar chain, see `tests/e2e/cross-language-plugin.e2e.test.ts` — it
+spins up the bundled python-plugins container and asserts the Connect
+contract end-to-end.
+
+## 14. Python pitfalls
+
+- **`req.config` and friends are `Struct`, not dict.** Use
+  `from google.protobuf.json_format import MessageToDict` to convert; or
+  read individual fields with `struct.fields["key"].string_value` /
+  `.number_value`. Direct attribute access on `Struct` does not work.
+- **`Struct` represents all numbers as float64.** A config value `3` comes
+  through as `3.0`. Cast to `int` if you index a list with it (`range(int(n))`).
+- **Hypercorn vs uvicorn.** uvicorn is HTTP/1.1 only — Connect HTTP/JSON
+  works, but native gRPC and full-duplex bidi require Hypercorn (or
+  Daphne). The bundled sidecar uses Hypercorn for this reason.
+- **The generated `plugin_connect.py` has a flat import (`import plugin_pb2`)** that breaks when the module is loaded as part of a package.
+  `scripts/gen-proto.sh` post-processes the generated file to rewrite this
+  to a relative import. Always run codegen via the script, not raw protoc.

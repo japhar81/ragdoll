@@ -240,10 +240,13 @@ services:
       dockerfile: services/python-plugins/Dockerfile
     environment:
       PORT: "8000"
-    # Optional debugging only; the service is reachable in-network without
-    # publishing. Uncomment to hit it from the host.
-    # ports:
-    #   - "8000:8000"
+    # Published on the host so tests/e2e/cross-language-plugin.e2e.test.ts
+    # (Phase B) can hit the sidecar's Connect endpoint without piping
+    # through `docker exec`. Production deployments (helm) DO NOT expose
+    # python-plugins externally — see infra/helm/ragdoll/templates/
+    # python-plugins-service.yaml which is ClusterIP-only.
+    ports:
+      - "8000:8000"
     healthcheck:
       # python:slim has no curl in the base, but the Dockerfile installs it;
       # use a stdlib urllib check so the probe works regardless.

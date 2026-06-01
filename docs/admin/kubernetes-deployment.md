@@ -77,6 +77,37 @@ docker build \
 rate-limited Docker Hub clusters, set these to your proxy's mirror path
 in CI/CD and the upstream defaults stay out of the build entirely.
 
+### HTTP/2 + native gRPC for external plugins (Phase B)
+
+The python-plugins sidecar serves Connect HTTP/JSON + native gRPC + gRPC-Web
+from one Hypercorn listener (see ADR
+[0022](../adr/0022-connect-rpc-plugin-transport.md)). For the runtime's
+default `connect` transport over HTTP/1.1, no extra cluster config is needed —
+unary, server-streaming, and client-streaming all work over plain h1.
+
+**Full-duplex bidi and `protocol: "grpc"` require HTTP/2 end-to-end.** Two
+gotchas:
+
+1. **Service `appProtocol: http2`.** The chart sets this on the python-plugins
+   Service when `pythonPlugins.http2.enabled: true` (the default). Some
+   older Service-mesh proxies (Linkerd ≤2.13, Istio ≤1.17) don't honor
+   `appProtocol` and downgrade to HTTP/1.1 silently — `kubectl describe svc
+   ragdoll-python-plugins` shows the field as set; verify with
+   `grpcurl -plaintext <pod-ip>:8000 list` against a pod IP that bypasses
+   the proxy to isolate. Flip `pythonPlugins.http2.enabled: false` if your
+   mesh isn't ready; only native gRPC + full-duplex bidi callers degrade.
+2. **OpenShift Routes need passthrough TLS + h2-via-ALPN.** The chart's
+   `python-plugins-service.yaml` is **ClusterIP-only** (no Route) — the
+   sidecar is intentionally internal. If you expose it externally for any
+   reason, the Route must use `passthrough` termination so the h2 ALPN
+   negotiation reaches the pod intact; `edge` termination terminates h2 at
+   the router and re-encodes downstream as h1.
+
+For plugin authors deploying their OWN external Connect server, mirror the
+same pattern: `appProtocol: http2` on the Service, Hypercorn (Python) or
+http2.createServer (Node) in the container, ClusterIP unless an inbound
+mesh requires Route exposure.
+
 ## Python crawler sidecar (optional)
 
 The `crawl4ai_crawler` / `scrapy_spider` plugins run in a separate Python

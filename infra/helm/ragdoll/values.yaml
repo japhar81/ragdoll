@@ -198,6 +198,17 @@ pythonPlugins:
     # rollout. Pin to a digest / semver and flip this when needed.
     pullPolicy: Always
   timeoutMs: 300000
+  # Phase B: HTTP/2 negotiation for the connect-rpc transport. Hypercorn
+  # serves Connect HTTP/JSON + native gRPC + gRPC-Web from the same listener;
+  # appProtocol: http2 on the Service tells kube-proxy and any sidecar mesh
+  # that this Service speaks h2 end-to-end, which native gRPC + full-duplex
+  # bidi require. Default ON because the bundled Hypercorn handles both
+  # transparently. Flip to false if your platform's Service-mesh proxy
+  # doesn't yet understand appProtocol (older Linkerd / older Istio
+  # versions) — Connect over HTTP/1.1 (the runtime default) still works
+  # without the hint; only native gRPC + full-duplex bidi need it.
+  http2:
+    enabled: true
   resources:
     requests: { cpu: 250m, memory: 512Mi }
     limits: { cpu: "2", memory: 2Gi }

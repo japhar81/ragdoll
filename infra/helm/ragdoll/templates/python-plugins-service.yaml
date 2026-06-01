@@ -17,4 +17,14 @@ spec:
     - name: http
       port: {{ .Values.pythonPlugins.port }}
       targetPort: {{ .Values.pythonPlugins.port }}
+      # Phase B: appProtocol: http2 tells kube-proxy / Service mesh / Envoy
+      # sidecars that this Service speaks HTTP/2 end-to-end. Without the
+      # hint, the platform may downgrade to HTTP/1.1 and break native gRPC
+      # + full-duplex bidi (Connect HTTP/JSON still works over h1, so unary
+      # and server-stream stay functional even if dropped, but the bidi
+      # path silently hangs). Hypercorn negotiates h1 + h2 from the same
+      # listener — the appProtocol just promises h2 capability.
+      {{- if .Values.pythonPlugins.http2.enabled }}
+      appProtocol: http2
+      {{- end }}
 {{- end }}
