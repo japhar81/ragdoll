@@ -9,12 +9,8 @@ import {
   ExecuteResponseSchema,
   PluginRuntime
 } from "@ragdoll/proto-gen/plugin";
-import {
-  executeRegisteredPlugin,
-  externalPluginHealth,
-  type PluginExecutionInput,
-  type RegisteredPlugin
-} from "../src/index.ts";
+import { type PluginExecutionInput, type RegisteredPlugin } from "../src/index.ts";
+import { executeRegisteredPlugin, externalPluginHealth } from "../src/transport.ts";
 
 /**
  * Real connect-rpc server stub. We mount an actual `PluginRuntime` handler
