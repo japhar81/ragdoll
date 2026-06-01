@@ -312,6 +312,16 @@ services:
       # the (slow) python-plugins build to be healthy to start.
       PYTHON_PLUGIN_URL: http://python-plugins:8000
       PYTHON_PLUGIN_TIMEOUT_MS: "300000"
+      # Required by the SSE /api/pipelines/:id/stream path which runs
+      # provider_chat in-process inside the API container. The local-demo
+      # seed deliberately does NOT pin `llm.base_url` (so the same spec
+      # works in OpenShift via `oc port-forward`), which means the
+      # OllamaCompatibleProvider falls back to OLLAMA_BASE_URL — without
+      # this env the in-API fallback hits `http://localhost:11434` inside
+      # the API container, where nothing listens, and the stream errors
+      # immediately with "fetch failed". The worker has the same env
+      # (line 357) so non-streaming /run was already fine.
+      OLLAMA_BASE_URL: http://ollama:11434
     ports:
       - "3001:3001"
     depends_on:
