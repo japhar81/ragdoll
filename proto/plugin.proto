@@ -54,7 +54,7 @@ message ExecuteRequest {
   google.protobuf.Struct inputs = 8;      // upstream node outputs feeding this node
   google.protobuf.Struct dataset = 9;     // resolved dataset backends + connections
   google.protobuf.Struct secrets = 10;    // resolved secret values keyed by name
-  int32 deadline_ms = 11;                 // soft deadline; 0 = none
+  int64 deadline_ms = 11;                 // soft deadline (ms from now); 0 = none. int64 because a far-future Date can exceed 24-day int32 limit (~2.1B ms).
 }
 
 message ExecuteResponse {

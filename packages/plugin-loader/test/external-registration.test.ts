@@ -68,10 +68,7 @@ test("external crawler plugins registered when PYTHON_PLUGIN_URL is set", async 
     assert.equal(crawl4ai?.mode, "external");
     assert.equal(crawl4ai?.implementation, undefined);
     assert.deepEqual(crawl4ai?.external, {
-      mode: "http",
       baseUrl: stub.baseUrl,
-      healthPath: "/healthz",
-      executePath: "/execute",
       timeoutMs: 12345
     });
     // Manifest carries a form-renderable configSchema + ui.

@@ -210,10 +210,12 @@ function registerExternalPlugins(registry: PluginRegistry): void {
       mode: "external",
       manifest,
       external: {
-        mode: "http",
+        // Connect transport (default). The crawl4ai sidecar will dual-host
+        // Connect endpoints alongside its legacy FastAPI routes in Phase B;
+        // until then the runtime still talks JSON-over-HTTP, just through the
+        // PluginRuntime service contract. `protocol: "connect"` is the default
+        // and is omitted; httpVersion stays at 1.1 for compatibility.
         baseUrl,
-        healthPath: "/healthz",
-        executePath: "/execute",
         timeoutMs
       }
     };
