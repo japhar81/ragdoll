@@ -163,6 +163,22 @@ On podman, a compose override file disables the otel-collector's docker-
 socket scrape (no equivalent path on podman); the app's own
 logs/metrics/traces still flow normally. See [docs/admin/podman.md](docs/admin/podman.md).
 
+**Intel-Mac developers:** the Python plugin sidecar's `connectrpc` dependency
+(via `pyqwest`) publishes wheels for macOS arm64 + Linux x86_64/aarch64 but
+not macOS x86_64. If you're on Intel Mac and plan to run/develop the Python
+sidecar locally, install a Rust toolchain so `pyqwest` can build from source:
+
+```sh
+# macOS (Intel)
+brew install rust       # or: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+```
+
+Apple Silicon Macs install from wheels — no Rust needed. Linux dev + every
+production target (`python:3.12-slim` in compose / k8s / OpenShift) is wheel-
+served end to end; Rust never enters the build path. See ADR
+[0022-connect-rpc-plugin-transport.md](docs/adr/0022-connect-rpc-plugin-transport.md)
+for the transport choice rationale.
+
 Tests:
 
 ```sh
