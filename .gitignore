@@ -33,3 +33,7 @@ tests/playwright/.test-output/
 # Helm chart subchart tarballs — pulled by 'helm dependency update'
 infra/helm/*/charts/
 
+# Scratch spike for the connect-rpc transport investigation (not part of
+# the shipping codebase; FINDINGS.md content was moved to docs/adr/).
+spike-grpc/
+

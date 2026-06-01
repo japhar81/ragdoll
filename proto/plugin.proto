@@ -1,0 +1,92 @@
+// RAGdoll external-plugin wire contract.
+//
+// One service, five methods covering the four RPC kinds plus a Health probe.
+// Served by every external plugin (Node or Python) via connect-rpc, which
+// exposes the SAME handler over Connect HTTP/JSON, gRPC-Web, and native gRPC
+// from one process. Clients pick the protocol best suited to the runtime
+// (gRPC for backpressure-heavy streaming, Connect HTTP for browser/curl).
+//
+// google.protobuf.Struct carries the dynamic per-plugin payload because the
+// shape varies per plugin and is validated against the plugin's
+// `inputSchema` / `outputSchema` (zod) at the runtime boundary.
+syntax = "proto3";
+
+package ragdoll.plugin.v1;
+
+import "google/protobuf/struct.proto";
+
+service PluginRuntime {
+  // Liveness + capability probe. Returns the plugin IDs this server handles.
+  rpc Health(HealthRequest) returns (HealthResponse);
+
+  // Unary execution — request/response. The HTTP path most plugins take today.
+  rpc Execute(ExecuteRequest) returns (ExecuteResponse);
+
+  // Server-streaming — same request, stream of chunks (tokens / partial outputs / final envelope).
+  rpc ExecuteServerStream(ExecuteRequest) returns (stream ExecuteChunk);
+
+  // Client-streaming — stream of input chunks (multi-modal ingest, large payload), single response.
+  rpc ExecuteClientStream(stream ExecuteRequest) returns (ExecuteResponse);
+
+  // Bidi — interleaved request/response streams (chat with mid-stream tool-use).
+  rpc ExecuteBidi(stream ExecuteRequest) returns (stream ExecuteChunk);
+}
+
+message HealthRequest {}
+
+message HealthResponse {
+  bool ok = 1;
+  repeated string plugins = 2;  // plugin IDs this server can execute
+  string message = 3;
+}
+
+// Full plugin execution envelope. Fields mirror PluginExecutionInput in the
+// TypeScript plugin-sdk (sans the in-process callbacks like onToken /
+// runPipelineByRef, which can't cross a network boundary).
+message ExecuteRequest {
+  string plugin = 1;                      // plugin id, e.g. "crawl4ai_crawler"
+  string version = 2;                     // plugin version, e.g. "0.1.0"
+  string node_id = 3;                     // DAG node id (for telemetry / cancellation)
+  string tenant_id = 4;
+  string environment = 5;                 // env name (dev/staging/prod)
+  string request_id = 6;
+  google.protobuf.Struct config = 7;      // resolved config map for the plugin
+  google.protobuf.Struct inputs = 8;      // upstream node outputs feeding this node
+  google.protobuf.Struct dataset = 9;     // resolved dataset backends + connections
+  google.protobuf.Struct secrets = 10;    // resolved secret values keyed by name
+  int32 deadline_ms = 11;                 // soft deadline; 0 = none
+}
+
+message ExecuteResponse {
+  google.protobuf.Struct outputs = 1;
+  google.protobuf.Struct metadata = 2;
+  Usage usage = 3;
+  repeated Artifact artifacts = 4;
+}
+
+// Streaming envelope. `oneof payload` keeps wire compact — a token frame
+// carries 5 bytes of overhead + the token, not a full ExecuteResponse.
+message ExecuteChunk {
+  oneof payload {
+    string token = 1;                     // streaming token (LLM, transcript, etc.)
+    google.protobuf.Struct delta = 2;     // partial outputs update (key/value diff)
+    ExecuteResponse final = 3;            // completion envelope (last frame on success)
+  }
+  string node_id = 10;                    // node attribution; constant across chunks for one call
+}
+
+message Usage {
+  string provider = 1;
+  string model = 2;
+  int32 input_tokens = 3;
+  int32 output_tokens = 4;
+  int32 embedding_tokens = 5;
+  double estimated_cost_usd = 6;
+}
+
+message Artifact {
+  string kind = 1;                        // "file" | "log" | "trace" | ...
+  string uri = 2;
+  bytes data = 3;                         // inline bytes (small artifacts); prefer uri for big ones
+  bool sensitive = 4;
+}

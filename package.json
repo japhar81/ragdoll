@@ -26,11 +26,17 @@
     "typecheck": "tsc --noEmit",
     "build:web": "npm --workspace @ragdoll/web run build",
     "dev:api": "node --experimental-strip-types apps/api/src/server.ts",
-    "dev:worker": "node --experimental-strip-types apps/worker/src/index.ts"
+    "dev:worker": "node --experimental-strip-types apps/worker/src/index.ts",
+    "generate": "buf generate"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.39.0",
+    "@bufbuild/protobuf": "^2.12.0",
+    "@connectrpc/connect": "^2.1.1",
+    "@connectrpc/connect-node": "^2.1.1",
     "@fastify/websocket": "^11.2.0",
+    "@grpc/grpc-js": "^1.14.4",
+    "@grpc/proto-loader": "^0.8.1",
     "@modelcontextprotocol/sdk": "^1.0.0",
     "@node-saml/node-saml": "^5.0.0",
     "@opentelemetry/api": "^1.9.0",
@@ -61,6 +67,8 @@
     "zod": "^3.24.2"
   },
   "devDependencies": {
+    "@bufbuild/buf": "^1.70.0",
+    "@bufbuild/protoc-gen-es": "^2.12.0",
     "@playwright/test": "^1.60.0",
     "@types/jmespath": "^0.15.2",
     "@types/node": "^22.13.1",
