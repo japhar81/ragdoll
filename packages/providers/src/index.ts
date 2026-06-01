@@ -134,6 +134,46 @@ export class OpenAIProvider implements ProviderAdapter {
     };
   }
 
+  /**
+   * OpenAI chat completions SSE: lines are `data: <json>` with a final
+   * `data: [DONE]` sentinel. Each delta carries a `choices[0].delta.content`
+   * fragment. Stream ends on `[DONE]` or when the connection closes.
+   */
+  async *streamChat(request: ChatRequest): AsyncIterable<{ type: "token" | "done" | "error"; token?: string; error?: string }> {
+    const url = `${request.baseUrl ?? "https://api.openai.com/v1"}/chat/completions`;
+    let opened: Awaited<ReturnType<typeof openStream>> | undefined;
+    try {
+      opened = await openStream(url, request.apiKey, {
+        model: request.model,
+        messages: request.messages,
+        temperature: request.temperature,
+        top_p: request.topP,
+        max_tokens: request.maxTokens,
+        stream: true
+      }, request.timeoutMs ?? 60000);
+      for await (const line of iterateResponseLines(opened.response)) {
+        if (!line.startsWith("data: ")) continue;
+        const payload = line.slice(6).trim();
+        if (payload === "[DONE]") {
+          yield { type: "done" };
+          return;
+        }
+        try {
+          const event = JSON.parse(payload);
+          const token: string | undefined = event?.choices?.[0]?.delta?.content;
+          if (token) yield { type: "token", token };
+        } catch {
+          // Skip malformed lines — OpenAI occasionally emits keepalive comments.
+        }
+      }
+      yield { type: "done" };
+    } catch (error) {
+      yield { type: "error", error: error instanceof Error ? error.message : String(error) };
+    } finally {
+      opened?.cancelTimeout();
+    }
+  }
+
   async embeddings(request: EmbeddingRequest): Promise<EmbeddingResponse> {
     const response = await postJson(`${request.baseUrl ?? "https://api.openai.com/v1"}/embeddings`, request.apiKey, {
       model: request.model,
@@ -197,6 +237,60 @@ export class AnthropicProvider implements ProviderAdapter {
     };
   }
 
+  /**
+   * Anthropic Messages SSE: events are `event: <name>\ndata: <json>\n\n`.
+   * Text tokens arrive as `content_block_delta` with `delta.type:"text_delta"`.
+   * Stream ends with `message_stop` or when the connection closes.
+   */
+  async *streamChat(request: ChatRequest): AsyncIterable<{ type: "token" | "done" | "error"; token?: string; error?: string }> {
+    const system = request.messages.find((m) => m.role === "system")?.content;
+    const messages = request.messages
+      .filter((m) => m.role !== "system")
+      .map((m) => ({ role: m.role === "assistant" ? "assistant" : "user", content: m.content }));
+    let opened: Awaited<ReturnType<typeof openStream>> | undefined;
+    try {
+      opened = await openStream(
+        "https://api.anthropic.com/v1/messages",
+        undefined,
+        {
+          model: request.model,
+          system,
+          messages,
+          temperature: request.temperature,
+          top_p: request.topP,
+          max_tokens: request.maxTokens ?? 1024,
+          stream: true
+        },
+        request.timeoutMs ?? 60000,
+        {
+          "anthropic-version": "2023-06-01",
+          ...(request.apiKey ? { "x-api-key": request.apiKey } : {})
+        }
+      );
+      for await (const line of iterateResponseLines(opened.response)) {
+        // Skip the `event: <name>` lines and blank framing — we key off the
+        // payload type, which is also present in the data envelope.
+        if (!line.startsWith("data: ")) continue;
+        try {
+          const event = JSON.parse(line.slice(6));
+          if (event?.type === "content_block_delta" && event?.delta?.type === "text_delta" && event?.delta?.text) {
+            yield { type: "token", token: event.delta.text };
+          } else if (event?.type === "message_stop") {
+            yield { type: "done" };
+            return;
+          }
+        } catch {
+          // Anthropic occasionally sends keepalive comments; ignore parse errors.
+        }
+      }
+      yield { type: "done" };
+    } catch (error) {
+      yield { type: "error", error: error instanceof Error ? error.message : String(error) };
+    } finally {
+      opened?.cancelTimeout();
+    }
+  }
+
   async models(): Promise<ModelCatalogEntry[]> {
     return [
       { id: "claude-3-5-sonnet-latest", contextWindow: 200000, supportsStreaming: true, supportsTools: true },
@@ -243,6 +337,55 @@ export class OllamaCompatibleProvider implements ProviderAdapter {
       },
       raw: response
     };
+  }
+
+  /**
+   * Ollama /api/chat with `stream: true` emits NDJSON (one JSON object per
+   * line). Each chunk has `message.content` until `done: true` arrives.
+   * Always uses the localLlmDispatcher to bypass undici's connection cap
+   * and the global headersTimeout (model load can be slow on CPU).
+   */
+  async *streamChat(request: ChatRequest): AsyncIterable<{ type: "token" | "done" | "error"; token?: string; error?: string }> {
+    const baseUrl = request.baseUrl ?? process.env.OLLAMA_BASE_URL ?? "http://localhost:11434";
+    let opened: Awaited<ReturnType<typeof openStream>> | undefined;
+    try {
+      opened = await openStream(
+        `${baseUrl}/api/chat`,
+        undefined,
+        {
+          model: request.model,
+          messages: request.messages,
+          stream: true,
+          options: {
+            temperature: request.temperature,
+            top_p: request.topP,
+            num_predict: request.maxTokens
+          }
+        },
+        request.timeoutMs ?? 300_000,
+        {},
+        { useLocalLlmDispatcher: true }
+      );
+      for await (const line of iterateResponseLines(opened.response)) {
+        if (!line) continue;
+        try {
+          const event = JSON.parse(line);
+          const token: string | undefined = event?.message?.content;
+          if (token) yield { type: "token", token };
+          if (event?.done === true) {
+            yield { type: "done" };
+            return;
+          }
+        } catch {
+          // Tolerate the rare ragged line; the server emits one JSON per line.
+        }
+      }
+      yield { type: "done" };
+    } catch (error) {
+      yield { type: "error", error: error instanceof Error ? error.message : String(error) };
+    } finally {
+      opened?.cancelTimeout();
+    }
   }
 
   async embeddings(request: EmbeddingRequest): Promise<EmbeddingResponse> {
@@ -406,6 +549,82 @@ function isTransientFetchError(error: unknown): boolean {
     message.includes("network") ||
     error.name === "AbortError"
   );
+}
+
+/**
+ * Iterate response body lines for SSE / NDJSON parsers. Yields one logical
+ * line per yield, with `\r\n` and trailing `\n` stripped. Tolerant of chunk
+ * boundaries that split a line; emits a final partial buffer (rare for
+ * well-formed streams, but defensive).
+ */
+async function* iterateResponseLines(response: Response): AsyncIterable<string> {
+  if (!response.body) return;
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let nl: number;
+      while ((nl = buffer.indexOf("\n")) >= 0) {
+        const line = buffer.slice(0, nl).replace(/\r$/, "");
+        buffer = buffer.slice(nl + 1);
+        yield line;
+      }
+    }
+    if (buffer.length > 0) yield buffer;
+  } finally {
+    reader.releaseLock();
+  }
+}
+
+/**
+ * Open a streaming POST. Used by `streamChat` implementations — does NOT
+ * buffer the body (caller iterates), does NOT retry (partial output is
+ * irrecoverable), and trips the AbortController on a hard timeout so a
+ * hung provider can't pin the executor.
+ */
+async function openStream(
+  url: string,
+  apiKey: string | undefined,
+  body: unknown,
+  timeoutMs: number,
+  headers: Record<string, string> = {},
+  options: { useLocalLlmDispatcher?: boolean } = {}
+): Promise<{ response: Response; cancelTimeout: () => void }> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  const fetchImpl = options.useLocalLlmDispatcher
+    ? (input: string, init?: RequestInit) =>
+        undiciFetch(input, { ...init, dispatcher: localLlmDispatcher } as never)
+    : fetch;
+  try {
+    const response = await fetchImpl(url, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        accept: "text/event-stream",
+        ...(apiKey ? { authorization: `Bearer ${apiKey}` } : {}),
+        ...headers
+      },
+      body: JSON.stringify(body),
+      signal: controller.signal
+    });
+    if (!response.ok) {
+      clearTimeout(timeout);
+      const payload = await response.text().catch(() => "");
+      throw new Error(`Streaming provider request failed with HTTP ${response.status}: ${payload}`);
+    }
+    // Cast across the native-fetch / undici Response union — both share the
+    // streaming Response surface we use (`body.getReader()`), and the union
+    // type diverges only in the unused `closed: Promise<void|undefined>`.
+    return { response: response as unknown as Response, cancelTimeout: () => clearTimeout(timeout) };
+  } catch (error) {
+    clearTimeout(timeout);
+    throw error;
+  }
 }
 
 async function postJson(

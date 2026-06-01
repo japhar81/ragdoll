@@ -1,0 +1,12 @@
+# Single-module buf config. The .proto contract for external plugins lives
+# at the repo root so it's discoverable and language-agnostic; Python and
+# Node both generate from this one source.
+version: v2
+modules:
+  - path: proto
+lint:
+  use:
+    - STANDARD
+breaking:
+  use:
+    - FILE

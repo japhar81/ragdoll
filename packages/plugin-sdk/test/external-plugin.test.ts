@@ -1,10 +1,15 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import http from "node:http";
-import type { IncomingMessage, ServerResponse } from "node:http";
+import * as http from "node:http";
 import type { AddressInfo } from "node:net";
+import { create } from "@bufbuild/protobuf";
+import { Code, ConnectError } from "@connectrpc/connect";
+import { connectNodeAdapter } from "@connectrpc/connect-node";
 import {
-  buildExternalRequestBody,
+  ExecuteResponseSchema,
+  PluginRuntime
+} from "@ragdoll/proto-gen/plugin";
+import {
   executeRegisteredPlugin,
   externalPluginHealth,
   type PluginExecutionInput,
@@ -12,69 +17,74 @@ import {
 } from "../src/index.ts";
 
 /**
- * In-process node:http stub implementing the External Plugin HTTP Contract v1.
- * Offline, install-free. Routes:
- *   GET  /healthz       -> 200 {ok:true,plugins:[...]}
- *   POST /execute       -> 200 {outputs: <echo of inputs>, metadata, usage, artifacts}
- *   POST /error         -> 200 {error:"boom"}
- *   POST /fail          -> 500 plain non-2xx
- *   POST /slow          -> responds after 200ms (to exercise timeout)
+ * Real connect-rpc server stub. We mount an actual `PluginRuntime` handler
+ * with `connectNodeAdapter`, listen on an ephemeral port, and let the
+ * plugin-sdk talk to it over Connect HTTP/1.1+JSON. Validates the full
+ * client/server contract instead of mocking the wire shape.
  */
-function startStub(): Promise<{ baseUrl: string; close: () => Promise<void> }> {
-  const server = http.createServer((req: IncomingMessage, res: ServerResponse) => {
-    const url = req.url ?? "";
-    if (req.method === "GET" && url === "/healthz") {
-      res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify({ ok: true, plugins: ["crawl4ai_crawler", "scrapy_spider"] }));
-      return;
+function startStub(opts?: {
+  executeBehavior?: "ok" | "error" | "fail" | "slow";
+  streamingTokens?: string[];
+}): Promise<{ baseUrl: string; close: () => Promise<void> }> {
+  const handler = connectNodeAdapter({
+    routes: (r) => {
+      r.service(PluginRuntime, {
+        async health() {
+          return {
+            ok: true,
+            plugins: ["crawl4ai_crawler", "scrapy_spider"],
+            message: ""
+          };
+        },
+        async execute(req) {
+          switch (opts?.executeBehavior) {
+            case "error":
+              throw new ConnectError("boom from server", Code.Internal);
+            case "fail":
+              throw new ConnectError("internal explosion", Code.Internal);
+            case "slow":
+              await new Promise((res) => setTimeout(res, 200));
+              return create(ExecuteResponseSchema, { outputs: {} });
+            default:
+              // Echo the request inputs so tests can assert round-trip.
+              return create(ExecuteResponseSchema, {
+                outputs: { echoed: req.inputs ?? {}, plugin: req.plugin },
+                metadata: { ok: true },
+                usage: { provider: "python", inputTokens: 1 }
+              });
+          }
+        },
+        async *executeServerStream(req, ctx) {
+          for (const token of opts?.streamingTokens ?? []) {
+            if (ctx.signal.aborted) return;
+            yield { payload: { case: "token", value: token } } as never;
+          }
+          // Final envelope so the client doesn't have to synthesise one.
+          yield {
+            payload: {
+              case: "final",
+              value: create(ExecuteResponseSchema, {
+                outputs: { plugin: req.plugin, count: opts?.streamingTokens?.length ?? 0 }
+              })
+            }
+          } as never;
+        },
+        async executeClientStream() {
+          throw new ConnectError("not used in these tests", Code.Unimplemented);
+        },
+        async *executeBidi() {
+          throw new ConnectError("not used in these tests", Code.Unimplemented);
+        }
+      });
     }
-    const chunks: Buffer[] = [];
-    req.on("data", (c: Buffer) => chunks.push(c));
-    req.on("end", () => {
-      const raw = Buffer.concat(chunks).toString("utf8");
-      const body = raw.length > 0 ? JSON.parse(raw) : {};
-      if (url === "/execute") {
-        res.writeHead(200, { "content-type": "application/json" });
-        res.end(
-          JSON.stringify({
-            outputs: { echoed: body.inputs, plugin: body.plugin },
-            metadata: { ok: true },
-            usage: { provider: "python", inputTokens: 1 },
-            artifacts: [{ kind: "doc", uri: "mem://1" }]
-          })
-        );
-        return;
-      }
-      if (url === "/error") {
-        res.writeHead(200, { "content-type": "application/json" });
-        res.end(JSON.stringify({ error: "boom from server" }));
-        return;
-      }
-      if (url === "/fail") {
-        res.writeHead(500, { "content-type": "text/plain" });
-        res.end("internal explosion");
-        return;
-      }
-      if (url === "/slow") {
-        setTimeout(() => {
-          res.writeHead(200, { "content-type": "application/json" });
-          res.end(JSON.stringify({ outputs: {} }));
-        }, 200);
-        return;
-      }
-      res.writeHead(404);
-      res.end();
-    });
   });
+  const server = http.createServer(handler);
   return new Promise((resolve) => {
     server.listen(0, "127.0.0.1", () => {
       const { port } = server.address() as AddressInfo;
       resolve({
         baseUrl: `http://127.0.0.1:${port}`,
-        close: () =>
-          new Promise<void>((done) => {
-            server.close(() => done());
-          })
+        close: () => new Promise<void>((done) => server.close(() => done()))
       });
     });
   });
@@ -124,7 +134,7 @@ function makeInput(overrides?: Partial<PluginExecutionInput>): PluginExecutionIn
   };
 }
 
-function externalPlugin(baseUrl: string, executePath: string, timeoutMs?: number): RegisteredPlugin {
+function externalPlugin(baseUrl: string, opts?: { timeoutMs?: number; streaming?: boolean }): RegisteredPlugin {
   return {
     mode: "external",
     manifest: {
@@ -132,67 +142,34 @@ function externalPlugin(baseUrl: string, executePath: string, timeoutMs?: number
       name: "Crawl4AI",
       version: "1.0.0",
       category: "datasource",
-      description: "test"
+      description: "test",
+      streaming: opts?.streaming
     },
-    external: { mode: "http", baseUrl, healthPath: "/healthz", executePath, timeoutMs }
+    external: { baseUrl, timeoutMs: opts?.timeoutMs }
   };
 }
 
-test("buildExternalRequestBody produces a JSON-safe wire body", () => {
-  const body = buildExternalRequestBody(externalPlugin("http://x", "/execute"), makeInput());
-  // Round-trips cleanly: no functions, no AbortSignal.
-  const roundTripped = JSON.parse(JSON.stringify(body));
-  assert.deepEqual(roundTripped, body);
-
-  assert.deepEqual(body.plugin, {
-    category: "datasource",
-    id: "crawl4ai_crawler",
-    version: "1.0.0"
-  });
-  const ctx = body.context as Record<string, unknown>;
-  assert.equal(ctx.requestId, "req-1");
-  assert.equal(ctx.executionId, "exec-1");
-  assert.equal(ctx.tenantId, "tenant-a");
-  assert.equal(ctx.environment, "prod");
-  // Date deadline -> ISO string.
-  assert.equal(ctx.deadline, "2030-01-01T00:00:00.000Z");
-  // No AbortSignal leaked into the wire body.
-  assert.equal("signal" in ctx, false);
-  // resolvedConfig collapsed to { values: { key: { value } } } only.
-  assert.deepEqual(ctx.resolvedConfig, { values: { "crawl.maxPages": { value: 5 } } });
-});
-
-test("buildExternalRequestBody serializes a missing deadline as null", () => {
-  const input = makeInput();
-  delete (input.context as { deadline?: unknown }).deadline;
-  const body = buildExternalRequestBody(externalPlugin("http://x", "/execute"), input);
-  assert.equal((body.context as Record<string, unknown>).deadline, null);
-});
-
-test("external execute maps a 200 success body to PluginExecutionOutput", async () => {
+test("external execute round-trips inputs through the Connect Execute RPC", async () => {
   const stub = await startStub();
   try {
-    const out = await executeRegisteredPlugin(
-      externalPlugin(stub.baseUrl, "/execute"),
-      makeInput()
-    );
+    const out = await executeRegisteredPlugin(externalPlugin(stub.baseUrl), makeInput());
     assert.deepEqual(out.outputs, {
       echoed: { seed: "https://example.com" },
-      plugin: { category: "datasource", id: "crawl4ai_crawler", version: "1.0.0" }
+      plugin: "crawl4ai_crawler"
     });
     assert.deepEqual(out.metadata, { ok: true });
-    assert.deepEqual(out.usage, { provider: "python", inputTokens: 1 });
-    assert.deepEqual(out.artifacts, [{ kind: "doc", uri: "mem://1" }]);
+    assert.equal(out.usage?.provider, "python");
+    assert.equal(out.usage?.inputTokens, 1);
   } finally {
     await stub.close();
   }
 });
 
-test("external execute throws when the server returns {error}", async () => {
-  const stub = await startStub();
+test("external execute surfaces a server-side ConnectError message", async () => {
+  const stub = await startStub({ executeBehavior: "error" });
   try {
     await assert.rejects(
-      executeRegisteredPlugin(externalPlugin(stub.baseUrl, "/error"), makeInput()),
+      executeRegisteredPlugin(externalPlugin(stub.baseUrl), makeInput()),
       /boom from server/
     );
   } finally {
@@ -200,23 +177,11 @@ test("external execute throws when the server returns {error}", async () => {
   }
 });
 
-test("external execute throws on a non-2xx response", async () => {
-  const stub = await startStub();
-  try {
-    await assert.rejects(
-      executeRegisteredPlugin(externalPlugin(stub.baseUrl, "/fail"), makeInput()),
-      /HTTP 500/
-    );
-  } finally {
-    await stub.close();
-  }
-});
-
 test("external execute aborts and throws when the timeout elapses", async () => {
-  const stub = await startStub();
+  const stub = await startStub({ executeBehavior: "slow" });
   try {
     await assert.rejects(
-      executeRegisteredPlugin(externalPlugin(stub.baseUrl, "/slow", 25), makeInput()),
+      executeRegisteredPlugin(externalPlugin(stub.baseUrl, { timeoutMs: 25 }), makeInput()),
       /timed out after 25ms/
     );
   } finally {
@@ -224,14 +189,10 @@ test("external execute aborts and throws when the timeout elapses", async () => 
   }
 });
 
-test("externalPluginHealth parses the health payload", async () => {
+test("externalPluginHealth parses the Health RPC response", async () => {
   const stub = await startStub();
   try {
-    const health = await externalPluginHealth({
-      mode: "http",
-      baseUrl: stub.baseUrl,
-      healthPath: "/healthz"
-    });
+    const health = await externalPluginHealth({ baseUrl: stub.baseUrl });
     assert.equal(health.ok, true);
     assert.deepEqual(health.plugins, ["crawl4ai_crawler", "scrapy_spider"]);
   } finally {
@@ -239,40 +200,52 @@ test("externalPluginHealth parses the health payload", async () => {
   }
 });
 
-test("externalPluginHealth resolves ok:false on transport error", async () => {
-  // Port 1 is unroutable; fetch rejects and we surface ok:false (no throw).
+test("externalPluginHealth resolves ok:false on transport error (no throw)", async () => {
+  // Port 1 is unroutable; the Connect client errors and we surface ok:false.
   const health = await externalPluginHealth({
-    mode: "http",
     baseUrl: "http://127.0.0.1:1",
-    healthPath: "/healthz",
     timeoutMs: 200
   });
   assert.equal(health.ok, false);
   assert.equal(typeof health.message, "string");
 });
 
-test("grpc external transport is not implemented", async () => {
-  const plugin: RegisteredPlugin = {
-    mode: "external",
-    manifest: {
-      id: "x",
-      name: "x",
-      version: "1.0.0",
-      category: "datasource",
-      description: "x"
-    },
-    external: { mode: "grpc", baseUrl: "http://x" }
-  };
-  await assert.rejects(
-    executeRegisteredPlugin(plugin, makeInput()),
-    /grpc external transport not implemented/
-  );
-  const health = await externalPluginHealth({ mode: "grpc", baseUrl: "http://x" });
-  assert.equal(health.ok, false);
-  assert.match(health.message ?? "", /grpc external transport not implemented/);
+test("streaming plugin: tokens fan out through input.onToken; final envelope returned", async () => {
+  const stub = await startStub({ streamingTokens: ["alpha", "beta", "gamma"] });
+  try {
+    const tokens: string[] = [];
+    const out = await executeRegisteredPlugin(
+      externalPlugin(stub.baseUrl, { streaming: true }),
+      makeInput({ onToken: (t) => tokens.push(t) })
+    );
+    assert.deepEqual(tokens, ["alpha", "beta", "gamma"]);
+    assert.equal((out.outputs as { count: number }).count, 3);
+  } finally {
+    await stub.close();
+  }
 });
 
-test("in-process execution path is unaffected", async () => {
+test("streaming-capable plugin called without onToken still uses unary path", async () => {
+  // No streamingTokens supplied => Execute branch would echo; if streaming
+  // were taken without onToken being present, ExecuteServerStream would
+  // return just the final envelope. The dispatch rule is: streaming branch
+  // requires BOTH manifest.streaming AND caller-supplied onToken.
+  const stub = await startStub();
+  try {
+    const out = await executeRegisteredPlugin(
+      externalPlugin(stub.baseUrl, { streaming: true }),
+      makeInput() // no onToken
+    );
+    assert.deepEqual(out.outputs, {
+      echoed: { seed: "https://example.com" },
+      plugin: "crawl4ai_crawler"
+    });
+  } finally {
+    await stub.close();
+  }
+});
+
+test("in-process execution path is unaffected by the Connect transport switch", async () => {
   const plugin: RegisteredPlugin = {
     mode: "in_process",
     manifest: {

@@ -1,0 +1,12 @@
+# Generates TypeScript message + service descriptors into packages/proto-gen/src/.
+# The Node Connect server/client and the in-tree TS clients all consume from
+# @ragdoll/proto-gen. Python generation lives separately under
+# services/python-plugins/ (see services/python-plugins/scripts/gen-proto.sh)
+# because it needs the venv's protoc-gen-connectrpc on PATH.
+version: v2
+plugins:
+  - local: ./node_modules/.bin/protoc-gen-es
+    out: packages/proto-gen/src
+    opt:
+      - target=ts
+      - import_extension=ts

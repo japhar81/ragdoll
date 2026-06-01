@@ -144,6 +144,15 @@ export interface PluginManifest {
   secretsSchema?: JsonSchemaLike;
   inputSchema?: JsonSchemaLike;
   outputSchema?: JsonSchemaLike;
+  /**
+   * Plugin can produce its result as a server-side stream (token-by-token for
+   * LLMs, chunk-by-chunk for crawlers/transcripts) in addition to the unary
+   * shape. When `true` AND the caller provides an `onToken` sink, the runtime
+   * routes through the `ExecuteServerStream` RPC instead of unary `Execute`
+   * — same handler, the plugin is free to yield as work progresses. Plugins
+   * that only return a complete envelope leave this undeclared.
+   */
+  streaming?: boolean;
   /** Named input ports (declared contract). Undeclared plugins keep
    *  legacy merge wiring; declared plugins receive `inputs[portName]`. */
   inputPorts?: PortDef[];
@@ -465,10 +474,25 @@ export interface InProcessPlugin {
 }
 
 export interface ExternalPluginEndpoint {
-  mode: "http" | "grpc";
+  /** Base URL of the plugin server, e.g. `http://python-plugins:8000`. */
   baseUrl: string;
-  healthPath?: string;
-  executePath?: string;
+  /**
+   * Wire protocol. All three are served simultaneously by the same connect-rpc
+   * server (one handler), so this is a *client preference*, not a server-side
+   * choice. Default: `connect` — JSON-over-HTTP, works through every proxy,
+   * survives nginx default buffering for unary, curl-debuggable.
+   * - `grpc`: native gRPC. Lower per-call overhead, real backpressure, requires
+   *   HTTP/2 end-to-end. Pick this when streaming load is high.
+   * - `grpc-web`: gRPC framing over HTTP/1.1. Browser-callable but rarely the
+   *   right choice server-side.
+   */
+  protocol?: "connect" | "grpc" | "grpc-web";
+  /**
+   * HTTP version. Defaults: `2` for `grpc` (required), `1.1` otherwise. Bump to
+   * `2` for `connect`/`grpc-web` when full-duplex bidi or multiplexed streaming
+   * is needed and the network path supports h2 end-to-end.
+   */
+  httpVersion?: "1.1" | "2";
   timeoutMs?: number;
 }
 
@@ -515,94 +539,123 @@ export function pluginKey(ref: Pick<PluginRef, "category" | "id" | "version">): 
 /** Default execute/health timeout. Crawls are slow, so this is generous. */
 const DEFAULT_EXTERNAL_TIMEOUT_MS = 300000;
 
-function joinUrl(baseUrl: string, path: string): string {
-  const base = baseUrl.endsWith("/") ? baseUrl.slice(0, -1) : baseUrl;
-  const suffix = path.startsWith("/") ? path : `/${path}`;
-  return `${base}${suffix}`;
+// ===========================================================================
+// External plugin transport — connect-rpc (Connect HTTP/JSON | gRPC | gRPC-Web).
+//
+// One client per call. Connect's clients are cheap to construct; pooling lives
+// inside the transport (HTTP/2 connection reuse for `grpc`, keep-alive for
+// `connect`/`grpc-web`). Cancellation flows via AbortSignal; deadlines are
+// translated to per-call abort timers.
+// ===========================================================================
+
+import { create } from "@bufbuild/protobuf";
+import type { JsonObject } from "@bufbuild/protobuf";
+import { createClient, type Transport } from "@connectrpc/connect";
+import {
+  createConnectTransport,
+  createGrpcTransport,
+  createGrpcWebTransport
+} from "@connectrpc/connect-node";
+import {
+  ExecuteRequestSchema,
+  HealthRequestSchema,
+  PluginRuntime,
+  type ExecuteResponse
+} from "@ragdoll/proto-gen/plugin";
+
+function transportFor(endpoint: ExternalPluginEndpoint): Transport {
+  const protocol = endpoint.protocol ?? "connect";
+  // grpc REQUIRES h2; connect/grpc-web default to 1.1 unless caller overrides.
+  if (protocol === "grpc") {
+    return createGrpcTransport({ baseUrl: endpoint.baseUrl });
+  }
+  const httpVersion = endpoint.httpVersion ?? "1.1";
+  if (protocol === "grpc-web") {
+    return createGrpcWebTransport({ baseUrl: endpoint.baseUrl, httpVersion });
+  }
+  return createConnectTransport({ baseUrl: endpoint.baseUrl, httpVersion });
 }
 
-/**
- * Reduces a {@link RuntimeContext} to a JSON-safe wire object for an external
- * plugin. Strips the AbortSignal and any functions, turns the `deadline` Date
- * into an ISO string (or `null`), and collapses the resolved config down to
- * `{ values: { key: { value } } }` so secret/sensitivity metadata never leaves
- * the control plane.
- */
-function toWireContext(context: PluginExecutionInput["context"]): Record<string, unknown> {
-  const values: Record<string, { value: unknown }> = {};
-  const resolved = context.resolvedConfig?.values ?? {};
-  for (const [key, entry] of Object.entries(resolved)) {
-    values[key] = { value: entry?.value };
-  }
-  let deadline: string | null = null;
-  if (context.deadline instanceof Date && !Number.isNaN(context.deadline.getTime())) {
-    deadline = context.deadline.toISOString();
-  }
-  return {
-    requestId: context.requestId,
-    executionId: context.executionId,
-    tenantId: context.tenantId,
-    pipelineId: context.pipelineId,
-    pipelineVersionId: context.pipelineVersionId,
-    environment: context.environment,
-    deadline,
-    resolvedConfig: { values }
-  };
+// protobuf-es maps google.protobuf.Struct ⇄ JsonObject natively in TS — no
+// hand-written conversion needed. The JSON.parse(JSON.stringify(...)) round-trip
+// strips any undefined / function / Date / Map values that wouldn't survive the
+// Struct wire encoding anyway (matches the strictness of the old HTTP body).
+function asJsonObject(value: unknown): JsonObject {
+  const json = JSON.parse(JSON.stringify(value ?? {})) as unknown;
+  return json && typeof json === "object" && !Array.isArray(json) ? (json as JsonObject) : {};
 }
 
-/**
- * Builds the exact JSON-safe request body for the external plugin HTTP
- * contract v1. Kept as a standalone function so tests can assert the wire
- * shape and the Python server can be validated against the same structure.
- */
-export function buildExternalRequestBody(
+/** Build the ExecuteRequest proto from the in-process PluginExecutionInput. */
+function buildExecuteRequest(
   plugin: RegisteredPlugin,
   input: PluginExecutionInput
-): Record<string, unknown> {
-  return {
-    plugin: {
-      category: plugin.manifest.category,
-      id: plugin.manifest.id,
-      version: plugin.manifest.version
-    },
-    node: {
-      id: input.node.id,
-      config: input.node.config ?? {},
-      secrets: input.node.secrets ?? {}
-    },
-    inputs: input.inputs,
-    config: input.config,
-    secrets: input.secrets,
-    context: toWireContext(input.context)
-  };
+): ReturnType<typeof create<typeof ExecuteRequestSchema>> {
+  const ctx = input.context;
+  return create(ExecuteRequestSchema, {
+    plugin: plugin.manifest.id,
+    version: plugin.manifest.version,
+    nodeId: input.node.id,
+    tenantId: ctx.tenantId,
+    environment: ctx.environment,
+    requestId: ctx.requestId,
+    config: asJsonObject(input.config),
+    inputs: asJsonObject(input.inputs),
+    dataset: input.dataset ? asJsonObject(input.dataset) : undefined,
+    secrets: asJsonObject(input.secrets),
+    // int64 on the wire → bigint in TS. Far-future Dates can exceed int32's
+    // ~24-day ms ceiling, so bigint is necessary; 0n means "no deadline."
+    deadlineMs:
+      ctx.deadline instanceof Date && !Number.isNaN(ctx.deadline.getTime())
+        ? BigInt(Math.max(0, ctx.deadline.getTime() - Date.now()))
+        : 0n
+  });
+}
+
+/** Decode an ExecuteResponse proto into the in-process PluginExecutionOutput. */
+function fromExecuteResponse(resp: ExecuteResponse): PluginExecutionOutput {
+  const result: PluginExecutionOutput = { outputs: (resp.outputs ?? {}) as Record<string, unknown> };
+  if (resp.metadata && Object.keys(resp.metadata).length > 0) {
+    result.metadata = resp.metadata as Record<string, unknown>;
+  }
+  if (resp.usage) {
+    result.usage = {
+      provider: resp.usage.provider || undefined,
+      model: resp.usage.model || undefined,
+      inputTokens: resp.usage.inputTokens || undefined,
+      outputTokens: resp.usage.outputTokens || undefined,
+      embeddingTokens: resp.usage.embeddingTokens || undefined,
+      estimatedCostUsd: resp.usage.estimatedCostUsd || undefined
+    };
+  }
+  if (resp.artifacts && resp.artifacts.length > 0) {
+    result.artifacts = resp.artifacts.map((a) => ({
+      kind: a.kind,
+      uri: a.uri || undefined,
+      data: a.data && a.data.length > 0 ? a.data : undefined,
+      sensitive: a.sensitive || undefined
+    }));
+  }
+  return result;
 }
 
 /**
- * Calls the external plugin health endpoint
- * (`GET {baseUrl}{healthPath ?? "/healthz"}`). Resolves (never rejects) so
- * callers can probe liveness without try/catch; on any transport/parse error
- * it returns `{ ok: false, message }`.
+ * Liveness + capability probe. Resolves (never rejects) so callers can probe
+ * without try/catch; on any transport error returns `{ ok: false, message }`.
  */
 export async function externalPluginHealth(
   endpoint: ExternalPluginEndpoint
 ): Promise<{ ok: boolean; plugins?: string[]; message?: string }> {
-  if (endpoint.mode === "grpc") {
-    return { ok: false, message: "grpc external transport not implemented" };
-  }
-  const url = joinUrl(endpoint.baseUrl, endpoint.healthPath ?? "/healthz");
   const timeoutMs = endpoint.timeoutMs ?? DEFAULT_EXTERNAL_TIMEOUT_MS;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const response = await fetch(url, { method: "GET", signal: controller.signal });
-    if (!response.ok) {
-      return { ok: false, message: `health check failed with HTTP ${response.status}` };
-    }
-    const body = (await response.json()) as { ok?: unknown; plugins?: unknown };
-    const plugins = Array.isArray(body.plugins)
-      ? body.plugins.filter((entry): entry is string => typeof entry === "string")
-      : undefined;
-    return { ok: body.ok === true, plugins };
+    const client = createClient(PluginRuntime, transportFor(endpoint));
+    const resp = await client.health(create(HealthRequestSchema, {}), { signal: controller.signal });
+    return {
+      ok: resp.ok,
+      plugins: resp.plugins.length > 0 ? resp.plugins : undefined,
+      message: resp.message || undefined
+    };
   } catch (error) {
     return { ok: false, message: error instanceof Error ? error.message : String(error) };
   } finally {
@@ -610,33 +663,28 @@ export async function externalPluginHealth(
   }
 }
 
-async function executeExternalHttp(
+/**
+ * Unary external plugin call over connect-rpc. Retries transient connection
+ * failures (3 attempts, 250ms / 750ms / 2250ms backoff) but NOT timeouts —
+ * those usually mean the plugin is genuinely hung, not flaky.
+ */
+async function executeExternalConnect(
   plugin: RegisteredPlugin,
   endpoint: ExternalPluginEndpoint,
   input: PluginExecutionInput
 ): Promise<PluginExecutionOutput> {
-  const url = joinUrl(endpoint.baseUrl, endpoint.executePath ?? "/execute");
   const timeoutMs = endpoint.timeoutMs ?? DEFAULT_EXTERNAL_TIMEOUT_MS;
-  const body = JSON.stringify(buildExternalRequestBody(plugin, input));
-  // Retry transient connection failures (typical when the python-plugins
-  // container is restarting at the same minute a schedule fires). Three
-  // attempts with 250ms / 750ms / 2250ms backoff keeps the total ceiling
-  // under a 5s budget. Timeouts are NOT retried — those usually mean the
-  // plugin is genuinely hung, not flaky.
+  const req = buildExecuteRequest(plugin, input);
+  const client = createClient(PluginRuntime, transportFor(endpoint));
   const attempts = 3;
   let lastError: unknown;
   for (let attempt = 1; attempt <= attempts; attempt++) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
-      const response = await fetch(url, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body,
-        signal: controller.signal
-      });
+      const resp = await client.execute(req, { signal: controller.signal });
       clearTimeout(timer);
-      return await handleExternalResponse(response);
+      return fromExecuteResponse(resp);
     } catch (error) {
       clearTimeout(timer);
       if (controller.signal.aborted) {
@@ -644,9 +692,7 @@ async function executeExternalHttp(
       }
       lastError = error;
       if (attempt < attempts) {
-        // Exponential-ish backoff; jitter unnecessary at this small N.
-        const delay = 250 * Math.pow(3, attempt - 1);
-        await new Promise((resolve) => setTimeout(resolve, delay));
+        await new Promise((resolve) => setTimeout(resolve, 250 * Math.pow(3, attempt - 1)));
         continue;
       }
     }
@@ -658,49 +704,49 @@ async function executeExternalHttp(
   );
 }
 
-async function handleExternalResponse(
-  response: Response
+/**
+ * Server-streaming external plugin call. Yields ExecuteChunks until the
+ * server completes. Tokens are emitted via `input.onToken` when present;
+ * the final `outputs` envelope is returned as the resolved value.
+ *
+ * Used when a plugin's manifest declares `streaming: true` and the runtime
+ * is executing inside an SSE / chunked-response handler. Unlike the unary
+ * path, streaming calls are NOT retried — partial output is irrecoverable.
+ */
+export async function executeExternalConnectStream(
+  plugin: RegisteredPlugin,
+  endpoint: ExternalPluginEndpoint,
+  input: PluginExecutionInput
 ): Promise<PluginExecutionOutput> {
-  let parsed: unknown;
-  let rawText = "";
+  const timeoutMs = endpoint.timeoutMs ?? DEFAULT_EXTERNAL_TIMEOUT_MS;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    rawText = await response.text();
-    parsed = rawText.length > 0 ? JSON.parse(rawText) : undefined;
-  } catch {
-    parsed = undefined;
+    const client = createClient(PluginRuntime, transportFor(endpoint));
+    const req = buildExecuteRequest(plugin, input);
+    let final: PluginExecutionOutput | undefined;
+    const partialOutputs: Record<string, unknown> = {};
+    for await (const chunk of client.executeServerStream(req, { signal: controller.signal })) {
+      switch (chunk.payload.case) {
+        case "token":
+          input.onToken?.(chunk.payload.value);
+          break;
+        case "delta":
+          Object.assign(partialOutputs, chunk.payload.value as Record<string, unknown>);
+          break;
+        case "final":
+          final = fromExecuteResponse(chunk.payload.value);
+          break;
+      }
+    }
+    if (final) return final;
+    // Server closed the stream without sending a final envelope — synthesise
+    // one from accumulated deltas (or empty). Plugins SHOULD send a final
+    // chunk on success; this is the lenient fallback.
+    return { outputs: partialOutputs };
+  } finally {
+    clearTimeout(timer);
   }
-  const body = (parsed ?? {}) as {
-    error?: unknown;
-    outputs?: unknown;
-    metadata?: unknown;
-    usage?: unknown;
-    artifacts?: unknown;
-  };
-
-  if (typeof body.error === "string") {
-    throw new Error(body.error);
-  }
-  if (!response.ok) {
-    const detail = rawText.trim().length > 0 ? `: ${rawText.trim()}` : "";
-    throw new Error(`External plugin returned HTTP ${response.status}${detail}`);
-  }
-
-  const result: PluginExecutionOutput = {
-    outputs:
-      body.outputs && typeof body.outputs === "object"
-        ? (body.outputs as Record<string, unknown>)
-        : {}
-  };
-  if (body.metadata && typeof body.metadata === "object") {
-    result.metadata = body.metadata as Record<string, unknown>;
-  }
-  if (body.usage && typeof body.usage === "object") {
-    result.usage = body.usage as PluginExecutionOutput["usage"];
-  }
-  if (Array.isArray(body.artifacts)) {
-    result.artifacts = body.artifacts as PluginExecutionOutput["artifacts"];
-  }
-  return result;
 }
 
 export async function executeRegisteredPlugin(
@@ -711,10 +757,13 @@ export async function executeRegisteredPlugin(
     return plugin.implementation.execute(input);
   }
   if (plugin.mode === "external" && plugin.external) {
-    if (plugin.external.mode === "grpc") {
-      throw new Error("grpc external transport not implemented");
+    // Route to streaming variant when the caller provided an onToken sink AND
+    // the plugin manifest opted into streaming. Without `streaming: true` the
+    // server may not implement ExecuteServerStream; unary is the safe default.
+    if (input.onToken && plugin.manifest.streaming === true) {
+      return executeExternalConnectStream(plugin, plugin.external, input);
     }
-    return executeExternalHttp(plugin, plugin.external, input);
+    return executeExternalConnect(plugin, plugin.external, input);
   }
   throw new Error("External plugin execution is scaffolded; deploy plugin gateway before enabling external plugins");
 }
