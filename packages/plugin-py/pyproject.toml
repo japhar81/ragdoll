@@ -1,0 +1,30 @@
+[tool.poetry]
+name = "ragdoll-plugin-py"
+version = "0.1.0"
+description = "Python author SDK for RAGdoll external plugins — thin wrapper around connectrpc that bundles the shared concerns layer (auth, tenant-scope, allow-list, OTel) and ships the generated proto bindings."
+authors = ["RAGdoll"]
+readme = "README.md"
+packages = [{ include = "ragdoll_plugin_py" }]
+
+[tool.poetry.dependencies]
+python = "^3.11"
+connectrpc = "^0.10.0"
+# grpcio-tools (used by scripts/gen-proto.sh) emits 6.x-pinned gencode; the
+# runtime must be >= that. Range bounded only by major to leave room for
+# point upgrades without churn — connectrpc itself just wants >=5.28.
+protobuf = ">=6.0,<8.0"
+# OTel is OPTIONAL — interceptors degrade to no-op if it's missing so the
+# SDK installs cleanly on minimal images (mirrors the Node side's lazy-import
+# pattern in @ragdoll/observability).
+opentelemetry-api = { version = "^1.27.0", optional = true }
+
+[tool.poetry.extras]
+otel = ["opentelemetry-api"]
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.2.0"
+pytest-asyncio = "^0.23.0"
+
+[build-system]
+requires = ["poetry-core>=1.9.0"]
+build-backend = "poetry.core.masonry.api"

@@ -9,10 +9,21 @@ packages = [{ include = "app" }]
 [tool.poetry.dependencies]
 python = "^3.11"
 fastapi = "^0.115.0"
+# Hypercorn replaces uvicorn for HTTP/2 + h2c (Phase B): native gRPC and
+# full-duplex bidi require h2 end-to-end. Connect HTTP/JSON still works
+# over HTTP/1.1 — hypercorn negotiates both.
+hypercorn = "^0.17.0"
 uvicorn = { extras = ["standard"], version = "^0.30.0" }
 crawl4ai = "^0.4.0"
 scrapy = "^2.11.0"
 pydantic = "^2.7.0"
+# Workspace SDK installed from /opt (mirror of the host packages/plugin-py/
+# layout copied in by the Dockerfile). Brings in connectrpc + the generated
+# proto bindings so the sidecar speaks the same wire as the runtime.
+ragdoll-plugin-py = { path = "/opt/ragdoll-plugin-py", develop = false }
+# Starlette is a transitive dep of FastAPI but we import it directly to
+# compose the Connect + FastAPI apps under one ASGI surface (Mount).
+starlette = "^0.41.0"
 
 # Phase 13 follow-up: local cross-encoder reranking is an OPTIONAL
 # dependency group (`reranker`). Pulling sentence-transformers + torch

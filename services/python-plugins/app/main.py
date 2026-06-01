@@ -1,15 +1,36 @@
-"""FastAPI app implementing EXTERNAL PLUGIN HTTP CONTRACT v1.
+"""ASGI entrypoint composing two protocols over the same handlers.
 
-Server side only. A TS client calls these endpoints.
+Phase B: this sidecar now serves the new connect-rpc PluginRuntime contract
+(`ragdoll.plugin.v1.PluginRuntime/*`) in addition to the legacy HTTP/JSON
+`POST /execute` route. Both delegate to the same HANDLERS dict — the
+crawl4ai / scrapy / rerank_bge implementations are wire-agnostic.
 
-Dispatch model:
+Layout (in dispatch order):
+
+  /healthz                                 → FastAPI (k8s probe; unchanged)
+  /execute                                 → FastAPI (legacy contract v1)
+  /ragdoll.plugin.v1.PluginRuntime/*       → Connect ASGI (new)
+  everything else                          → 404
+
+Legacy /execute is kept during the cutover so existing TS callers that
+haven't migrated to the Connect transport keep working. Once the Node
+runtime is exclusively on Connect (the default since Phase A) the legacy
+route becomes dead code and can be removed in a follow-up.
+
+Dispatch model (legacy /execute, unchanged from Phase A):
     POST /execute -> validate body with pydantic -> look up plugin.id in
     HANDLERS -> call handler(request) -> wrap result in the success envelope.
 
-Error model (per contract):
-    - Unknown plugin / bad config / SSRF rejection -> HTTP 200 {"error": ...}
-      (expected failures the TS side treats as plugin failure).
-    - Truly unexpected exceptions -> surface as HTTP 500.
+Dispatch model (Connect /ragdoll.plugin.v1.PluginRuntime/Execute):
+    proto ExecuteRequest -> translate to the same pydantic ExecuteRequest
+    the legacy handler expects -> call handler -> proto ExecuteResponse.
+
+Error model (legacy):
+    Expected failures -> HTTP 200 {"error": ...}; unexpected -> HTTP 500.
+Error model (Connect):
+    Expected failures -> ConnectError(code=INTERNAL or INVALID_ARGUMENT);
+    unexpected -> ConnectError(code=INTERNAL) — connectrpc serialises
+    these as the protocol-appropriate frame for whichever wire is in use.
 """
 
 from __future__ import annotations
@@ -20,7 +41,9 @@ from typing import Any, Callable, Dict
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError
+from starlette.types import ASGIApp, Receive, Scope, Send
 
+from app.connect_bridge import build_connect_app
 from app.models import ExecuteRequest, HealthResponse
 from app.plugins import crawl4ai_plugin, rerank_bge_plugin, scrapy_plugin
 
@@ -35,10 +58,12 @@ HANDLERS: Dict[str, Callable[[ExecuteRequest], Dict[str, Any]]] = {
 
 PLUGIN_IDS = list(HANDLERS.keys())
 
-app = FastAPI(title="RAGdoll Python Plugins", version="1.0.0")
+# --- Legacy FastAPI app (contract v1) --------------------------------------
+
+legacy = FastAPI(title="RAGdoll Python Plugins (legacy HTTP contract v1)", version="1.0.0")
 
 
-@app.get("/healthz", response_model=HealthResponse)
+@legacy.get("/healthz", response_model=HealthResponse)
 async def healthz() -> HealthResponse:
     return HealthResponse(ok=True, plugins=PLUGIN_IDS)
 
@@ -55,7 +80,7 @@ def _build_envelope(result: Dict[str, Any]) -> Dict[str, Any]:
     return envelope
 
 
-@app.post("/execute")
+@legacy.post("/execute")
 async def execute(raw: Request) -> JSONResponse:
     # Parse JSON body manually so a malformed body becomes a 200 {"error"}
     # rather than FastAPI's default 422.
@@ -91,3 +116,28 @@ async def execute(raw: Request) -> JSONResponse:
         )
 
     return JSONResponse(_build_envelope(result), status_code=200)
+
+
+# --- Connect-RPC app (new) -------------------------------------------------
+
+connect_app = build_connect_app(HANDLERS, PLUGIN_IDS)
+
+
+# --- ASGI composition ------------------------------------------------------
+# A manual two-route dispatcher avoids Starlette's Mount("/") path-stripping
+# (which strips the leading slash and breaks connectrpc's ASGI matcher).
+# The dispatch table is exact-path: legacy paths win, everything else falls
+# through to the Connect app, which 404s on unknown paths itself.
+
+LEGACY_PATHS = {"/healthz", "/execute"}
+
+
+async def app(scope: Scope, receive: Receive, send: Send) -> None:
+    if scope["type"] != "http":
+        # Lifespan / websocket — Hypercorn drives lifespan for the legacy
+        # FastAPI app (startup/shutdown hooks); pass through there.
+        await legacy(scope, receive, send)
+        return
+    path = scope.get("path", "")
+    target: ASGIApp = legacy if path in LEGACY_PATHS else connect_app
+    await target(scope, receive, send)

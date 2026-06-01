@@ -45,6 +45,12 @@ RUN apt-get update \
 
 RUN pip install "poetry==${POETRY_VERSION}"
 
+# Workspace plugin SDK as a poetry path dep. Copy it BEFORE `poetry install`
+# so the dep resolves; the SDK + generated proto bindings are stable in the
+# Phase B model (regen only when proto/plugin.proto changes), so its layer
+# stays cached unless those files change.
+COPY packages/plugin-py /opt/ragdoll-plugin-py
+
 # Dependency manifests first → this layer (Poetry resolve + install) only
 # re-runs when pyproject.toml / poetry.lock change, not on every app edit.
 COPY services/python-plugins/pyproject.toml services/python-plugins/poetry.lock ./
@@ -72,4 +78,9 @@ USER appuser
 
 EXPOSE 8000
 
-CMD ["poetry", "run", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Hypercorn (HTTP/1.1 + HTTP/2 + h2c via prior knowledge) replaces uvicorn so
+# the sidecar serves native gRPC + true full-duplex bidi alongside Connect
+# HTTP/JSON. Connect over HTTP/1.1 still works for unary + server-stream +
+# client-stream; only full-duplex bidi requires h2 end-to-end. The two
+# protocols share the same ASGI app — no extra port, no separate process.
+CMD ["poetry", "run", "hypercorn", "app.main:app", "--bind", "0.0.0.0:8000"]
