@@ -4,6 +4,7 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
+    "./transport": "./src/transport.ts",
     "./author": "./src/author.ts"
   },
   "dependencies": {
