@@ -3,7 +3,11 @@
 # extract manifests in stage 1 and let stage 2's npm-install layer
 # cache on their content alone).
 
-FROM node:22-alpine AS manifests
+# See api.Dockerfile for the NODE_BASE_IMAGE rationale (mirror /
+# air-gapped registries). Default = upstream node:22-alpine.
+ARG NODE_BASE_IMAGE=node:22-alpine
+
+FROM ${NODE_BASE_IMAGE} AS manifests
 WORKDIR /src
 COPY package.json ./
 COPY apps ./apps
@@ -13,7 +17,7 @@ RUN find apps packages plugins \
       -type f -not -name package.json -not -path '*/node_modules/*' -delete \
     && find apps packages plugins -type d -empty -delete
 
-FROM node:22-alpine
+FROM ${NODE_BASE_IMAGE}
 WORKDIR /app
 # git + openssh-client for @ragdoll/git-storage (the worker's poller
 # clones and pushes per-tenant repos). Same justification as the api

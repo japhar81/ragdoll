@@ -12,7 +12,14 @@
 # Chromium plus its OS libraries. This image is intentionally large and slow
 # to build — that is acceptable for a browser-driven crawler service and is
 # why it is excluded from the fast scripts/dev-refresh.sh path.
-FROM python:3.12-slim
+#
+# PYTHON_BASE_IMAGE is parameterised so operators behind a Docker Hub proxy
+# (or air-gapped clusters that mirror upstream into an internal registry)
+# can override the base without patching this Dockerfile:
+#   docker build --build-arg PYTHON_BASE_IMAGE=registry.internal/python:3.12-slim ...
+# Default keeps the upstream image so unconfigured builds Just Work.
+ARG PYTHON_BASE_IMAGE=python:3.12-slim
+FROM ${PYTHON_BASE_IMAGE}
 
 # - POETRY_VIRTUALENVS_CREATE=false: install into the system site so the
 #   non-root runtime user can import without activating a venv.
