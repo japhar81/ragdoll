@@ -48,6 +48,35 @@ helm install ragdoll infra/helm/ragdoll \
 `web.replicas`/`web.port`, `postgres.externalUrl`, `redis.externalUrl`,
 `qdrant.url`, `otel.endpoint`, and `secrets.existingSecret`.
 
+### Building behind a Docker Hub proxy / air-gapped registry
+
+Every Dockerfile in the repo (`infra/docker/{api,web,worker,file-watcher}.Dockerfile`
+and `services/python-plugins/Dockerfile`) declares its base image as a
+build ARG with the upstream default. Override per-build to pull from an
+internal mirror — no Dockerfile edits required:
+
+```bash
+# Node-based images (api, worker, web build stage, file-watcher)
+docker build \
+  --build-arg NODE_BASE_IMAGE=registry.internal/library/node:22-alpine \
+  -f infra/docker/api.Dockerfile -t ragdoll-api .
+
+# web runtime stage uses a second ARG
+docker build \
+  --build-arg NODE_BASE_IMAGE=registry.internal/library/node:22-alpine \
+  --build-arg NGINX_BASE_IMAGE=registry.internal/nginxinc/nginx-unprivileged:1.27-alpine \
+  -f infra/docker/web.Dockerfile -t ragdoll-web .
+
+# Python crawler sidecar
+docker build \
+  --build-arg PYTHON_BASE_IMAGE=registry.internal/library/python:3.12-slim \
+  -f services/python-plugins/Dockerfile -t ragdoll-python-plugins .
+```
+
+`docker compose build` honours the same ARGs via `--build-arg`. For
+rate-limited Docker Hub clusters, set these to your proxy's mirror path
+in CI/CD and the upstream defaults stay out of the build entirely.
+
 ## Python crawler sidecar (optional)
 
 The `crawl4ai_crawler` / `scrapy_spider` plugins run in a separate Python

@@ -18,7 +18,17 @@
 # the same image runs identically under both docker compose and the
 # OpenShift in-cluster build.
 
-FROM node:22-alpine AS manifests
+# NODE_BASE_IMAGE is parameterised so operators behind a corporate
+# Docker Hub proxy (or air-gapped clusters that mirror upstream images
+# into an internal registry) can override the base without patching
+# this Dockerfile:
+#   docker build --build-arg NODE_BASE_IMAGE=registry.internal/node:22-alpine ...
+# Default keeps the upstream image so unconfigured builds Just Work.
+# Declared once before the first FROM: a global ARG is visible in every
+# FROM instruction in the file, no re-declaration needed.
+ARG NODE_BASE_IMAGE=node:22-alpine
+
+FROM ${NODE_BASE_IMAGE} AS manifests
 WORKDIR /src
 COPY package.json ./
 COPY apps ./apps
@@ -31,7 +41,7 @@ RUN find apps packages plugins \
       -type f -not -name package.json -not -path '*/node_modules/*' -delete \
     && find apps packages plugins -type d -empty -delete
 
-FROM node:22-alpine
+FROM ${NODE_BASE_IMAGE}
 WORKDIR /app
 # git + openssh-client are required by @ragdoll/git-storage (it shells out
 # to `git` so HTTPS-with-PAT and SSH-with-key both work without a JS git

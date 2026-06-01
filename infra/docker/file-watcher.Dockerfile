@@ -1,5 +1,8 @@
 # syntax=docker/dockerfile:1.7-labs
-FROM node:22-alpine
+# See api.Dockerfile for the NODE_BASE_IMAGE rationale (mirror /
+# air-gapped registries). Default = upstream node:22-alpine.
+ARG NODE_BASE_IMAGE=node:22-alpine
+FROM ${NODE_BASE_IMAGE}
 WORKDIR /app
 # Pure-JS, no native deps. Only the file-watcher source is needed at
 # runtime — we don't ship the worker registry or any plugin code so the
