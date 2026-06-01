@@ -26,6 +26,24 @@ export default defineConfig({
   },
   build: {
     outDir: "dist",
-    emptyOutDir: true
+    emptyOutDir: true,
+    rollupOptions: {
+      // npm workspaces hoist server-only deps (connect-rpc / grpc-js / pg /
+      // fastify / etc.) into the root node_modules; vite's resolver sees them
+      // as available and will try to bundle them on any incidental import
+      // chain. The web app NEVER imports any of these — they're Node-only.
+      // Marking them external means rollup refuses to follow imports into
+      // them rather than tripping over their `node:*` requires.
+      external: [
+        /^@connectrpc\//,
+        /^@grpc\//,
+        /^@bufbuild\//,
+        /^@ragdoll\/(plugin-sdk|proto-gen|runtime|db|auth|secrets|providers|plugin-loader|cron|opensearch|vector|graph|observability|git-storage)$/,
+        /^@ragdoll\/(plugin-sdk|proto-gen|runtime|db|auth|secrets|providers|plugin-loader|cron|opensearch|vector|graph|observability|git-storage)\//
+      ]
+    }
+  },
+  optimizeDeps: {
+    exclude: ["@connectrpc/connect", "@connectrpc/connect-node", "@grpc/grpc-js", "@grpc/proto-loader", "@bufbuild/protobuf"]
   }
 });
