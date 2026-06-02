@@ -3,15 +3,16 @@
 ## Status
 
 Accepted. **Wire contract superseded by ADR
-[0022](./0022-connect-rpc-plugin-transport.md) (Phase A/B, 2026-06-01).**
-The out-of-process-sidecar motivation (sandbox headless Chromium / Scrapy
-away from the worker) is unchanged and still load-bearing. The HTTP
-contract v1 described below is deprecated — the sidecar dual-hosts it
-during cutover, but new plugins (and the in-tree `rerank_bge_local`
-consumer) target the `ragdoll.plugin.v1.PluginRuntime` Connect service
-instead. The `ExternalPluginEndpoint.mode: "http" | "grpc"` union and
-`buildExternalRequestBody` helper referenced here no longer exist; see
-ADR 0022 for the replacement.
+[0022](./0022-connect-rpc-plugin-transport.md) (Phase A/B, 2026-06-01) and
+removed (2026-06-01).** The out-of-process-sidecar motivation (sandbox
+headless Chromium / Scrapy away from the worker) is unchanged and still
+load-bearing. The HTTP contract v1 described below — `POST /execute` with
+the hand-assembled JSON envelope built by `buildExternalRequestBody` —
+**no longer exists in the sidecar**; `app/main.py` serves only the
+`ragdoll.plugin.v1.PluginRuntime` Connect routes plus a 5-line Starlette
+`/healthz` shim. The `ExternalPluginEndpoint.mode: "http" | "grpc"` union
+and `buildExternalRequestBody` helper are gone from the codebase. See ADR
+0022 for the replacement contract.
 
 ## Context
 

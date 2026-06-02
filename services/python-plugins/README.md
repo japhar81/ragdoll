@@ -1,58 +1,69 @@
 # RAGdoll Python Plugins Service
 
-A self-contained FastAPI service that hosts Python-only crawler plugins for the
-RAGdoll platform. It speaks **EXTERNAL PLUGIN HTTP CONTRACT v1**: a TypeScript
-transport client calls this HTTP server to execute a plugin and gets back a
-normalized result envelope.
+A self-contained ASGI service that hosts Python-only crawler plugins for the
+RAGdoll platform. Speaks the
+[`ragdoll.plugin.v1.PluginRuntime`](../../proto/plugin.proto) connect-rpc
+contract (ADR [0022](../../docs/adr/0022-connect-rpc-plugin-transport.md))
+from a single Hypercorn listener.
+
+The two-line summary:
+
+| Route                                            | Purpose                                              |
+|--------------------------------------------------|------------------------------------------------------|
+| `/ragdoll.plugin.v1.PluginRuntime/*`             | Connect HTTP/JSON + gRPC + gRPC-Web                  |
+| `GET /healthz`                                   | 5-line Starlette shim for k8s liveness probes        |
+
+The dual-host of `POST /execute` from the Phase B cutover was removed
+(2026-06-01) — every caller is on the Connect wire.
+
+`app/connect_bridge.py` translates the `ExecuteRequest` proto into the
+pydantic `ExecuteRequest` the handlers already accept (Struct ⇄ dict via
+`MessageToDict` / `Struct.update`) so the per-plugin code is wire-agnostic.
 
 Plugins shipped:
 
-| `plugin.id`        | Engine                       |
-|--------------------|------------------------------|
-| `crawl4ai_crawler` | crawl4ai `AsyncWebCrawler`   |
-| `scrapy_spider`    | Scrapy (run in a subprocess) |
+| `plugin.id`         | Engine                       |
+|---------------------|------------------------------|
+| `crawl4ai_crawler`  | crawl4ai `AsyncWebCrawler`   |
+| `scrapy_spider`     | Scrapy (run in a subprocess) |
+| `rerank_bge_local`  | cross-encoder (sentence-transformers; optional `[reranker]` extra) |
 
-This directory is fully isolated from the Node/TS side. The only coupling is
-the HTTP contract below.
+The directory is fully isolated from the Node/TS side. The only coupling
+is the proto contract.
 
-## HTTP contract v1
+## Calling it
 
-- `GET /healthz` → `200 {"ok": true, "plugins": ["crawl4ai_crawler","scrapy_spider"]}`
-- `POST /execute` with JSON body:
+The TypeScript runtime calls this sidecar via
+`@ragdoll/plugin-sdk/transport` (`executeRegisteredPlugin` →
+`executeExternalConnect`); plugin authors targeting Python should follow
+[`docs/developer/plugin-author-quickstart.md` sections 9-14](../../docs/developer/plugin-author-quickstart.md#plugin-author-quickstart-python).
+The runtime emits `PluginRuntime.Execute` (unary) by default; pipelines
+with `manifest.streaming: true` route through `ExecuteServerStream`.
 
-  ```json
-  {
-    "plugin": {"category": "...", "id": "...", "version": "..."},
-    "node":   {"id": "...", "config": {}, "secrets": {}},
-    "inputs": {},
-    "config": {},
-    "secrets": {},
-    "context": {
-      "requestId": "...", "executionId": "...", "tenantId": "...",
-      "pipelineId": "...", "pipelineVersionId": "...", "environment": "...",
-      "deadline": null,
-      "resolvedConfig": {"values": {"<key>": {"value": "<any>"}}}
-    }
-  }
-  ```
+Quick smoke probes (from inside the docker network):
 
-- **Success** → `200`:
+```sh
+# Liveness (k8s probe-style)
+docker exec ragdoll-api-1 wget -qO- http://python-plugins:8000/healthz
+# → {"ok":true,"plugins":["crawl4ai_crawler","rerank_bge_local","scrapy_spider"]}
 
-  ```json
-  { "outputs": {...}, "metadata": {...}, "usage": {...}, "artifacts": [ ... ] }
-  ```
+# Capability via Connect Health RPC
+docker exec ragdoll-api-1 sh -c '
+  wget -qO- --post-data="{}" --header="Content-Type: application/json" \
+    http://python-plugins:8000/ragdoll.plugin.v1.PluginRuntime/Health'
+# → {"ok": true, "plugins": ["crawl4ai_crawler","rerank_bge_local","scrapy_spider"], "message": ""}
+```
 
-  (`metadata` / `usage` / `artifacts` included only when present.)
+## Effective config merge
 
-- **Failure** → `200 {"error": "<message>"}` for *expected* failures
-  (unknown plugin, SSRF-blocked, bad config, malformed body). Truly
-  unexpected exceptions surface as HTTP `500 {"error": ...}`. The TS client
-  treats a 200 `{error}` **or** any non-2xx as a plugin failure.
+`node.config` < `context.resolvedConfig.values` < top-level `config`
+(last wins). Same semantics inside every handler — the merge happens in
+`app.models.ExecuteRequest.effective_config()` which is called by all
+three plugin handlers.
 
-Effective config is merged as `node.config` < `context.resolvedConfig.values`
-< top-level `config` (last wins).
+---
 
-### Plugin configs
+## Plugin configs
 
 **`crawl4ai_crawler`**
 
@@ -169,8 +180,16 @@ cd services/python-plugins
 poetry run pytest
 ```
 
-Tests use FastAPI's `TestClient` and require **no network, no browser, and no
-Twisted reactor**. `crawl4ai`/`scrapy` are imported lazily inside the run
-functions, and tests monkeypatch `run_crawl4ai` / `run_scrapy` plus inject a
-fake DNS resolver. The dev deps (`pytest`, `pytest-asyncio`, `httpx`) plus
-`fastapi`/`pydantic` are sufficient to run the suite.
+Tests use a small `FakeClient` (defined in `tests/conftest.py`) that calls
+the HANDLERS dispatch directly without going through HTTP. It preserves the
+ergonomics of `client.post("/execute", json=body)` / `client.get("/healthz")`
+the legacy FastAPI TestClient gave us, so the per-plugin unit tests didn't
+need to be rewritten when the FastAPI `/execute` route was removed. Wire
+fidelity (the actual Connect protocol round-trip) is covered by
+`tests/e2e/cross-language-plugin.e2e.test.ts` on the Node side, which hits
+the running sidecar container.
+
+`crawl4ai`/`scrapy` are imported lazily inside the run functions, so tests
+require **no network, no browser, and no Twisted reactor** — monkeypatch
+`run_crawl4ai` / `run_scrapy` + inject a fake DNS resolver. The dev deps
+(`pytest`, `pytest-asyncio`, `pydantic`) are sufficient to run the suite.

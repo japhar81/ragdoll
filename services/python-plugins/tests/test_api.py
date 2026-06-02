@@ -27,7 +27,7 @@ def test_healthz(client):
     assert r.status_code == 200
     body = r.json()
     assert body["ok"] is True
-    assert body["plugins"] == ["crawl4ai_crawler", "scrapy_spider"]
+    assert body["plugins"] == ["crawl4ai_crawler", "rerank_bge_local", "scrapy_spider"]
 
 
 # --------------------------------------------------------------------------- #
@@ -211,16 +211,6 @@ def test_unknown_plugin(client):
     r = client.post("/execute", json=body)
     assert r.status_code == 200
     assert r.json() == {"error": "unknown plugin does_not_exist"}
-
-
-def test_malformed_body_not_json(client):
-    r = client.post(
-        "/execute",
-        content=b"this is not json",
-        headers={"content-type": "application/json"},
-    )
-    assert r.status_code == 200
-    assert "invalid JSON" in r.json()["error"]
 
 
 def test_malformed_body_missing_plugin(client):

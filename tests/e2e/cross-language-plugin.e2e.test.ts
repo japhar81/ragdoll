@@ -30,10 +30,9 @@ async function isSidecarReachable(): Promise<boolean> {
   try {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 1500);
-    // /healthz (legacy FastAPI route) is the cheapest reachability check
-    // — a 200 here means the Hypercorn listener is bound and the legacy
-    // app is mounted. The Connect Health RPC is exercised in the
-    // assertions below.
+    // /healthz (5-line Starlette shim kept for k8s liveness probes) is the
+    // cheapest reachability check — a 200 here means the Hypercorn listener
+    // is bound. The Connect Health RPC is exercised in the assertions below.
     const r = await fetch(`${BASE_URL}/healthz`, { signal: controller.signal });
     clearTimeout(timer);
     return r.ok;

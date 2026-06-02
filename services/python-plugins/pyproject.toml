@@ -1,28 +1,30 @@
 [tool.poetry]
 name = "ragdoll-python-plugins"
 version = "0.1.0"
-description = "RAGdoll external plugin HTTP service hosting Python-only crawler plugins (crawl4ai, scrapy)."
+description = "RAGdoll external plugin service hosting Python-only crawler plugins (crawl4ai, scrapy, rerank_bge). Speaks the ragdoll.plugin.v1.PluginRuntime connect-rpc contract from ADR 0022."
 authors = ["RAGdoll"]
 readme = "README.md"
 packages = [{ include = "app" }]
 
 [tool.poetry.dependencies]
 python = "^3.11"
-fastapi = "^0.115.0"
-# Hypercorn replaces uvicorn for HTTP/2 + h2c (Phase B): native gRPC and
-# full-duplex bidi require h2 end-to-end. Connect HTTP/JSON still works
-# over HTTP/1.1 — hypercorn negotiates both.
+# Hypercorn (HTTP/1.1 + HTTP/2 + h2c via prior knowledge) is the only ASGI
+# server we need — the legacy FastAPI /execute route was removed in the
+# Phase B post-rip cleanup, leaving a 5-line Starlette /healthz shim + the
+# Connect PluginRuntime app composed under one ASGI surface in app/main.py.
 hypercorn = "^0.17.0"
-uvicorn = { extras = ["standard"], version = "^0.30.0" }
 crawl4ai = "^0.4.0"
 scrapy = "^2.11.0"
+# pydantic still wraps the handler request shape (crawl4ai/scrapy/rerank_bge
+# all take `ExecuteRequest` from app/models.py); the Connect bridge in
+# app/connect_bridge.py translates from the proto request into this shape.
 pydantic = "^2.7.0"
 # Workspace SDK installed from /opt (mirror of the host packages/plugin-py/
 # layout copied in by the Dockerfile). Brings in connectrpc + the generated
 # proto bindings so the sidecar speaks the same wire as the runtime.
 ragdoll-plugin-py = { path = "/opt/ragdoll-plugin-py", develop = false }
-# Starlette is a transitive dep of FastAPI but we import it directly to
-# compose the Connect + FastAPI apps under one ASGI surface (Mount).
+# Direct dep so app/main.py's tiny dispatcher + the /healthz shim aren't
+# relying on a transitive (Hypercorn pulls it in but pinning here is safer).
 starlette = "^0.41.0"
 
 # Phase 13 follow-up: local cross-encoder reranking is an OPTIONAL
@@ -42,6 +44,9 @@ sentence-transformers = "^3.0.0"
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.2.0"
 pytest-asyncio = "^0.23.0"
+# httpx kept for any future tests that hit the Connect ASGI app directly
+# (the Phase B test refactor uses a small FakeClient that calls HANDLERS
+# without HTTP, so httpx isn't strictly required today).
 httpx = "^0.27.0"
 
 [tool.poetry.scripts]
