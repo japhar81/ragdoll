@@ -303,6 +303,76 @@ export class AnthropicProvider implements ProviderAdapter {
   }
 }
 
+/**
+ * In-process concurrency gate for local Ollama.
+ *
+ * CPU Ollama is single-process and serializes inference internally. When the
+ * runtime fires N concurrent ollama calls (worker concurrency × replicas),
+ * they ALL queue on the same Ollama instance — each fights for the same CPU
+ * cores, none get scheduled cleanly, and a request that takes 1s alone can
+ * take 30-90s in a 4-way pile-up. With the ollama-warmer's 90s heartbeat
+ * timeout on top, the heartbeat starts failing too and emits noisy
+ * `ollama_warm_error: This operation was aborted` warnings.
+ *
+ * The fix is to serialize ollama calls at the runtime boundary. We do this
+ * per-baseUrl (so a sidecar pointing at a different Ollama doesn't block
+ * with the bundled one), bounded by `OLLAMA_MAX_CONCURRENCY` (default 1 to
+ * match CPU Ollama's actual inference parallelism; bump to 2-4 when running
+ * against GPU Ollama or a hosted Ollama-compatible endpoint that does
+ * batch fan-out internally).
+ *
+ * Hosted providers (OpenAI / Anthropic) are NOT gated — their backends
+ * scale horizontally and benefit from runtime parallelism.
+ */
+const OLLAMA_MAX_CONCURRENCY = Math.max(1, Number(process.env.OLLAMA_MAX_CONCURRENCY ?? "1"));
+const ollamaGates = new Map<string, OllamaGate>();
+
+class OllamaGate {
+  // Node's --experimental-strip-types doesn't accept parameter properties,
+  // so the field is declared and assigned explicitly.
+  readonly #max: number;
+  #inflight = 0;
+  readonly #waiters: Array<() => void> = [];
+
+  constructor(max: number) {
+    this.#max = max;
+  }
+
+  async acquire(): Promise<void> {
+    if (this.#inflight < this.#max) {
+      this.#inflight += 1;
+      return;
+    }
+    await new Promise<void>((resolve) => this.#waiters.push(resolve));
+    this.#inflight += 1;
+  }
+
+  release(): void {
+    this.#inflight -= 1;
+    const next = this.#waiters.shift();
+    if (next) next();
+  }
+}
+
+function gateFor(baseUrl: string): OllamaGate {
+  let gate = ollamaGates.get(baseUrl);
+  if (!gate) {
+    gate = new OllamaGate(OLLAMA_MAX_CONCURRENCY);
+    ollamaGates.set(baseUrl, gate);
+  }
+  return gate;
+}
+
+async function withOllamaGate<T>(baseUrl: string, fn: () => Promise<T>): Promise<T> {
+  const gate = gateFor(baseUrl);
+  await gate.acquire();
+  try {
+    return await fn();
+  } finally {
+    gate.release();
+  }
+}
+
 export class OllamaCompatibleProvider implements ProviderAdapter {
   id = "ollama";
   displayName = "Ollama-compatible";
@@ -310,33 +380,35 @@ export class OllamaCompatibleProvider implements ProviderAdapter {
   async chat(request: ChatRequest): Promise<ChatResponse> {
     const baseUrl =
       request.baseUrl ?? process.env.OLLAMA_BASE_URL ?? "http://localhost:11434";
-    const response = await postJson(
-      `${baseUrl}/api/chat`,
-      undefined,
-      {
-        model: request.model,
-        messages: request.messages,
-        stream: false,
-        options: {
-          temperature: request.temperature,
-          top_p: request.topP,
-          num_predict: request.maxTokens
-        }
-      },
-      request.timeoutMs ?? 300_000,
-      {},
-      { useLocalLlmDispatcher: true }
-    );
-    return {
-      text: response.message?.content ?? response.response ?? "",
-      model: response.model ?? request.model,
-      provider: this.id,
-      usage: {
-        inputTokens: response.prompt_eval_count,
-        outputTokens: response.eval_count
-      },
-      raw: response
-    };
+    return withOllamaGate(baseUrl, async () => {
+      const response = await postJson(
+        `${baseUrl}/api/chat`,
+        undefined,
+        {
+          model: request.model,
+          messages: request.messages,
+          stream: false,
+          options: {
+            temperature: request.temperature,
+            top_p: request.topP,
+            num_predict: request.maxTokens
+          }
+        },
+        request.timeoutMs ?? 300_000,
+        {},
+        { useLocalLlmDispatcher: true }
+      );
+      return {
+        text: response.message?.content ?? response.response ?? "",
+        model: response.model ?? request.model,
+        provider: this.id,
+        usage: {
+          inputTokens: response.prompt_eval_count,
+          outputTokens: response.eval_count
+        },
+        raw: response
+      };
+    });
   }
 
   /**
@@ -344,9 +416,16 @@ export class OllamaCompatibleProvider implements ProviderAdapter {
    * line). Each chunk has `message.content` until `done: true` arrives.
    * Always uses the localLlmDispatcher to bypass undici's connection cap
    * and the global headersTimeout (model load can be slow on CPU).
+   *
+   * The Ollama concurrency gate is acquired before opening the stream and
+   * released when the generator finishes (either by `done`, error, or
+   * caller `break`). The `finally` block guarantees the release even if
+   * the consumer stops iterating early.
    */
   async *streamChat(request: ChatRequest): AsyncIterable<{ type: "token" | "done" | "error"; token?: string; error?: string }> {
     const baseUrl = request.baseUrl ?? process.env.OLLAMA_BASE_URL ?? "http://localhost:11434";
+    const gate = gateFor(baseUrl);
+    await gate.acquire();
     let opened: Awaited<ReturnType<typeof openStream>> | undefined;
     try {
       opened = await openStream(
@@ -385,12 +464,17 @@ export class OllamaCompatibleProvider implements ProviderAdapter {
       yield { type: "error", error: error instanceof Error ? error.message : String(error) };
     } finally {
       opened?.cancelTimeout();
+      gate.release();
     }
   }
 
   async embeddings(request: EmbeddingRequest): Promise<EmbeddingResponse> {
     const baseUrl =
       request.baseUrl ?? process.env.OLLAMA_BASE_URL ?? "http://localhost:11434";
+    return withOllamaGate(baseUrl, () => this.#embeddingsImpl(request, baseUrl));
+  }
+
+  async #embeddingsImpl(request: EmbeddingRequest, baseUrl: string): Promise<EmbeddingResponse> {
     // Two practical constraints when talking to a CPU-only local
     // Ollama for embeddings:
     //

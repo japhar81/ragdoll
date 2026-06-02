@@ -289,74 +289,123 @@ fusion strategies, and the local `make` stack.
 
 ## External / Python plugins
 
-A plugin can run out-of-process behind an HTTP endpoint
+A plugin can run out-of-process behind a network endpoint
 (`RegisteredPlugin.mode: "external"`). This is how the Python-only crawlers
-(`crawl4ai_crawler`, `scrapy_spider`) ship: a separate FastAPI sidecar
+(`crawl4ai_crawler`, `scrapy_spider`) ship: a separate sidecar
 (`services/python-plugins/`) so a headless Chromium and Scrapy's Twisted
-reactor never enter the Node worker. See ADR 0010.
+reactor never enter the Node worker.
 
-### Wire contract v1
+The transport is **connect-rpc** (ADR
+[0022](../adr/0022-connect-rpc-plugin-transport.md)) — one `.proto` defines
+the wire, one server handler answers Connect HTTP/JSON + native gRPC +
+gRPC-Web simultaneously. The runtime picks the protocol on a per-call
+basis; the server is wire-agnostic. ADR 0010 covers the original
+out-of-process motivation (sandboxing untrusted Chromium / Twisted away
+from the worker); ADR 0022 covers the wire migration.
 
-`@ragdoll/plugin-sdk` (`executeRegisteredPlugin` → `executeExternalHttp`)
-speaks this contract. The exact request body is built by
-`buildExternalRequestBody`:
+> For step-by-step author walkthroughs, see
+> **[plugin-author-quickstart.md](./plugin-author-quickstart.md)** —
+> sections 1-8 cover the Node `@ragdoll/plugin-sdk/author` SDK and
+> sections 9-14 cover the Python `ragdoll-plugin-py` SDK. The reference
+> below is the lower-level contract a SDK consumer doesn't normally need.
 
-- `GET {baseUrl}{healthPath ?? "/healthz"}` → `200 { ok: true, plugins:
-  string[] }`. Probed by `externalPluginHealth` (never throws).
-- `POST {baseUrl}{executePath ?? "/execute"}` with JSON:
+### Wire contract (PluginRuntime service)
 
-  ```json
-  {
-    "plugin":  { "category": "...", "id": "...", "version": "..." },
-    "node":    { "id": "...", "config": {}, "secrets": {} },
-    "inputs":  {},
-    "config":  {},
-    "secrets": {},
-    "context": {
-      "requestId": "...", "executionId": "...", "tenantId": "...",
-      "pipelineId": "...", "pipelineVersionId": "...", "environment": "...",
-      "deadline": "ISO-8601 or null",
-      "resolvedConfig": { "values": { "<key>": { "value": "<any>" } } }
-    }
-  }
-  ```
+The contract lives at `proto/plugin.proto`. One service, five methods:
 
-  The context is deliberately reduced: the `AbortSignal` and functions are
-  stripped, `deadline` is an ISO string or `null`, and `resolvedConfig`
-  carries only `{ values: { key: { value } } }` — no sensitivity/secret
-  metadata leaves the control plane.
+```protobuf
+service PluginRuntime {
+  rpc Health(HealthRequest) returns (HealthResponse);
+  rpc Execute(ExecuteRequest) returns (ExecuteResponse);
+  rpc ExecuteServerStream(ExecuteRequest) returns (stream ExecuteChunk);
+  rpc ExecuteClientStream(stream ExecuteRequest) returns (ExecuteResponse);
+  rpc ExecuteBidi(stream ExecuteRequest) returns (stream ExecuteChunk);
+}
+```
 
-- **Success** → `200 { "outputs": {...}, "metadata"?: {...}, "usage"?:
-  {...}, "artifacts"?: [...] }` (optional keys included only when present).
-- **Expected failure** → `200 { "error": "<message>" }` (unknown plugin,
-  SSRF-blocked, bad config, malformed body).
-- **Unexpected failure** → any non-2xx (the service uses HTTP 500).
+- `ExecuteRequest` carries `plugin` (id) + `version` + `node_id` + tenant /
+  environment / request_id + four `google.protobuf.Struct` fields
+  (`config`, `inputs`, `dataset`, `secrets`) for the dynamic payload +
+  `deadline_ms` (int64, ms-from-now; `0` = none). `Struct` round-trips
+  natively to JSON objects in both Node (`JsonObject`) and Python
+  (`MessageToDict`) so there's no protobuf wrapper class to wrangle.
+- `ExecuteResponse` carries `outputs` + optional `metadata`, `usage`,
+  `artifacts` — same shape the old contract v1 wrapped in JSON.
+- `ExecuteChunk` is a `oneof payload { string token; Struct delta;
+  ExecuteResponse final; }` envelope for streaming. The plugin yields
+  zero or more `token`/`delta` chunks then a `final` envelope; the
+  runtime synthesises the envelope from accumulated deltas if `final`
+  is omitted.
 
-The TS client treats a 200 `{error}` **or** any non-2xx as a plugin
-failure (it throws). Calls use an `AbortController` timeout
-(`endpoint.timeoutMs`, default 300000 ms). `endpoint.mode: "grpc"` is
-**not implemented** and fails fast.
+`@ragdoll/plugin-sdk/transport` is the Node-side adapter
+(`executeRegisteredPlugin` / `executeExternalConnectStream` /
+`externalPluginHealth`). `ExternalPluginEndpoint` reshape:
+
+```ts
+interface ExternalPluginEndpoint {
+  baseUrl: string;
+  // Default "connect" (HTTP/JSON over HTTP/1.1) — works through every
+  // proxy/WAF, debuggable with curl. Bump to "grpc" + httpVersion: "2"
+  // for backpressure-heavy streaming.
+  protocol?: "connect" | "grpc" | "grpc-web";
+  httpVersion?: "1.1" | "2";  // default "1.1"; required "2" for grpc
+  timeoutMs?: number;
+}
+```
+
+There is no `mode: "http" | "grpc"` enum any more — the server speaks all
+three protocols from one handler; `protocol` on the endpoint is a per-call
+client preference. The runtime retries unary calls three times with
+250/750/2250ms backoff (timeouts are NOT retried). Streaming calls are NOT
+retried — partial output is irrecoverable.
+
+### Legacy contract v1 (deprecated, still served during cutover)
+
+The bundled `services/python-plugins` sidecar dual-hosts both transports
+on the same Hypercorn listener:
+
+- `/healthz` + `/execute` → legacy FastAPI HTTP contract v1 (kept for
+  rollback; will be removed in a follow-up)
+- `/ragdoll.plugin.v1.PluginRuntime/*` → Connect
+
+Both paths delegate to the same `HANDLERS` dict so the three Python
+plugins are wire-agnostic. The legacy contract is documented in earlier
+revisions of this file; new plugins should target the PluginRuntime
+proto exclusively.
 
 ### Adding a Python plugin
 
-In `services/python-plugins/`:
+The fastest path is the SDK walkthrough at
+[plugin-author-quickstart.md sections 9-14](./plugin-author-quickstart.md).
+Three things matter for an in-tree contribution to the bundled sidecar:
 
-1. Add `app/plugins/<name>_plugin.py` with `PLUGIN_ID = "<id>"` and a
-   `handle(request) -> {"outputs": {...}, "usage"?: {...},
-   "metadata"?: {...}}`. Read effective config via
+1. **Plugin source.** Add `app/plugins/<name>_plugin.py` with
+   `PLUGIN_ID = "<id>"` and a `handle(request) -> {"outputs": {...},
+   "usage"?: {...}, "metadata"?: {...}}`. The handler still takes the
+   legacy pydantic `ExecuteRequest` — the Connect bridge in
+   `app/connect_bridge.py` translates from the proto shape on the way in
+   so handlers don't need to change. Read effective config via
    `request.effective_config()` (merges `node.config` <
    `context.resolvedConfig.values` < top-level `config`, last wins).
-2. Validate every target URL through `app.safety.SafetyPolicy` before
-   fetching; raise `ValueError`/`SSRFError` for expected failures (the
-   dispatcher maps `ValueError` → `200 {error}`, anything else → 500).
-3. Register it in the `HANDLERS` dispatch map in `app/main.py`.
-4. Add a matching `PluginManifest` (with `configSchema`,
-   `ui.formHints`, `ui.paletteGroup`) to `packages/plugin-loader`'s
-   external manifest list (`registerExternalPlugins`) so it appears in
-   the builder palette with a schema-driven form like any plugin.
-5. Add a pytest in `tests/` that monkeypatches the network/engine seam
-   (`run_crawl4ai` / `run_scrapy` style) and injects a fake DNS resolver
-   so the suite stays offline and browser-free.
+2. **SSRF safety.** Validate every target URL through
+   `app.safety.SafetyPolicy` before fetching; raise `ValueError` /
+   `SSRFError` for expected failures (the dispatcher maps `ValueError`
+   to `ConnectError(INVALID_ARGUMENT)` on the Connect path and `200
+   {error}` on the legacy path).
+3. **Register** the plugin in the `HANDLERS` dispatch map in
+   `app/main.py`, and add a matching `PluginManifest` (with
+   `configSchema`, `ui.formHints`, `ui.paletteGroup`) to
+   `packages/plugin-loader`'s external manifest list
+   (`registerExternalPlugins`) so the runtime knows the plugin exists
+   and the builder palette can show it.
+
+Add a pytest in `services/python-plugins/tests/` that monkeypatches the
+network/engine seam (`run_crawl4ai` / `run_scrapy` style) and injects a
+fake DNS resolver so the suite stays offline and browser-free. For
+cross-language verification of the Connect path,
+`tests/e2e/cross-language-plugin.e2e.test.ts` exercises the full Node
+runtime → Python sidecar round-trip; skips gracefully when the sidecar
+isn't reachable.
 
 ### Enabling it
 
