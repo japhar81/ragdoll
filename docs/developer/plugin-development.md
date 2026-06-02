@@ -359,19 +359,18 @@ client preference. The runtime retries unary calls three times with
 250/750/2250ms backoff (timeouts are NOT retried). Streaming calls are NOT
 retried — partial output is irrecoverable.
 
-### Legacy contract v1 (deprecated, still served during cutover)
+### Legacy contract v1 (removed)
 
-The bundled `services/python-plugins` sidecar dual-hosts both transports
-on the same Hypercorn listener:
+The original `POST /execute` HTTP envelope and its FastAPI handler were
+removed from `services/python-plugins/app/main.py` after the in-tree
+`rerank_bge_local` consumer migrated to the SDK transport. The sidecar
+now serves only:
 
-- `/healthz` + `/execute` → legacy FastAPI HTTP contract v1 (kept for
-  rollback; will be removed in a follow-up)
-- `/ragdoll.plugin.v1.PluginRuntime/*` → Connect
+- `/ragdoll.plugin.v1.PluginRuntime/*` → Connect (PluginRuntime proto)
+- `GET /healthz` → 5-line Starlette shim for k8s liveness probes
 
-Both paths delegate to the same `HANDLERS` dict so the three Python
-plugins are wire-agnostic. The legacy contract is documented in earlier
-revisions of this file; new plugins should target the PluginRuntime
-proto exclusively.
+If you're looking at a tree that predates the rip and need the old
+contract reference, see ADR 0010's Status block + git log of this file.
 
 ### Adding a Python plugin
 

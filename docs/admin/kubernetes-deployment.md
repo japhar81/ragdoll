@@ -7,9 +7,11 @@
 - `ragdoll-worker`: runtime and async worker (`apps/worker/src/index.ts`).
 - `ragdoll-web`: static frontend, deployable behind any ingress.
 - `ragdoll-python-plugins` (optional): Python crawler sidecar
-  (`services/python-plugins/`) hosting the external `crawl4ai_crawler` and
-  `scrapy_spider` plugins over HTTP contract v1 (see ADR 0010). Only
-  needed if those datasource plugins are used.
+  (`services/python-plugins/`) hosting the external `crawl4ai_crawler`,
+  `scrapy_spider`, and (optional) `rerank_bge_local` plugins over the
+  `ragdoll.plugin.v1.PluginRuntime` connect-rpc contract (ADR 0022;
+  sandboxing rationale in ADR 0010). Only needed if those plugins are
+  used.
 - Postgres: metadata, encrypted secrets, audit, executions, usage.
 - Redis: BullMQ-compatible queue.
 - Qdrant: default vector database.

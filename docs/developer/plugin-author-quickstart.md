@@ -322,8 +322,8 @@ if __name__ == "__main__":
 Hypercorn (for HTTP/2 + native gRPC + full-duplex bidi support) or mount
 inside Starlette / FastAPI for sharing the listener with other routes. The
 bundled `services/python-plugins/app/main.py` demonstrates the
-shared-listener pattern (legacy FastAPI `/healthz` + `/execute` + Connect
-RPCs on the same port).
+shared-listener pattern (5-line Starlette `/healthz` shim + the Connect
+ASGI app on the same port, picked apart by a tiny manual ASGI dispatcher).
 
 ## 11. Streaming + the other RPC kinds
 

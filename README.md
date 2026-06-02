@@ -35,9 +35,11 @@ run with **zero install**.
   `tone_profile_build`, `compose_with_style`) — generic plugins
   that compose into event-query / action-item / tone-matched-reply
   pipelines over any message corpus.
-- External-plugin HTTP transport (contract v1) with an optional Python
-  crawler sidecar (`crawl4ai_crawler`, `scrapy_spider`) gated on
-  `PYTHON_PLUGIN_URL`, with a default-deny SSRF guard (ADR 0010).
+- External-plugin connect-rpc transport (one `.proto`, serves Connect
+  HTTP/JSON + native gRPC + gRPC-Web from one handler — ADR 0022) with
+  an optional Python crawler sidecar (`crawl4ai_crawler`,
+  `scrapy_spider`, `rerank_bge_local`) gated on `PYTHON_PLUGIN_URL`,
+  with a default-deny SSRF guard (ADR 0010).
 - Provider abstraction with OpenAI, Anthropic, and Ollama-compatible
   adapters.
 - Runtime `DagExecutor` with tenant context, redaction, retries, usage
@@ -291,23 +293,32 @@ The wrapper invokes `apps/cli/src/index.ts` directly via Node's
 
 ## Honest limits
 
-- **Token-by-token provider streaming through SSE** isn't wired yet.
-  `POST /api/pipelines/:id/stream` emits real chunked execution
-  lifecycle frames (`execution.started` → `output` → `done`); each
-  arrives as soon as it's produced. What's still missing is
-  per-token streaming from `provider_chat` straight through to the
-  HTTP response — requires a provider-layer AsyncIterable +
-  executor plumbing. Lifecycle streaming is here today.
-- **gRPC external-plugin transport** isn't implemented — the manifest
-  recognizes it, but `executeRegisteredPlugin` throws on the gRPC
-  branch. HTTP is the supported external transport.
+- **CPU Ollama serializes inference.** When the bundled CPU Ollama
+  drives an LLM or embedding model, concurrent callers thrash the same
+  single-process inference loop and tail latencies explode. The
+  in-process `OllamaGate` semaphore in `@ragdoll/providers` caps
+  concurrent calls to `OLLAMA_MAX_CONCURRENCY` (default `1` — matches
+  CPU Ollama's actual inference parallelism). Bump to 2-4 on GPU
+  Ollama or a hosted Ollama-compatible endpoint that fans out batches
+  internally. The cap means a `Run All` of pipelines that touch the
+  same Ollama instance queues serially rather than racing; throughput
+  is the same as solo runs, but the operator's "watch them all finish
+  at once" UX isn't.
+- **Stale-execution sweep is a 10-minute safety net.** Per-pipeline
+  `metadata.timeoutMs` is enforced precisely (the runtime's
+  AbortController fires on the dot). When no per-pipeline timeout is
+  set, the platform default reclaims orphaned `running` rows within
+  10 minutes — set
+  [`RAGDOLL_DEFAULT_PIPELINE_TIMEOUT_MS`](apps/worker/src/handlers.ts)
+  if you need a different ceiling.
 
 ## Key docs
 
 - **Start here** (3-minute concepts read): `docs/users-guide.md`
 - Architecture: `docs/architecture/initial-design.md`,
   `docs/architecture/runtime.md`
-- ADRs: `docs/adr/0001`–`0019`
+- ADRs: `docs/adr/0001`–`0022` (`0022-connect-rpc-plugin-transport.md`
+  is the current plugin-transport contract)
 - Developer: `docs/developer/local-development.md`,
   `docs/developer/plugin-development.md`,
   `docs/developer/provider-development.md`

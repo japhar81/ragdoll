@@ -122,11 +122,13 @@ this automatically).
 
 ### Python crawler plugins (crawl4ai / scrapy)
 
-`make up` also builds and starts the `python-plugins` FastAPI sidecar
+`make up` also builds and starts the `python-plugins` Hypercorn sidecar
 (`services/python-plugins/`) and Compose sets `PYTHON_PLUGIN_URL` (and
 `PYTHON_PLUGIN_TIMEOUT_MS`) on both the API and worker, so the
 `crawl4ai_crawler` and `scrapy_spider` datasource nodes appear in the
-builder palette under "Crawling" automatically.
+builder palette under "Crawling" automatically. The runtime talks to the
+sidecar over connect-rpc (ADR 0022) — same wire as every other external
+plugin.
 
 > **First build is slow and large.** The `python-plugins` image bundles a
 > full headless Chromium plus its OS libraries
