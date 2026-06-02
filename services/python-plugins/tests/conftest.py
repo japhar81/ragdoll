@@ -1,19 +1,17 @@
-"""Shared test fixtures.
+"""Shared test fixtures for the python-plugins sidecar.
 
 These tests run with ONLY the dev deps (pytest, pytest-asyncio). They never
 touch the network, never spawn a browser, and never start a Twisted reactor.
 That works because crawl4ai/scrapy are imported lazily *inside* the run
 functions, and the tests monkeypatch those run functions before dispatch.
 
-Phase B post-rip cleanup (2026-06-01): the FastAPI app is gone (the
-legacy `POST /execute` route was removed). The Connect transport is the
-only wire the sidecar serves to the runtime. These unit tests target the
-HANDLERS dict directly via a small `FakeClient` that preserves the
-original `client.post("/execute", json=body)` / `client.get("/healthz")`
-test ergonomics — so the ~15 existing test cases work unchanged. Wire
-fidelity is covered by `tests/e2e/cross-language-plugin.e2e.test.ts` on
-the Node side, which exercises the real Connect protocol against the
-running sidecar container.
+The `client` fixture exposes a small `FakeClient` that calls the HANDLERS
+dispatch directly (no HTTP). It preserves the
+`client.post("/execute", json=body)` / `client.get("/healthz")` shape so
+per-plugin unit tests can target the handler dispatch logic without
+spinning up a server. Wire fidelity (real Connect protocol round-trip) is
+covered by `tests/e2e/cross-language-plugin.e2e.test.ts` on the Node side,
+which hits the running sidecar container.
 """
 
 from __future__ import annotations
@@ -44,12 +42,13 @@ class _FakeResponse:
 
 
 class _FakeClient:
-    """Stand-in for FastAPI's TestClient that bypasses the HTTP wire.
+    """In-process dispatcher that mirrors the per-plugin HTTP semantics.
 
-    Mirrors the previous `/healthz` and `/execute` semantics by calling the
-    HANDLERS dispatch directly — same envelope, same error model. Tests can
-    keep their `client.post("/execute", json=body)` / `client.get("/healthz")`
-    shape so this rip didn't bleed into the per-plugin unit tests.
+    Tests call `client.get("/healthz")` / `client.post("/execute", json=body)`
+    exactly as they would against an HTTP server; this class resolves both
+    by calling `HANDLERS[body.plugin.id]` directly and wrapping the result
+    in the standard envelope. Same envelope shape the connect-rpc bridge
+    builds in production.
     """
 
     def __init__(self) -> None:
@@ -67,8 +66,9 @@ class _FakeClient:
             return _FakeResponse(404, {"error": f"unknown path {path}"})
         return _FakeResponse(200, {"ok": True, "plugins": self._plugin_ids})
 
-    # /execute — mirrors the legacy dispatch (kept here as a TEST FIXTURE
-    # ONLY; production removed this route in the Phase B post-rip cleanup).
+    # /execute — test-only dispatch mirror. Production serves the equivalent
+    # over the Connect `PluginRuntime.Execute` RPC; the per-plugin dispatch
+    # + error mapping below is shared logic the bridge calls into.
     def post(self, path: str, json: Dict[str, Any]) -> _FakeResponse:
         if path != "/execute":
             return _FakeResponse(404, {"error": f"unknown path {path}"})
@@ -102,7 +102,7 @@ def client() -> _FakeClient:
 
 
 def make_request_body(plugin_id: str, config: dict) -> dict:
-    """Build a minimal but contract-complete request body (legacy envelope shape)."""
+    """Build a minimal but contract-complete request body."""
     return {
         "plugin": {"category": "crawler", "id": plugin_id, "version": "1.0.0"},
         "node": {"id": "node-1", "config": {}, "secrets": {}},

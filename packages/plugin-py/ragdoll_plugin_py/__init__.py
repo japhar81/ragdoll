@@ -10,8 +10,6 @@ importing `ragdoll_plugin_py` get:
   - `default_interceptors()` bundling auth/tenant/allow-list/OTel concerns
     so plugin authors don't reimplement them per plugin
 
-Phase A scaffold; Phase B fills in the interceptor implementations.
-
 Example:
 
     from ragdoll_plugin_py import create_plugin_server, ExecuteHandler

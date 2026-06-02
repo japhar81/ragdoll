@@ -1,7 +1,7 @@
 /**
- * Cross-language E2E (Phase B): Node runtime → Python plugin sidecar over
- * connect-rpc. Proves the .proto-as-truth invariant from ADR 0022 holds in
- * practice — the Python side honors the contract the Node SDK speaks.
+ * Cross-language E2E: Node runtime → Python plugin sidecar over connect-rpc.
+ * Proves the .proto-as-truth invariant from ADR 0022 holds in practice —
+ * the Python side honors the contract the Node SDK speaks.
  *
  * Touches a running python-plugins container (the docker compose stack must
  * be up via `make up` or `make crawl-up`). The test is SKIPPED gracefully

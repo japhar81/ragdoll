@@ -79,7 +79,7 @@ docker build \
 rate-limited Docker Hub clusters, set these to your proxy's mirror path
 in CI/CD and the upstream defaults stay out of the build entirely.
 
-### HTTP/2 + native gRPC for external plugins (Phase B)
+### HTTP/2 + native gRPC for external plugins
 
 The python-plugins sidecar serves Connect HTTP/JSON + native gRPC + gRPC-Web
 from one Hypercorn listener (see ADR

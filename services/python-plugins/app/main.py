@@ -1,25 +1,18 @@
 """ASGI entrypoint for the python-plugins sidecar.
 
-Phase B follow-up (2026-06-01): the legacy HTTP contract v1 (`POST /execute`
-with the JSON envelope built by `buildExternalRequestBody`) has been
-removed. The Node runtime is exclusively on connect-rpc since Phase A and
-the only in-tree consumer of the legacy wire (`rerank_bge_local` via
-`plugins/builtin-rag/src/retrieval-v2.ts`) was migrated alongside this
-cleanup.
+Two routes:
 
-Routes (in dispatch order):
-  /healthz                                 → 5-line Starlette shim
-                                              (k8s probe + the operator's
-                                              cheapest reachability check)
+  /healthz                                 → 5-line Starlette shim (k8s probe)
   /ragdoll.plugin.v1.PluginRuntime/*       → Connect ASGI (PluginRuntime
                                               proto contract — ADR 0022)
   everything else                          → 404
 
-`app/connect_bridge.py` translates between the proto request shape and the
-pydantic `ExecuteRequest` the handlers (`crawl4ai_plugin`, `scrapy_plugin`,
-`rerank_bge_plugin`) accept. Handlers are wire-agnostic.
+`app/connect_bridge.py` builds the Connect ASGI app over the HANDLERS dict
+declared below — each handler receives a pydantic `ExecuteRequest` and
+returns a dict the bridge wraps as a proto `ExecuteResponse`. Handlers are
+wire-agnostic.
 
-Error model (Connect):
+Error model:
     Expected failures (unknown plugin / SSRF-blocked / bad config) →
     `ConnectError(code=INVALID_ARGUMENT)`; unexpected →
     `ConnectError(code=INTERNAL)`. connectrpc serialises these into the
@@ -57,7 +50,7 @@ async def _healthz(_scope: Scope, _receive: Receive, send: Send) -> None:
     await response(_scope, _receive, send)
 
 
-# --- Connect-RPC app (primary) ---------------------------------------------
+# --- Connect-RPC app --------------------------------------------------------
 
 connect_app = build_connect_app(HANDLERS, PLUGIN_IDS)
 

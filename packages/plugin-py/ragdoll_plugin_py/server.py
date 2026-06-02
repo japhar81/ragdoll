@@ -77,14 +77,11 @@ def create_plugin_server(
         config.bind = ["0.0.0.0:8000"]
         asyncio.run(serve(app, config))
 
-    Or mount alongside FastAPI via Starlette:
-
-        from starlette.applications import Starlette
-        from starlette.routing import Mount
-        app = Starlette(routes=[
-            Mount("/legacy", app=fastapi_app),
-            Mount("/", app=create_plugin_server(...)),
-        ])
+    Or share the listener with other ASGI apps (e.g. a tiny health probe
+    served from the same port — see services/python-plugins/app/main.py
+    for the dispatcher pattern that avoids Starlette's Mount("/") path-
+    stripping). The Connect app 404s on unknown paths, so a sibling app
+    can declare its own routes first.
 
     Per-method behaviour:
       - Author MUST supply `execute` (unary). Everything else is opt-in.

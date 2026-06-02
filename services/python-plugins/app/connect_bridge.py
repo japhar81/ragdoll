@@ -1,19 +1,18 @@
-"""Bridge: connect-rpc PluginRuntime → existing HANDLERS dict.
+"""Build the Connect ASGI app over the per-plugin HANDLERS dict.
 
-The connect-rpc proto carries the same logical payload as the legacy HTTP
-contract v1 in a different physical shape (`google.protobuf.Struct` for
-the dynamic fields instead of plain JSON). This module:
+Each handler in `HANDLERS` (declared in `app/main.py`) is a sync function
+that accepts a pydantic `ExecuteRequest` (`app/models.py`) and returns a
+dict shaped `{outputs, metadata?, usage?, artifacts?}`. This module:
 
-  1. Translates the proto ExecuteRequest into the pydantic ExecuteRequest
-     the existing crawl4ai / scrapy / rerank_bge plugins already accept,
-  2. Calls the handler (unchanged from the legacy path),
-  3. Wraps the dict result into a proto ExecuteResponse.
+  1. Receives a proto `ExecuteRequest` on the Connect wire,
+  2. Decodes its `google.protobuf.Struct` fields into plain Python dicts,
+  3. Wraps them in the pydantic `ExecuteRequest` the handler expects,
+  4. Wraps the handler's dict result back into a proto `ExecuteResponse`.
 
-Streaming RPCs (server-stream, client-stream, bidi) are NOT wired today
-— our three Python plugins are all unary today. The connectrpc default
-unary→stream wrapping in ragdoll_plugin_py.create_plugin_server takes
-care of older clients that call ExecuteServerStream; the unary handler
-runs and the result is yielded as a single `final` chunk.
+Streaming RPCs (server-stream, client-stream, bidi) are NOT implemented
+explicitly — all three Python plugins are unary. `create_plugin_server`
+in `ragdoll_plugin_py` falls back to wrapping the unary result as a
+single `final` chunk for clients that call ExecuteServerStream.
 """
 
 from __future__ import annotations
@@ -68,7 +67,7 @@ def _dict_to_struct(value: Dict[str, Any] | None) -> Struct:
 
 
 def _proto_to_pydantic(req: ProtoExecuteRequest) -> ExecuteRequest:
-    """Translate the new proto request into the legacy pydantic shape.
+    """Decode the proto request into the pydantic shape the handlers accept.
 
     Field mapping:
       proto.plugin / proto.version  -> pydantic.plugin (PluginRef)
@@ -147,13 +146,12 @@ def build_connect_app(
         handler = handlers.get(req.plugin)
         if handler is None:
             raise ConnectError(Code.UNIMPLEMENTED, f"unknown plugin {req.plugin}")
-        legacy_req = _proto_to_pydantic(req)
+        pydantic_req = _proto_to_pydantic(req)
         try:
-            result = handler(legacy_req)
+            result = handler(pydantic_req)
         except ValueError as exc:
-            # Maps SSRFError (a ValueError subclass) + bad-config errors to a
-            # client error rather than an internal one — same semantics as
-            # the legacy /execute returning a 200 {"error":...} envelope.
+            # Maps SSRFError (a ValueError subclass) + bad-config errors to
+            # a client error rather than an internal one.
             raise ConnectError(Code.INVALID_ARGUMENT, str(exc)) from exc
         except Exception as exc:  # noqa: BLE001
             logger.exception("unhandled error in plugin %s (connect path)", req.plugin)

@@ -172,7 +172,11 @@ the same handler — the *client* chooses which wire to speak. Defaults:
 | Browser-originated (rare for plugins)     | `grpc-web`   | `1.1` or `2`  | Browsers can't speak native gRPC |
 
 `appProtocol: http2` on the Service is mandatory for any client using
-`protocol: "grpc"` (Phase B work — see ADR 0022 deferred section).
+`protocol: "grpc"`. The chart sets it on the bundled python-plugins
+Service when `pythonPlugins.http2.enabled: true` (the default); see
+[docs/admin/kubernetes-deployment.md](../admin/kubernetes-deployment.md#http2--native-grpc-for-external-plugins)
+for the operational gotchas (Service-mesh awareness, OpenShift Route
+passthrough for h2 ALPN).
 
 ## 6. Testing your plugin
 

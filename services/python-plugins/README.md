@@ -13,11 +13,8 @@ The two-line summary:
 | `/ragdoll.plugin.v1.PluginRuntime/*`             | Connect HTTP/JSON + gRPC + gRPC-Web                  |
 | `GET /healthz`                                   | 5-line Starlette shim for k8s liveness probes        |
 
-The dual-host of `POST /execute` from the Phase B cutover was removed
-(2026-06-01) — every caller is on the Connect wire.
-
-`app/connect_bridge.py` translates the `ExecuteRequest` proto into the
-pydantic `ExecuteRequest` the handlers already accept (Struct ⇄ dict via
+`app/connect_bridge.py` decodes the `ExecuteRequest` proto into the
+pydantic `ExecuteRequest` the per-plugin handlers accept (Struct ⇄ dict via
 `MessageToDict` / `Struct.update`) so the per-plugin code is wire-agnostic.
 
 Plugins shipped:
@@ -181,13 +178,12 @@ poetry run pytest
 ```
 
 Tests use a small `FakeClient` (defined in `tests/conftest.py`) that calls
-the HANDLERS dispatch directly without going through HTTP. It preserves the
-ergonomics of `client.post("/execute", json=body)` / `client.get("/healthz")`
-the legacy FastAPI TestClient gave us, so the per-plugin unit tests didn't
-need to be rewritten when the FastAPI `/execute` route was removed. Wire
-fidelity (the actual Connect protocol round-trip) is covered by
-`tests/e2e/cross-language-plugin.e2e.test.ts` on the Node side, which hits
-the running sidecar container.
+the HANDLERS dispatch directly without going through HTTP. Per-plugin unit
+tests use `client.post("/execute", json=body)` / `client.get("/healthz")`
+ergonomics to exercise the same handler dispatch + envelope-wrapping logic
+the bridge runs in production; wire fidelity (real Connect protocol
+round-trip) is covered by `tests/e2e/cross-language-plugin.e2e.test.ts` on
+the Node side, which hits the running sidecar container.
 
 `crawl4ai`/`scrapy` are imported lazily inside the run functions, so tests
 require **no network, no browser, and no Twisted reactor** — monkeypatch

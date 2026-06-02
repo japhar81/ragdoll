@@ -10,10 +10,14 @@
  *     names (`ExecuteHandler`, `StreamHandler`, etc.)
  *
  * Shared concerns (auth interceptor, tenant-scope check, allow-listed
- * hosts enforcement, OTel context propagation) are scaffolded as
- * `defaultInterceptors()` — Phase A ships an empty list with the wiring
- * in place; Phase B adds the actual interceptors alongside the Python
- * SDK so both implementations stay in lockstep.
+ * hosts enforcement, OTel context propagation) are exposed via
+ * `defaultInterceptors()`. The Node side ships an empty list — author
+ * deployments compose the interceptors they need. The Python sibling
+ * (`ragdoll_plugin_py.default_interceptors`) ships the four standard
+ * interceptors enabled by env vars; the asymmetry is intentional today
+ * because the only in-tree external plugin is the Python crawl4ai
+ * sidecar. When a Node-side external plugin lands, populate this list
+ * with the equivalents so both author SDKs stay symmetrical.
  *
  * Example author file (a fictional "echo" plugin):
  *
@@ -89,20 +93,25 @@ export interface CreatePluginServerOptions {
   /**
    * Connect-rpc interceptors. The SDK appends `defaultInterceptors()` (auth,
    * tenant-scope, allow-list, OTel propagator) automatically — author-supplied
-   * interceptors run first, then defaults. Phase A defaults are empty; Phase B
-   * fills them in alongside the Python equivalent.
+   * interceptors run first, then defaults. Node defaults are an empty list
+   * today (the Python SDK ships the four standard interceptors via env vars
+   * — see ragdoll_plugin_py.default_interceptors); add equivalents here when
+   * a Node-side external plugin lands.
    */
   interceptors?: Interceptor[];
 }
 
 /**
- * Default shared-concerns interceptor list. Currently empty — Phase B adds:
- *   - auth: validates a bearer token shared between runtime + plugin
- *   - tenant-scope: enforces request.tenantId matches the call's authn context
- *   - allow-listed-hosts: blocks DNS rebinding / SSRF to private networks
- *   - OTel: extracts traceparent + propagates baggage
- * Exported so author-side instrumentation can compose with these later
- * without breaking changes when they arrive.
+ * Default shared-concerns interceptor list. Empty on the Node side today —
+ * exported so author-side compositions are forward-compatible and the
+ * Node↔Python parity story stays clear. Equivalents exist on the Python
+ * side at `ragdoll_plugin_py.default_interceptors`:
+ *   - auth bearer (RAGDOLL_PLUGIN_TOKEN)
+ *   - tenant-scope (RAGDOLL_PLUGIN_REQUIRE_TENANT=1 → require x-ragdoll-tenant)
+ *   - host allow-list (RAGDOLL_PLUGIN_HOST_ALLOWLIST=comma,separated)
+ *   - OTel traceparent extractor (lazy-imports opentelemetry-api)
+ * Populate this list with the Node equivalents when a Node-side external
+ * plugin ships and these become load-bearing here too.
  */
 export function defaultInterceptors(): Interceptor[] {
   return [];

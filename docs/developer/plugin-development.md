@@ -330,7 +330,7 @@ service PluginRuntime {
   natively to JSON objects in both Node (`JsonObject`) and Python
   (`MessageToDict`) so there's no protobuf wrapper class to wrangle.
 - `ExecuteResponse` carries `outputs` + optional `metadata`, `usage`,
-  `artifacts` — same shape the old contract v1 wrapped in JSON.
+  `artifacts`.
 - `ExecuteChunk` is a `oneof payload { string token; Struct delta;
   ExecuteResponse final; }` envelope for streaming. The plugin yields
   zero or more `token`/`delta` chunks then a `final` envelope; the
@@ -359,19 +359,6 @@ client preference. The runtime retries unary calls three times with
 250/750/2250ms backoff (timeouts are NOT retried). Streaming calls are NOT
 retried — partial output is irrecoverable.
 
-### Legacy contract v1 (removed)
-
-The original `POST /execute` HTTP envelope and its FastAPI handler were
-removed from `services/python-plugins/app/main.py` after the in-tree
-`rerank_bge_local` consumer migrated to the SDK transport. The sidecar
-now serves only:
-
-- `/ragdoll.plugin.v1.PluginRuntime/*` → Connect (PluginRuntime proto)
-- `GET /healthz` → 5-line Starlette shim for k8s liveness probes
-
-If you're looking at a tree that predates the rip and need the old
-contract reference, see ADR 0010's Status block + git log of this file.
-
 ### Adding a Python plugin
 
 The fastest path is the SDK walkthrough at
@@ -380,17 +367,17 @@ Three things matter for an in-tree contribution to the bundled sidecar:
 
 1. **Plugin source.** Add `app/plugins/<name>_plugin.py` with
    `PLUGIN_ID = "<id>"` and a `handle(request) -> {"outputs": {...},
-   "usage"?: {...}, "metadata"?: {...}}`. The handler still takes the
-   legacy pydantic `ExecuteRequest` — the Connect bridge in
-   `app/connect_bridge.py` translates from the proto shape on the way in
-   so handlers don't need to change. Read effective config via
+   "usage"?: {...}, "metadata"?: {...}}`. The handler receives a
+   pydantic `ExecuteRequest` (`app/models.py`) — `app/connect_bridge.py`
+   decodes the proto request into that shape so handlers don't deal
+   with protobuf directly. Read effective config via
    `request.effective_config()` (merges `node.config` <
    `context.resolvedConfig.values` < top-level `config`, last wins).
 2. **SSRF safety.** Validate every target URL through
    `app.safety.SafetyPolicy` before fetching; raise `ValueError` /
-   `SSRFError` for expected failures (the dispatcher maps `ValueError`
-   to `ConnectError(INVALID_ARGUMENT)` on the Connect path and `200
-   {error}` on the legacy path).
+   `SSRFError` for expected failures (the bridge maps `ValueError`
+   to `ConnectError(INVALID_ARGUMENT)`; any other exception becomes
+   `ConnectError(INTERNAL)`).
 3. **Register** the plugin in the `HANDLERS` dispatch map in
    `app/main.py`, and add a matching `PluginManifest` (with
    `configSchema`, `ui.formHints`, `ui.paletteGroup`) to
