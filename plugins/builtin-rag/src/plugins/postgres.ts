@@ -440,6 +440,203 @@ export function buildBatchUpsert(args: BuildBatchUpsertArgs): { text: string; va
 }
 
 // ---------------------------------------------------------------------------
+// postgres_delete — bulk delete by operator-specified match columns.
+// ---------------------------------------------------------------------------
+//
+// Operator picks the table + which columns identify a row to delete
+// (`where`). One row per delete; rows are batched into a single
+// statement per batch. Pairs with `delta_filter.deleted` for delta-aware
+// ingestion: the operator wires `where: ["docId"]` (or whatever their
+// column is named) and the `{ deleted: [{docId}] }` array slots in
+// directly. Multi-column match (e.g. `where: ["tenant_id", "doc_id"]`)
+// gives defense-in-depth for multi-tenant tables.
+//
+// SQL shape:
+//   - single-column `where`: `DELETE FROM t WHERE col = ANY($1)` — one
+//     parameter binding an array. Fastest path.
+//   - multi-column `where`: `DELETE FROM t WHERE (c1, c2) IN ((..),(..))`
+//     with per-tuple placeholders. Batched.
+//
+// All identifiers validated via `quoteIdentifier` (same as upsert);
+// values bind as parameters — never interpolated.
+export const postgresDeletePlugin: InProcessPlugin = {
+  manifest: {
+    id: "postgres_delete",
+    name: "Postgres Delete",
+    version: "1.0.0",
+    category: "sink",
+    description:
+      "Bulk-deletes rows from an external Postgres table whose `where` columns match the input rows. Pairs with `delta_filter.deleted` for delta-aware ingestion when the operator's table has a column matching the delta input's key (typically `docId`). Identifiers come from config and are validated/quoted; values bind as parameters. Multi-column `where` (e.g. `[\"tenant_id\", \"doc_id\"]`) is recommended for multi-tenant tables as defense-in-depth.",
+    configSchema: {
+      type: "object",
+      required: ["table", "where"],
+      properties: {
+        connection: { type: "string", default: "default", description: "Operator-facing label." },
+        table: {
+          type: "string",
+          description:
+            "Target table name. Accepts `schema.table`; each segment validated against the Postgres identifier grammar."
+        },
+        where: {
+          type: "array",
+          items: { type: "string" },
+          description:
+            "Match column(s) — every value present in an input row's matching keys becomes part of the WHERE clause. Single column → `WHERE col = ANY(values)`; multi-column → `WHERE (c1, c2) IN ((..),(..))`. A row missing any `where`-column key is rejected up front (NULL-vs-not-NULL ambiguity in SQL would otherwise silently skip rows)."
+        },
+        batchSize: {
+          type: "integer",
+          default: 500,
+          description: "Maximum rows per multi-row delete; transactions chain batches together."
+        }
+      },
+      additionalProperties: false
+    },
+    secretsSchema: POSTGRES_SECRETS_SCHEMA,
+    inputPorts: [
+      {
+        name: "rows",
+        required: true,
+        description:
+          "Array of row objects carrying the `where`-column values. For delta-driven use, wire `delta_filter.deleted` (which emits `[{docId}]`) here when `where: [\"docId\"]`."
+      }
+    ],
+    outputPorts: [
+      { name: "deleted", description: "Count of rows actually removed (reported by Postgres rowCount)." }
+    ],
+    capabilities: ["ingestion"],
+    ui: {
+      icon: "trash",
+      color: "#dc2626",
+      paletteGroup: "External data",
+      formHints: {
+        where: { widget: "tags" },
+        batchSize: { widget: "number", min: 1, step: 50 }
+      }
+    }
+  },
+  async execute(input) {
+    const { inputs, config, secrets } = input;
+    const rows = inputs.rows;
+    if (!Array.isArray(rows)) {
+      throw new Error("postgres_delete requires `inputs.rows` to be an array.");
+    }
+    if (rows.length === 0) {
+      return { outputs: { deleted: 0 } };
+    }
+    const tableRaw = config.table;
+    if (typeof tableRaw !== "string" || tableRaw.length === 0) {
+      throw new Error("postgres_delete requires `config.table`.");
+    }
+    const whereRaw = config.where;
+    if (!Array.isArray(whereRaw) || whereRaw.length === 0) {
+      throw new Error("postgres_delete requires `config.where` to be a non-empty array.");
+    }
+    const whereCols = whereRaw.map((col, i) => {
+      if (typeof col !== "string") {
+        throw new Error(`postgres_delete config.where[${i}] must be a string identifier.`);
+      }
+      return col;
+    });
+    const quotedTable = quoteIdentifier(tableRaw, "config.table");
+    const quotedWhere = whereCols.map((c) => quoteIdentifier(c, "config.where"));
+    const batchSize = Math.max(1, Math.floor(Number(config.batchSize ?? 500)));
+    // Up-front validation: every row MUST carry every `where` key. SQL would
+    // otherwise let NULL slip into IN-list comparisons (NULL never matches
+    // anything, including itself), silently failing to delete rows that
+    // happen to have a NULL key — surprising and hard to debug. Loud here.
+    for (let i = 0; i < rows.length; i++) {
+      const row = rows[i] as Record<string, unknown>;
+      for (const col of whereCols) {
+        if (!Object.prototype.hasOwnProperty.call(row, col)) {
+          throw new Error(
+            `postgres_delete: rows[${i}] is missing required where-column "${col}".`
+          );
+        }
+      }
+    }
+
+    const dsn = dsnFromSecrets(secrets);
+    const entry = await getPool({ dsn, name: connectionLabel(config) });
+    const client = await acquire(entry);
+    let deleted = 0;
+    const startedAt = Date.now();
+    try {
+      await client.query("BEGIN");
+      for (let i = 0; i < rows.length; i += batchSize) {
+        const slice = rows.slice(i, i + batchSize) as Array<Record<string, unknown>>;
+        const { text, values } = buildBatchDelete({
+          quotedTable,
+          quotedWhere,
+          whereCols,
+          rows: slice
+        });
+        const result = await client.query({ text, values });
+        deleted += result.rowCount ?? 0;
+      }
+      await client.query("COMMIT");
+      return {
+        outputs: { deleted },
+        metadata: {
+          connection: connectionLabel(config),
+          batches: Math.ceil(rows.length / batchSize),
+          latencyMs: Date.now() - startedAt,
+          poolAcquireWaitMs: entry.acquireWaitMs,
+          poolAcquireCount: entry.acquireCount
+        }
+      };
+    } catch (error) {
+      try {
+        await client.query("ROLLBACK");
+      } catch {
+        // Rollback failure on top of a primary failure: surface the
+        // original error; the connection's about to be released and any
+        // half-applied state is the operator's problem to diagnose.
+      }
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+};
+
+interface BuildBatchDeleteArgs {
+  quotedTable: string;
+  quotedWhere: string[];
+  whereCols: string[];
+  rows: Array<Record<string, unknown>>;
+}
+
+/** Pure builder so the SQL shape is unit-testable without a database.
+ *  Single-column `where` → `WHERE col = ANY($1)` (one array param).
+ *  Multi-column `where` → `WHERE (c1, c2) IN (($1, $2), ($3, $4), ...)`. */
+export function buildBatchDelete(args: BuildBatchDeleteArgs): { text: string; values: unknown[] } {
+  const { quotedTable, quotedWhere, whereCols, rows } = args;
+  if (whereCols.length === 1) {
+    // Fast path: one parameter that binds an array; Postgres uses
+    // `= ANY($1)` for IN-list-via-array.
+    const col = whereCols[0]!;
+    const values = rows.map((r) => r[col]);
+    const text = `DELETE FROM ${quotedTable} WHERE ${quotedWhere[0]} = ANY($1)`;
+    return { text, values: [values] };
+  }
+  const values: unknown[] = [];
+  const tuples: string[] = [];
+  let placeholderIndex = 1;
+  for (const row of rows) {
+    const tupleParts: string[] = [];
+    for (const col of whereCols) {
+      values.push(row[col]);
+      tupleParts.push(`$${placeholderIndex}`);
+      placeholderIndex += 1;
+    }
+    tuples.push(`(${tupleParts.join(", ")})`);
+  }
+  const text =
+    `DELETE FROM ${quotedTable} WHERE (${quotedWhere.join(", ")}) IN (${tuples.join(", ")})`;
+  return { text, values };
+}
+
+// ---------------------------------------------------------------------------
 // postgres_exec — DDL / migration runner. Hard-gated.
 // ---------------------------------------------------------------------------
 //

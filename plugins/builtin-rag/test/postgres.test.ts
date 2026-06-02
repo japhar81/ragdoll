@@ -3,8 +3,10 @@ import assert from "node:assert/strict";
 import {
   postgresQueryPlugin,
   postgresUpsertPlugin,
+  postgresDeletePlugin,
   postgresExecPlugin,
-  buildBatchUpsert
+  buildBatchUpsert,
+  buildBatchDelete
 } from "../src/index.ts";
 import {
   __setPoolFactory,
@@ -38,6 +40,8 @@ interface FakeDriver {
   pools: FakePool[];
   calls: QueryCall[];
   enqueue(response: { rows?: Array<Record<string, unknown>>; rowCount?: number }): void;
+  /** Queue an error to be thrown on the next non-tx-control query. */
+  enqueueError(error: Error): void;
 }
 interface FakePool extends PoolLike {
   acquireCount: number;
@@ -50,12 +54,19 @@ function installFakeDriver(t: { after(fn: () => void | Promise<void>): void }): 
     calls: [],
     enqueue(response) {
       pendingResponses.push({
+        kind: "rows",
         rows: response.rows ?? [],
         rowCount: response.rowCount ?? response.rows?.length ?? 0
       });
+    },
+    enqueueError(error) {
+      pendingResponses.push({ kind: "error", error });
     }
   };
-  const pendingResponses: Array<{ rows: Array<Record<string, unknown>>; rowCount: number }> = [];
+  type PendingResponse =
+    | { kind: "rows"; rows: Array<Record<string, unknown>>; rowCount: number }
+    | { kind: "error"; error: Error };
+  const pendingResponses: PendingResponse[] = [];
   const factory = async (): Promise<PoolLike> => {
     const pool: FakePool = {
       acquireCount: 0,
@@ -76,7 +87,8 @@ function installFakeDriver(t: { after(fn: () => void | Promise<void>): void }): 
             if (isTxControl) {
               return { rows: [] as R[], rowCount: 0 };
             }
-            const next = pendingResponses.shift() ?? { rows: [], rowCount: 0 };
+            const next = pendingResponses.shift() ?? { kind: "rows" as const, rows: [], rowCount: 0 };
+            if (next.kind === "error") throw next.error;
             return { rows: next.rows as R[], rowCount: next.rowCount };
           },
           release() {
@@ -556,4 +568,152 @@ test("manifest categorisation: postgres_exec is a `tool`, flagged `dangerous`", 
   assert.equal(m.category, "tool");
   assert.ok(m.capabilities?.includes("dangerous"));
   assert.ok(m.configSchema?.required?.includes("allowDDL"));
+});
+
+test("manifest categorisation: postgres_delete is a `sink` requiring table+where", () => {
+  const m = postgresDeletePlugin.manifest;
+  assert.equal(m.category, "sink");
+  assert.equal(m.inputPorts?.[0]?.name, "rows");
+  assert.equal(m.inputPorts?.[0]?.required, true);
+  assert.deepEqual(m.configSchema?.required, ["table", "where"]);
+});
+
+// ---------------------------------------------------------------------------
+// buildBatchDelete: pure SQL builder unit-tested without a database
+// ---------------------------------------------------------------------------
+
+test("buildBatchDelete: single-column where uses `= ANY($1)` fast path", () => {
+  const { text, values } = buildBatchDelete({
+    quotedTable: `"docs"`,
+    quotedWhere: [`"doc_id"`],
+    whereCols: ["doc_id"],
+    rows: [{ doc_id: "a.md" }, { doc_id: "b.md" }, { doc_id: "c.md" }]
+  });
+  assert.equal(text, `DELETE FROM "docs" WHERE "doc_id" = ANY($1)`);
+  // One parameter binds the entire array — one round-trip, one prepared plan.
+  assert.deepEqual(values, [["a.md", "b.md", "c.md"]]);
+});
+
+test("buildBatchDelete: multi-column where uses tuple IN-list with per-cell placeholders", () => {
+  const { text, values } = buildBatchDelete({
+    quotedTable: `"chunks"`,
+    quotedWhere: [`"tenant_id"`, `"doc_id"`],
+    whereCols: ["tenant_id", "doc_id"],
+    rows: [
+      { tenant_id: "t-1", doc_id: "a.md" },
+      { tenant_id: "t-1", doc_id: "b.md" }
+    ]
+  });
+  assert.equal(
+    text,
+    `DELETE FROM "chunks" WHERE ("tenant_id", "doc_id") IN (($1, $2), ($3, $4))`
+  );
+  // Per-row, per-column placeholders bind values in row-major order.
+  assert.deepEqual(values, ["t-1", "a.md", "t-1", "b.md"]);
+});
+
+// ---------------------------------------------------------------------------
+// postgres_delete: end-to-end through the fake pg driver
+// ---------------------------------------------------------------------------
+
+test("postgres_delete: single-column where sends one DELETE with `= ANY($1)`", async (t) => {
+  const driver = installFakeDriver(t);
+  // BEGIN + COMMIT are tx-control (auto-handled, no enqueue). Only the
+  // DELETE itself consumes a queued response.
+  driver.enqueue({ rowCount: 3 });
+  const out = await postgresDeletePlugin.execute(
+    pluginInput({
+      config: { table: "docs", where: ["docId"] },
+      inputs: { rows: [{ docId: "a.md" }, { docId: "b.md" }, { docId: "c.md" }] }
+    })
+  );
+  assert.equal(out.outputs.deleted, 3, "reports the rowCount from the DELETE");
+  // BEGIN + DELETE + COMMIT — three queries, in order.
+  assert.equal(driver.calls.length, 3);
+  assert.equal(driver.calls[0]!.text, "BEGIN");
+  assert.equal(driver.calls[1]!.text, `DELETE FROM "docs" WHERE "docId" = ANY($1)`);
+  assert.deepEqual(driver.calls[1]!.values, [["a.md", "b.md", "c.md"]]);
+  assert.equal(driver.calls[2]!.text, "COMMIT");
+});
+
+test("postgres_delete: multi-column where for tenant-scoped deletes", async (t) => {
+  const driver = installFakeDriver(t);
+  driver.enqueue({ rowCount: 2 });
+  const out = await postgresDeletePlugin.execute(
+    pluginInput({
+      config: { table: "chunks", where: ["tenant_id", "doc_id"] },
+      inputs: {
+        rows: [
+          { tenant_id: "t-1", doc_id: "a.md" },
+          { tenant_id: "t-1", doc_id: "b.md" }
+        ]
+      }
+    })
+  );
+  assert.equal(out.outputs.deleted, 2);
+  assert.equal(
+    driver.calls[1]!.text,
+    `DELETE FROM "chunks" WHERE ("tenant_id", "doc_id") IN (($1, $2), ($3, $4))`
+  );
+});
+
+test("postgres_delete: refuses up front when a row is missing a where-column key", async (t) => {
+  installFakeDriver(t);
+  await assert.rejects(
+    () =>
+      postgresDeletePlugin.execute(
+        pluginInput({
+          config: { table: "docs", where: ["doc_id"] },
+          inputs: { rows: [{ doc_id: "a.md" }, { other: "b.md" }] }
+        })
+      ),
+    /missing required where-column "doc_id"/
+  );
+});
+
+test("postgres_delete: empty rows array no-ops without opening a transaction", async (t) => {
+  const driver = installFakeDriver(t);
+  const out = await postgresDeletePlugin.execute(
+    pluginInput({
+      config: { table: "docs", where: ["doc_id"] },
+      inputs: { rows: [] }
+    })
+  );
+  assert.equal(out.outputs.deleted, 0);
+  assert.equal(driver.calls.length, 0, "no BEGIN — the empty case bails before pool acquire");
+});
+
+test("postgres_delete: identifier validation rejects injection attempts in `where`", async (t) => {
+  installFakeDriver(t);
+  await assert.rejects(
+    () =>
+      postgresDeletePlugin.execute(
+        pluginInput({
+          config: { table: "docs", where: [`doc_id"; DROP TABLE x; --`] },
+          inputs: { rows: [{ "doc_id": "a.md" }] }
+        })
+      ),
+    /identifier|config\.where/i
+  );
+});
+
+test("postgres_delete: rolls back on a DELETE failure mid-transaction", async (t) => {
+  const driver = installFakeDriver(t);
+  // BEGIN + ROLLBACK are tx-control and don't consume the queue; the
+  // single queued error fires on the DELETE call.
+  driver.enqueueError(new Error("connection terminated"));
+  await assert.rejects(
+    () =>
+      postgresDeletePlugin.execute(
+        pluginInput({
+          config: { table: "docs", where: ["doc_id"] },
+          inputs: { rows: [{ doc_id: "a.md" }] }
+        })
+      ),
+    /connection terminated/
+  );
+  // BEGIN → DELETE (threw) → ROLLBACK — three queries recorded.
+  assert.equal(driver.calls[0]!.text, "BEGIN");
+  assert.equal(driver.calls[1]!.text.startsWith("DELETE FROM"), true);
+  assert.equal(driver.calls[2]!.text, "ROLLBACK");
 });

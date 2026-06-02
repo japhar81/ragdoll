@@ -1592,8 +1592,10 @@ export {
 export {
   postgresQueryPlugin,
   postgresUpsertPlugin,
+  postgresDeletePlugin,
   postgresExecPlugin,
-  buildBatchUpsert
+  buildBatchUpsert,
+  buildBatchDelete
 } from "./plugins/postgres.ts";
 
 // Email pre-processing family — pure text, no LLM, no I/O.
