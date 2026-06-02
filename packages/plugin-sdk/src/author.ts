@@ -34,6 +34,7 @@
  *   });
  *   server.listen(8000, () => console.log("plugin up on :8000"));
  */
+import * as http from "node:http";
 import * as http2 from "node:http2";
 import { create } from "@bufbuild/protobuf";
 import { connectNodeAdapter } from "@connectrpc/connect-node";
@@ -99,6 +100,21 @@ export interface CreatePluginServerOptions {
    * a Node-side external plugin lands.
    */
   interceptors?: Interceptor[];
+  /**
+   * Wire transport for the returned server:
+   *   - `http1` (default): plain HTTP/1.1 — works with curl, every proxy,
+   *     every WAF; covers Connect HTTP/JSON unary + server-streaming +
+   *     client-streaming. Recommended for any plugin that doesn't
+   *     specifically need native gRPC or full-duplex bidi.
+   *   - `http2`: h2c (cleartext HTTP/2) — required by native gRPC clients
+   *     and by full-duplex bidi. Hypercorn-style negotiation isn't part
+   *     of Node's stdlib; if you need both wire versions on the same
+   *     port, construct your own server using `connectNodeAdapter`
+   *     directly. Most authors won't need this.
+   * Production deployments should wrap with TLS — see
+   * `http.createSecureServer` / `http2.createSecureServer`.
+   */
+  transport?: "http1" | "http2";
 }
 
 /**
@@ -118,12 +134,12 @@ export function defaultInterceptors(): Interceptor[] {
 }
 
 /**
- * Build an http2 server that serves the `PluginRuntime` over Connect, gRPC,
- * and gRPC-Web from one handler. h2c (cleartext); production callers should
- * wrap with TLS via http2.createSecureServer. Returns the unstarted server
- * — caller invokes `.listen(port)` so they control the bind lifecycle.
+ * Build a server that serves the `PluginRuntime` over Connect (HTTP/1.1+JSON
+ * by default; opt into HTTP/2 + native gRPC via `transport: "http2"`).
+ * Returns the unstarted server — caller invokes `.listen(port)` so they
+ * control the bind lifecycle.
  */
-export function createPluginServer(opts: CreatePluginServerOptions): http2.Http2Server {
+export function createPluginServer(opts: CreatePluginServerOptions): http.Server | http2.Http2Server {
   const userInterceptors = opts.interceptors ?? [];
   const interceptors: Interceptor[] = [...userInterceptors, ...defaultInterceptors()];
   const handler = connectNodeAdapter({
@@ -181,5 +197,7 @@ export function createPluginServer(opts: CreatePluginServerOptions): http2.Http2
     // in one place.
     ...(interceptors.length > 0 ? { interceptors } : {})
   });
-  return http2.createServer(handler);
+  return opts.transport === "http2"
+    ? http2.createServer(handler)
+    : http.createServer(handler);
 }

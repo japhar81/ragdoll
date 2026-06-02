@@ -1,0 +1,13 @@
+{
+  "name": "@ragdoll/example-node-echo",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Bare-minimum external Node plugin example — copy this directory as your starting point.",
+  "type": "module",
+  "scripts": {
+    "start": "node --experimental-strip-types src/server.ts"
+  },
+  "dependencies": {
+    "@ragdoll/plugin-sdk": "*"
+  }
+}

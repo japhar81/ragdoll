@@ -1,0 +1,22 @@
+[tool.poetry]
+name = "ragdoll-example-python-echo"
+version = "0.1.0"
+description = "Bare-minimum external Python plugin example — copy this directory as your starting point."
+authors = ["RAGdoll"]
+readme = "README.md"
+packages = [{ include = "app" }]
+
+[tool.poetry.dependencies]
+python = "^3.11"
+# Hypercorn handles HTTP/1.1 + HTTP/2 + h2c via prior knowledge so the
+# same listener answers Connect HTTP/JSON callers AND any future
+# native-gRPC callers without extra config.
+hypercorn = "^0.17.0"
+# Workspace SDK; in production builds this is installed from a path dep
+# in the Dockerfile. For local `poetry install` outside docker, edit
+# this to point at your local checkout (e.g. `develop = true`).
+ragdoll-plugin-py = { path = "/opt/ragdoll-plugin-py", develop = false }
+
+[build-system]
+requires = ["poetry-core>=1.9.0"]
+build-backend = "poetry.core.masonry.api"
