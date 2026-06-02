@@ -20,6 +20,7 @@ import {
 import {
   dgraphUpsertPlugin,
   dgraphQueryPlugin,
+  dgraphDeletePlugin,
   resetGraphStoreCache
 } from "../src/dgraph.ts";
 import type {
@@ -150,6 +151,43 @@ test("InMemoryGraphStore: tenants are isolated on query + deleteByTenant", async
   await store.deleteByTenant("t-a");
   assert.equal(store.size("t-a"), 0);
   assert.equal(store.size("t-b"), 1);
+});
+
+test("InMemoryGraphStore: deleteByDocIds removes matching docs but not cross-tenant docs with same docId", async () => {
+  const store = new InMemoryGraphStore();
+  // Tenant A: two nodes for doc "a.md" + one for doc "b.md".
+  await store.mutate({
+    tenantId: "t-a",
+    setJson: [
+      { uid: "_:a1", "dgraph.type": "Chunk", doc_id: "a.md", text: "chunk0" },
+      { uid: "_:a2", "dgraph.type": "Chunk", doc_id: "a.md", text: "chunk1" },
+      { uid: "_:b1", "dgraph.type": "Chunk", doc_id: "b.md", text: "other" }
+    ]
+  });
+  // Tenant B: a node with the SAME docId — must NOT be touched when we
+  // delete "a.md" under tenant A.
+  await store.mutate({
+    tenantId: "t-b",
+    setJson: [{ uid: "_:x", "dgraph.type": "Chunk", doc_id: "a.md", text: "tenant-B chunk" }]
+  });
+  assert.equal(store.size("t-a"), 3);
+  assert.equal(store.size("t-b"), 1);
+  await store.deleteByDocIds("t-a", ["a.md"]);
+  // Both tenant-A "a.md" nodes gone; the "b.md" one stays.
+  assert.equal(store.size("t-a"), 1);
+  // Tenant B's same-docId node is untouched (defense against
+  // cross-tenant collision via mandatory tenant scoping).
+  assert.equal(store.size("t-b"), 1);
+});
+
+test("InMemoryGraphStore: deleteByDocIds is a no-op on empty input", async () => {
+  const store = new InMemoryGraphStore();
+  await store.mutate({
+    tenantId: "t",
+    setJson: [{ uid: "_:x", "dgraph.type": "Doc", doc_id: "a.md" }]
+  });
+  await store.deleteByDocIds("t", []);
+  assert.equal(store.size("t"), 1);
 });
 
 // ---- dgraph_upsert --------------------------------------------------------
@@ -295,13 +333,57 @@ test("DgraphStore: deleteByTenant issues an upsert mutation scoped to tenant_id"
   assert.deepEqual(b.mutations[0].delete, [{ uid: "uid(v)" }]);
 });
 
+// ---- dgraph_delete --------------------------------------------------------
+
+test("dgraph_delete: removes every node for the supplied docIds under the executing tenant", async () => {
+  resetGraphStoreCache();
+  // Pre-seed the in-memory store via dgraph_upsert (same memory:host
+  // sentinel both plugins resolve to), then run the delete and verify.
+  await runPlugin(dgraphUpsertPlugin, {
+    inputs: {
+      nodes: [
+        { uid: "_:c1", "dgraph.type": "Chunk", doc_id: "a.md", text: "alpha-0" },
+        { uid: "_:c2", "dgraph.type": "Chunk", doc_id: "a.md", text: "alpha-1" },
+        { uid: "_:c3", "dgraph.type": "Chunk", doc_id: "b.md", text: "beta" }
+      ]
+    },
+    tenantId: "t-1"
+  });
+  const result = await runPlugin(dgraphDeletePlugin, {
+    inputs: { deleted: [{ docId: "a.md" }] },
+    tenantId: "t-1"
+  });
+  // deletedCount is the source-docId count, not the node count removed.
+  assert.equal(result.outputs.deletedCount, 1);
+  // Verify via the in-memory store directly: only "b.md" survives.
+  const q = await runPlugin(dgraphQueryPlugin, {
+    config: { query: "{ all(func: type(Chunk)) { doc_id text } }" },
+    tenantId: "t-1"
+  });
+  const rows = (q.outputs.results as { all: Array<{ doc_id: string }> }).all;
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].doc_id, "b.md");
+});
+
+test("dgraph_delete: empty input no-ops", async () => {
+  resetGraphStoreCache();
+  const result = await runPlugin(dgraphDeletePlugin, {
+    inputs: { deleted: [] },
+    tenantId: "t-1"
+  });
+  assert.equal(result.outputs.deletedCount, 0);
+});
+
 // ---- manifest sanity ------------------------------------------------------
 
-test("dgraph_upsert + dgraph_query manifests declare graph modality", () => {
+test("dgraph_upsert + dgraph_query + dgraph_delete manifests declare graph modality", () => {
   assert.equal(dgraphUpsertPlugin.manifest.contract, 2);
   assert.deepEqual(dgraphUpsertPlugin.manifest.datasetModalities, ["graph"]);
   assert.equal(dgraphUpsertPlugin.manifest.category, "sink");
   assert.equal(dgraphQueryPlugin.manifest.contract, 2);
   assert.deepEqual(dgraphQueryPlugin.manifest.datasetModalities, ["graph"]);
   assert.equal(dgraphQueryPlugin.manifest.category, "retriever");
+  assert.equal(dgraphDeletePlugin.manifest.contract, 2);
+  assert.deepEqual(dgraphDeletePlugin.manifest.datasetModalities, ["graph"]);
+  assert.equal(dgraphDeletePlugin.manifest.category, "sink");
 });

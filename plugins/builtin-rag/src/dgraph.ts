@@ -205,3 +205,62 @@ export const dgraphQueryPlugin: InProcessPlugin = {
     return { outputs: { results } };
   }
 };
+
+// ===========================================================================
+// dgraph_delete
+// ===========================================================================
+
+export const dgraphDeletePlugin: InProcessPlugin = {
+  manifest: {
+    id: "dgraph_delete",
+    name: "Dgraph Delete",
+    version: "1.0.0",
+    category: "sink",
+    contract: 2,
+    requires: [{ modality: "graph", provider: "dgraph" }],
+    datasetModalities: ["graph"],
+    description:
+      "Deletes every node whose `doc_id` is in the supplied list AND whose `tenant_id` matches the executing tenant. Pairs with `delta_filter.deleted` for delta-aware graph ingestion: when a source document disappears, every node derived from it goes too. Producer plugins (typically `dgraph_upsert` upstream of a knowledge-extractor) must stamp `doc_id` on every node for this delete to match.",
+    configSchema: {
+      // No collection / index field: Dgraph is a single graph per
+      // database — every node lives under the same root, scoped by
+      // `tenant_id` + `doc_id` predicates.
+      type: "object",
+      properties: {},
+      additionalProperties: false
+    },
+    inputPorts: [
+      { name: "deleted", required: true, description: "Array of { docId } entries to remove." }
+    ],
+    outputPorts: [
+      {
+        name: "deletedCount",
+        description:
+          "Number of source docIds submitted (one input docId may match many graph nodes)."
+      }
+    ],
+    capabilities: ["ingestion"],
+    ui: {
+      icon: "trash",
+      color: "#dc2626",
+      paletteGroup: "Graph"
+    }
+  },
+  async execute(input) {
+    const { inputs, context } = input;
+    const entries = (inputs.deleted as Array<{ docId?: string }> | undefined) ?? [];
+    if (!Array.isArray(entries) || entries.length === 0) {
+      return { outputs: { deletedCount: 0 } };
+    }
+    const docIds = entries
+      .map((e) => (typeof e.docId === "string" && e.docId ? e.docId : undefined))
+      .filter((id): id is string => !!id);
+    if (docIds.length === 0) return { outputs: { deletedCount: 0 } };
+    const store = getStore(pickGraphUrl(input));
+    // Tenant scope is mandatory at this layer — same defense-in-depth
+    // posture as qdrant_delete + opensearch_delete + the
+    // VectorStore.deleteByDocIds paths.
+    await store.deleteByDocIds(context.tenantId, docIds);
+    return { outputs: { deletedCount: docIds.length } };
+  }
+};

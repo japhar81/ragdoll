@@ -387,6 +387,83 @@ export const datasetUpsertPlugin: InProcessPlugin = {
 };
 
 // ===========================================================================
+// dataset_delete — v2-native delete primitive
+// ===========================================================================
+
+/**
+ * Modality-routing delete companion to `dataset_upsert`. Today this is
+ * vector-only (matches `dataset_upsert`'s scope); when the upsert side
+ * grows additional modalities, this plugin grows alongside.
+ *
+ * Caller contract: the upstream upsert MUST stamp `docId` on every
+ * chunk's payload (the chunker spread is the usual path — every chunk
+ * carrying `docId` lands in `payload.docId` automatically). Without
+ * that, `deleteByDocIds` matches zero rows and the delete is a silent
+ * no-op.
+ */
+export const datasetDeletePlugin: InProcessPlugin = {
+  manifest: {
+    id: "dataset_delete",
+    name: "Dataset Delete",
+    version: "1.0.0",
+    category: "sink",
+    contract: 2,
+    description:
+      "Deletes every chunk for the given docIds from a Dataset's vector backend (filter by payload.docId + tenantId; dispatches to qdrant / pgvector / in-memory based on the dataset's resolved provider). Pairs with `delta_filter.deleted` for delta-aware ingestion.",
+    configSchema: {
+      type: "object",
+      properties: {},
+      additionalProperties: false
+    },
+    inputPorts: [
+      { name: "deleted", required: true, description: "Array of { docId } entries to remove." }
+    ],
+    outputPorts: [
+      {
+        name: "deletedCount",
+        description:
+          "Number of source docIds submitted (one input docId may match many chunks)."
+      }
+    ],
+    capabilities: ["ingestion"],
+    ui: {
+      icon: "trash",
+      color: "#dc2626",
+      paletteGroup: "Ingestion"
+    }
+  },
+  async execute(input) {
+    const { inputs, context, dataset } = input;
+    if (!dataset) {
+      throw new Error("dataset_delete requires node.dataset to be wired");
+    }
+    const collection = pickBackendName(input, "vector");
+    if (!collection) {
+      throw new Error("dataset_delete: dataset has no vector backend collection");
+    }
+    const entries = (inputs.deleted as Array<{ docId?: string }> | undefined) ?? [];
+    if (!Array.isArray(entries) || entries.length === 0) {
+      return { outputs: { deletedCount: 0 } };
+    }
+    const docIds = entries
+      .map((e) => (typeof e.docId === "string" && e.docId ? e.docId : undefined))
+      .filter((id): id is string => !!id);
+    if (docIds.length === 0) return { outputs: { deletedCount: 0 } };
+    const vectorBackend = (
+      (dataset as unknown as { backends?: { vector?: { provider?: string } } })
+        .backends?.vector?.provider
+    ) as "qdrant" | "pgvector" | undefined;
+    const store = createVectorStore({
+      ...(vectorBackend ? { provider: vectorBackend } : {})
+    });
+    // Tenant scope is mandatory at this layer — same defense-in-depth
+    // posture as qdrant_delete + opensearch_delete + dgraph_delete.
+    await store.deleteByDocIds(collection, context.tenantId, docIds);
+    return { outputs: { deletedCount: docIds.length } };
+  }
+};
+
+// ===========================================================================
 // query_hyde — Hypothetical Document Embeddings
 // ===========================================================================
 

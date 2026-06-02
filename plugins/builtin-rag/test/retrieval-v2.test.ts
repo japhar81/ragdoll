@@ -17,13 +17,14 @@ import {
   mergeRrfPlugin,
   datasetSearchPlugin,
   datasetUpsertPlugin,
+  datasetDeletePlugin,
   queryHydePlugin,
   queryFanoutPlugin,
   pipelineCallPlugin
 } from "../src/retrieval-v2.ts";
 import type { PluginExecutionInput, ResolvedDataset } from "../../../packages/plugin-sdk/src/index.ts";
 import type { RuntimeContext } from "../../../packages/core/src/index.ts";
-import { resetInMemoryVectorStore } from "../../../packages/vector/src/index.ts";
+import { getInMemoryVectorStore, resetInMemoryVectorStore } from "../../../packages/vector/src/index.ts";
 
 function fakeContext(): RuntimeContext {
   return {
@@ -173,6 +174,54 @@ test("dataset_upsert: refuses to run without a dataset", async () => {
       }),
     /requires node.dataset/
   );
+});
+
+test("dataset_delete: removes every chunk for the supplied docIds (in-memory vector backend)", async () => {
+  resetInMemoryVectorStore();
+  // Pre-seed three points: two chunks for "a.ts", one for "b.ts", all
+  // under the same tenant. Each carries docId in payload — same shape
+  // any real upsert (qdrant_vector_store / dataset_upsert) writes.
+  const store = getInMemoryVectorStore();
+  await store.ensureCollection("kb_v1", { dimensions: 4, distance: "cosine" });
+  await store.upsert("kb_v1", [
+    { id: "p-a-0", vector: [1, 0, 0, 0], tenantId: "t-1", payload: { text: "", docId: "a.ts", chunkIndex: 0 } },
+    { id: "p-a-1", vector: [0.9, 0, 0, 0], tenantId: "t-1", payload: { text: "", docId: "a.ts", chunkIndex: 1 } },
+    { id: "p-b-0", vector: [0, 1, 0, 0], tenantId: "t-1", payload: { text: "", docId: "b.ts", chunkIndex: 0 } }
+  ]);
+  const result = await runPlugin({
+    plugin: datasetDeletePlugin,
+    inputs: { deleted: [{ docId: "a.ts" }] },
+    config: {},
+    dataset: fakeDataset()
+  });
+  // deletedCount reports source docIds (not chunks removed).
+  assert.equal(result.outputs.deletedCount, 1);
+  const remaining = await store.query("kb_v1", { vector: [1, 0, 0, 0], topK: 10, tenantId: "t-1" });
+  assert.equal(remaining.length, 1, "both a.ts chunks removed; only b.ts remains");
+  assert.equal((remaining[0].payload as { docId: string }).docId, "b.ts");
+});
+
+test("dataset_delete: refuses to run without a dataset", async () => {
+  await assert.rejects(
+    () =>
+      runPlugin({
+        plugin: datasetDeletePlugin,
+        inputs: { deleted: [{ docId: "a.ts" }] },
+        config: {}
+      }),
+    /requires node.dataset/
+  );
+});
+
+test("dataset_delete: empty input no-ops", async () => {
+  resetInMemoryVectorStore();
+  const result = await runPlugin({
+    plugin: datasetDeletePlugin,
+    inputs: { deleted: [] },
+    config: {},
+    dataset: fakeDataset()
+  });
+  assert.equal(result.outputs.deletedCount, 0);
 });
 
 // ---- LLM plugins: manifest shape + input validation -----------------------

@@ -55,6 +55,18 @@ export interface GraphStore {
   /** Wipe every node carrying `tenant_id = <tenantId>`. Used on
    *  tenant delete + tests that want a clean slate. */
   deleteByTenant(tenantId: string): Promise<void>;
+  /**
+   * Wipe every node whose `tenant_id == tenantId` AND `doc_id` is in
+   * `docIds`. Used by delta-aware ingestion: when a source document
+   * disappears, every graph node derived from it goes too. Tenant scope
+   * is mandatory — defense against a docId collision across tenants
+   * (mirrors the VectorStore.deleteByDocIds contract).
+   *
+   * Nodes without a `doc_id` predicate are not matched; producer plugins
+   * (`dgraph_upsert` and friends) are expected to stamp `doc_id` when
+   * the resulting nodes are derived from a known source document.
+   */
+  deleteByDocIds(tenantId: string, docIds: string[]): Promise<void>;
 }
 
 interface DgraphConfig {
@@ -167,6 +179,33 @@ export class DgraphStore implements GraphStore {
       );
     }
   }
+
+  async deleteByDocIds(tenantId: string, docIds: string[]): Promise<void> {
+    if (docIds.length === 0) return;
+    // DQL upsert pattern: select all nodes whose tenant + doc_id match
+    // any of the supplied docIds in ONE query block, then delete every
+    // matched uid in the mutation block. Single round-trip.
+    //
+    // Tenant scope is mandatory (mirrors VectorStore.deleteByDocIds);
+    // the `eq(tenant_id, ...)` clause defends against a cross-tenant
+    // docId collision. `eq(doc_id, [list])` is Dgraph's IN-list match.
+    const safe = (s: string): string => s.replace(/"/g, '\\"');
+    const docList = docIds.map((id) => `"${safe(id)}"`).join(", ");
+    const upsert = {
+      query: `{ all(func: eq(doc_id, [${docList}])) @filter(eq(tenant_id, "${safe(tenantId)}")) { v as uid } }`,
+      mutations: [{ delete: [{ uid: "uid(v)" }] }]
+    };
+    const res = await this.fetchImpl(`${this.url}/mutate?commitNow=true`, {
+      method: "POST",
+      headers: this.headers("application/json"),
+      body: JSON.stringify(upsert)
+    });
+    if (!res.ok) {
+      throw new Error(
+        `dgraph deleteByDocIds failed: HTTP ${res.status} ${await res.text()}`
+      );
+    }
+  }
 }
 
 /**
@@ -250,6 +289,18 @@ export class InMemoryGraphStore implements GraphStore {
   async deleteByTenant(tenantId: string): Promise<void> {
     for (const [uid, node] of this.nodes) {
       if (node.tenant_id === tenantId) this.nodes.delete(uid);
+    }
+  }
+
+  async deleteByDocIds(tenantId: string, docIds: string[]): Promise<void> {
+    if (docIds.length === 0) return;
+    const set = new Set(docIds);
+    for (const [uid, node] of this.nodes) {
+      if (node.tenant_id !== tenantId) continue;
+      const docId = (node as Record<string, unknown>).doc_id;
+      if (typeof docId === "string" && set.has(docId)) {
+        this.nodes.delete(uid);
+      }
     }
   }
 

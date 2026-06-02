@@ -52,7 +52,7 @@ export { githubSourcePlugin } from "./github.ts";
 // Dgraph plugins for the `graph` modality. Sink + retriever, both
 // contract: 2 and declare datasetModalities: ["graph"] so the
 // Builder picker filters to graph-enabled datasets.
-export { dgraphUpsertPlugin, dgraphQueryPlugin } from "./dgraph.ts";
+export { dgraphUpsertPlugin, dgraphQueryPlugin, dgraphDeletePlugin } from "./dgraph.ts";
 // Data-shaping plugins (JSONata/JMESPath transform + XML codec) live in their
 // own module; re-exported so the plugin-loader's namespace scan registers
 // them alongside the rest.
@@ -61,6 +61,7 @@ export { transformPlugin, xmlCodecPlugin } from "./transform.ts";
 export {
   datasetSearchPlugin,
   datasetUpsertPlugin,
+  datasetDeletePlugin,
   queryHydePlugin,
   queryFanoutPlugin,
   mergeRrfPlugin,
