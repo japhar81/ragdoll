@@ -198,15 +198,17 @@ A suggested set of values keys to add if you template this in the chart:
 `pythonPlugins.image.repository`/`tag`, `pythonPlugins.resources`, and
 `pythonPlugins.url` (the value plumbed into `PYTHON_PLUGIN_URL`).
 
-**Security (sidecar trust boundary).** The `POST /execute` body carries
-resolved non-secret config **and resolved secret values** for the node, so
-the sidecar is inside the trust boundary: keep its Service
-cluster-internal (no Ingress, no public LoadBalancer) and reachable only
-from the API/worker. It is a network-facing crawler — its in-process SSRF
-guard is default-deny (private/loopback/link-local/reserved blocked,
-scheme + domain allowlists), but for a real multi-tenant deployment add a
-`NetworkPolicy` that (a) restricts ingress to the API/worker pods and
-(b) constrains egress (block RFC1918 / metadata IPs, allow only intended
+**Security (sidecar trust boundary).** Every plugin invocation (whether
+over the Connect `PluginRuntime.Execute` RPC or the legacy `POST /execute`
+route) carries resolved non-secret config **and resolved secret values**
+for the node, so the sidecar is inside the trust boundary: keep its
+Service cluster-internal (no Ingress, no public LoadBalancer) and
+reachable only from the API/worker. It is a network-facing crawler — its
+in-process SSRF guard is default-deny (private/loopback/link-local/
+reserved blocked, scheme + domain allowlists), but for a real
+multi-tenant deployment add a `NetworkPolicy` that (a) restricts ingress
+to the API/worker pods and (b) constrains egress (block RFC1918 /
+metadata IPs, allow only intended
 crawl egress). Defense in depth: the application guard plus network
 egress controls, not either alone.
 

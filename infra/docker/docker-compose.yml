@@ -325,6 +325,10 @@ services:
       # immediately with "fetch failed". The worker has the same env
       # (line 357) so non-streaming /run was already fine.
       OLLAMA_BASE_URL: http://ollama:11434
+      # API-side gate; mirror of the worker setting. Without this the
+      # in-API streaming path could fire concurrent calls into Ollama
+      # while the workers are also calling, doubling the saturation.
+      OLLAMA_MAX_CONCURRENCY: ${OLLAMA_MAX_CONCURRENCY:-1}
     ports:
       - "3001:3001"
     depends_on:
@@ -370,6 +374,13 @@ services:
       OLLAMA_BASE_URL: http://ollama:11434
       OLLAMA_WARM_MODELS: ${OLLAMA_WARM_MODELS:-qwen2.5:0.5b,nomic-embed-text}
       OLLAMA_WARM_INTERVAL_MS: ${OLLAMA_WARM_INTERVAL_MS:-300000}
+      # CPU Ollama is single-process; concurrent callers thrash the same
+      # inference loop and tail latencies explode. Cap concurrent calls
+      # at the runtime boundary so 8 worker slots (WORKER_CONCURRENCY=4 × 2
+      # replicas) don't all pile up on the same model. Bump to 2-4 on GPU
+      # Ollama or a hosted Ollama-compatible endpoint that fans out
+      # batches internally.
+      OLLAMA_MAX_CONCURRENCY: ${OLLAMA_MAX_CONCURRENCY:-1}
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
       OTEL_SERVICE_NAME: ragdoll-worker
       OTEL_RESOURCE_ATTRIBUTES: "service.namespace=ragdoll,deployment.environment=local,service.instance.id=worker-1"
@@ -411,6 +422,13 @@ services:
       OLLAMA_BASE_URL: http://ollama:11434
       OLLAMA_WARM_MODELS: ${OLLAMA_WARM_MODELS:-qwen2.5:0.5b,nomic-embed-text}
       OLLAMA_WARM_INTERVAL_MS: ${OLLAMA_WARM_INTERVAL_MS:-300000}
+      # CPU Ollama is single-process; concurrent callers thrash the same
+      # inference loop and tail latencies explode. Cap concurrent calls
+      # at the runtime boundary so 8 worker slots (WORKER_CONCURRENCY=4 × 2
+      # replicas) don't all pile up on the same model. Bump to 2-4 on GPU
+      # Ollama or a hosted Ollama-compatible endpoint that fans out
+      # batches internally.
+      OLLAMA_MAX_CONCURRENCY: ${OLLAMA_MAX_CONCURRENCY:-1}
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
       OTEL_SERVICE_NAME: ragdoll-worker
       OTEL_RESOURCE_ATTRIBUTES: "service.namespace=ragdoll,deployment.environment=local,service.instance.id=worker-2"

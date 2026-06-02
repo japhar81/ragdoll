@@ -1015,9 +1015,22 @@ export function createWorker(deps: WorkerDeps): Worker {
   /* ----------------------------- system sweeps --------------------------- */
 
   /** Platform default pipeline timeout, applied when a spec doesn't carry
-   *  `metadata.timeoutMs`. 60 min matches the user-visible default in the
-   *  Pipelines screen; override per-pipeline by editing that field. */
-  const DEFAULT_PIPELINE_TIMEOUT_MS = 60 * 60 * 1000;
+   *  `metadata.timeoutMs`. Overridable via `RAGDOLL_DEFAULT_PIPELINE_TIMEOUT_MS`.
+   *
+   *  10 minutes is the operator-friendly default: a stuck-on-external-call
+   *  execution gets reclaimed within a sweep cycle (5 min) of the timeout,
+   *  so the operator's "what's still running?" view stays honest. The old
+   *  60-minute default left orphans visible as `running` for the better
+   *  part of an hour when an external (Ollama / vector store / sidecar)
+   *  hung — long enough that operators concluded "broken" before the sweep
+   *  fired.
+   *
+   *  Per-pipeline timeouts (set in the Pipelines screen → metadata.timeoutMs)
+   *  still take precedence; this default only applies when nothing else
+   *  governs the run. */
+  const DEFAULT_PIPELINE_TIMEOUT_MS = Number(
+    process.env.RAGDOLL_DEFAULT_PIPELINE_TIMEOUT_MS ?? 10 * 60 * 1000
+  );
 
   async function staleExecSweep(): Promise<StaleExecSweepResult> {
     if (!deps.systemSweeps) {

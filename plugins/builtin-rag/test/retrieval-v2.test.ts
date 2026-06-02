@@ -265,27 +265,55 @@ test("dataset_upsert: passes records that conform to chunk_schema", async () => 
   assert.equal(result.outputs.upserted, 2);
 });
 
-test("rerank_bge: provider=local routes to the python sidecar", async () => {
-  // Stub global fetch so we don't actually hit the network. The
-  // important thing is the request shape: POST /execute with the
-  // rerank_bge_local plugin id + the documents + question in inputs.
-  const originalFetch = globalThis.fetch;
-  const calls: Array<{ url: string; body: unknown }> = [];
-  globalThis.fetch = (async (url: string, init?: RequestInit) => {
-    calls.push({ url, body: init?.body ? JSON.parse(String(init.body)) : null });
-    return new Response(
-      JSON.stringify({
-        outputs: {
-          documents: [
-            { id: "d1", text: "alpha", rerankScore: 0.9 },
-            { id: "d2", text: "beta", rerankScore: 0.1 }
-          ]
+test("rerank_bge: provider=local routes to the python sidecar via Connect", async () => {
+  // Spin up an actual Connect server that implements the PluginRuntime
+  // contract — the same wire the sidecar serves. This is the same pattern
+  // packages/plugin-sdk/test/external-plugin.test.ts uses; we validate the
+  // function-level contract (rerank request → ranked docs) rather than the
+  // wire bytes, because the wire is the SDK's responsibility, not this
+  // plugin's.
+  const http = await import("node:http");
+  const { create } = await import("@bufbuild/protobuf");
+  const { connectNodeAdapter } = await import("@connectrpc/connect-node");
+  const { ExecuteResponseSchema, PluginRuntime } = await import(
+    "../../../packages/proto-gen/src/plugin_pb.ts"
+  );
+  let received: { plugin: string; inputs: Record<string, unknown> } | undefined;
+  const handler = connectNodeAdapter({
+    routes: (r) => {
+      r.service(PluginRuntime, {
+        async health() {
+          return { ok: true, plugins: ["rerank_bge_local"], message: "" };
         },
-        usage: { provider: "huggingface-local", model: "BAAI/bge-reranker-v2-m3" }
-      }),
-      { status: 200, headers: { "content-type": "application/json" } }
-    );
-  }) as unknown as typeof fetch;
+        async execute(req) {
+          received = {
+            plugin: req.plugin,
+            inputs: (req.inputs ?? {}) as Record<string, unknown>
+          };
+          return create(ExecuteResponseSchema, {
+            outputs: {
+              documents: [
+                { id: "d1", text: "alpha", rerankScore: 0.9 },
+                { id: "d2", text: "beta", rerankScore: 0.1 }
+              ]
+            }
+          });
+        },
+        async *executeServerStream() {},
+        async executeClientStream() {
+          throw new Error("not used");
+        },
+        async *executeBidi() {}
+      });
+    }
+  });
+  const server = http.createServer(handler);
+  const port: number = await new Promise((resolve) =>
+    server.listen(0, "127.0.0.1", () => {
+      const addr = server.address() as { port: number };
+      resolve(addr.port);
+    })
+  );
   try {
     const { rerankBgePlugin } = await import("../src/retrieval-v2.ts");
     const result = await runPlugin({
@@ -299,23 +327,23 @@ test("rerank_bge: provider=local routes to the python sidecar", async () => {
       },
       config: {
         provider: "local",
-        sidecarUrl: "http://python-plugins:8000",
+        sidecarUrl: `http://127.0.0.1:${port}`,
         topK: 5
       }
     });
     const docs = result.outputs.documents as Array<{ id: string }>;
     assert.equal(docs[0].id, "d1");
-    assert.equal(calls.length, 1);
-    assert.ok(calls[0].url.endsWith("/execute"));
-    const body = calls[0].body as {
-      plugin: { id: string };
-      inputs: { question: string; documents: unknown[] };
+    // The sidecar saw the rerank request with the right plugin id +
+    // question + documents — validated via Connect proto, not /execute JSON.
+    assert.equal(received?.plugin, "rerank_bge_local");
+    const inputs = received?.inputs as {
+      question: string;
+      documents: unknown[];
     };
-    assert.equal(body.plugin.id, "rerank_bge_local");
-    assert.equal(body.inputs.question, "what is alpha?");
-    assert.equal(body.inputs.documents.length, 2);
+    assert.equal(inputs.question, "what is alpha?");
+    assert.equal(inputs.documents.length, 2);
   } finally {
-    globalThis.fetch = originalFetch;
+    await new Promise<void>((done) => server.close(() => done()));
   }
 });
 

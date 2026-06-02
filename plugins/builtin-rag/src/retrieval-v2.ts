@@ -24,6 +24,7 @@
  *    expose to plugins today; structurally bigger than the rest.
  */
 import type { InProcessPlugin, PluginExecutionInput } from "../../../packages/plugin-sdk/src/index.ts";
+import { executeRegisteredPlugin } from "../../../packages/plugin-sdk/src/transport.ts";
 import {
   OpenAIProvider,
   AnthropicProvider,
@@ -834,58 +835,43 @@ export const rerankBgePlugin: InProcessPlugin = {
     const timeoutMs = Math.max(1000, Number(config.timeoutMs ?? 30000));
     const provider = String(config.provider ?? "hf-api");
 
-    // Phase 13 follow-up: local cross-encoder via the Python sidecar.
-    // The sidecar loads the model once and serves /execute requests;
-    // no HF API token, latency settles after the first call.
+    // Local cross-encoder via the Python sidecar. The sidecar loads the model
+    // once and serves the rerank_bge_local plugin via the standard
+    // PluginRuntime contract (ADR 0022). We dispatch through the SDK's
+    // Connect transport rather than hand-rolling the wire so we get the
+    // retry/timeout/cancellation policy + the contract-evolution coverage
+    // for free; when the legacy /execute path is removed this still works
+    // without changes.
     if (provider === "local") {
       const sidecar = String(
         config.sidecarUrl ??
           process.env.PYTHON_PLUGIN_URL ??
           "http://python-plugins:8000"
       );
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), timeoutMs);
-      try {
-        const response = await fetch(`${sidecar}/execute`, {
-          method: "POST",
-          signal: controller.signal,
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({
-            plugin: { category: "reranker", id: "rerank_bge_local", version: "1.0.0" },
-            node: { id: "rerank_bge", config: {}, secrets: {} },
-            inputs: { question, documents },
-            config: { model, topK, textField },
-            secrets: {},
-            context: {
-              requestId: "rerank_bge",
-              executionId: input.context.executionId,
-              tenantId: input.context.tenantId,
-              pipelineId: input.context.pipelineId,
-              pipelineVersionId: input.context.pipelineVersionId,
-              environment: input.context.environment,
-              deadline: null,
-              resolvedConfig: { values: {} }
-            }
-          })
-        });
-        if (!response.ok) {
-          throw new Error(
-            `rerank_bge (local): sidecar returned ${response.status}: ${(await response.text()).slice(0, 400)}`
-          );
+      const result = await executeRegisteredPlugin(
+        {
+          mode: "external",
+          manifest: {
+            id: "rerank_bge_local",
+            name: "rerank_bge_local",
+            version: "1.0.0",
+            category: "reranker",
+            description: "local cross-encoder reranker"
+          },
+          external: { baseUrl: sidecar, timeoutMs }
+        },
+        {
+          ...input,
+          inputs: { question, documents },
+          config: { model, topK, textField },
+          secrets: {}
         }
-        const body = (await response.json()) as
-          | { error: string }
-          | { outputs: { documents: RankedDoc[] }; usage?: Record<string, unknown> };
-        if ("error" in body) {
-          throw new Error(`rerank_bge (local): ${body.error}`);
-        }
-        return {
-          outputs: { documents: body.outputs.documents },
-          ...(body.usage ? { usage: body.usage } : {})
-        };
-      } finally {
-        clearTimeout(timer);
-      }
+      );
+      const outDocs = (result.outputs as { documents?: RankedDoc[] }).documents ?? [];
+      return {
+        outputs: { documents: outDocs },
+        ...(result.usage ? { usage: result.usage } : {})
+      };
     }
 
     const endpoint = String(config.endpoint ?? "https://api-inference.huggingface.co");
