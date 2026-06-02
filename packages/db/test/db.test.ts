@@ -263,6 +263,7 @@ test("in-memory ExecutionStore matches runtime contract behavior", async () => {
     tenantId: "t1",
     pipelineId: "p1",
     pipelineVersionId: "v1",
+    environment: "test",
     status: "running",
     startedAt: new Date().toISOString()
   });
@@ -272,6 +273,7 @@ test("in-memory ExecutionStore matches runtime contract behavior", async () => {
     tenantId: "t1",
     pipelineId: "p1",
     pipelineVersionId: "v1",
+    environment: "test",
     status: "succeeded",
     startedAt: store.executions[0].startedAt,
     completedAt: new Date().toISOString()

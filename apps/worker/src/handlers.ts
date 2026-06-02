@@ -421,6 +421,7 @@ export function createWorker(deps: WorkerDeps): Worker {
     tenantId: string;
     pipelineId: string;
     pipelineVersionId?: string;
+    environment: string;
     enqueuedBy?: EnqueuedBy;
     error: string;
   }): Promise<void> {
@@ -430,6 +431,7 @@ export function createWorker(deps: WorkerDeps): Worker {
       tenantId: args.tenantId,
       pipelineId: args.pipelineId,
       pipelineVersionId: args.pipelineVersionId ?? "denied",
+      environment: args.environment,
       status: "running",
       startedAt,
       actorId: args.enqueuedBy?.principalId ?? null
@@ -482,6 +484,7 @@ export function createWorker(deps: WorkerDeps): Worker {
           executionId,
           tenantId: payload.tenantId,
           pipelineId: payload.pipelineId,
+          environment: payload.environment,
           enqueuedBy: payload.enqueuedBy,
           error: e.message
         });
@@ -690,6 +693,7 @@ export function createWorker(deps: WorkerDeps): Worker {
         tenantId: payload.tenantId,
         pipelineId: payload.pipelineId,
         pipelineVersionId,
+        environment: payload.environment,
         status: "running",
         startedAt,
         input: { documents: documents.length }

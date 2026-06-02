@@ -113,11 +113,13 @@ export class PostgresExecutionStore implements ExecutionStore {
         record.tenantId,
         record.pipelineId,
         record.pipelineVersionId,
-        // The executions table requires an environment string; if the
-        // caller didn't supply one we fall back to "unknown" rather than
-        // failing the insert. Callers SHOULD supply it (the executor binds
-        // every run to an environment).
-        record.environment ?? "unknown",
+        // `environment` is required on ExecutionRecord (no longer
+        // optional) — the runtime's DagExecutor + every other call site
+        // now plumb it through explicitly. A missing env at this layer
+        // would mean a regression in a writer path; surface it loudly
+        // rather than masking with a literal "unknown" that ages into
+        // unfixable history.
+        record.environment,
         record.status,
         stringifyForTrace(record.input),
         record.startedAt
@@ -343,7 +345,10 @@ function rowToExecutionRecord(
     tenantId: row.tenant_id as string,
     pipelineId: row.pipeline_id as string,
     pipelineVersionId: row.pipeline_version_id as string,
-    environment: (row.environment as string | null) ?? undefined,
+    // The executions.environment column is NOT NULL with the schema-level
+    // default of "unknown" for any pre-Phase-X rows that slipped through
+    // before env became required on ExecutionRecord. Cast to string.
+    environment: (row.environment as string | null) ?? "unknown",
     status: row.status as ExecutionRecord["status"],
     startedAt: toIso(row.started_at) ?? new Date(0).toISOString(),
     completedAt: toIso(row.completed_at),

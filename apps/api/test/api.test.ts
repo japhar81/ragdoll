@@ -410,6 +410,7 @@ test("tenant isolation: execution scoped to another tenant is forbidden", async 
     tenantId: "tenant-b",
     pipelineId: "p",
     pipelineVersionId: "v",
+    environment: "test",
     status: "succeeded",
     startedAt: new Date().toISOString()
   });

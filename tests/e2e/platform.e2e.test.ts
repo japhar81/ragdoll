@@ -411,6 +411,7 @@ test("e2e: tenant A principal is denied tenant-B-scoped actions across the bound
     tenantId: "tenant-b",
     pipelineId: "p",
     pipelineVersionId: "v",
+    environment: "test",
     status: "succeeded",
     startedAt: new Date().toISOString()
   });
