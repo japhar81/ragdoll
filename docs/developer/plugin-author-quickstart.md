@@ -17,6 +17,14 @@ Pick whichever your plugin happens to be written in. The runtime treats them
 identically — every `RegisteredPlugin` entry with an `external.baseUrl` is
 called via the same dispatcher regardless of which language served it.
 
+> **Skip ahead if you'd rather just copy a working template.**
+> [`examples/plugins/node-echo/`](../../examples/plugins/node-echo/) and
+> [`examples/plugins/python-echo/`](../../examples/plugins/python-echo/)
+> are bare-minimum plugins (~30 lines of code each) that round-trip
+> `{ text }` → `{ echoed, length }`. Both have a Dockerfile, a smoke-probe,
+> and a CI-tested round-trip; copy either directory as your starting point.
+> The sections below walk through the same shape line by line.
+
 ## 1. Define the manifest
 
 Plugins are addressed by `category:id:version`. The manifest lives wherever
