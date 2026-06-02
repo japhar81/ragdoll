@@ -106,6 +106,31 @@ export class OpenSearchVectorStore implements VectorStore {
     });
   }
 
+  async deleteByIds(collection: string, ids: string[]): Promise<void> {
+    if (ids.length === 0) return;
+    // OpenSearch's _delete_by_query accepts an `ids` query directly —
+    // matches the docs by their `_id` and removes them in one request.
+    // refresh=true + conflicts=proceed mirror the delete-by-tenant call
+    // below so callers see the deletion reflected in the next query.
+    await this.client.deleteByQuery(collection, { ids: { values: ids } });
+  }
+
+  async deleteByDocIds(collection: string, tenantId: string, docIds: string[]): Promise<void> {
+    if (docIds.length === 0) return;
+    // Tenant scope is mandatory at this layer (matches the Qdrant +
+    // InMemory + Pg paths — defense against a docId collision across
+    // tenants). `bool.must[tenantId term, docId terms]` removes every
+    // chunk for any of the supplied source docIds in one call.
+    await this.client.deleteByQuery(collection, {
+      bool: {
+        must: [
+          { term: { tenantId } },
+          { terms: { docId: docIds } }
+        ]
+      }
+    });
+  }
+
   async deleteByTenant(collection: string, tenantId: string): Promise<void> {
     await this.client.deleteByQuery(collection, { term: { tenantId } });
   }

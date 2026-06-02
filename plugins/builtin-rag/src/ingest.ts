@@ -1138,18 +1138,11 @@ export const opensearchDeletePlugin: InProcessPlugin = {
     requires: [{ modality: "text", provider: "opensearch" }],
     datasetModalities: ["text"],
     description:
-      "Bulk delete-by-id against an OpenSearch index. Tenant-scoped: refuses to issue the request if the docs don't carry the executing tenant id (defence-in-depth against cross-tenant deletes).",
+      "Deletes every chunk for the given docIds from an OpenSearch index (filter by docId + tenantId on the doc body — the upsert side sets `_id` per-chunk so the caller doesn't know the chunk count to recompute the per-chunk ids). Tenant-scoped: the filter requires the indexed doc's `tenantId` field to match the executing tenant, defense against a docId collision across tenants. Pairs with `delta_filter.deleted` for delta-aware ingestion.",
     configSchema: {
-      // PR1 of the requires roll-out: endpoint field gone. Dataset's
-      // resolved connection supplies host/port; secrets stay here for
-      // basic-auth (until connection.secretRefId integration lands).
       type: "object",
       properties: {
-        index: { type: "string", default: "default", description: "Target index." },
-        idPrefix: {
-          type: "string",
-          description: "Prefix combined with each input doc_id to compute the document _id."
-        }
+        index: { type: "string", default: "default", description: "Target index." }
       },
       additionalProperties: false
     },
@@ -1166,7 +1159,7 @@ export const opensearchDeletePlugin: InProcessPlugin = {
       { name: "deleted", required: true, description: "Array of { docId } entries to remove." }
     ],
     outputPorts: [
-      { name: "deletedCount", description: "Number of ids submitted to the bulk delete." }
+      { name: "deletedCount", description: "Number of source docIds submitted (one input docId may match many indexed chunks)." }
     ],
     capabilities: ["ingestion"],
     ui: {
@@ -1176,8 +1169,7 @@ export const opensearchDeletePlugin: InProcessPlugin = {
     }
   },
   async execute(input) {
-    const { inputs, config, secrets, context } = input;
-    void context; // resolvedConfig fallback removed in PR1 requires roll-out
+    const { inputs, secrets, context } = input;
     const { url: endpoint } = requireBackendConnection(input, "text", {
       pluginId: "opensearch_delete",
       defaultPort: 9200
@@ -1190,19 +1182,27 @@ export const opensearchDeletePlugin: InProcessPlugin = {
     });
     if (!client) throw new Error("opensearch_delete: endpoint not configured");
     const index = String(pickBackendName(input, "keyword") ?? "default");
-    const idPrefix = config.idPrefix ? String(config.idPrefix) : "";
     const entries = (inputs.deleted as Array<{ docId?: string }> | undefined) ?? [];
     if (!Array.isArray(entries) || entries.length === 0) {
       return { outputs: { deletedCount: 0 } };
     }
-    const ids = entries
-      .map((e) => (typeof e.docId === "string" && e.docId ? `${idPrefix}${e.docId}` : undefined))
+    const docIds = entries
+      .map((e) => (typeof e.docId === "string" && e.docId ? e.docId : undefined))
       .filter((id): id is string => !!id);
-    if (ids.length === 0) return { outputs: { deletedCount: 0 } };
-    // Use delete_by_query with a terms filter — atomic across all ids and the
-    // exact endpoint already exposed by our minimal OpenSearchClient.
-    await client.deleteByQuery(index, { terms: { _id: ids } });
-    return { outputs: { deletedCount: ids.length } };
+    if (docIds.length === 0) return { outputs: { deletedCount: 0 } };
+    // Tenant scope is mandatory at this layer — same defense-in-depth
+    // posture as qdrant_delete + the pgvector + InMemory paths. The
+    // filter removes every chunk for any of the supplied source docIds
+    // in one delete_by_query call.
+    await client.deleteByQuery(index, {
+      bool: {
+        must: [
+          { term: { tenantId: context.tenantId } },
+          { terms: { docId: docIds } }
+        ]
+      }
+    });
+    return { outputs: { deletedCount: docIds.length } };
   }
 };
 

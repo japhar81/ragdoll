@@ -26,7 +26,7 @@ import {
 } from "../../../packages/vector/src/index.ts";
 import type { IngestStateStore, PluginExecutionInput } from "../../../packages/plugin-sdk/src/index.ts";
 import type { RuntimeContext } from "../../../packages/core/src/index.ts";
-import { fakeVectorDataset } from "./test-helpers.ts";
+import { fakeTextDataset, fakeVectorDataset } from "./test-helpers.ts";
 
 /** Minimal RuntimeContext built per-test — only the fields the plugins
  *  read (tenantId, resolvedConfig.values). Everything else is shimmed. */
@@ -583,38 +583,49 @@ test("qdrant_delete tolerates empty input", async () => {
 // opensearch_delete
 // ---------------------------------------------------------------------------
 
-test("opensearch_delete issues a delete_by_query against the configured index", async () => {
-  let calledWith: { method: string; path: string; body?: unknown } | undefined;
-  // Inject a fake fetch into createOpenSearchClient via the OPENSEARCH_URL env.
-  const fakeFetch = async (url: string, init?: { method?: string; body?: string }) => {
-    calledWith = {
+test("opensearch_delete: delete-by-query filters on docId + tenantId (no cross-tenant erase)", async () => {
+  // Capture the actual HTTP call the plugin makes. Have to monkeypatch
+  // global fetch because opensearch_delete constructs its own client
+  // internally — there's no fetchImpl injection seam exposed.
+  const calls: Array<{ method: string; path: string; body?: unknown }> = [];
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (async (url: string, init?: { method?: string; body?: string }) => {
+    calls.push({
       method: init?.method ?? "GET",
       path: new URL(url).pathname,
       body: init?.body ? JSON.parse(init.body) : undefined
-    };
-    return new Response(JSON.stringify({ deleted: 2 }), {
+    });
+    return new Response(JSON.stringify({ deleted: 5 }), {
       status: 200,
       headers: { "content-type": "application/json" }
     });
-  };
-  const { createOpenSearchClient } = await import(
-    "../../../packages/opensearch/src/index.ts"
-  );
-  // Sanity: ensure the client we construct uses fakeFetch by passing it via env-bypass.
-  // The plugin doesn't allow fetch injection directly, so we exercise the
-  // function-level wiring through process.env. Skip when the helper isn't
-  // available to take fetch overrides.
-  const client = createOpenSearchClient({ endpoint: "http://localhost:9200", fetchImpl: fakeFetch });
-  if (!client) {
-    return; // misconfiguration — bail
+  }) as unknown as typeof fetch;
+  try {
+    const result = await opensearchDeletePlugin.execute({
+      context: { ...fakeContext(), tenantId: "tenant-a" },
+      node: { id: "del", plugin: opensearchDeletePlugin.manifest, config: {}, secrets: {} },
+      inputs: { deleted: [{ docId: "a.md" }, { docId: "b.md" }] },
+      config: { index: "docs" },
+      secrets: {},
+      dataset: fakeTextDataset({ host: "localhost" })
+    } as unknown as PluginExecutionInput);
+    // deletedCount reports source docIds (not the chunk count removed).
+    assert.equal(result.outputs.deletedCount, 2);
+    // The plugin issued exactly one _delete_by_query against the
+    // configured index — no cross-index spray.
+    const deleteCall = calls.find((c) => c.path.includes("_delete_by_query"));
+    assert.ok(deleteCall, "expected a _delete_by_query call");
+    assert.ok(deleteCall!.path.includes("/docs/_delete_by_query"));
+    // The filter MUST require both tenantId + docId membership (defense
+    // against a docId collision across tenants).
+    const query = (deleteCall!.body as { query: { bool: { must: unknown[] } } }).query;
+    assert.deepEqual(query.bool.must, [
+      { term: { tenantId: "tenant-a" } },
+      { terms: { docId: ["a.md", "b.md"] } }
+    ]);
+  } finally {
+    globalThis.fetch = realFetch;
   }
-  await client.deleteByQuery("docs", { terms: { _id: ["a.md", "b.md"] } });
-  assert.ok(calledWith, "fakeFetch was called");
-  assert.ok(calledWith!.path.includes("/docs/_delete_by_query"));
-  assert.deepEqual(
-    (calledWith!.body as { query: unknown }).query,
-    { terms: { _id: ["a.md", "b.md"] } }
-  );
 });
 
 // ---------------------------------------------------------------------------
