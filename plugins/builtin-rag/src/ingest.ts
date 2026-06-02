@@ -1049,31 +1049,32 @@ export const qdrantDeletePlugin: InProcessPlugin = {
         context.resolvedConfig.values["vector.collection"]?.value ??
         "default"
     );
-    const idPrefix = config.idPrefix ? String(config.idPrefix) : "";
     const entries = (inputs.deleted as Array<{ docId?: string }> | undefined) ?? [];
     if (!Array.isArray(entries) || entries.length === 0) {
       return { outputs: { deletedCount: 0 } };
     }
-    const ids = entries
-      .map((e) => (typeof e.docId === "string" && e.docId ? `${idPrefix}${e.docId}` : undefined))
+    const docIds = entries
+      .map((e) => (typeof e.docId === "string" && e.docId ? e.docId : undefined))
       .filter((id): id is string => !!id);
-    if (ids.length === 0) return { outputs: { deletedCount: 0 } };
+    if (docIds.length === 0) return { outputs: { deletedCount: 0 } };
     try {
-      await store.deleteByIds(collection, ids);
+      // Tenant scoping is mandatory at this layer (defense against a
+      // docId collision across tenants — every chunk payload carries
+      // tenantId so the underlying delete-by-filter requires a match).
+      // This single call removes every chunk for every supplied docId.
+      await store.deleteByDocIds(collection, context.tenantId, docIds);
     } catch (err) {
       // The Qdrant js client throws bare `Error: Bad Request` (or
       // similar status text) without including the response body or
-      // the operation context. That makes a failed delete look
-      // identical to a failed upsert in the trace. Enrich here so the
-      // operator sees the collection + id-list-preview that's needed
-      // to actually diagnose the problem.
+      // the operation context. Enrich here so the operator sees the
+      // collection + docId-list-preview needed to actually diagnose.
       throw enrichQdrantError(err, {
         operation: "delete",
         collection,
-        ids
+        ids: docIds
       });
     }
-    return { outputs: { deletedCount: ids.length } };
+    return { outputs: { deletedCount: docIds.length } };
   }
 };
 

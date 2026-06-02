@@ -540,9 +540,15 @@ test("qdrant_delete removes points by id from the (in-memory) store", async () =
   resetInMemoryVectorStore();
   const store = getInMemoryVectorStore();
   await store.ensureCollection("codebase", { dimensions: 4, distance: "cosine" });
+  // Match the real qdrant_vector_store upsert shape: point id is a
+  // deterministic UUID per chunk (not the source path), and the source
+  // path is carried in payload.docId. qdrant_delete now filters by
+  // payload.docId because the caller doesn't know the chunk count to
+  // recompute per-chunk UUIDs.
   await store.upsert("codebase", [
-    { id: "a.ts", vector: [1, 0, 0, 0], tenantId: "t", payload: { text: "" } },
-    { id: "b.ts", vector: [0, 1, 0, 0], tenantId: "t", payload: { text: "" } }
+    { id: "uuid-a-0", vector: [1, 0, 0, 0], tenantId: "t", payload: { text: "", docId: "a.ts", chunkIndex: 0 } },
+    { id: "uuid-a-1", vector: [0.9, 0, 0, 0], tenantId: "t", payload: { text: "", docId: "a.ts", chunkIndex: 1 } },
+    { id: "uuid-b-0", vector: [0, 1, 0, 0], tenantId: "t", payload: { text: "", docId: "b.ts", chunkIndex: 0 } }
   ]);
   const result = await qdrantDeletePlugin.execute({
     context: fakeContext(),
@@ -552,10 +558,12 @@ test("qdrant_delete removes points by id from the (in-memory) store", async () =
     secrets: {},
     dataset: fakeVectorDataset()
   } as unknown as PluginExecutionInput);
+  // deletedCount is the number of source docIds passed in (1: "a.ts"),
+  // not the chunk count removed (2: both chunks of a.ts).
   assert.equal(result.outputs.deletedCount, 1);
   const remaining = await store.query("codebase", { vector: [1, 0, 0, 0], topK: 10, tenantId: "t" });
-  assert.equal(remaining.length, 1);
-  assert.equal(remaining[0].id, "b.ts");
+  assert.equal(remaining.length, 1, "both a.ts chunks removed; only b.ts remains");
+  assert.equal(remaining[0].id, "uuid-b-0");
 });
 
 test("qdrant_delete tolerates empty input", async () => {

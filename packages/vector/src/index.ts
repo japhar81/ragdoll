@@ -32,6 +32,21 @@ export interface VectorStore {
   /** Delete specific points by id. Used by delta_filter / qdrant_delete to
    *  remove docs whose source has been removed from disk. */
   deleteByIds(collection: string, ids: string[]): Promise<void>;
+  /**
+   * Delete every point whose payload `docId` is in `docIds` AND whose
+   * payload `tenantId` matches. Used by the delta-aware deletion path
+   * (`qdrant_delete` → `delta_filter.deleted`) when a source document
+   * disappears: the upsert side hashes `(tenant, collection, docId,
+   * chunkIdx)` into a UUID per chunk, so the caller doesn't know the
+   * chunk count and can't recompute the per-chunk UUIDs to call
+   * `deleteByIds`. Filter-by-payload removes every chunk for a deleted
+   * source in one call without that knowledge.
+   *
+   * Tenant scoping is mandatory: it's defense-in-depth against a docId
+   * collision across tenants (every chunk's payload carries tenantId,
+   * so the filter MUST require a match to prevent cross-tenant erase).
+   */
+  deleteByDocIds(collection: string, tenantId: string, docIds: string[]): Promise<void>;
   deleteByTenant(collection: string, tenantId: string): Promise<void>;
   deleteCollection(name: string): Promise<void>;
 }
@@ -173,6 +188,19 @@ export class InMemoryVectorStore implements VectorStore {
     for (const id of ids) stored.points.delete(id);
   }
 
+  async deleteByDocIds(collection: string, tenantId: string, docIds: string[]): Promise<void> {
+    if (docIds.length === 0) return;
+    const stored = this.requireCollection(collection);
+    const set = new Set(docIds);
+    for (const [id, point] of stored.points) {
+      if (point.tenantId !== tenantId) continue;
+      const payloadDocId = (point.payload as { docId?: unknown } | undefined)?.docId;
+      if (typeof payloadDocId === "string" && set.has(payloadDocId)) {
+        stored.points.delete(id);
+      }
+    }
+  }
+
   async deleteByTenant(collection: string, tenantId: string): Promise<void> {
     const stored = this.requireCollection(collection);
     for (const [id, point] of stored.points) {
@@ -285,6 +313,24 @@ export class QdrantVectorStore implements VectorStore {
     if (ids.length === 0) return;
     const client = await this.client();
     await client.delete(collection, { wait: true, points: ids });
+  }
+
+  async deleteByDocIds(collection: string, tenantId: string, docIds: string[]): Promise<void> {
+    if (docIds.length === 0) return;
+    const client = await this.client();
+    await client.delete(collection, {
+      wait: true,
+      // Both clauses must match — tenant scoping is mandatory (defense
+      // against a docId collision across tenants); docId membership
+      // uses Qdrant's `any` matcher to delete every chunk for any of
+      // the deleted source documents in one call.
+      filter: {
+        must: [
+          { key: "tenantId", match: { value: tenantId } },
+          { key: "docId", match: { any: docIds } }
+        ]
+      }
+    });
   }
 
   async deleteByTenant(collection: string, tenantId: string): Promise<void> {
@@ -421,6 +467,8 @@ function createPgVectorStoreProxy(connectionString: string): VectorStore {
       (await instance()).query(collection, query),
     deleteByIds: async (collection, ids) =>
       (await instance()).deleteByIds(collection, ids),
+    deleteByDocIds: async (collection, tenantId, docIds) =>
+      (await instance()).deleteByDocIds(collection, tenantId, docIds),
     deleteByTenant: async (collection, tenantId) =>
       (await instance()).deleteByTenant(collection, tenantId),
     deleteCollection: async (name) =>

@@ -234,6 +234,18 @@ export class PgVectorStore implements VectorStore {
     );
   }
 
+  async deleteByDocIds(collection: string, tenantId: string, docIds: string[]): Promise<void> {
+    if (docIds.length === 0) return;
+    const table = sanitizeCollection(collection);
+    await this.requireMeta(table);
+    // payload->>'docId' = ANY($2) — tenant scope mandatory (same
+    // defense-in-depth as the Qdrant + InMemory paths).
+    await this.pool.query(
+      `DELETE FROM ${table} WHERE tenant_id = $1 AND payload->>'docId' = ANY($2::text[])`,
+      [tenantId, docIds]
+    );
+  }
+
   async deleteByTenant(collection: string, tenantId: string): Promise<void> {
     const table = sanitizeCollection(collection);
     await this.requireMeta(table);
