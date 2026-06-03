@@ -37,3 +37,4 @@ infra/helm/*/charts/
 # the shipping codebase; FINDINGS.md content was moved to docs/adr/).
 spike-grpc/
 
+tests/load/k6/.last-run.ndjson

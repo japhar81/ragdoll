@@ -17,6 +17,14 @@
 //             descriptors, in-memory caches, anything that grows unbounded
 //             on the happy path. Duration via DURATION=<k6 duration>.
 //
+//   trend   — sustained constant-arrival-rate for DURATION (default 5m) at
+//             RATE rps (default 10). The wrapper pairs this with the
+//             scripts/load-trend.ts analyzer, which buckets per-pipeline
+//             latency by BUCKET_SECONDS (default 30) and fails the run if
+//             median(last-2-buckets p95) / median(first-2 p95) > DRIFT_LIMIT
+//             (default 1.5x). Use this to confirm pipelines keep finishing
+//             at roughly the same speed under sustained load.
+//
 // Latency thresholds are kept loose on purpose — the load corpus is plumbing
 // (no LLMs, no I/O), so a healthy local stack hits low millisecond p95s.
 // Tighten thresholds per-scenario when you're characterizing a deploy you
@@ -24,6 +32,11 @@
 
 const RATE = Number(__ENV.RATE) || 20;
 const DURATION = __ENV.DURATION || "10m";
+// `trend` defaults stay separate from `steady` so the steady scenario
+// (short, throughput-shape SLA) and the trend scenario (long, drift-
+// detection) can coexist without overloading one set of env vars.
+const TREND_RATE = Number(__ENV.RATE) || 10;
+const TREND_DURATION = __ENV.DURATION || "5m";
 
 export const SCENARIOS = {
   smoke: {
@@ -54,6 +67,14 @@ export const SCENARIOS = {
     executor: "constant-vus",
     vus: 5,
     duration: DURATION
+  },
+  trend: {
+    executor: "constant-arrival-rate",
+    rate: TREND_RATE,
+    timeUnit: "1s",
+    duration: TREND_DURATION,
+    preAllocatedVUs: Math.max(5, TREND_RATE),
+    maxVUs: Math.max(20, TREND_RATE * 2)
   }
 };
 

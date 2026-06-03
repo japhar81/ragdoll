@@ -7,6 +7,7 @@
 #   ./scripts/k6.sh steady
 #   ./scripts/k6.sh spike
 #   ./scripts/k6.sh soak
+#   ./scripts/k6.sh trend      # sustained + per-bucket drift analyzer
 #   ./scripts/k6.sh smoke -e BASE_URL=http://stage.example.com:3001
 #
 # All scenarios run the same main.js — they differ only in the SCENARIO env
@@ -14,6 +15,12 @@
 #   RATE=50 ./scripts/k6.sh steady
 #   DURATION=30m ./scripts/k6.sh soak
 #   PIPELINE=load-deep-chain ./scripts/k6.sh steady
+#
+# `trend` additionally writes k6's per-sample NDJSON to
+# tests/load/k6/.last-run.ndjson and then runs scripts/load-trend.ts to
+# bucket the per-pipeline p95 over the run; the analyzer exits non-zero if
+# drift > DRIFT_LIMIT (default 1.5x). Knobs: DURATION (default 5m),
+# BUCKET_SECONDS (default 30), DRIFT_LIMIT (default 1.5).
 #
 # Defaults assume the local Docker stack on http://localhost:3001 with the
 # bootstrap admin + `tenant-local` seeded. See docs/admin/load-testing.md.
@@ -38,7 +45,32 @@ EOF
 fi
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
-SCRIPT="${HERE}/../tests/load/k6/main.js"
+ROOT="$(cd "${HERE}/.." && pwd)"
+SCRIPT="${ROOT}/tests/load/k6/main.js"
+
+# Default path. `trend` overrides this to a known location so the analyzer
+# can read it. Tests/CI may set NDJSON_OUT to redirect elsewhere.
+NDJSON_OUT="${NDJSON_OUT:-}"
+
+if [ "${SCENARIO}" = "trend" ]; then
+  : "${NDJSON_OUT:=${ROOT}/tests/load/k6/.last-run.ndjson}"
+  # Wipe any prior run's output so a failed k6 invocation can't poison the
+  # analyzer with stale samples.
+  rm -f "${NDJSON_OUT}"
+  k6 run \
+    -e "SCENARIO=${SCENARIO}" \
+    --out "json=${NDJSON_OUT}" \
+    "$@" \
+    "${SCRIPT}"
+  k6_status=$?
+  if [ "$k6_status" -ne 0 ]; then
+    # k6 already printed its threshold failures; surface the exit code and
+    # skip drift analysis (the data is already suspect).
+    exit "$k6_status"
+  fi
+  exec node --experimental-strip-types \
+    "${ROOT}/scripts/load-trend.ts" "${NDJSON_OUT}"
+fi
 
 exec k6 run \
   -e "SCENARIO=${SCENARIO}" \

@@ -48,10 +48,56 @@ extra args through to `k6 run`.
 | `npm run load:steady`   | steady   | Constant arrival rate (default 20 RPS) for 60 s.                     |
 | `npm run load:spike`    | spike    | Ramp 1 → 50 VUs over 10 s, hold 30 s, drain over 10 s.                |
 | `npm run load:soak`     | soak     | 5 VUs for 10 min (override with `DURATION=30m`).                     |
+| `npm run load:trend`    | trend    | Sustained 10 RPS for 5 min + per-bucket drift analyzer.              |
 
-`make load`, `make load-steady`, `make load-spike`, `make load-soak`
-work the same. All scenarios run the same `main.js`; they differ only
-in the `SCENARIO` env the wrapper sets.
+`make load`, `make load-steady`, `make load-spike`, `make load-soak`,
+`make load-trend` work the same. All scenarios run the same `main.js`;
+they differ only in the `SCENARIO` env the wrapper sets.
+
+### Trend scenario: did the pipelines slow down?
+
+Smoke / steady / spike / soak all answer "did the harness finish without
+breaching the latency ceiling." None answer "did the pipelines keep
+finishing at roughly the same speed over the sustained run." The `trend`
+scenario does:
+
+1. k6 runs `constant-arrival-rate` for `DURATION` (default 5 m) at `RATE`
+   RPS (default 10), tagging each request with its pipeline.
+2. The wrapper directs k6's per-sample output to
+   `tests/load/k6/.last-run.ndjson` (gitignored).
+3. `scripts/load-trend.ts` reads the NDJSON, groups
+   `http_req_duration` samples by `(pipeline, time bucket)` where each
+   bucket is `BUCKET_SECONDS` long (default 30 s), and prints a table:
+   ```
+   === load trend per pipeline (p95 by time bucket) ===
+
+   pipeline           b0      b1      b2      ...  b9      drift   verdict
+   --------------------------------------------------------------------------------
+   load-deep-chain    33ms    34ms    36ms    ...  35ms      6%    ok
+   load-fanout-merge  41ms    40ms    42ms    ...  44ms      7%    ok
+   load-passthrough   18ms    19ms    18ms    ...  19ms      6%    ok
+   load-xml-parse     23ms    23ms    24ms    ...  25ms      9%    ok
+   ```
+4. **Drift** for each pipeline is
+   `median(p95 of LAST two buckets) / median(p95 of FIRST two buckets)`.
+   The analyzer fails non-zero if any pipeline drifts above `DRIFT_LIMIT`
+   (default `1.5` — i.e. a 50% slowdown over the run).
+
+Knobs (all env vars):
+
+| Var              | Default | Meaning                                                          |
+| ---------------- | ------- | ---------------------------------------------------------------- |
+| `DURATION`       | `5m`    | Total run length (k6 duration syntax).                           |
+| `RATE`           | `10`    | Constant arrival rate, RPS.                                      |
+| `BUCKET_SECONDS` | `30`    | Time-bucket size used by the analyzer.                           |
+| `DRIFT_LIMIT`    | `1.5`   | Multiplier above which a pipeline's drift fails the run.         |
+| `NDJSON_OUT`     | `tests/load/k6/.last-run.ndjson` | Where to land the per-sample NDJSON. |
+
+A clean run on a healthy local stack should show drift values in the
+single-digit percent range — the platform isn't doing real work that
+heats up. Watch for any pipeline that shows monotonically increasing
+bucket p95s; that's the signal a leak or cache-warm-up bug is shifting
+the latency floor over time.
 
 ## Tweaking a run
 

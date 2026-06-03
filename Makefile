@@ -1,4 +1,4 @@
-.PHONY: up down refresh smoke test load load-smoke load-steady load-spike load-soak build-load-seeds crawl-up crawl-up-reranker obs oc-build-api oc-build-web oc-build-python-plugins oc-build-all
+.PHONY: up down refresh smoke test load load-smoke load-steady load-spike load-soak load-trend build-load-seeds crawl-up crawl-up-reranker obs oc-build-api oc-build-web oc-build-python-plugins oc-build-all
 
 # Bring up the full local stack (build + start everything). First run pulls
 # CPU Ollama models and builds images.
@@ -30,6 +30,8 @@ test:
 #   make load-steady       # constant arrival (RATE=20rps default, 1 min)
 #   make load-spike        # 1->50 VUs ramp, hold, drain
 #   make load-soak         # 5 VUs for 10 min (override with DURATION=30m)
+#   make load-trend        # sustained 10rps for 5 min + per-bucket drift table
+#                          # (override DURATION, RATE, BUCKET_SECONDS, DRIFT_LIMIT)
 #
 # All scenarios honor BASE_URL, PIPELINE, RATE, DURATION env vars — see the
 # wrapper for the full list.
@@ -42,6 +44,8 @@ load-spike:
 	./scripts/k6.sh spike
 load-soak:
 	./scripts/k6.sh soak
+load-trend:
+	./scripts/k6.sh trend
 
 # Regenerate packages/db/seeds/zzzzzzz-load-test-pipelines.sql from
 # examples/load/pipelines/*.yaml. Run after editing a load YAML; the

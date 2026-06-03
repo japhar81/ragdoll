@@ -205,6 +205,7 @@ npm run load          # smoke: 1 VU × 30 iters across every load-* pipeline
 npm run load:steady   # constant arrival rate (RATE=20rps default, 1 min)
 npm run load:spike    # 1->50 VUs ramp, hold, drain
 npm run load:soak     # 5 VUs for 10 min (DURATION=30m to extend)
+npm run load:trend    # sustained 10rps for 5 min + per-bucket drift table
 ```
 
 Run services directly (in-memory unless `DATABASE_URL` / `REDIS_URL`
