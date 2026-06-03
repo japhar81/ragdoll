@@ -33,7 +33,8 @@
     "load:smoke": "./scripts/k6.sh smoke",
     "load:steady": "./scripts/k6.sh steady",
     "load:spike": "./scripts/k6.sh spike",
-    "load:soak": "./scripts/k6.sh soak"
+    "load:soak": "./scripts/k6.sh soak",
+    "load:trend": "./scripts/k6.sh trend"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.39.0",
