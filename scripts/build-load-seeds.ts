@@ -1,0 +1,189 @@
+/**
+ * Codegen: examples/load/pipelines/*.yaml → packages/db/seeds/zzzzzzz-load-test-pipelines.sql
+ *
+ * Why a generator (and not hand-written SQL like the demo seeds): load
+ * pipelines are scaffolding for performance work, not living example
+ * artifacts. Encoding them once in YAML and projecting to SQL keeps the
+ * two in lockstep — change a YAML, re-run this script, commit the regen.
+ *
+ * The output sorts AFTER every demo seed (`zzzzzzz-...` vs. `zzzzzz-...`)
+ * so its `INSERT ... SELECT FROM tenants WHERE slug = 'tenant-local'`
+ * runs after the tenant exists.
+ *
+ * Run: `node --experimental-strip-types scripts/build-load-seeds.ts`
+ *      (or `npm run build:load-seeds`)
+ *
+ * Deterministic UUIDs are derived from the pipeline slug so re-running
+ * the script is byte-stable and a `git diff` after a YAML edit shows
+ * exactly the row that changed.
+ */
+import { readFile, readdir, writeFile } from "node:fs/promises";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import {
+  autoLayoutSpec,
+  autoStageSpec,
+  loadPipelineSpec,
+  specChecksum,
+  stringifyYaml
+} from "../packages/pipeline-spec/src/index.ts";
+import { stableHash } from "../packages/core/src/index.ts";
+
+const here = path.dirname(fileURLToPath(import.meta.url));
+const root = path.resolve(here, "..");
+const pipelinesDir = path.join(root, "examples", "load", "pipelines");
+const outFile = path.join(
+  root,
+  "packages",
+  "db",
+  "seeds",
+  "zzzzzzz-load-test-pipelines.sql"
+);
+
+/**
+ * Deterministic UUID derived from `slug` plus a discriminator suffix
+ * (`""`, `"v"`, `"d"`). The fixed `7777-7777` middle segments tag every
+ * load-test row as belonging to this generator at a glance, so an
+ * operator looking at the database can tell load-test seeds apart from
+ * the demo `0000-...d3010` family without grepping.
+ */
+function loadUuid(slug: string, suffix: string): string {
+  const h = stableHash(`load:${slug}:${suffix}`);
+  const h2 = stableHash(`load:${slug}:${suffix}:tail`);
+  // 8-4-4-4-12 → "00000000-7777-7777-7777-{8h}{4h-of-h2}"
+  return `00000000-7777-7777-7777-${h}${h2.slice(0, 4)}`;
+}
+
+function sqlEscapeJson(json: string): string {
+  return json.replace(/'/g, "''");
+}
+
+interface BuiltPipeline {
+  slug: string;
+  name: string;
+  description: string;
+  pipelineId: string;
+  versionId: string;
+  deploymentId: string;
+  specJson: string;
+  checksum: string;
+}
+
+async function buildOne(file: string): Promise<BuiltPipeline> {
+  const yamlPath = path.join(pipelinesDir, file);
+  const text = await readFile(yamlPath, "utf8");
+  const raw = loadPipelineSpec(text);
+  const laidOut = autoStageSpec(autoLayoutSpec(raw));
+  // Persist the canonical (laid-out + staged) form back to disk so the YAML
+  // on disk byte-checksums identically to what the SQL embeds. Without this
+  // step, a minimal hand-authored YAML would parse, but its checksum would
+  // never equal the seed's — the YAML-vs-SQL parity test would always fail.
+  const canonicalYaml = stringifyYaml(laidOut);
+  if (canonicalYaml !== text) {
+    await writeFile(yamlPath, canonicalYaml);
+  }
+  const md = laidOut.metadata as { name?: string; description?: string };
+  const slug = md.name;
+  if (!slug) {
+    throw new Error(`${file}: metadata.name is required (used as slug)`);
+  }
+  const description = md.description ?? "";
+  // Title-case the slug for the display name (kebab → Title Case).
+  const name = slug
+    .split(/[-_]/)
+    .map((s) => (s.length === 0 ? s : s[0].toUpperCase() + s.slice(1)))
+    .join(" ");
+  return {
+    slug,
+    name,
+    description,
+    pipelineId: loadUuid(slug, ""),
+    versionId: loadUuid(slug, "v"),
+    deploymentId: loadUuid(slug, "d"),
+    specJson: JSON.stringify(laidOut),
+    checksum: specChecksum(laidOut).slice(0, 8)
+  };
+}
+
+function renderBlock(p: BuiltPipeline): string {
+  const descSql = sqlEscapeJson(p.description);
+  const specSql = sqlEscapeJson(p.specJson);
+  return `-- ------------------------------ ${p.slug} ------------------------------
+
+INSERT INTO pipelines (id, slug, name, description) VALUES
+  (
+    '${p.pipelineId}',
+    '${p.slug}',
+    '${sqlEscapeJson(p.name)}',
+    '${descSql}'
+  )
+ON CONFLICT (slug) DO NOTHING;
+
+INSERT INTO pipeline_versions (id, pipeline_id, version, status, spec, checksum, published_at) VALUES
+  (
+    '${p.versionId}',
+    '${p.pipelineId}',
+    '1.0.0',
+    'published',
+    '${specSql}'::jsonb,
+    '${p.checksum}',
+    now()
+  )
+ON CONFLICT (pipeline_id, version) DO UPDATE
+SET spec = EXCLUDED.spec,
+    checksum = EXCLUDED.checksum,
+    status = EXCLUDED.status;
+
+INSERT INTO pipeline_deployments (id, pipeline_id, pipeline_version_id, environment, tenant_id, status)
+SELECT
+  '${p.deploymentId}',
+  '${p.pipelineId}',
+  '${p.versionId}',
+  'dev',
+  t.id,
+  'active'
+FROM tenants t
+WHERE t.slug = 'tenant-local'
+ON CONFLICT (pipeline_id, environment, tenant_id) DO NOTHING;
+`;
+}
+
+const header = `-- AUTOGENERATED by scripts/build-load-seeds.ts — DO NOT HAND-EDIT.
+--
+-- Source of truth: examples/load/pipelines/*.yaml
+-- Regenerate after editing a YAML: \`npm run build:load-seeds\`.
+--
+-- These pipelines exist for the k6 load harness (tests/load/k6) and are
+-- deployed to the seeded 'tenant-local' tenant in the 'dev' environment.
+-- They use only CPU-light, side-effect-free plugins (transform, xml_codec
+-- and friends) — no LLMs, no embeddings, no I/O — so they measure platform
+-- overhead instead of model latency. See docs/admin/load-testing.md.
+--
+-- Filename sorts AFTER \`zzzzzz-demo-connections.sql\` so the tenant
+-- + environment rows the deployments reference already exist.
+`;
+
+async function main(): Promise<void> {
+  const entries = (await readdir(pipelinesDir))
+    .filter((n) => n.endsWith(".yaml"))
+    .sort((a, b) => a.localeCompare(b));
+  if (entries.length === 0) {
+    process.stderr.write(`no YAMLs in ${pipelinesDir}\n`);
+    process.exit(1);
+  }
+  const built: BuiltPipeline[] = [];
+  for (const entry of entries) {
+    built.push(await buildOne(entry));
+    process.stdout.write(`  ${entry}\n`);
+  }
+  const body = built.map(renderBlock).join("\n");
+  await writeFile(outFile, `${header}\n${body}`);
+  process.stdout.write(
+    `wrote ${path.relative(root, outFile)} (${built.length} pipeline${built.length === 1 ? "" : "s"})\n`
+  );
+}
+
+main().catch((e) => {
+  process.stderr.write(`${e instanceof Error ? e.stack ?? e.message : String(e)}\n`);
+  process.exit(1);
+});

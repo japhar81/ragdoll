@@ -1,4 +1,4 @@
-.PHONY: up down refresh smoke test crawl-up crawl-up-reranker obs oc-build-api oc-build-web oc-build-python-plugins oc-build-all
+.PHONY: up down refresh smoke test load load-smoke load-steady load-spike load-soak build-load-seeds crawl-up crawl-up-reranker obs oc-build-api oc-build-web oc-build-python-plugins oc-build-all
 
 # Bring up the full local stack (build + start everything). First run pulls
 # CPU Ollama models and builds images.
@@ -21,6 +21,34 @@ smoke:
 # All offline test suites (unit + functional + e2e).
 test:
 	npm test && npm run test:functional && npm run test:e2e
+
+# k6 load harness against the running local stack. `load` defaults to the
+# smoke scenario (1 VU × 30 iters across every load-* pipeline) so it's safe
+# to run anytime; the other targets ramp up. See docs/admin/load-testing.md.
+#
+#   make load              # smoke — sanity check
+#   make load-steady       # constant arrival (RATE=20rps default, 1 min)
+#   make load-spike        # 1->50 VUs ramp, hold, drain
+#   make load-soak         # 5 VUs for 10 min (override with DURATION=30m)
+#
+# All scenarios honor BASE_URL, PIPELINE, RATE, DURATION env vars — see the
+# wrapper for the full list.
+load: load-smoke
+load-smoke:
+	./scripts/k6.sh smoke
+load-steady:
+	./scripts/k6.sh steady
+load-spike:
+	./scripts/k6.sh spike
+load-soak:
+	./scripts/k6.sh soak
+
+# Regenerate packages/db/seeds/zzzzzzz-load-test-pipelines.sql from
+# examples/load/pipelines/*.yaml. Run after editing a load YAML; the
+# generator also rewrites the YAML in canonical (laid-out + staged) form
+# so the seed and the YAML hash to the same checksum.
+build-load-seeds:
+	npm run build:load-seeds
 
 # Build + start only the Python crawler plugin service. Kept separate from
 # `refresh` because the image bundles a headless Chromium and is slow to

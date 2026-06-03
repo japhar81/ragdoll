@@ -1,0 +1,169 @@
+apiVersion: rag-platform/v1
+kind: Pipeline
+metadata:
+  name: load-deep-chain
+  description: "Six sequential transformers in a single chain. Isolates per-node DAG-traversal cost (edge resolution, input bag construction, plugin dispatch) from per-node compute, since each transform does almost no work. Watch the delta vs. load-passthrough: that's your sequential per-node overhead."
+  tags:
+  - load-test
+  stages:
+  - id: s_auto_1
+    label: Stage 1
+  - id: s_auto_2
+    label: Stage 2
+  - id: s_auto_3
+    label: Stage 3
+  - id: s_auto_4
+    label: Stage 4
+  - id: s_auto_5
+    label: Stage 5
+  - id: s_auto_6
+    label: Stage 6
+  - id: s_auto_7
+    label: Stage 7
+  - id: s_auto_8
+    label: Stage 8
+spec:
+  nodes:
+  - id: input
+    type: input
+    config:
+      default:
+        payload:
+          n: 0
+    ui:
+      position:
+        x: -2.517578125
+        y: 40
+      stageId: s_auto_1
+  - id: t_1
+    plugin:
+      category: transformer
+      id: transform
+      version: 1.0.0
+    config:
+      engine: jsonata
+      inputs:
+      - payload
+      outputs:
+        payload: "{ 'n': payload.n + 1 }"
+    ui:
+      position:
+        x: 450.265625
+        y: 40
+      stageId: s_auto_2
+  - id: t_2
+    plugin:
+      category: transformer
+      id: transform
+      version: 1.0.0
+    config:
+      engine: jsonata
+      inputs:
+      - payload
+      outputs:
+        payload: "{ 'n': payload.n + 1 }"
+    ui:
+      position:
+        x: 900.27734375
+        y: 40
+      stageId: s_auto_3
+  - id: t_3
+    plugin:
+      category: transformer
+      id: transform
+      version: 1.0.0
+    config:
+      engine: jsonata
+      inputs:
+      - payload
+      outputs:
+        payload: "{ 'n': payload.n + 1 }"
+    ui:
+      position:
+        x: 1349.64453125
+        y: 40
+      stageId: s_auto_4
+  - id: t_4
+    plugin:
+      category: transformer
+      id: transform
+      version: 1.0.0
+    config:
+      engine: jsonata
+      inputs:
+      - payload
+      outputs:
+        payload: "{ 'n': payload.n + 1 }"
+    ui:
+      position:
+        x: 1800.534423828125
+        y: 40
+      stageId: s_auto_5
+  - id: t_5
+    plugin:
+      category: transformer
+      id: transform
+      version: 1.0.0
+    config:
+      engine: jsonata
+      inputs:
+      - payload
+      outputs:
+        payload: "{ 'n': payload.n + 1 }"
+    ui:
+      position:
+        x: 2254.58251953125
+        y: 40
+      stageId: s_auto_6
+  - id: t_6
+    plugin:
+      category: transformer
+      id: transform
+      version: 1.0.0
+    config:
+      engine: jsonata
+      inputs:
+      - payload
+      outputs:
+        payload: "{ 'n': payload.n + 1 }"
+    ui:
+      position:
+        x: 2712.6065673828125
+        y: 40
+      stageId: s_auto_7
+  - id: output
+    type: output
+    ui:
+      position:
+        x: 3174.6065673828125
+        y: 40
+      stageId: s_auto_8
+  edges:
+  - from: input
+    to: t_1
+    fromPort: payload
+    toPort: payload
+  - from: t_1
+    to: t_2
+    fromPort: payload
+    toPort: payload
+  - from: t_2
+    to: t_3
+    fromPort: payload
+    toPort: payload
+  - from: t_3
+    to: t_4
+    fromPort: payload
+    toPort: payload
+  - from: t_4
+    to: t_5
+    fromPort: payload
+    toPort: payload
+  - from: t_5
+    to: t_6
+    fromPort: payload
+    toPort: payload
+  - from: t_6
+    to: output
+    fromPort: payload
+    toPort: result

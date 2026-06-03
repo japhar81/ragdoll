@@ -197,6 +197,14 @@ npm run test:all          # all of the above (~623 tests; ~6s end-to-end)
 # Isolates state into a per-run `integration_testing` tenant; setup creates
 # it, teardown nukes it via the cascade FKs from migration 013. ~56 specs.
 npm run test:playwright
+
+# k6 load harness against the running stack. Smoke is safe to run anytime;
+# steady / spike / soak ramp up. Non-LLM platform-only pipelines — see
+# docs/admin/load-testing.md for the four shapes and how to tune them.
+npm run load          # smoke: 1 VU × 30 iters across every load-* pipeline
+npm run load:steady   # constant arrival rate (RATE=20rps default, 1 min)
+npm run load:spike    # 1->50 VUs ramp, hold, drain
+npm run load:soak     # 5 VUs for 10 min (DURATION=30m to extend)
 ```
 
 Run services directly (in-memory unless `DATABASE_URL` / `REDIS_URL`
@@ -331,6 +339,7 @@ The wrapper invokes `apps/cli/src/index.ts` directly via Node's
   `docs/admin/governance-and-security.md`,
   `docs/admin/kubernetes-deployment.md`,
   `docs/admin/operations-runbook.md`,
+  `docs/admin/load-testing.md`,
   `docs/admin/upgrade-and-migrations.md`
 - Plugin reference: `docs/plugins/README.md`
 - API contract: `docs/api/openapi.yaml`

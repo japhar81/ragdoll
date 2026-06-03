@@ -27,7 +27,13 @@
     "build:web": "npm --workspace @ragdoll/web run build",
     "dev:api": "node --experimental-strip-types apps/api/src/server.ts",
     "dev:worker": "node --experimental-strip-types apps/worker/src/index.ts",
-    "generate": "buf generate"
+    "generate": "buf generate",
+    "build:load-seeds": "node --experimental-strip-types scripts/build-load-seeds.ts",
+    "load": "./scripts/k6.sh smoke",
+    "load:smoke": "./scripts/k6.sh smoke",
+    "load:steady": "./scripts/k6.sh steady",
+    "load:spike": "./scripts/k6.sh spike",
+    "load:soak": "./scripts/k6.sh soak"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.39.0",
