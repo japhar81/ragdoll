@@ -1,0 +1,77 @@
+apiVersion: rag-platform/v1
+kind: Pipeline
+metadata:
+  name: load-xml-parse
+  description: "CPU-realistic load shape: input -> xml_codec parse -> transform projection -> output. The xml_codec parser produces noticeably more work per call than a single transform, so this pipeline catches regressions where the API/runtime path bottlenecks before plugin compute does. The seeded input ships a small feed; pass a larger `xml` body in the run input to scale per-iteration cost."
+  tags:
+  - load-test
+  stages:
+  - id: s_auto_1
+    label: Stage 1
+  - id: s_auto_2
+    label: Stage 2
+  - id: s_auto_3
+    label: Stage 3
+  - id: s_auto_4
+    label: Stage 4
+spec:
+  nodes:
+  - id: input
+    type: input
+    config:
+      default:
+        xml: "<feed><item><title>Hello</title></item><item><title>World</title></item><item><title>Load</title></item></feed>"
+    ui:
+      position:
+        x: 8.71875
+        y: 40
+      stageId: s_auto_1
+  - id: parse
+    plugin:
+      category: transformer
+      id: xml_codec
+      version: 1.0.0
+    config:
+      mode: parse
+    ui:
+      position:
+        x: 469
+        y: 40
+      stageId: s_auto_2
+  - id: project
+    plugin:
+      category: transformer
+      id: transform
+      version: 1.0.0
+    config:
+      engine: jsonata
+      inputs:
+      - json
+      outputs:
+        titles: json.feed.item.title
+        count: $count(json.feed.item)
+    ui:
+      position:
+        x: 931
+        y: 40
+      stageId: s_auto_3
+  - id: output
+    type: output
+    ui:
+      position:
+        x: 1391.28125
+        y: 40
+      stageId: s_auto_4
+  edges:
+  - from: input
+    to: parse
+    fromPort: xml
+    toPort: xml
+  - from: parse
+    to: project
+    fromPort: json
+    toPort: json
+  - from: project
+    to: output
+    fromPort: titles
+    toPort: result

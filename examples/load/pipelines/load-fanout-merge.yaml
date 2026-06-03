@@ -1,0 +1,160 @@
+apiVersion: rag-platform/v1
+kind: Pipeline
+metadata:
+  name: load-fanout-merge
+  description: "Exercises the runtime's parallel-node scheduler: one input fans out to four sibling transformers, all four feed into one merge transformer, and the merge feeds the output. Catches scheduler regressions (lost concurrency, edge-ordering bugs, port-routing) that the linear baselines miss."
+  tags:
+  - load-test
+  stages:
+  - id: s_auto_1
+    label: Stage 1
+  - id: s_auto_2
+    label: Stage 2
+  - id: s_auto_3
+    label: Stage 3
+  - id: s_auto_4
+    label: Stage 4
+spec:
+  nodes:
+  - id: input
+    type: input
+    config:
+      default:
+        payload:
+          n: 100
+          tags:
+          - a
+          - b
+          - c
+    ui:
+      position:
+        x: 10.4375
+        y: 250
+      stageId: s_auto_1
+  - id: t_a
+    plugin:
+      category: transformer
+      id: transform
+      version: 1.0.0
+    config:
+      engine: jsonata
+      inputs:
+      - payload
+      outputs:
+        a: "payload.n * 2"
+    ui:
+      position:
+        x: 480
+        y: 8.71875
+      stageId: s_auto_2
+  - id: t_b
+    plugin:
+      category: transformer
+      id: transform
+      version: 1.0.0
+    config:
+      engine: jsonata
+      inputs:
+      - payload
+      outputs:
+        b: payload.n + 1
+    ui:
+      position:
+        x: 470.890625
+        y: 169
+      stageId: s_auto_2
+  - id: t_c
+    plugin:
+      category: transformer
+      id: transform
+      version: 1.0.0
+    config:
+      engine: jsonata
+      inputs:
+      - payload
+      outputs:
+        c: $count(payload.tags)
+    ui:
+      position:
+        x: 472.4375
+        y: 331
+      stageId: s_auto_2
+  - id: t_d
+    plugin:
+      category: transformer
+      id: transform
+      version: 1.0.0
+    config:
+      engine: jsonata
+      inputs:
+      - payload
+      outputs:
+        d: "payload.tags[0]"
+    ui:
+      position:
+        x: 480
+        y: 491.28125
+      stageId: s_auto_2
+  - id: merge
+    plugin:
+      category: transformer
+      id: transform
+      version: 1.0.0
+    config:
+      engine: jsonata
+      inputs:
+      - a
+      - b
+      - c
+      - d
+      outputs:
+        result: "{ 'a': a.a, 'b': b.b, 'c': c.c, 'd': d.d }"
+    ui:
+      position:
+        x: 932.890625
+        y: 250
+      stageId: s_auto_3
+  - id: output
+    type: output
+    ui:
+      position:
+        x: 1393.34375
+        y: 250
+      stageId: s_auto_4
+  edges:
+  - from: input
+    to: t_a
+    fromPort: payload
+    toPort: payload
+  - from: input
+    to: t_b
+    fromPort: payload
+    toPort: payload
+  - from: input
+    to: t_c
+    fromPort: payload
+    toPort: payload
+  - from: input
+    to: t_d
+    fromPort: payload
+    toPort: payload
+  - from: t_a
+    to: merge
+    fromPort: a
+    toPort: a
+  - from: t_b
+    to: merge
+    fromPort: b
+    toPort: b
+  - from: t_c
+    to: merge
+    fromPort: c
+    toPort: c
+  - from: t_d
+    to: merge
+    fromPort: d
+    toPort: d
+  - from: merge
+    to: output
+    fromPort: result
+    toPort: result

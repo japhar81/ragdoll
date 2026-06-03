@@ -1,0 +1,60 @@
+apiVersion: rag-platform/v1
+kind: Pipeline
+metadata:
+  name: load-passthrough
+  description: "Minimum-cost baseline for load tests: input -> single transform -> output. Measures the API + runtime overhead for a synchronous /invoke against a trivial 3-node DAG with no external services. Use this as the floor; any other load pipeline's latency should be this number plus its added work."
+  tags:
+  - load-test
+  stages:
+  - id: s_auto_1
+    label: Stage 1
+  - id: s_auto_2
+    label: Stage 2
+  - id: s_auto_3
+    label: Stage 3
+spec:
+  nodes:
+  - id: input
+    type: input
+    config:
+      default:
+        payload:
+          ts: "1970-01-01T00:00:00Z"
+          n: 1
+    ui:
+      position:
+        x: 18.6875
+        y: 40
+      stageId: s_auto_1
+  - id: passthrough
+    plugin:
+      category: transformer
+      id: transform
+      version: 1.0.0
+    config:
+      engine: jsonata
+      inputs:
+      - payload
+      outputs:
+        result: payload
+    ui:
+      position:
+        x: 479.65625
+        y: 40
+      stageId: s_auto_2
+  - id: output
+    type: output
+    ui:
+      position:
+        x: 941.65625
+        y: 40
+      stageId: s_auto_3
+  edges:
+  - from: input
+    to: passthrough
+    fromPort: payload
+    toPort: payload
+  - from: passthrough
+    to: output
+    fromPort: result
+    toPort: result
