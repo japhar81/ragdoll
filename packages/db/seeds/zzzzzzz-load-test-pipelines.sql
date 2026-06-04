@@ -9,17 +9,46 @@
 -- and friends) — no LLMs, no embeddings, no I/O — so they measure platform
 -- overhead instead of model latency. See docs/admin/load-testing.md.
 --
+-- All load-* pipelines live in a dedicated "Load Tests" folder so
+-- the Builder shows them grouped instead of as loose "Uncategorized"
+-- entries next to the demos.
+--
 -- Filename sorts AFTER `zzzzzz-demo-connections.sql` so the tenant
 -- + environment rows the deployments reference already exist.
 
+-- ------------------------------ Load Tests folder ------------------------------
+
+INSERT INTO pipeline_folders (id, parent_id, name)
+VALUES ('00000000-7777-7777-7777-f01df01df100', NULL, 'Load Tests')
+-- (parent_id, name) is UNIQUE but NULL != NULL under Postgres uniqueness,
+-- so a parent-NULL row doesn't dedupe on re-seed. PK ON CONFLICT keeps
+-- the second run a clean no-op.
+ON CONFLICT (id) DO NOTHING;
+
+-- Idempotently move every load-* pipeline into the folder. Covers both
+-- fresh installs (where the INSERT below would already set folder_id)
+-- and pre-existing installs that minted the pipelines before the folder
+-- column was written by this generator — without this UPDATE those rows
+-- would forever land under "Uncategorized".
+UPDATE pipelines
+SET folder_id = '00000000-7777-7777-7777-f01df01df100'
+WHERE folder_id IS DISTINCT FROM '00000000-7777-7777-7777-f01df01df100'
+  AND slug IN (
+  'load-deep-chain',
+  'load-fanout-merge',
+  'load-passthrough',
+  'load-xml-parse'
+);
+
 -- ------------------------------ load-deep-chain ------------------------------
 
-INSERT INTO pipelines (id, slug, name, description) VALUES
+INSERT INTO pipelines (id, slug, name, description, folder_id) VALUES
   (
     '00000000-7777-7777-7777-507ce41c1802',
     'load-deep-chain',
     'Load Deep Chain',
-    'Six sequential transformers in a single chain. Isolates per-node DAG-traversal cost (edge resolution, input bag construction, plugin dispatch) from per-node compute, since each transform does almost no work. Watch the delta vs. load-passthrough: that''s your sequential per-node overhead.'
+    'Six sequential transformers in a single chain. Isolates per-node DAG-traversal cost (edge resolution, input bag construction, plugin dispatch) from per-node compute, since each transform does almost no work. Watch the delta vs. load-passthrough: that''s your sequential per-node overhead.',
+    '00000000-7777-7777-7777-f01df01df100'
   )
 ON CONFLICT (slug) DO NOTHING;
 
@@ -52,12 +81,13 @@ ON CONFLICT (pipeline_id, environment, tenant_id) DO NOTHING;
 
 -- ------------------------------ load-fanout-merge ------------------------------
 
-INSERT INTO pipelines (id, slug, name, description) VALUES
+INSERT INTO pipelines (id, slug, name, description, folder_id) VALUES
   (
     '00000000-7777-7777-7777-d3dec2ba2527',
     'load-fanout-merge',
     'Load Fanout Merge',
-    'Exercises the runtime''s parallel-node scheduler: one input fans out to four sibling transformers, all four feed into one merge transformer, and the merge feeds the output. Catches scheduler regressions (lost concurrency, edge-ordering bugs, port-routing) that the linear baselines miss.'
+    'Exercises the runtime''s parallel-node scheduler: one input fans out to four sibling transformers, all four feed into one merge transformer, and the merge feeds the output. Catches scheduler regressions (lost concurrency, edge-ordering bugs, port-routing) that the linear baselines miss.',
+    '00000000-7777-7777-7777-f01df01df100'
   )
 ON CONFLICT (slug) DO NOTHING;
 
@@ -90,12 +120,13 @@ ON CONFLICT (pipeline_id, environment, tenant_id) DO NOTHING;
 
 -- ------------------------------ load-passthrough ------------------------------
 
-INSERT INTO pipelines (id, slug, name, description) VALUES
+INSERT INTO pipelines (id, slug, name, description, folder_id) VALUES
   (
     '00000000-7777-7777-7777-af1d4ec26402',
     'load-passthrough',
     'Load Passthrough',
-    'Minimum-cost baseline for load tests: input -> single transform -> output. Measures the API + runtime overhead for a synchronous /invoke against a trivial 3-node DAG with no external services. Use this as the floor; any other load pipeline''s latency should be this number plus its added work.'
+    'Minimum-cost baseline for load tests: input -> single transform -> output. Measures the API + runtime overhead for a synchronous /invoke against a trivial 3-node DAG with no external services. Use this as the floor; any other load pipeline''s latency should be this number plus its added work.',
+    '00000000-7777-7777-7777-f01df01df100'
   )
 ON CONFLICT (slug) DO NOTHING;
 
@@ -128,12 +159,13 @@ ON CONFLICT (pipeline_id, environment, tenant_id) DO NOTHING;
 
 -- ------------------------------ load-xml-parse ------------------------------
 
-INSERT INTO pipelines (id, slug, name, description) VALUES
+INSERT INTO pipelines (id, slug, name, description, folder_id) VALUES
   (
     '00000000-7777-7777-7777-87e2d3295823',
     'load-xml-parse',
     'Load Xml Parse',
-    'CPU-realistic load shape: input -> xml_codec parse -> transform projection -> output. The xml_codec parser produces noticeably more work per call than a single transform, so this pipeline catches regressions where the API/runtime path bottlenecks before plugin compute does. The seeded input ships a small feed; pass a larger `xml` body in the run input to scale per-iteration cost.'
+    'CPU-realistic load shape: input -> xml_codec parse -> transform projection -> output. The xml_codec parser produces noticeably more work per call than a single transform, so this pipeline catches regressions where the API/runtime path bottlenecks before plugin compute does. The seeded input ships a small feed; pass a larger `xml` body in the run input to scale per-iteration cost.',
+    '00000000-7777-7777-7777-f01df01df100'
   )
 ON CONFLICT (slug) DO NOTHING;
 
