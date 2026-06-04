@@ -41,18 +41,24 @@ Generated seed SQL: `packages/db/seeds/zzzzzzz-load-test-pipelines.sql`.
 The wrapper (`scripts/k6.sh`) takes a scenario name and threads any
 extra args through to `k6 run`.
 
-| Command                 | Scenario | Shape                                                                |
-| ----------------------- | -------- | -------------------------------------------------------------------- |
-| `npm run load`          | smoke    | 1 VU × 30 iterations across every pipeline. Default.                 |
-| `npm run load:smoke`    | smoke    | Same as `load` — explicit for the unambiguous case.                  |
-| `npm run load:steady`   | steady   | Constant arrival rate (default 20 RPS) for 60 s.                     |
-| `npm run load:spike`    | spike    | Ramp 1 → 50 VUs over 10 s, hold 30 s, drain over 10 s.                |
-| `npm run load:soak`     | soak     | 5 VUs for 10 min (override with `DURATION=30m`).                     |
-| `npm run load:trend`    | trend    | Sustained 10 RPS for 5 min + per-bucket drift analyzer.              |
+| Command                       | Scenario | Endpoint  | Shape                                                                |
+| ----------------------------- | -------- | --------- | -------------------------------------------------------------------- |
+| `npm run load`                | smoke    | invoke    | 1 VU × 30 iterations across every pipeline. Default.                 |
+| `npm run load:smoke`          | smoke    | invoke    | Same as `load` — explicit for the unambiguous case.                  |
+| `npm run load:steady`         | steady   | invoke    | Constant arrival rate (default 20 RPS) for 60 s.                     |
+| `npm run load:spike`          | spike    | invoke    | Ramp 1 → 50 VUs over 10 s, hold 30 s, drain over 10 s.                |
+| `npm run load:soak`           | soak     | **run**   | 5 VUs for 10 min (`DURATION=30m` to extend). Defaults to the worker path so the Worker scale-out dashboard populates. |
+| `npm run load:trend`          | trend    | invoke    | Sustained 10 RPS for 5 min + per-bucket drift analyzer.              |
+| `npm run load:worker`         | smoke    | run       | Worker-path smoke. Identical shape to `load:smoke` but hits `/run` + polls so BullMQ + workers participate. |
+| `npm run load:worker:steady`  | steady   | run       | Steady worker-path load (20 RPS × 60 s, queue-backed).                |
+| `npm run load:worker:spike`   | spike    | run       | Spike against the worker path — proves scale-out under burst.         |
+| `npm run load:worker:soak`    | soak     | run       | Long worker-path soak. Same defaults as `load:soak` (which is already `run`). |
+| `npm run load:worker:trend`   | trend    | run       | Sustained worker-path load with drift analysis.                       |
 
 `make load`, `make load-steady`, `make load-spike`, `make load-soak`,
-`make load-trend` work the same. All scenarios run the same `main.js`;
-they differ only in the `SCENARIO` env the wrapper sets.
+`make load-trend`, and the `load-worker-*` siblings work the same. All
+scenarios run the same `main.js`; they differ only in the `SCENARIO` env
+the wrapper sets and (for the worker variants) `ENDPOINT=run`.
 
 ### Trend scenario: did the pipelines slow down?
 
@@ -114,6 +120,9 @@ Every knob is an env var; no editing required.
 | `RATE`                      | `20` (steady only)       | Target arrival rate, RPS.                                |
 | `DURATION`                  | `10m` (soak only)        | Soak length, k6 duration syntax.                         |
 | `SCENARIO`                  | `smoke`                  | Override the scenario when calling `k6 run` directly.    |
+| `ENDPOINT`                  | `invoke` (`run` for soak)| `invoke` = sync in-API; `run` = enqueue + poll worker.   |
+| `POLL_INTERVAL_MS`          | `100`                    | Status-poll cadence when `ENDPOINT=run`.                 |
+| `POLL_TIMEOUT_MS`           | `30000`                  | Per-iteration deadline waiting for a worker terminal.    |
 
 Examples:
 
@@ -121,14 +130,43 @@ Examples:
 # 50 RPS for a minute against the deep-chain pipeline
 PIPELINE=load-deep-chain RATE=50 npm run load:steady
 
-# Half-hour soak
+# Half-hour soak (defaults to ENDPOINT=run so workers are exercised)
 DURATION=30m npm run load:soak
+
+# Soak the API/runtime path WITHOUT the queue (no worker activity)
+ENDPOINT=invoke npm run load:soak
+
+# Exercise the worker scale-out path under steady load (not just soak)
+ENDPOINT=run npm run load:steady
 
 # Point at a stage cluster with a pre-minted API key
 BASE_URL=https://stage.example.com:3001 \
   RAGDOLL_API_KEY=rgd_xxx_yyyyyyy \
   npm run load:steady
 ```
+
+### `invoke` vs. `run` endpoint
+
+| Endpoint  | Path             | Worker involved? | What it measures                                  |
+| --------- | ---------------- | ---------------- | ------------------------------------------------- |
+| `invoke`  | `POST /invoke`   | No               | API + runtime latency, lowest variance.           |
+| `run`     | `POST /run`      | Yes              | Full path: API enqueue → BullMQ → worker process. |
+
+For `ENDPOINT=run`, each iteration:
+
+1. POSTs to `/run`, captures `executionId`.
+2. Polls `GET /api/executions/:id` every `POLL_INTERVAL_MS` until status
+   is terminal (`succeeded` / `failed` / `cancelled` / `denied`) or
+   `POLL_TIMEOUT_MS` elapses.
+3. Records the full enqueue+poll loop into the custom
+   `ragdoll_run_e2e_ms` metric (per-pipeline tagged).
+
+iteration_duration in `run` mode reflects real end-to-end latency, which
+means VU arrival self-throttles to whatever the workers can drain — the
+queue won't grow unbounded even at high `RATE`. **Use `ENDPOINT=run`
+when you want the `RAGdoll · Worker scale-out` Grafana dashboard
+populated** (the `ragdoll_worker_*` metrics only emit when jobs flow
+through the worker).
 
 ## What the corpus exercises
 
