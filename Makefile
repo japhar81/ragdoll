@@ -1,4 +1,4 @@
-.PHONY: up down refresh smoke test load load-smoke load-steady load-spike load-soak load-trend build-load-seeds crawl-up crawl-up-reranker obs oc-build-api oc-build-web oc-build-python-plugins oc-build-all
+.PHONY: up down refresh smoke test load load-smoke load-steady load-spike load-soak load-trend load-worker load-worker-smoke load-worker-steady load-worker-spike load-worker-soak load-worker-trend build-load-seeds crawl-up crawl-up-reranker obs oc-build-api oc-build-web oc-build-python-plugins oc-build-all
 
 # Bring up the full local stack (build + start everything). First run pulls
 # CPU Ollama models and builds images.
@@ -33,8 +33,20 @@ test:
 #   make load-trend        # sustained 10rps for 5 min + per-bucket drift table
 #                          # (override DURATION, RATE, BUCKET_SECONDS, DRIFT_LIMIT)
 #
+# Worker variants — same scenarios, but ENDPOINT=run so iterations POST to
+# /api/pipelines/:id/run and poll /api/executions/:id until terminal. The
+# BullMQ workers actually do the work, which lights up the "RAGdoll · Worker
+# scale-out" Grafana dashboard (ragdoll_worker_* metrics). Use these when you
+# care about queue + worker behavior, not just API/runtime compute.
+#
+#   make load-worker            # smoke against the worker path
+#   make load-worker-steady
+#   make load-worker-spike
+#   make load-worker-soak       # same as `make load-soak` (soak defaults to ENDPOINT=run)
+#   make load-worker-trend
+#
 # All scenarios honor BASE_URL, PIPELINE, RATE, DURATION env vars — see the
-# wrapper for the full list.
+# wrapper for the full list. Worker-mode adds POLL_INTERVAL_MS / POLL_TIMEOUT_MS.
 load: load-smoke
 load-smoke:
 	./scripts/k6.sh smoke
@@ -46,6 +58,18 @@ load-soak:
 	./scripts/k6.sh soak
 load-trend:
 	./scripts/k6.sh trend
+
+load-worker: load-worker-smoke
+load-worker-smoke:
+	ENDPOINT=run ./scripts/k6.sh smoke
+load-worker-steady:
+	ENDPOINT=run ./scripts/k6.sh steady
+load-worker-spike:
+	ENDPOINT=run ./scripts/k6.sh spike
+load-worker-soak:
+	ENDPOINT=run ./scripts/k6.sh soak
+load-worker-trend:
+	ENDPOINT=run ./scripts/k6.sh trend
 
 # Regenerate packages/db/seeds/zzzzzzz-load-test-pipelines.sql from
 # examples/load/pipelines/*.yaml. Run after editing a load YAML; the

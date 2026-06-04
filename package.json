@@ -34,7 +34,13 @@
     "load:steady": "./scripts/k6.sh steady",
     "load:spike": "./scripts/k6.sh spike",
     "load:soak": "./scripts/k6.sh soak",
-    "load:trend": "./scripts/k6.sh trend"
+    "load:trend": "./scripts/k6.sh trend",
+    "load:worker": "ENDPOINT=run ./scripts/k6.sh smoke",
+    "load:worker:smoke": "ENDPOINT=run ./scripts/k6.sh smoke",
+    "load:worker:steady": "ENDPOINT=run ./scripts/k6.sh steady",
+    "load:worker:spike": "ENDPOINT=run ./scripts/k6.sh spike",
+    "load:worker:soak": "ENDPOINT=run ./scripts/k6.sh soak",
+    "load:worker:trend": "ENDPOINT=run ./scripts/k6.sh trend"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.39.0",

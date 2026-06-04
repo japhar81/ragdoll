@@ -16,6 +16,14 @@
 #   DURATION=30m ./scripts/k6.sh soak
 #   PIPELINE=load-deep-chain ./scripts/k6.sh steady
 #
+# Endpoint choice (ENDPOINT env): `invoke` (sync, in-API) or `run` (async,
+# worker-backed; iteration polls /api/executions/:id until terminal). The
+# `soak` scenario defaults to `run` so the Worker scale-out dashboard
+# actually populates during a soak; every other scenario defaults to
+# `invoke` (low-variance API/runtime latency). Override per-run:
+#   ENDPOINT=run ./scripts/k6.sh steady     # exercise workers under steady load
+#   ENDPOINT=invoke ./scripts/k6.sh soak    # API-only soak (no queue)
+#
 # `trend` additionally writes k6's per-sample NDJSON to
 # tests/load/k6/.last-run.ndjson and then runs scripts/load-trend.ts to
 # bucket the per-pipeline p95 over the run; the analyzer exits non-zero if

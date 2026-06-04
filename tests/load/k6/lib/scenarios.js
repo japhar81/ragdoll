@@ -15,7 +15,11 @@
 //
 //   soak    — 5 VUs for 10 minutes (default). Catches slow leaks: file
 //             descriptors, in-memory caches, anything that grows unbounded
-//             on the happy path. Duration via DURATION=<k6 duration>.
+//             on the happy path. Defaults to ENDPOINT=run (POST /run +
+//             poll), so the WORKER process is what's actually under load —
+//             that's what populates the Worker scale-out Grafana dashboard
+//             (ragdoll_worker_* metrics). Use ENDPOINT=invoke to soak the
+//             API/runtime path instead. Duration via DURATION=<k6 duration>.
 //
 //   trend   — sustained constant-arrival-rate for DURATION (default 5m) at
 //             RATE rps (default 10). The wrapper pairs this with the

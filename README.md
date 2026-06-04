@@ -206,6 +206,14 @@ npm run load:steady   # constant arrival rate (RATE=20rps default, 1 min)
 npm run load:spike    # 1->50 VUs ramp, hold, drain
 npm run load:soak     # 5 VUs for 10 min (DURATION=30m to extend)
 npm run load:trend    # sustained 10rps for 5 min + per-bucket drift table
+
+# Worker variants — same scenarios, but POST /run + poll until terminal so
+# BullMQ workers do the work and the Worker scale-out dashboard populates.
+npm run load:worker   # smoke against the queue+worker path
+npm run load:worker:steady
+npm run load:worker:spike
+npm run load:worker:soak
+npm run load:worker:trend
 ```
 
 Run services directly (in-memory unless `DATABASE_URL` / `REDIS_URL`
