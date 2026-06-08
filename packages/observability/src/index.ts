@@ -11,13 +11,16 @@ export interface Tracer {
 }
 
 export class NoopSpan implements SpanHandle {
-  setAttribute(): void {}
-  recordException(): void {}
+  setAttribute(_key: string, _value: string | number | boolean | undefined): void {}
+  recordException(_error: unknown): void {}
   end(): void {}
 }
 
 export class NoopTracer implements Tracer {
-  startSpan(): SpanHandle {
+  startSpan(
+    _name: string,
+    _attributes?: Record<string, string | number | boolean | undefined>
+  ): SpanHandle {
     return new NoopSpan();
   }
 }
@@ -489,13 +492,25 @@ export interface Meter {
   upDownCounter(name: string, opts?: { description?: string; unit?: string }): UpDownCounterHandle;
 }
 
-class NoopCounter implements CounterHandle { add(): void {} }
-class NoopHistogram implements HistogramHandle { record(): void {} }
-class NoopUpDownCounter implements UpDownCounterHandle { add(): void {} }
+class NoopCounter implements CounterHandle {
+  add(_value: number, _attributes?: Record<string, string | number | boolean>): void {}
+}
+class NoopHistogram implements HistogramHandle {
+  record(_value: number, _attributes?: Record<string, string | number | boolean>): void {}
+}
+class NoopUpDownCounter implements UpDownCounterHandle {
+  add(_value: number, _attributes?: Record<string, string | number | boolean>): void {}
+}
 export class NoopMeter implements Meter {
-  counter(): CounterHandle { return new NoopCounter(); }
-  histogram(): HistogramHandle { return new NoopHistogram(); }
-  upDownCounter(): UpDownCounterHandle { return new NoopUpDownCounter(); }
+  counter(_name: string, _opts?: { description?: string; unit?: string }): CounterHandle {
+    return new NoopCounter();
+  }
+  histogram(_name: string, _opts?: { description?: string; unit?: string }): HistogramHandle {
+    return new NoopHistogram();
+  }
+  upDownCounter(_name: string, _opts?: { description?: string; unit?: string }): UpDownCounterHandle {
+    return new NoopUpDownCounter();
+  }
 }
 
 interface OtelMetricsApiLike {

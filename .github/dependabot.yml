@@ -1,0 +1,164 @@
+# Dependabot config — covers every ecosystem in the monorepo.
+#
+# Conventions:
+#  - One entry per package-ecosystem × directory pair.
+#  - npm: a single root entry covers every workspace package via the root
+#    `workspaces` field; do NOT add per-workspace npm entries (they generate
+#    duplicate PRs against the same shared lockfile).
+#  - grouped: lump non-breaking (minor + patch) bumps into one PR per
+#    ecosystem so the queue doesn't drown in 40 PRs every Monday.
+#  - open-pull-requests-limit caps in-flight noise; major bumps still arrive
+#    as individual PRs so reviewers see them.
+
+version: 2
+
+updates:
+  # ---- Root npm workspace (api, worker, web, cli, packages/*, plugins/*) ----
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "07:00"
+      timezone: Etc/UTC
+    open-pull-requests-limit: 10
+    labels:
+      - dependencies
+      - npm
+    commit-message:
+      prefix: chore(deps)
+      prefix-development: chore(dev-deps)
+      include: scope
+    groups:
+      # Everything non-breaking in one PR per week.
+      minor-and-patch:
+        applies-to: version-updates
+        update-types:
+          - minor
+          - patch
+      # OpenTelemetry packages move in lockstep — group them so the suite
+      # stays on the same minor across the metrics/traces/logs/sdk packages.
+      opentelemetry:
+        applies-to: version-updates
+        patterns:
+          - "@opentelemetry/*"
+      # Same logic for the connectrpc + bufbuild families (ADR 0022 wire).
+      connectrpc:
+        applies-to: version-updates
+        patterns:
+          - "@connectrpc/*"
+          - "@bufbuild/*"
+    ignore:
+      # `pg` 8.x is the highest version with the stable `Pool` API our
+      # packages/db wrapper relies on; pin until we do an audited cutover.
+      - dependency-name: pg
+        update-types: [version-update:semver-major]
+      # Vite + Vitest churn fast on majors and need a coordinated web-app
+      # build verification — gate on intentional bumps.
+      - dependency-name: vite
+        update-types: [version-update:semver-major]
+      - dependency-name: vitest
+        update-types: [version-update:semver-major]
+
+  # ---- GitHub Actions used by .github/workflows/ ----
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - github-actions
+    commit-message:
+      prefix: chore(ci)
+      include: scope
+    groups:
+      actions:
+        patterns:
+          - "*"
+
+  # ---- Python: sidecar ----
+  - package-ecosystem: pip
+    directory: /services/python-plugins
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - python
+    commit-message:
+      prefix: chore(deps,python-plugins)
+    groups:
+      minor-and-patch:
+        update-types: [minor, patch]
+
+  # ---- Python: author SDK ----
+  - package-ecosystem: pip
+    directory: /packages/plugin-py
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - python
+    commit-message:
+      prefix: chore(deps,plugin-py)
+    groups:
+      minor-and-patch:
+        update-types: [minor, patch]
+
+  # ---- Python: example plugin ----
+  - package-ecosystem: pip
+    directory: /examples/plugins/python-echo
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 3
+    labels:
+      - dependencies
+      - python
+      - examples
+    commit-message:
+      prefix: chore(deps,python-echo)
+
+  # ---- Docker: sidecar + example images ----
+  - package-ecosystem: docker
+    directory: /services/python-plugins
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 3
+    labels:
+      - dependencies
+      - docker
+    commit-message:
+      prefix: chore(docker,python-plugins)
+
+  - package-ecosystem: docker
+    directory: /examples/plugins/node-echo
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 2
+    labels:
+      - dependencies
+      - docker
+      - examples
+    commit-message:
+      prefix: chore(docker,node-echo)
+
+  - package-ecosystem: docker
+    directory: /examples/plugins/python-echo
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 2
+    labels:
+      - dependencies
+      - docker
+      - examples
+    commit-message:
+      prefix: chore(docker,python-echo)

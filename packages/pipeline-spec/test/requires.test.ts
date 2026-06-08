@@ -19,7 +19,7 @@ import {
   type DatasetModalityIndex
 } from "../src/index.ts";
 import type { PipelineSpec } from "../../core/src/index.ts";
-import { PluginRegistry } from "../../plugin-sdk/src/index.ts";
+import { PluginRegistry, type DatasetModality } from "../../plugin-sdk/src/index.ts";
 
 function specWith(args: {
   pluginId: string;
@@ -46,8 +46,8 @@ function specWith(args: {
 function registryWith(manifest: {
   id: string;
   category: string;
-  requires?: Array<{ modality: string; provider?: string }>;
-  datasetModalities?: string[];
+  requires?: Array<{ modality: DatasetModality; provider?: string }>;
+  datasetModalities?: DatasetModality[];
 }): PluginRegistry {
   const r = new PluginRegistry();
   r.register({

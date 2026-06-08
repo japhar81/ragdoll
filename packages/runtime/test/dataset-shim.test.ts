@@ -33,6 +33,7 @@ function fakeResolved(overrides: Partial<ResolvedDataset> = {}): ResolvedDataset
     chunkSchema: {},
     version: { id: "v-1", versionLabel: "v1", status: "ready" },
     backendCollections: { vector: "rag_kb_v1" },
+    backends: {},
     ...overrides
   };
 }
