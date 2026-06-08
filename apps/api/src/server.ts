@@ -20,6 +20,7 @@ import {
   AuthResolver,
   ApiKeyService,
   SessionTokenService,
+  InMemorySessionRevocationStore,
   Authorizer,
   BuiltinPolicyEngine,
   createCasbinEngine,
@@ -30,7 +31,8 @@ import {
   type SsoStateStore
 } from "../../../packages/auth/src/index.ts";
 import {
-  defaultCatalogRows
+  defaultCatalogRows,
+  type Role
 } from "../../../packages/authz/src/index.ts";
 import {
   createPool,
@@ -248,7 +250,13 @@ async function buildDeps(): Promise<{
     });
   }
   const sessionSecret = rawSessionSecret;
-  const sessions = new SessionTokenService(sessionSecret);
+  // ADR-0011: in-memory revocation store by default. A Redis-backed
+  // adapter (so /logout on one pod revokes the token everywhere) would
+  // plug in here when REDIS_URL is set; the implementation lives with
+  // the rest of the ioredis-shaped code paths and is wired below if
+  // present. The in-memory version is correct for single-pod deploys.
+  const revocationStore = new InMemorySessionRevocationStore();
+  const sessions = new SessionTokenService(sessionSecret, revocationStore);
   if (process.env.RAGDOLL_DEV_AUTH === "1") {
     logger.warn("dev_auth_removed", {
       message:
@@ -275,10 +283,21 @@ async function buildDeps(): Promise<{
     });
     secretRepository = new PostgresSecretRepository(pool);
     const apiKeyRepo = new PostgresApiKeyRepository(pool);
-    const apiKeys = new ApiKeyService(apiKeyRepo);
-    const auth = new AuthResolver({ sessions, apiKeys });
     const rbacPolicies = new PostgresRbacPolicyRepository(pool);
     const users = new PostgresUserRepository(pool);
+    // ADR-0011 / Phase 13 follow-through: hand ApiKeyService closures
+    // over the live user + rbac stores so verify() can reject keys for
+    // disabled users AND intersect the mint-time role snapshot with the
+    // user's CURRENT grants (so a demoted user loses powers immediately).
+    const apiKeys = new ApiKeyService(apiKeyRepo, {
+      accountStatus: async (principalId) =>
+        (await users.get(principalId))?.status,
+      currentRoles: async (principalId) => {
+        const grants = await rbacPolicies.listGrantsForUser(principalId);
+        return [...new Set(grants.map((g) => g.role))] as Role[];
+      }
+    });
+    const auth = new AuthResolver({ sessions, apiKeys });
     deps = {
       tenants: new PostgresTenantRepository(pool),
       users,

@@ -45,6 +45,7 @@ export {
   enrichQdrantError
 } from "./ingest.ts";
 import { enrichQdrantError } from "./ingest.ts";
+import { validateAgainstSchema } from "./schema-validate.ts";
 // GitHub datasource — emits one document per file in a repo tree at a
 // given ref. Mirrors filesystem_source's output shape so the rest of
 // the ingest path (delta_filter, code_chunker, …) works unchanged.
@@ -1016,16 +1017,37 @@ export const vectorUpsertPlugin: InProcessPlugin = {
     await store.ensureCollection(collection, { dimensions, distance });
 
     const idPrefix = String(config.idPrefix ?? context.executionId ?? "doc");
+    // ADR-0016 follow-through: enforce the dataset's chunk_schema at the
+    // vector_upsert write path too (dataset_upsert already does this).
+    // Empty / no-schema datasets pass every record (back-compat); errors
+    // are aggregated across the whole batch so the caller sees every
+    // offending record at once, not just the first.
+    const chunkSchema = input.dataset?.chunkSchema as unknown;
+    const schemaErrors: string[] = [];
     const points: VectorPoint[] = vectors.map((vector, index) => {
       const chunk = chunks[index] ?? {};
       const { text, index: chunkIndex, ...rest } = chunk;
+      const payload = { text: text ?? "", chunkIndex: chunkIndex ?? index, ...rest };
+      if (chunkSchema) {
+        const errs = validateAgainstSchema(payload, chunkSchema);
+        for (const e of errs) {
+          schemaErrors.push(`chunks[${index}]${e.path}: ${e.message}`);
+        }
+      }
       return {
         id: String(chunk.id ?? `${idPrefix}_${index}`),
         vector,
         tenantId: context.tenantId,
-        payload: { text: text ?? "", chunkIndex: chunkIndex ?? index, ...rest }
+        payload
       };
     });
+    if (schemaErrors.length > 0) {
+      throw new Error(
+        `vector_upsert: chunk_schema validation failed for ${schemaErrors.length} field(s):\n` +
+          schemaErrors.slice(0, 20).join("\n") +
+          (schemaErrors.length > 20 ? `\n…and ${schemaErrors.length - 20} more` : "")
+      );
+    }
     await store.upsert(collection, points);
     return { outputs: { upserted: points.length } };
   }
