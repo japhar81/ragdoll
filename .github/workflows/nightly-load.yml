@@ -1,0 +1,137 @@
+name: Nightly load drift
+
+on:
+  schedule:
+    # 06:13 UTC nightly — off-peak for both US and EU, avoids exactly :00
+    # so we don't pile onto the typical action burst.
+    - cron: "13 6 * * *"
+  workflow_dispatch:
+    inputs:
+      duration:
+        description: "k6 duration (e.g. 5m, 30s)"
+        default: "5m"
+        required: false
+      rate:
+        description: "Requests per second (trend scenario)"
+        default: "10"
+        required: false
+      drift_limit:
+        description: "Fail the job if median(last-2 p95) / median(first-2 p95) > this"
+        default: "1.5"
+        required: false
+
+jobs:
+  load-trend:
+    name: Trend + drift analyzer
+    runs-on: ubuntu-latest
+    # Cap the whole job — k6 trend is bounded by duration but the stack
+    # startup + analyzer must also finish in reasonable time.
+    timeout-minutes: 20
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: ragdoll
+          POSTGRES_PASSWORD: ragdoll
+          POSTGRES_DB: ragdoll
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      DATABASE_URL: postgres://ragdoll:ragdoll@localhost:5432/ragdoll
+      REDIS_URL: redis://localhost:6379/0
+      DURATION: ${{ inputs.duration || '5m' }}
+      RATE: ${{ inputs.rate || '10' }}
+      DRIFT_LIMIT: ${{ inputs.drift_limit || '1.5' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node 22.x
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.x
+
+      - name: Install dependencies
+        run: npm ci || npm install
+
+      - name: Install k6
+        run: |
+          sudo gpg -k
+          sudo gpg --no-default-keyring --keyring /usr/share/keyrings/k6-archive-keyring.gpg --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys C5AD17C747E3415A3642D57D77C6C491D6AC1D69
+          echo "deb [signed-by=/usr/share/keyrings/k6-archive-keyring.gpg] https://dl.k6.io/deb stable main" | sudo tee /etc/apt/sources.list.d/k6.list
+          sudo apt-get update
+          sudo apt-get install -y k6
+
+      - name: Build load test seeds
+        run: npm run build:load-seeds
+
+      # Boot the API + worker in the background. The k6 harness will poll
+      # /healthz before firing real load.
+      - name: Boot API
+        run: |
+          node --experimental-strip-types apps/api/src/server.ts > api.log 2>&1 &
+          echo $! > api.pid
+
+      - name: Boot Worker
+        run: |
+          node --experimental-strip-types apps/worker/src/index.ts > worker.log 2>&1 &
+          echo $! > worker.pid
+
+      - name: Wait for API to come up
+        run: |
+          for i in {1..30}; do
+            if curl -sf http://localhost:3001/readyz >/dev/null; then
+              echo "API ready after ${i}s"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "API failed to come up — last 200 lines of api.log:" >&2
+          tail -200 api.log >&2 || true
+          exit 1
+
+      - name: Run k6 trend scenario + drift analyzer
+        run: npm run load:trend
+
+      - name: Upload k6 NDJSON
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: k6-trend-ndjson
+          path: tests/load/k6/.last-run.ndjson
+          if-no-files-found: warn
+
+      - name: Upload API/worker logs (on failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: stack-logs
+          path: |
+            api.log
+            worker.log
+          if-no-files-found: warn
+
+      - name: Shut down stack
+        if: always()
+        run: |
+          [ -f api.pid ] && kill "$(cat api.pid)" 2>/dev/null || true
+          [ -f worker.pid ] && kill "$(cat worker.pid)" 2>/dev/null || true
+          # SIGTERM then wait briefly so they flush metrics.
+          sleep 2
