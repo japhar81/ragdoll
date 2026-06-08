@@ -23,6 +23,7 @@ import ReactFlow, {
 import "reactflow/dist/style.css";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, ApiError, type PluginInfo } from "../lib/api.ts";
+import { streamRun } from "../lib/streamRun.ts";
 import { stringifyYaml } from "../lib/yaml.ts";
 import {
   applyResolved,
@@ -513,6 +514,14 @@ export function PipelineBuilder(props: {
     | { ok: false; error: string }
     | null
   >(null);
+  // Streaming run UI state. Tokens land in `streamTokens` per nodeId so a
+  // multi-LLM pipeline can show parallel streams; `streamStatus` tracks the
+  // lifecycle so the button label + abort behavior stay consistent.
+  const [streamBusy, setStreamBusy] = useState(false);
+  const [streamTokens, setStreamTokens] = useState<Record<string, string>>({});
+  const [streamError, setStreamError] = useState<string | null>(null);
+  const [streamFinalOutput, setStreamFinalOutput] = useState<unknown>(null);
+  const streamAbortRef = useRef<AbortController | null>(null);
   // The identifier used for every API call: the slug until the pipeline row
   // exists, then its real UUID (set on create / open-from-tree).
   const [pipelineId, setPipelineId] = useState("support-rag");
@@ -2542,42 +2551,112 @@ export function PipelineBuilder(props: {
                         style={{ width: "100%", fontFamily: "monospace" }}
                         placeholder='{ "question": "..." }'
                       />
-                      <button
-                        className="primary"
-                        disabled={invokeBusy || !pipelineId}
-                        onClick={async () => {
-                          setInvokeBusy(true);
-                          setInvokeResult(null);
-                          try {
-                            let parsed: unknown;
+                      <div style={{ display: "flex", gap: 8 }}>
+                        <button
+                          className="primary"
+                          disabled={invokeBusy || streamBusy || !pipelineId}
+                          onClick={async () => {
+                            setInvokeBusy(true);
+                            setInvokeResult(null);
                             try {
-                              parsed = JSON.parse(invokeInput);
-                            } catch {
-                              throw new Error(
-                                "Invoke input must be valid JSON (e.g. {\"question\": \"...\"})"
+                              let parsed: unknown;
+                              try {
+                                parsed = JSON.parse(invokeInput);
+                              } catch {
+                                throw new Error(
+                                  "Invoke input must be valid JSON (e.g. {\"question\": \"...\"})"
+                                );
+                              }
+                              const res = await api.invokePipeline(
+                                pipelineId,
+                                { input: parsed, environment }
                               );
+                              setInvokeResult({
+                                ok: true,
+                                output: res.output,
+                                executionId: res.executionId
+                              });
+                            } catch (e) {
+                              setInvokeResult({
+                                ok: false,
+                                error: e instanceof Error ? e.message : String(e)
+                              });
+                            } finally {
+                              setInvokeBusy(false);
                             }
-                            const res = await api.invokePipeline(
-                              pipelineId,
-                              { input: parsed, environment }
-                            );
-                            setInvokeResult({
-                              ok: true,
-                              output: res.output,
-                              executionId: res.executionId
-                            });
-                          } catch (e) {
-                            setInvokeResult({
-                              ok: false,
-                              error: e instanceof Error ? e.message : String(e)
-                            });
-                          } finally {
-                            setInvokeBusy(false);
-                          }
-                        }}
-                      >
-                        {invokeBusy ? "Invoking…" : "Invoke"}
-                      </button>
+                          }}
+                        >
+                          {invokeBusy ? "Invoking…" : "Invoke"}
+                        </button>
+                        <button
+                          disabled={invokeBusy || !pipelineId}
+                          title="Stream LLM token deltas in real time via SSE"
+                          onClick={async () => {
+                            // Toggle: if a stream is already running, cancel it.
+                            if (streamBusy) {
+                              streamAbortRef.current?.abort();
+                              return;
+                            }
+                            setStreamBusy(true);
+                            setStreamTokens({});
+                            setStreamError(null);
+                            setStreamFinalOutput(null);
+                            const controller = new AbortController();
+                            streamAbortRef.current = controller;
+                            try {
+                              let parsed: unknown;
+                              try {
+                                parsed = JSON.parse(invokeInput);
+                              } catch {
+                                throw new Error(
+                                  "Invoke input must be valid JSON"
+                                );
+                              }
+                              await streamRun({
+                                pipelineId,
+                                body: { input: parsed, environment },
+                                signal: controller.signal,
+                                onEvent: (frame) => {
+                                  if (frame.event === "token") {
+                                    const { nodeId, token } = frame.data as {
+                                      nodeId: string;
+                                      token: string;
+                                    };
+                                    setStreamTokens((prev) => ({
+                                      ...prev,
+                                      [nodeId]: (prev[nodeId] ?? "") + token
+                                    }));
+                                  } else if (frame.event === "output") {
+                                    setStreamFinalOutput(
+                                      (frame.data as { output: unknown }).output
+                                    );
+                                  } else if (
+                                    frame.event === "execution.failed" ||
+                                    frame.event === "error"
+                                  ) {
+                                    const msg =
+                                      (frame.data as { error?: string; message?: string }).error ??
+                                      (frame.data as { error?: string; message?: string }).message ??
+                                      "stream error";
+                                    setStreamError(msg);
+                                  }
+                                }
+                              });
+                            } catch (e) {
+                              if ((e as Error).name !== "AbortError") {
+                                setStreamError(
+                                  e instanceof Error ? e.message : String(e)
+                                );
+                              }
+                            } finally {
+                              setStreamBusy(false);
+                              streamAbortRef.current = null;
+                            }
+                          }}
+                        >
+                          {streamBusy ? "Cancel stream" : "Stream"}
+                        </button>
+                      </div>
                       {invokeResult && invokeResult.ok && (
                         <pre className="codeblock" style={{ marginTop: 8 }}>
                           {JSON.stringify(invokeResult.output, null, 2)}
@@ -2586,6 +2665,38 @@ export function PipelineBuilder(props: {
                       {invokeResult && !invokeResult.ok && (
                         <p className="error" style={{ marginTop: 8 }}>
                           {invokeResult.error}
+                        </p>
+                      )}
+                      {Object.keys(streamTokens).length > 0 && (
+                        <div style={{ marginTop: 8 }}>
+                          {Object.entries(streamTokens).map(([nodeId, text]) => (
+                            <div key={nodeId} style={{ marginBottom: 6 }}>
+                              <div className="muted" style={{ fontSize: "0.8em" }}>
+                                {nodeId}
+                              </div>
+                              <pre
+                                className="codeblock"
+                                style={{ whiteSpace: "pre-wrap", margin: 0 }}
+                              >
+                                {text}
+                              </pre>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                      {streamFinalOutput !== null && (
+                        <details style={{ marginTop: 8 }}>
+                          <summary className="muted" style={{ fontSize: "0.85em" }}>
+                            Final output
+                          </summary>
+                          <pre className="codeblock" style={{ marginTop: 4 }}>
+                            {JSON.stringify(streamFinalOutput, null, 2)}
+                          </pre>
+                        </details>
+                      )}
+                      {streamError && (
+                        <p className="error" style={{ marginTop: 8 }}>
+                          {streamError}
                         </p>
                       )}
                     </div>
