@@ -35,7 +35,8 @@ import type {
   RbacPolicyRepository,
   AuthSettingsRepository,
   RoleRepository,
-  WebhookTriggerRepository
+  WebhookTriggerRepository,
+  PoolLike
 } from "../../../../packages/db/src/index.ts";
 import type {
   ExecutionStore,
@@ -165,6 +166,9 @@ export interface AppDeps {
   logger: StructuredLogger;
   /** RAGDOLL_ENV; the dev auth fallback is rejected when this is "production". */
   env?: string;
+  /** Optional Postgres pool, threaded through so /readyz can ping the DB.
+   *  Omit on in-memory harnesses; the readiness check skips DB when absent. */
+  pool?: PoolLike;
   /**
    * Auth / RBAC stores. Optional so legacy harnesses still construct a valid
    * `AppDeps`; `createApp` falls back to fresh InMemory instances. When

@@ -473,7 +473,7 @@ export function createApp(deps: AppDeps): App {
   }
 
 
-  registerHealthRoutes({ route });
+  registerHealthRoutes({ route }, { pool: deps.pool, queue: deps.queue });
 
   registerTenantsRoutes({ route }, { deps, audit, environments });
 

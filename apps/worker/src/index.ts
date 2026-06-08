@@ -45,6 +45,9 @@ export interface QueuePort {
   status(id: string): Promise<QueueJobStatus>;
   retry(id: string): Promise<void>;
   deadLetter(id: string, reason: string): Promise<void>;
+  /** Readiness probe — should resolve quickly when the queue's transport is
+   * reachable, reject otherwise. Optional so in-process adapters can omit. */
+  ping?(): Promise<void>;
 }
 
 interface InMemoryQueueEntry {
@@ -95,6 +98,9 @@ export class InMemoryQueue implements QueuePort {
       item.reason = reason;
     }
   }
+
+  // In-process queue is always reachable if the API process is running.
+  async ping(): Promise<void> {}
 
   /** Test/inspection helper: the failure or dead-letter reason, if any. */
   reason(id: string): string | undefined {

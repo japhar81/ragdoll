@@ -11,8 +11,33 @@ test("healthz and readyz are public", async () => {
   const health = await request({ method: "GET", path: "/healthz" });
   assert.equal(health.status, 200);
   assert.equal(health.body.ok, true);
+  assert.equal(health.body.status, "alive");
   const ready = await request({ method: "GET", path: "/readyz" });
   assert.equal(ready.status, 200);
+  assert.equal(ready.body.ok, true);
+  assert.equal(ready.body.status, "ready");
+  // In-memory queue ping always succeeds, no pool → only the queue check
+  // runs and the response surfaces a per-component breakdown.
+  assert.equal(ready.body.checks?.queue?.ok, true);
+});
+
+test("readyz returns 503 with per-component breakdown when a dep is down", async () => {
+  const { request, deps } = buildHarness();
+  // Stub the queue ping to fail so /readyz must report it.
+  const original = deps.queue.ping;
+  deps.queue.ping = async () => {
+    throw new Error("simulated redis outage");
+  };
+  try {
+    const ready = await request({ method: "GET", path: "/readyz" });
+    assert.equal(ready.status, 503);
+    assert.equal(ready.body.ok, false);
+    assert.equal(ready.body.status, "degraded");
+    assert.equal(ready.body.checks.queue.ok, false);
+    assert.match(ready.body.checks.queue.error, /simulated redis outage/);
+  } finally {
+    deps.queue.ping = original;
+  }
 });
 
 // ---------------------------------------------------------------------------
