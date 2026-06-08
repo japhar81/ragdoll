@@ -63,8 +63,8 @@ def handle(request) -> Dict[str, Any]:
           question:    str
           documents:   [{id, text?, ...}]
 
-    The TS rerank_bge plugin calls this via the standard
-    /execute envelope; result mirrors what the HF-API branch returns
+    The TS rerank_bge plugin calls this via the Connect PluginRuntime
+    contract (ADR 0022); result mirrors what the HF-API branch returns
     so the upstream code path stays uniform.
     """
     config: Dict[str, Any] = request.config or {}

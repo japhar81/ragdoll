@@ -917,8 +917,7 @@ export const rerankBgePlugin: InProcessPlugin = {
     // PluginRuntime contract (ADR 0022). We dispatch through the SDK's
     // Connect transport rather than hand-rolling the wire so we get the
     // retry/timeout/cancellation policy + the contract-evolution coverage
-    // for free; when the legacy /execute path is removed this still works
-    // without changes.
+    // for free.
     if (provider === "local") {
       const sidecar = String(
         config.sidecarUrl ??

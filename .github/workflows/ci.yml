@@ -35,16 +35,23 @@ jobs:
       - name: End-to-end tests (cross-component)
         run: npm run test:e2e
 
+      - name: Plugin tests
+        run: npm run test:plugins
+
+      - name: CLI tests
+        run: npm run test:cli
+
+      - name: Web tests
+        run: npm run test:web
+
+      - name: Security tests
+        run: npm run test:security
+
       # ---- Typecheck -----------------------------------------------------
-      # Advisory until first confirmed green CI run. The offline, install-free
-      # dev/test design means `tsc` cannot be validated locally (ambient
-      # @types/node and dependency type decls require the install step above).
-      # All known source-level type defects have been fixed and the root
-      # tsconfig excludes the web app (it has its own tsconfig + Vite build).
-      # Flip `continue-on-error` to false once CI confirms a clean run.
+      # Hard gate. `tsc --noEmit` runs against the root tsconfig which
+      # excludes the web app (it has its own tsconfig + Vite build).
       - name: Typecheck
         run: npm run typecheck
-        continue-on-error: true
 
       # ---- Web build -----------------------------------------------------
       # Fatal: with dependencies installed by the step above, `vite build`

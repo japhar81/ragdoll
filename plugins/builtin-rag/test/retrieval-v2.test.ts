@@ -50,6 +50,7 @@ function fakeDataset(overrides: Partial<ResolvedDataset> = {}): ResolvedDataset 
     chunkSchema: {},
     version: { id: "v-1", versionLabel: "v1", status: "ready" },
     backendCollections: { vector: "kb_v1" },
+    backends: {},
     ...overrides
   };
 }

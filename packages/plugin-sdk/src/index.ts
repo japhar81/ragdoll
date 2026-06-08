@@ -27,7 +27,7 @@ export interface JsonSchemaLike {
   properties?: Record<string, JsonSchemaLike>;
   required?: string[];
   items?: JsonSchemaLike;
-  additionalProperties?: boolean;
+  additionalProperties?: boolean | JsonSchemaLike;
   description?: string;
   enum?: unknown[];
   default?: unknown;
