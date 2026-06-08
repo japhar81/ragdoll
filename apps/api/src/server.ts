@@ -220,7 +220,34 @@ async function buildDeps(): Promise<{
   // a `rgd_…` API key. Local developers use the bootstrap admin user
   // (BOOTSTRAP_ADMIN_EMAIL/PASSWORD env, default admin@ragdoll.local /
   // ragdoll-admin) and mint a per-machine API key from the Profile screen.
-  const sessionSecret = process.env.SESSION_SECRET ?? "dev-insecure-session-secret";
+  // SESSION_SECRET and SECRET_ENCRYPTION_KEY MUST be explicitly set in
+  // production — the dev defaults are publicly known and a process that
+  // boots with them mints forgeable session tokens / decryptable secrets.
+  // Fail-closed here so a misconfigured prod deploy crashes on startup
+  // instead of silently issuing tokens an attacker can mint themselves.
+  const DEV_SESSION_SECRET = "dev-insecure-session-secret";
+  const DEV_SECRET_ENCRYPTION_KEY = "dev-insecure-secret-encryption-key";
+  const isProd = (process.env.RAGDOLL_ENV ?? process.env.NODE_ENV) === "production";
+  const rawSessionSecret = process.env.SESSION_SECRET ?? DEV_SESSION_SECRET;
+  const rawKeyEncryptionSecret =
+    process.env.SECRET_ENCRYPTION_KEY ?? DEV_SECRET_ENCRYPTION_KEY;
+  if (isProd && rawSessionSecret === DEV_SESSION_SECRET) {
+    throw new Error(
+      "SESSION_SECRET must be set (and not equal to the dev default) when RAGDOLL_ENV=production"
+    );
+  }
+  if (isProd && rawKeyEncryptionSecret === DEV_SECRET_ENCRYPTION_KEY) {
+    throw new Error(
+      "SECRET_ENCRYPTION_KEY must be set (and not equal to the dev default) when RAGDOLL_ENV=production"
+    );
+  }
+  if (!isProd && rawSessionSecret === DEV_SESSION_SECRET) {
+    logger.warn("session_secret_dev_default", {
+      message:
+        "SESSION_SECRET is the dev default — fine for local development, NEVER ship this to staging/prod (server will refuse to boot when RAGDOLL_ENV=production)"
+    });
+  }
+  const sessionSecret = rawSessionSecret;
   const sessions = new SessionTokenService(sessionSecret);
   if (process.env.RAGDOLL_DEV_AUTH === "1") {
     logger.warn("dev_auth_removed", {
@@ -228,8 +255,7 @@ async function buildDeps(): Promise<{
         "RAGDOLL_DEV_AUTH=1 is no longer supported. Sign in with the bootstrap admin (admin@ragdoll.local / ragdoll-admin) and mint an API key under Profile → API keys."
     });
   }
-  const keyEncryptionSecret =
-    process.env.SECRET_ENCRYPTION_KEY ?? "dev-insecure-secret-encryption-key";
+  const keyEncryptionSecret = rawKeyEncryptionSecret;
 
   let pool: PoolLike | undefined;
   let secretRepository: SecretRepository;
@@ -306,7 +332,8 @@ async function buildDeps(): Promise<{
       pluginRegistry,
       providerRegistry,
       logger,
-      env
+      env,
+      pool
     };
     rbacForAuthz = rbacPolicies;
     usersForBootstrap = users;
@@ -369,15 +396,28 @@ async function buildDeps(): Promise<{
   // --- Authorizer: real Casbin when importable, else the equivalent
   // dependency-free engine. Bound to the live policy store so role/grant
   // edits (and revocations) take effect on the next request.
+  // In production we REQUIRE Casbin — a silent fallback would let a
+  // misconfigured deploy drift to a different decision engine without any
+  // signal in logs/alerts. Operators must intentionally opt out with
+  // RAGDOLL_AUTHZ_ALLOW_BUILTIN=1 (e.g. during a Casbin outage).
   let engine: PolicyEngine;
   try {
     engine = await createCasbinEngine();
     logger.info("authz_engine", { engine: "casbin" });
   } catch (e) {
+    const reason = e instanceof Error ? e.message : String(e);
+    if (isProd && process.env.RAGDOLL_AUTHZ_ALLOW_BUILTIN !== "1") {
+      throw new Error(
+        `Casbin authz engine failed to load in production: ${reason}. ` +
+          "Set RAGDOLL_AUTHZ_ALLOW_BUILTIN=1 to allow the dependency-free fallback."
+      );
+    }
     engine = new BuiltinPolicyEngine();
-    logger.info("authz_engine", {
+    logger.warn("authz_engine_fallback", {
       engine: "builtin",
-      reason: e instanceof Error ? e.message : String(e)
+      reason,
+      message:
+        "using built-in policy engine (Casbin unavailable). Decisions are equivalent but you lose Casbin-specific tooling."
     });
   }
   deps.authorizer = new Authorizer({ engine, store: rbacForAuthz });
@@ -427,9 +467,18 @@ async function main(): Promise<void> {
   const { deps, pool, changeBus } = await buildDeps();
   const app = createApp(deps);
 
-  const fastify = Fastify({ logger: false });
+  // Body-size cap (Fastify default is 1MB which the catch-all parser below
+  // would inherit). Tuned high enough for big crawl payloads / multi-doc
+  // ingests but low enough that a runaway client can't OOM the API by
+  // streaming /dev/zero into POST /api/pipelines/:id/run.
+  // Override with API_BODY_LIMIT_BYTES (e.g. an XML-heavy tenant).
+  const bodyLimit = Number(process.env.API_BODY_LIMIT_BYTES) || 8 * 1024 * 1024;
+  const fastify = Fastify({ logger: false, bodyLimit });
+  logger.info("fastify_body_limit", { bytes: bodyLimit });
 
   // Capture the raw body for all routes; the app does its own parsing.
+  // Fastify's bodyLimit (above) is enforced before this parser ever sees
+  // the payload, so we don't need a redundant check here.
   fastify.addContentTypeParser(
     "*",
     { parseAs: "string" },

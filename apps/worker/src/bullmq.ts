@@ -103,6 +103,17 @@ export class BullMqQueue implements QueuePort {
     }
   }
 
+  // Readiness probe — runs `PING` on the underlying ioredis connection.
+  // Cheap (single RTT) and fails loudly if Redis isn't reachable so /readyz
+  // can flip the pod out of the service mesh before traffic blackholes.
+  async ping(): Promise<void> {
+    const connection = await this.connection();
+    const reply = await connection.ping();
+    if (reply !== "PONG") {
+      throw new Error(`redis ping returned ${String(reply)} (expected PONG)`);
+    }
+  }
+
   async close(): Promise<void> {
     if (this.queuePromise) {
       const queue = await this.queuePromise;
