@@ -228,6 +228,28 @@ export interface IssuedApiKey {
 }
 
 /**
+ * Optional checks that ApiKeyService.verify runs AFTER the cryptographic
+ * verification. Lets the caller plug in account-status + permission
+ * intersection (ADR-0011 follow-through / authz.ts "Phase 13 follow-up").
+ *
+ * - `accountStatus` returns the current account status; verify rejects
+ *   the key if it's anything other than "active" so a disabled user
+ *   can't keep using a previously-minted key.
+ * - `currentRoles` returns the user's CURRENT grants; verify intersects
+ *   them with the mint-time snapshot stored on the key. Result: a role
+ *   that was demoted after the key was minted stops conferring its
+ *   permissions, instead of waiting until the key naturally expires.
+ *
+ * Both hooks are optional. When omitted, behavior matches the original
+ * snapshot-at-mint contract for back-compat with harnesses that haven't
+ * wired the user repo.
+ */
+export interface ApiKeyVerifyHooks {
+  accountStatus?: (principalId: string) => Promise<string | undefined>;
+  currentRoles?: (principalId: string) => Promise<Role[]>;
+}
+
+/**
  * Issues and verifies API keys. The plaintext key is `rgd_<prefix>_<secret>`
  * and is only ever returned once at issue time. Storage keeps a sha256 hash of
  * the full plaintext plus the lookup prefix; the secret itself is never
@@ -235,9 +257,11 @@ export interface IssuedApiKey {
  */
 export class ApiKeyService {
   private repository: ApiKeyRepository;
+  private hooks: ApiKeyVerifyHooks;
 
-  constructor(repository: ApiKeyRepository) {
+  constructor(repository: ApiKeyRepository, hooks: ApiKeyVerifyHooks = {}) {
     this.repository = repository;
+    this.hooks = hooks;
   }
 
   async issue(input: IssueApiKeyInput): Promise<IssuedApiKey> {
@@ -297,6 +321,25 @@ export class ApiKeyService {
       throw new InvalidCredentialsError("API key signature mismatch");
     }
 
+    // ADR-0011 / Phase 13 follow-through: request-time intersection.
+    // - Reject when the user account is no longer active so a disabled
+    //   user can't keep using their pre-mint API key.
+    // - Intersect the mint-time role snapshot with the user's CURRENT
+    //   grants so role demotions take effect immediately, not after the
+    //   key naturally expires.
+    if (this.hooks.accountStatus) {
+      const status = await this.hooks.accountStatus(record.principalId);
+      if (status && status !== "active") {
+        throw new InvalidCredentialsError("Account is not active");
+      }
+    }
+    let effectiveRoles = record.roles;
+    if (this.hooks.currentRoles) {
+      const current = await this.hooks.currentRoles(record.principalId);
+      const currentSet = new Set(current);
+      effectiveRoles = record.roles.filter((r) => currentSet.has(r));
+    }
+
     await this.repository.touch(record.id);
 
     return {
@@ -304,7 +347,7 @@ export class ApiKeyService {
       type: "api_key",
       tenantId: record.tenantId,
       environment: record.environmentId,
-      roles: record.roles
+      roles: effectiveRoles
     };
   }
 }
@@ -327,16 +370,79 @@ function base64url(input: Buffer | string): string {
 }
 
 /**
+ * ADR-0011 follow-through: shared revocation store so a /logout (or admin
+ * revoke) on one API replica invalidates tokens minted by another. The
+ * default in-memory implementation is fine for a single-pod deploy; the
+ * Redis-backed variant in server.ts is wired automatically when REDIS_URL
+ * is set.
+ *
+ * Storing the SHA-256 of the token (not the token itself) means a leaked
+ * revocation list reveals nothing useful — you can't reconstruct the token
+ * from the hash, only check whether a given token is in the set.
+ */
+export interface SessionRevocationStore {
+  revoke(tokenHash: string, expiresAtMs: number): Promise<void> | void;
+  isRevoked(tokenHash: string): Promise<boolean> | boolean;
+}
+
+export class InMemorySessionRevocationStore implements SessionRevocationStore {
+  private entries = new Map<string, number>();
+  revoke(tokenHash: string, expiresAtMs: number): void {
+    this.entries.set(tokenHash, expiresAtMs);
+    this.gc();
+  }
+  isRevoked(tokenHash: string): boolean {
+    this.gc();
+    return this.entries.has(tokenHash);
+  }
+  /** Drop entries whose original token expiration has already passed —
+   *  no point holding them after the natural TTL.  */
+  private gc(): void {
+    const now = Date.now();
+    for (const [hash, exp] of this.entries.entries()) {
+      if (exp <= now) this.entries.delete(hash);
+    }
+  }
+}
+
+function hashToken(token: string): string {
+  return createHash("sha256").update(token).digest("hex");
+}
+
+/**
  * Signs and verifies compact HMAC-SHA256 session tokens of the form
  * `base64url(header).base64url(payload).base64url(signature)`. Signature
  * verification uses a constant-time compare.
  */
 export class SessionTokenService {
   private secret: string;
+  private revocation?: SessionRevocationStore;
 
-  constructor(secret: string) {
+  constructor(secret: string, revocation?: SessionRevocationStore) {
     if (!secret) throw new Error("SessionTokenService requires a non-empty secret");
     this.secret = secret;
+    this.revocation = revocation;
+  }
+
+  /** Revoke a previously-issued token. Subsequent `verify()` calls reject
+   *  it (TokenInvalidError) until the token's natural expiration. */
+  async revoke(token: string): Promise<void> {
+    if (!this.revocation) return;
+    // Decode the payload (no signature check needed for revocation — we
+    // record a hash even of a forged token, but only valid tokens will
+    // actually be checked at verify time).
+    const segments = token.split(".");
+    if (segments.length !== 3) return;
+    let exp = Math.floor(Date.now() / 1000) + 24 * 3600;
+    try {
+      const payload = JSON.parse(
+        Buffer.from(segments[1], "base64url").toString("utf8")
+      ) as SessionTokenPayload;
+      if (typeof payload.exp === "number") exp = payload.exp;
+    } catch {
+      /* fall through with the default 24h horizon */
+    }
+    await this.revocation.revoke(hashToken(token), exp * 1000);
   }
 
   private sign_(signingInput: string): string {
@@ -386,12 +492,36 @@ export class SessionTokenService {
     const now = Math.floor(Date.now() / 1000);
     if (now >= payload.exp) throw new TokenExpiredError();
 
+    // ADR-0011: check the revocation list. Hash-based so a leaked
+    // revocation store reveals nothing useful. Synchronous in-memory
+    // path is the only one used in tests; the async path is awaited by
+    // AuthResolver.resolve below so this stays a single check.
+    if (this.revocation) {
+      const result = this.revocation.isRevoked(hashToken(token));
+      if (typeof result === "boolean") {
+        if (result) throw new TokenInvalidError("Token revoked");
+      }
+      // Async (Redis-backed) revocation is checked in `verifyAsync`.
+    }
+
     return {
       id: payload.sub,
       type: payload.type,
       tenantId: payload.tid,
       roles: payload.roles ?? []
     };
+  }
+
+  /** Async variant that handles a Promise-returning revocation store
+   *  (e.g. Redis). Callers in async paths should prefer this; the legacy
+   *  sync `verify()` keeps working for in-memory stores. */
+  async verifyAsync(token: string): Promise<Principal> {
+    const principal = this.verify(token);
+    if (this.revocation) {
+      const isRevoked = await this.revocation.isRevoked(hashToken(token));
+      if (isRevoked) throw new TokenInvalidError("Token revoked");
+    }
+    return principal;
   }
 }
 

@@ -78,8 +78,19 @@ export function registerAuthRoutes(
     }
   });
 
-  api.route("POST", "/api/auth/logout", async () => {
-    // Session tokens are stateless and short-lived; the client discards it.
+  api.route("POST", "/api/auth/logout", async (ctx) => {
+    // ADR-0011 follow-through: when a shared revocation store is wired,
+    // log the token out for every replica (not just this one). The
+    // session signer is stateless by construction, so we identify the
+    // token to revoke by re-parsing the Authorization header.
+    const authHeader = ctx.request.headers["authorization"];
+    const raw = Array.isArray(authHeader) ? authHeader[0] : authHeader;
+    if (typeof raw === "string" && raw.startsWith("Bearer ")) {
+      const token = raw.slice("Bearer ".length).trim();
+      if (token && svc.deps.sessions) {
+        await svc.deps.sessions.revoke(token);
+      }
+    }
     return { status: 204, body: undefined, headers: {} };
   });
 
