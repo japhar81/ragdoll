@@ -196,6 +196,61 @@ test("an invalid or malformed webhook token returns 401", async () => {
   assert.equal(malformed.status, 401);
 });
 
+test("webhook trigger is rate-limited per token after burst capacity is exhausted", async () => {
+  // Reset module-state so other tests in the file don't pre-consume tokens.
+  const { webhookPerIpLimiter, webhookPerTokenLimiter } = await import(
+    "../src/app/rate-limit.ts"
+  );
+  webhookPerIpLimiter.reset();
+  webhookPerTokenLimiter.reset();
+
+  const h = buildHarness({ withAuth: true });
+  const tenantId = randomUUID();
+  await h.deps.tenants.create({
+    id: tenantId,
+    slug: "ten-rl",
+    name: "RL",
+    status: "active",
+    metadata: {},
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  });
+  const { pipelineId } = await seedRunnablePipeline(h, tenantId);
+  const admin = await seedUser(h, {
+    email: "padmin-rl@x.io",
+    grants: [{ role: "platform_admin", scope: "*" }]
+  });
+  const minted = await h.request({
+    method: "POST",
+    path: `/api/pipelines/${pipelineId}/triggers`,
+    headers: { ...admin.bearer, "x-tenant-id": tenantId },
+    body: { environment: "dev", name: "rl" }
+  });
+  assert.equal(minted.status, 201);
+  const token = minted.body.token;
+
+  // Default capacity = 20 (per token), 60 (per IP). Drain the token bucket
+  // by firing 21 requests from one source.
+  let lastStatus = 0;
+  let limited = false;
+  for (let i = 0; i < 25; i++) {
+    const res = await h.request({
+      method: "POST",
+      path: `/api/triggers/webhook/${token}`,
+      body: { i }
+    });
+    lastStatus = res.status;
+    if (res.status === 429) {
+      limited = true;
+      assert.equal(res.body.error, "rate_limited");
+      assert.equal(res.body.scope, "token");
+      assert.ok(res.body.retryAfterSec > 0);
+      break;
+    }
+  }
+  assert.equal(limited, true, `expected 429 within 25 calls; last status was ${lastStatus}`);
+});
+
 test("deleting a trigger revokes it immediately", async () => {
   const h = buildHarness({ withAuth: true });
   const tenantId = randomUUID();

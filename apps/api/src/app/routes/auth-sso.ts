@@ -24,10 +24,24 @@ import type {
   IdentityProviderRepository,
   IdentityProviderRow
 } from "../../../../../packages/db/src/index.ts";
-import { ok, error, isObject } from "../http-utils.ts";
+import { ok, error, isObject, clientIp } from "../http-utils.ts";
 import { requestOrigin, webRedirect } from "../projections.ts";
 import type { AppDeps, AppResponse } from "../types.ts";
 import type { RouteRegistry } from "./types.ts";
+import { ssoPerIpLimiter } from "../rate-limit.ts";
+
+function ssoRateLimit(
+  headers: Record<string, string | string[] | undefined>
+): AppResponse | undefined {
+  const ip = clientIp(headers) ?? "unknown";
+  const decision = ssoPerIpLimiter.consume(`sso:${ip}`);
+  if (decision.allowed) return undefined;
+  return {
+    status: 429,
+    body: { error: "rate_limited", scope: "ip", retryAfterSec: decision.retryAfterSec },
+    headers: { "retry-after": String(decision.retryAfterSec) }
+  };
+}
 
 interface SsoServices {
   deps: AppDeps;
@@ -61,6 +75,8 @@ export function registerAuthSsoRoutes(
   });
 
   api.route("GET", "/api/auth/sso/:slug/start", async (ctx) => {
+    const limited = ssoRateLimit(ctx.request.headers);
+    if (limited) return limited;
     const row = await identityProviders.findBySlug(ctx.params.slug);
     if (!row || !row.enabled) return error(404, "provider_not_found");
     const provider = buildSsoProvider(row);
@@ -133,11 +149,15 @@ export function registerAuthSsoRoutes(
     }
   }
 
-  api.route("GET", "/api/auth/sso/:slug/callback", async (ctx) =>
-    completeSso(ctx.request.query.code, undefined, ctx.request.query.state)
-  );
+  api.route("GET", "/api/auth/sso/:slug/callback", async (ctx) => {
+    const limited = ssoRateLimit(ctx.request.headers);
+    if (limited) return limited;
+    return completeSso(ctx.request.query.code, undefined, ctx.request.query.state);
+  });
 
   api.route("POST", "/api/auth/sso/:slug/callback", async (ctx) => {
+    const limited = ssoRateLimit(ctx.request.headers);
+    if (limited) return limited;
     const body = isObject(ctx.request.body) ? ctx.request.body : {};
     return completeSso(
       typeof body.code === "string" ? body.code : ctx.request.query.code,

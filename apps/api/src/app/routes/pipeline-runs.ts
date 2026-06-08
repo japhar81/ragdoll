@@ -59,6 +59,7 @@ import type {
   AuditWriter
 } from "./types.ts";
 import type { PipelineActivationRepository } from "../../../../../packages/db/src/index.ts";
+import { webhookPerTokenLimiter, webhookPerIpLimiter } from "../rate-limit.ts";
 
 interface PipelineRunsServices {
   deps: AppDeps;
@@ -251,8 +252,33 @@ export function registerPipelineRunsRoutes(
   /**
    * Public webhook trigger. The path token is the bearer; no other
    * auth runs. Body is forwarded verbatim as the run's `input`.
+   *
+   * Rate-limited at two tiers: per-IP (catches token enumeration sweeps
+   * from one source) and per-token-prefix (catches a single leaked token
+   * being abused). Tunable via RATE_LIMIT_WEBHOOK_* env vars.
    */
   api.route("POST", "/api/triggers/webhook/:token", async (ctx) => {
+    const ip = clientIp(ctx.request.headers) ?? "unknown";
+    const ipDecision = webhookPerIpLimiter.consume(`ip:${ip}`);
+    if (!ipDecision.allowed) {
+      return {
+        status: 429,
+        body: { error: "rate_limited", scope: "ip", retryAfterSec: ipDecision.retryAfterSec },
+        headers: { "retry-after": String(ipDecision.retryAfterSec) }
+      };
+    }
+    // Limit per token-prefix (first 12 chars) — opaque to attackers who
+    // can't pre-compute the prefix without already having a valid token,
+    // bounded for a single legitimate token.
+    const tokenKey = `tok:${ctx.params.token.slice(0, 12)}`;
+    const tokDecision = webhookPerTokenLimiter.consume(tokenKey);
+    if (!tokDecision.allowed) {
+      return {
+        status: 429,
+        body: { error: "rate_limited", scope: "token", retryAfterSec: tokDecision.retryAfterSec },
+        headers: { "retry-after": String(tokDecision.retryAfterSec) }
+      };
+    }
     let record;
     try {
       record = await WebhookTokenService.verify(ctx.params.token, {
