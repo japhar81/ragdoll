@@ -473,8 +473,47 @@ async function main(): Promise<void> {
   // streaming /dev/zero into POST /api/pipelines/:id/run.
   // Override with API_BODY_LIMIT_BYTES (e.g. an XML-heavy tenant).
   const bodyLimit = Number(process.env.API_BODY_LIMIT_BYTES) || 8 * 1024 * 1024;
-  const fastify = Fastify({ logger: false, bodyLimit });
+  // trustProxy=true makes Fastify honor X-Forwarded-* for request.ip etc.
+  // Required behind an ingress/LB; harmless on a direct connection because
+  // those headers are stripped by reverse proxies before they reach us.
+  const fastify = Fastify({ logger: false, bodyLimit, trustProxy: true });
   logger.info("fastify_body_limit", { bytes: bodyLimit });
+
+  // ---- Security headers + CORS (lazy imports keep tests install-free) ----
+  // Helmet sets X-Content-Type-Options, X-Frame-Options, Strict-Transport-
+  // Security, Referrer-Policy, etc. — defaults are sane for a JSON API.
+  // CSP is OFF by default because this server is API-only; the web SPA
+  // (served separately) sets its own CSP. Override with API_DISABLE_HELMET=1
+  // only for debugging.
+  if (process.env.API_DISABLE_HELMET !== "1") {
+    const helmet = (await import("@fastify/helmet")).default as any;
+    await fastify.register(helmet, { contentSecurityPolicy: false });
+  }
+  // CORS allowlist. Default: no cross-origin (server-to-server callers and
+  // the same-origin web build are fine without it). Set CORS_ALLOW_ORIGINS
+  // to a CSV of allowed origins, or "*" to allow any (development only).
+  const corsOrigins = (process.env.CORS_ALLOW_ORIGINS ?? "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  if (corsOrigins.length > 0) {
+    const cors = (await import("@fastify/cors")).default as any;
+    const wildcard = corsOrigins.includes("*");
+    await fastify.register(cors, {
+      origin: wildcard ? true : corsOrigins,
+      credentials: !wildcard,
+      methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+      allowedHeaders: [
+        "authorization",
+        "x-api-key",
+        "x-request-id",
+        "content-type",
+        "x-ragdoll-tenant"
+      ],
+      exposedHeaders: ["x-request-id"]
+    });
+    logger.info("cors_enabled", { origins: corsOrigins });
+  }
 
   // Capture the raw body for all routes; the app does its own parsing.
   // Fastify's bodyLimit (above) is enforced before this parser ever sees
