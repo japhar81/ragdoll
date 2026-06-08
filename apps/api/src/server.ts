@@ -464,6 +464,14 @@ async function main(): Promise<void> {
   const requestDuration = meter.histogram("ragdoll_api_request_duration_ms", {
     description: "API request duration in milliseconds."
   });
+  // Counterpart to the `slow_request` log line — a counter so dashboards
+  // can alert on slow-request RATE without grepping logs. Threshold is
+  // the same as the log (1000ms) so the two stay in lockstep.
+  const slowRequestCounter = meter.counter("ragdoll_api_slow_requests_total", {
+    description:
+      "API requests that exceeded the slow-request threshold (default 1000ms); see also the slow_request log line.",
+    unit: "{request}"
+  });
   const { deps, pool, changeBus } = await buildDeps();
   const app = createApp(deps);
 
@@ -632,6 +640,9 @@ async function main(): Promise<void> {
       logger.warn("slow_request", { ...fields, threshold_ms: 1000 });
     } else {
       logger.info("request", fields);
+    }
+    if (slow) {
+      slowRequestCounter.add(1, metricLabels);
     }
 
     if (response.body === undefined) return reply.send();
