@@ -475,30 +475,226 @@ export const keywordGuardrailPlugin: InProcessPlugin = {
   }
 };
 
+/**
+ * Real evaluator plugin (`simple_evaluator`).
+ *
+ * Replaces the previous `simple_evaluator_stub` that always returned
+ * `{ score: 1, passed: true }` regardless of input. The new version runs
+ * a configurable list of declarative assertions over the upstream output
+ * and returns:
+ *   - score: (passed assertions) / (total assertions), in [0..1]
+ *   - passed: true iff every assertion passed (logical AND)
+ *   - notes: per-assertion result list, useful in the execution viewer
+ *
+ * Assertion kinds:
+ *   - length_min / length_max — length of the resolved field
+ *   - contains / not_contains — substring match (case-insensitive)
+ *   - matches               — JS regex (string `pattern`, optional `flags`)
+ *   - equals / not_equals   — exact value equality (deep for objects)
+ *   - has_keys              — object has all listed keys
+ *
+ * Field resolution: each assertion specifies `field` as a dotted path
+ * (e.g. `answer.text`). Default is `answer` if unset.
+ *
+ * Worth shipping because the previous stub was the only "evaluator"
+ * category plugin and was useless for actual scoring; downstream pipelines
+ * had to drop in a custom plugin instead of using anything off-the-shelf.
+ */
+
+type EvalAssertion =
+  | { kind: "length_min"; value: number; field?: string }
+  | { kind: "length_max"; value: number; field?: string }
+  | { kind: "contains"; value: string; field?: string; caseInsensitive?: boolean }
+  | { kind: "not_contains"; value: string; field?: string; caseInsensitive?: boolean }
+  | { kind: "matches"; pattern: string; flags?: string; field?: string }
+  | { kind: "equals"; value: unknown; field?: string }
+  | { kind: "not_equals"; value: unknown; field?: string }
+  | { kind: "has_keys"; keys: string[]; field?: string };
+
+function lookupField(bag: Record<string, unknown>, path: string): unknown {
+  const parts = path.split(".").filter(Boolean);
+  let cur: unknown = bag;
+  for (const p of parts) {
+    if (cur && typeof cur === "object" && p in (cur as Record<string, unknown>)) {
+      cur = (cur as Record<string, unknown>)[p];
+    } else {
+      return undefined;
+    }
+  }
+  return cur;
+}
+
+function deepEqual(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  if (typeof a !== typeof b) return false;
+  if (!a || !b || typeof a !== "object") return false;
+  const ka = Object.keys(a as object);
+  const kb = Object.keys(b as object);
+  if (ka.length !== kb.length) return false;
+  return ka.every((k) =>
+    deepEqual(
+      (a as Record<string, unknown>)[k],
+      (b as Record<string, unknown>)[k]
+    )
+  );
+}
+
+function evaluateAssertion(
+  assertion: EvalAssertion,
+  inputs: Record<string, unknown>
+): { passed: boolean; note: string } {
+  const field = assertion.field ?? "answer";
+  const value = lookupField(inputs, field);
+  switch (assertion.kind) {
+    case "length_min": {
+      const len = typeof value === "string" || Array.isArray(value) ? value.length : 0;
+      return {
+        passed: len >= assertion.value,
+        note: `length_min(${field}): ${len} >= ${assertion.value}`
+      };
+    }
+    case "length_max": {
+      const len = typeof value === "string" || Array.isArray(value) ? value.length : 0;
+      return {
+        passed: len <= assertion.value,
+        note: `length_max(${field}): ${len} <= ${assertion.value}`
+      };
+    }
+    case "contains": {
+      const haystack = String(value ?? "");
+      const needle = assertion.caseInsensitive
+        ? assertion.value.toLowerCase()
+        : assertion.value;
+      const hay = assertion.caseInsensitive ? haystack.toLowerCase() : haystack;
+      return {
+        passed: hay.includes(needle),
+        note: `contains(${field}, "${assertion.value}")`
+      };
+    }
+    case "not_contains": {
+      const haystack = String(value ?? "");
+      const needle = assertion.caseInsensitive
+        ? assertion.value.toLowerCase()
+        : assertion.value;
+      const hay = assertion.caseInsensitive ? haystack.toLowerCase() : haystack;
+      return {
+        passed: !hay.includes(needle),
+        note: `not_contains(${field}, "${assertion.value}")`
+      };
+    }
+    case "matches": {
+      try {
+        const re = new RegExp(assertion.pattern, assertion.flags ?? "");
+        return {
+          passed: re.test(String(value ?? "")),
+          note: `matches(${field}, /${assertion.pattern}/${assertion.flags ?? ""})`
+        };
+      } catch (e) {
+        return { passed: false, note: `matches(${field}): bad regex — ${(e as Error).message}` };
+      }
+    }
+    case "equals":
+      return {
+        passed: deepEqual(value, assertion.value),
+        note: `equals(${field}, ${JSON.stringify(assertion.value)})`
+      };
+    case "not_equals":
+      return {
+        passed: !deepEqual(value, assertion.value),
+        note: `not_equals(${field}, ${JSON.stringify(assertion.value)})`
+      };
+    case "has_keys": {
+      if (!value || typeof value !== "object") {
+        return { passed: false, note: `has_keys(${field}): not an object` };
+      }
+      const present = assertion.keys.every((k) => k in (value as object));
+      return {
+        passed: present,
+        note: `has_keys(${field}, ${JSON.stringify(assertion.keys)})`
+      };
+    }
+  }
+}
+
+export const simpleEvaluatorPlugin: InProcessPlugin = {
+  manifest: {
+    id: "simple_evaluator",
+    name: "Simple Evaluator",
+    version: "1.0.0",
+    category: "evaluator",
+    description:
+      "Runs declarative assertions over upstream output and emits a score in [0..1]. Useful for regression-style smoke tests and golden-answer checks.",
+    configSchema: {
+      type: "object",
+      properties: {
+        assertions: {
+          type: "array",
+          description:
+            "List of assertions to evaluate. Score = passed / total; `passed` is true iff every assertion holds.",
+          items: { type: "object" }
+        }
+      },
+      required: ["assertions"],
+      additionalProperties: false
+    },
+    inputPorts: [
+      { name: "answer", description: "Primary value to assert on (string, object, or array)." }
+    ],
+    outputPorts: [
+      { name: "score", description: "Fraction of assertions that passed, 0..1." },
+      { name: "passed", description: "True iff every assertion passed." },
+      { name: "notes", description: "Per-assertion results, one string per assertion." }
+    ],
+    capabilities: ["evaluation"],
+    ui: {
+      icon: "check-circle",
+      // The assertions config is a free-form JSON array; the form
+      // renderer should show a JSON textarea rather than try to build a
+      // dynamic per-row UI. A specialized editor can replace this later.
+      formHints: { assertions: { widget: "textarea" } }
+    }
+  },
+  async execute(input) {
+    const assertions = (input.config.assertions as EvalAssertion[] | undefined) ?? [];
+    if (assertions.length === 0) {
+      return {
+        outputs: {
+          score: 1,
+          passed: true,
+          notes: ["no assertions configured"]
+        }
+      };
+    }
+    const results = assertions.map((a) => evaluateAssertion(a, input.inputs));
+    const passedCount = results.filter((r) => r.passed).length;
+    return {
+      outputs: {
+        score: passedCount / results.length,
+        passed: passedCount === results.length,
+        notes: results.map((r) => `${r.passed ? "[ok]" : "[fail]"} ${r.note}`)
+      }
+    };
+  }
+};
+
+// Back-compat alias so existing pipelines referencing `simple_evaluator_stub`
+// keep loading. The stub manifest is preserved verbatim (no behavior change
+// for in-flight references); new pipelines should use `simple_evaluator`.
 export const evaluatorStubPlugin: InProcessPlugin = {
   manifest: {
     id: "simple_evaluator_stub",
-    name: "Simple Evaluator Stub",
+    name: "Simple Evaluator (deprecated alias)",
     version: "1.0.0",
     category: "evaluator",
-    description: "Returns a placeholder evaluation score.",
-    configSchema: {
-      type: "object",
-      description: "Stub evaluator; no configuration.",
-      properties: {},
-      additionalProperties: false
-    },
-    outputPorts: [
-      { name: "score", description: "Numeric score (placeholder)." },
-      { name: "passed", description: "Boolean pass/fail (placeholder always true)." },
-      { name: "notes", description: "Free-form notes string." }
-    ],
+    description:
+      "DEPRECATED — kept as an alias for `simple_evaluator`. Switch new pipelines to `simple_evaluator` for declarative assertions.",
+    configSchema: simpleEvaluatorPlugin.manifest.configSchema,
+    inputPorts: simpleEvaluatorPlugin.manifest.inputPorts,
+    outputPorts: simpleEvaluatorPlugin.manifest.outputPorts,
     capabilities: ["evaluation"],
-    ui: { icon: "check-circle" }
+    ui: simpleEvaluatorPlugin.manifest.ui
   },
-  async execute() {
-    return { outputs: { score: 1, passed: true, notes: "stub evaluator" } };
-  }
+  execute: simpleEvaluatorPlugin.execute
 };
 
 export const providerEmbeddingsPlugin: InProcessPlugin = {
@@ -709,16 +905,25 @@ export const qdrantRetrieverPlugin: InProcessPlugin = {
   }
 };
 
+// vector_upsert is the qdrant-specific upsert. The name is historical —
+// it WOULD ideally be `qdrant_upsert` to match `qdrant_delete` /
+// `qdrant_retriever`, but renaming would break every existing pipeline
+// referencing it. Authors should treat `vector_upsert` as a qdrant alias.
+// The opensearch equivalent is `opensearch_output`. There is no single
+// modality-agnostic "vector_delete" — see the note above qdrant_delete
+// in ingest.ts for why that asymmetry is intentional (deletes operate on
+// different modalities, not interchangeable backends).
 export const vectorUpsertPlugin: InProcessPlugin = {
   manifest: {
     id: "vector_upsert",
-    name: "Vector Upsert",
+    name: "Vector Upsert (qdrant)",
     version: "1.0.0",
     category: "sink",
     contract: 2,
     requires: [{ modality: "vector", provider: "qdrant" }],
     datasetModalities: ["vector"],
-    description: "Ensures a Qdrant collection exists and upserts embedded chunks into it.",
+    description:
+      "Ensures a Qdrant collection exists and upserts embedded chunks into it. Qdrant-specific despite the name; see opensearch_output for the OpenSearch sibling.",
     configSchema: {
       // PR1 of the requires roll-out: DSN fields (url/apiKey) are gone.
       // The dataset's resolved connection provides them. What stays is
