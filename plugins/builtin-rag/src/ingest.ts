@@ -985,6 +985,14 @@ export const codeChunkerPlugin: InProcessPlugin = {
 // ===========================================================================
 // qdrant_delete
 // ===========================================================================
+//
+// Naming convention: `qdrant_delete` and `opensearch_delete` are per-backend
+// on purpose — they operate on DIFFERENT modalities (vector points vs text
+// chunks) and are NOT interchangeable backends behind a single ID. Use both
+// in a pipeline that mirrors a corpus into qdrant + opensearch and needs
+// deletes to reach both stores. If you want a future "vector_delete" that
+// dispatches by resolved backend provider, see the matching note above
+// vector_upsert in src/index.ts.
 
 export const qdrantDeletePlugin: InProcessPlugin = {
   manifest: {
