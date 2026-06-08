@@ -209,11 +209,23 @@ export class DgraphStore implements GraphStore {
 }
 
 /**
- * Process-wide in-memory store for tests + offline mode. The shape
- * is intentionally minimal — we model nodes as a map and edges as
- * arrays under predicate names. DQL is NOT implemented; the
- * `query()` method accepts a tiny custom matcher language sufficient
- * for our offline test paths (see plugin tests).
+ * Process-wide in-memory store for tests + offline mode.
+ *
+ * IMPORTANT — this is NOT a DQL engine. It implements a "Mini-DQL" subset
+ * limited to two query shapes:
+ *   `{ <name>(func: type(<T>)) { <preds> } }`
+ *   `{ <name>(func: eq(<pred>, "<val>")) { <preds> } }`
+ *
+ * Any other DQL shape — filters, pagination, var blocks, recursive
+ * traversals, math, full-text — returns an empty result. The shape is
+ * sufficient for plugin wiring tests to assert "data round-tripped"
+ * without standing up a real Dgraph; for actual DQL evaluation, point
+ * the plugin at the real `DgraphStore`.
+ *
+ * If you find yourself wanting more here, you almost certainly want to
+ * run the plugin against Dgraph (Docker compose has it) instead of
+ * teaching the in-memory store more of DQL. The latter is a
+ * never-ending rabbit hole and the test value is small.
  */
 export class InMemoryGraphStore implements GraphStore {
   private nextId = 1;
