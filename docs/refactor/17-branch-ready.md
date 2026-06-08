@@ -1,4 +1,12 @@
-# 17 — Branch Ready Report
+# 17 — Branch Ready Report (ARCHIVED)
+
+> **Archive note (2026):** This was the close-out report for the
+> `refactor/datasets-rbac-retrieval` branch when it merged. The
+> "Known follow-ups (Phase 14+)" list at the bottom has since been
+> picked up incrementally — see commit history + recent ADRs (0019
+> plugin-contract-v2, 0021 external-connections, 0022 connect-rpc
+> transport). The document is kept as historical context only; do not
+> treat its "what's left to do later" section as an active backlog.
 
 `refactor/datasets-rbac-retrieval` is feature-complete for phases 0
 through 13. This is what's on the branch; what to look at first; and

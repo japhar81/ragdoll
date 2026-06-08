@@ -63,11 +63,16 @@ interface ConnState {
   principal?: Principal;
   /** Computed once on auth. True for any grant at global scope. */
   seesGlobal: boolean;
-  /** Computed once on auth. Set of tenant ids the principal holds any grant
-   *  covering. NOT recomputed live — a long-lived session reflecting a grant
-   *  revocation needs a fresh socket. (The REST path re-resolves on every
-   *  request; tracking live revocation here is a follow-up.) */
+  /** Set of tenant ids the principal holds any grant covering. Refreshed
+   *  every WS_GRANT_REFRESH_MS (default 60s) by re-resolving against the
+   *  authorizer; sockets whose principal lost ALL grants are closed by
+   *  the refresh loop in mountWebsocket. The REST path re-resolves on
+   *  every request and stays the source of truth — this is a per-socket
+   *  best-effort enforcement so a stale tab doesn't keep streaming
+   *  builder/execution events forever after a grant change. */
   tenants: Set<string>;
+  /** When `tenants` was last refreshed from the authorizer. */
+  tenantsRefreshedAtMs: number;
   /** Builder rooms this connection has joined. */
   rooms: Set<string>;
   /** Latest presence snapshot. */
@@ -227,6 +232,7 @@ export async function mountWebsocket(
         socket,
         seesGlobal: false,
         tenants: new Set(),
+        tenantsRefreshedAtMs: Date.now(),
         rooms: new Set(),
         presence: {
           connectionId: id,
@@ -396,6 +402,63 @@ export async function mountWebsocket(
   // The Node timer keeps the event loop alive otherwise; the API process is
   // the one that wants to control its own lifetime.
   reaper.unref?.();
+
+  // ADR-0015 follow-through: live grant re-resolve. Every WS_GRANT_REFRESH_MS
+  // (default 60s) walk authenticated sockets, re-resolve their reach against
+  // the authorizer, and close any whose grants collapsed to zero scope.
+  // This is intentionally coarse — the REST path stays the source of truth,
+  // and a one-minute lag on a stale tab is fine. Disable with
+  // WS_GRANT_REFRESH_MS=0 if the periodic load isn't worth it.
+  const refreshMs = Number(process.env.WS_GRANT_REFRESH_MS);
+  const refreshInterval =
+    Number.isFinite(refreshMs) && refreshMs >= 0 ? refreshMs : 60_000;
+  let grantRefresher: ReturnType<typeof setInterval> | undefined;
+  if (refreshInterval > 0 && authorizer) {
+    grantRefresher = setInterval(async () => {
+      for (const conn of connections.values()) {
+        if (!conn.principal) continue;
+        try {
+          const grants = await authorizer.resolveGrants({
+            id: conn.principal.id,
+            type: conn.principal.type,
+            tenantId: conn.principal.tenantId,
+            roles: conn.principal.roles
+          });
+          let nextSeesGlobal = false;
+          const nextTenants = new Set<string>();
+          for (const g of grants) {
+            if (g.scope === "*") nextSeesGlobal = true;
+            else {
+              const t = tenantFromScope(g.scope);
+              if (t) nextTenants.add(t);
+            }
+          }
+          // Explicit-roles principals (api_key) keep their original reach
+          // since the grant resolver isn't authoritative for them.
+          if (conn.principal.roles && conn.principal.roles.length > 0) continue;
+          if (!nextSeesGlobal && nextTenants.size === 0) {
+            // No reach left — close the socket. Client can reconnect with
+            // fresh credentials if its grants are restored.
+            try {
+              conn.socket.close(4403, "grants_revoked");
+            } catch {
+              /* best-effort */
+            }
+            continue;
+          }
+          conn.seesGlobal = nextSeesGlobal;
+          conn.tenants = nextTenants;
+          conn.tenantsRefreshedAtMs = Date.now();
+        } catch (e) {
+          logger.warn?.("ws_grant_refresh_failed", {
+            connectionId: conn.id,
+            error: e instanceof Error ? e.message : String(e)
+          });
+        }
+      }
+    }, refreshInterval);
+    grantRefresher.unref?.();
+  }
 }
 
 /**
@@ -504,6 +567,7 @@ async function handleAuth(
   conn.principal = principal;
   conn.seesGlobal = reach.seesGlobal;
   conn.tenants = reach.tenants;
+  conn.tenantsRefreshedAtMs = Date.now();
   conn.presence.principalId = principal.id;
   // Best-effort display label: session principals carry no name field; the
   // client may overwrite via presence frames with their resolved user record.
