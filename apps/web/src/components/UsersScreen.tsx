@@ -5,6 +5,7 @@ import type { AccountUser, GrantView, RoleView } from "../lib/api.ts";
 import { Screen, Table } from "./Screen.tsx";
 import { DataGrid, type DataGridColumn } from "./DataGrid.tsx";
 import { useTenants } from "./useTenants.tsx";
+import { useEnvironments, EnvironmentSelect } from "./useEnvironments.tsx";
 
 function errText(e: unknown): string {
   if (e instanceof ApiError) {
@@ -32,6 +33,17 @@ function GrantManager(props: { user: AccountUser; roles: RoleView[] }) {
   const [tenantId, setTenantId] = useState("");
   const [environment, setEnvironment] = useState("");
   const [pipelineId, setPipelineId] = useState("");
+
+  // Catalog-backed pickers for env + pipeline, so a typo can't mint a
+  // grant pointing at something that doesn't exist. Env list scopes to
+  // the picked tenant; pipeline list is platform-wide (grants can pin
+  // to any pipeline the operator can see).
+  const { environments, isLoading: envsLoading } = useEnvironments(tenantId);
+  const pipelines = useQuery({
+    queryKey: ["pipelines"],
+    queryFn: () => api.listPipelines(),
+    enabled: level === "pipeline"
+  });
 
   const grants = useQuery({
     queryKey: ["grants", props.user.id],
@@ -108,20 +120,27 @@ function GrantManager(props: { user: AccountUser; roles: RoleView[] }) {
           </select>
         )}
         {level === "environment" && (
-          <input
-            placeholder="environment (e.g. prod)"
+          <EnvironmentSelect
+            environments={environments}
             value={environment}
-            onChange={(e) => setEnvironment(e.target.value)}
-            required
+            onChange={setEnvironment}
+            isLoading={envsLoading}
           />
         )}
         {level === "pipeline" && (
-          <input
-            placeholder="pipeline id"
+          <select
             value={pipelineId}
             onChange={(e) => setPipelineId(e.target.value)}
             required
-          />
+            disabled={pipelines.isLoading}
+          >
+            <option value="">— pipeline —</option>
+            {(pipelines.data?.pipelines ?? []).map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.name} ({p.slug ?? p.id.slice(0, 8) + "…"})
+              </option>
+            ))}
+          </select>
         )}
         <button type="submit" className="primary" disabled={add.isPending}>
           Grant
