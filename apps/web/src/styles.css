@@ -1432,6 +1432,18 @@ table.datagrid tbody tr.row-highlighted {
 .scope-tree {
   border-right: 1px solid #e5e7eb;
   padding-right: 16px;
+  /* Pin the scope tree to the top of the viewport with its OWN scroll
+     so deeply-nested scopes (many tenants × many pipelines) don't push
+     the right-pane content off-screen on Secrets / Config / Connections.
+     `top` accounts for the Screen's title row + breathing room; tune
+     here in one place since all three screens share the layout. */
+  position: sticky;
+  top: 16px;
+  max-height: calc(100vh - 80px);
+  overflow-y: auto;
+  /* Reserve room for the scroll gutter so the focus/hover ring on
+     items doesn't get clipped against the right edge. */
+  scrollbar-gutter: stable;
 }
 
 .scope-tree a {
