@@ -23,7 +23,10 @@ import {
   type ExecutionStore,
   type ExecutionRecord
 } from "../../../packages/runtime/src/index.ts";
-import { ExternalConnectionResolver } from "../../../packages/external-connections/src/index.ts";
+import {
+  ExternalConnectionResolver,
+  probeConnection
+} from "../../../packages/external-connections/src/index.ts";
 import { pluginKey } from "../../../packages/plugin-sdk/src/index.ts";
 import { ConfigResolver } from "../../../packages/config-resolver/src/index.ts";
 import { validatePipelineSpec } from "../../../packages/pipeline-spec/src/index.ts";
@@ -1077,6 +1080,98 @@ export function createWorker(deps: WorkerDeps): Worker {
     return result;
   }
 
+  /**
+   * ADR-0021 — periodic probe of every non-archived external connection.
+   * Resolves each row through the runtime resolver (so secrets are
+   * fetched the same way pipeline execution would), invokes the
+   * registered driver's probe(), and writes the result back via
+   * recordProbe.
+   *
+   * Errors per-connection are swallowed (logged + recorded) so one bad
+   * row doesn't tank the whole sweep — the next tick will retry, and
+   * the Builder / admin UI shows the red badge on the failing row.
+   *
+   * When the registry is absent (legacy harness, no Postgres) the
+   * sweep no-ops with a clear log line.
+   */
+  async function connectionProbeSweep(): Promise<{
+    total: number;
+    ok: number;
+    failed: number;
+    skipped: number;
+  }> {
+    const repo = deps.repositories.externalConnections;
+    if (!repo) {
+      deps.logger?.info(
+        "connection_probe_sweep skipped: externalConnections repo not wired"
+      );
+      return { total: 0, ok: 0, failed: 0, skipped: 0 };
+    }
+    const rows = await repo.listAll({ includeArchived: false });
+    let ok = 0;
+    let failed = 0;
+    let skipped = 0;
+    for (const row of rows) {
+      try {
+        // Build a ResolvedExternalConnection synthetically. We bypass
+        // the resolver's cascade walk (we already know which row we're
+        // probing) but go through SecretProvider so the credential
+        // resolution path matches execution time.
+        let secret: string | undefined;
+        if (row.secretRefId) {
+          try {
+            secret = await deps.secretProvider.get(
+              {
+                scope: row.tenantId ? "tenant" : "global",
+                tenantId: row.tenantId ?? undefined,
+                key: row.secretRefId
+              },
+              row.tenantId ?? ""
+            );
+          } catch {
+            // Carry on without a secret — the driver may not need it,
+            // or its probe will surface a clear "missing secret" error.
+          }
+        }
+        const result = await probeConnection({
+          id: row.id,
+          slug: row.slug,
+          kind: row.kind,
+          secret,
+          options: row.options ?? {},
+          cascadeReason:
+            row.scope === "environment"
+              ? "environment"
+              : row.scope === "tenant"
+                ? "tenant"
+                : "global"
+        });
+        await repo.recordProbe(row.id, {
+          ok: result.ok,
+          error: result.error,
+          at: new Date().toISOString()
+        });
+        if (result.ok) ok += 1;
+        else failed += 1;
+      } catch (e) {
+        skipped += 1;
+        deps.logger?.warn("connection_probe_sweep error", {
+          connectionId: row.id,
+          slug: row.slug,
+          kind: row.kind,
+          error: e instanceof Error ? e.message : String(e)
+        });
+      }
+    }
+    deps.logger?.info("connection_probe_sweep completed", {
+      total: rows.length,
+      ok,
+      failed,
+      skipped
+    });
+    return { total: rows.length, ok, failed, skipped };
+  }
+
   /* ------------------------------ dispatch ------------------------------- */
 
   async function handle(job: QueueJob, signal?: AbortSignal): Promise<unknown> {
@@ -1103,6 +1198,8 @@ export function createWorker(deps: WorkerDeps): Worker {
         return staleExecSweep();
       case "retention_sweep":
         return retentionSweep();
+      case "connection_probe_sweep":
+        return connectionProbeSweep();
       default: {
         const exhaustive: never = job.type;
         throw new Error(`unsupported job type: ${String(exhaustive)}`);
