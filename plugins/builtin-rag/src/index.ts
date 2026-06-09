@@ -1825,6 +1825,16 @@ export {
   buildBatchDelete
 } from "./plugins/postgres.ts";
 
+// MongoDB plugin family (ADR-0021 — first non-Postgres external DB).
+// Consumes the new External Connections Registry; the driver factory
+// registers itself at module load via registerConnectionDriver("mongodb").
+export {
+  mongoFindPlugin,
+  mongoInsertPlugin,
+  mongoDeletePlugin,
+  mongoAggregatePlugin
+} from "./plugins/mongo.ts";
+
 // Email pre-processing family — pure text, no LLM, no I/O.
 // `preprocessEmailBody` and `aggregateThreads` are pure helpers re-
 // exported for unit tests.

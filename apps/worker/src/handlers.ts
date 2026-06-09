@@ -23,6 +23,7 @@ import {
   type ExecutionStore,
   type ExecutionRecord
 } from "../../../packages/runtime/src/index.ts";
+import { ExternalConnectionResolver } from "../../../packages/external-connections/src/index.ts";
 import { pluginKey } from "../../../packages/plugin-sdk/src/index.ts";
 import { ConfigResolver } from "../../../packages/config-resolver/src/index.ts";
 import { validatePipelineSpec } from "../../../packages/pipeline-spec/src/index.ts";
@@ -194,6 +195,16 @@ export function createWorker(deps: WorkerDeps): Worker {
         })
       : undefined;
 
+  // ADR-0021: External connection resolver wired the same way as
+  // datasetResolver — undefined when the optional repo is absent so the
+  // legacy install-free test paths keep working unchanged.
+  const externalConnectionResolver = deps.repositories.externalConnections
+    ? new ExternalConnectionResolver(
+        deps.repositories.externalConnections,
+        deps.secretProvider
+      )
+    : undefined;
+
   function executor(): DagExecutor {
     return new DagExecutor({
       pluginRegistry: deps.plugins,
@@ -201,6 +212,7 @@ export function createWorker(deps: WorkerDeps): Worker {
       store: runtimeStore,
       ingestStateRepository: deps.ingestStateRepository,
       datasetResolver,
+      externalConnectionResolver,
       maxRetries: deps.maxRetries ?? 1,
       tracer
     });

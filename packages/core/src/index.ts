@@ -178,6 +178,16 @@ export interface PipelineNode {
    * `config.collection` / `config.index` via the compatibility shim.
    */
   dataset?: { slug: string; alias?: string };
+  /**
+   * Optional ExternalConnection reference (ADR-0021). When set, the
+   * runtime resolves the slug via env -> tenant -> global cascade and
+   * hands a v2 plugin a {@link ResolvedExternalConnection} on
+   * `input.connection`. Plugins that touch external DBs (MongoDB,
+   * ClickHouse, HTTP-as-DB, …) read connection info from there instead
+   * of from `secrets.dsn`; the runtime enforces
+   * `external_connection:use` before invoking the plugin.
+   */
+  connection?: { slug: string };
   ui?: Record<string, unknown>;
 }
 

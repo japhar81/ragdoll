@@ -30,6 +30,7 @@ import {
   ActivationResolutionError
 } from "../../../../packages/pipeline-spec/src/index.ts";
 import { DagExecutor, buildDatasetResolver } from "../../../../packages/runtime/src/index.ts";
+import { ExternalConnectionResolver } from "../../../../packages/external-connections/src/index.ts";
 import type {
   PipelineActivationRow,
   PipelineActivationRepository,
@@ -354,11 +355,19 @@ export async function runSyncPipeline(args: {
     });
     return { output: nested.output };
   };
+  // ADR-0021: external connection resolver, lazy-built so test paths
+  // without a connections repo get `undefined` and `connection:`-bearing
+  // nodes simply receive `input.connection = undefined` (no behaviour
+  // change for legacy pipelines).
+  const externalConnectionResolver = deps.externalConnections
+    ? new ExternalConnectionResolver(deps.externalConnections, deps.secretProvider)
+    : undefined;
   const executor = new DagExecutor({
     pluginRegistry: deps.pluginRegistry,
     secretProvider: deps.secretProvider,
     store: deps.executionStore,
     datasetResolver: apiDatasetResolver,
+    externalConnectionResolver,
     runPipelineByRef,
     onToken: args.onToken,
     maxRetries: 1
