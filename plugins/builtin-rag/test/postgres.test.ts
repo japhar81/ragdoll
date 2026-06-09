@@ -547,9 +547,16 @@ test("manifest categorisation: postgres_query is a `tool` with declared ports", 
   const m = postgresQueryPlugin.manifest;
   assert.equal(m.id, "postgres_query");
   assert.equal(m.category, "tool");
-  assert.equal(m.contract ?? 1, 1, "no Dataset binding required");
+  // contract 2: ADR-0021 — `input.connection` is delivered when the
+  // node carries `connection: { slug }` and the registry resolves it.
+  assert.equal(m.contract, 2);
   assert.ok(m.configSchema?.required?.includes("sql"));
-  assert.ok(m.secretsSchema?.required?.includes("dsn"));
+  // `dsn` is no longer a required secret — registry-aware nodes get
+  // their DSN from the resolved connection's secret instead. The
+  // runtime check in dsnFromSecrets enforces it only when no
+  // registry connection is provided.
+  assert.equal(m.secretsSchema?.required, undefined);
+  assert.ok(m.secretsSchema?.properties?.dsn, "dsn still describable in the form");
   assert.deepEqual(
     m.outputPorts?.map((p) => p.name),
     ["rows", "rowCount", "truncated"]
@@ -716,4 +723,88 @@ test("postgres_delete: rolls back on a DELETE failure mid-transaction", async (t
   assert.equal(driver.calls[0]!.text, "BEGIN");
   assert.equal(driver.calls[1]!.text.startsWith("DELETE FROM"), true);
   assert.equal(driver.calls[2]!.text, "ROLLBACK");
+});
+
+// ---------------------------------------------------------------------------
+// ADR-0021 registry migration: postgres plugins now also accept
+// `input.connection` (a ResolvedExternalConnection) and prefer it over the
+// legacy secrets.dsn path.
+// ---------------------------------------------------------------------------
+
+test("postgres_query uses input.connection when provided (kind=postgres)", async (t) => {
+  const driver = installFakeDriver(t);
+  driver.enqueue({ rows: [{ x: 1 }], rowCount: 1 });
+  const input = pluginInput({
+    config: { sql: "SELECT 1 AS x" },
+    // Deliberately set NO secrets.dsn — the connection's secret should
+    // win and the DSN check should never fire.
+    secrets: {}
+  });
+  (input as { connection?: unknown }).connection = {
+    id: "conn-pg-1",
+    slug: "acme-pg",
+    kind: "postgres",
+    secret: "postgres://acme:acme@db:5432/acme",
+    options: {},
+    cascadeReason: "global"
+  };
+  const out = await postgresQueryPlugin.execute(input);
+  assert.equal((out.outputs.rowCount as number), 1);
+  // BEGIN READ ONLY → SELECT → COMMIT
+  assert.equal(driver.calls[0]!.text, "BEGIN READ ONLY");
+  assert.equal(driver.calls[1]!.text, "SELECT 1 AS x");
+});
+
+test("postgres_query rejects wrong-kind connections with a clear error", async (t) => {
+  installFakeDriver(t);
+  const input = pluginInput({ config: { sql: "SELECT 1" }, secrets: {} });
+  (input as { connection?: unknown }).connection = {
+    id: "conn-mongo-1",
+    slug: "warehouse",
+    kind: "mongodb",
+    secret: "mongodb://x",
+    options: {},
+    cascadeReason: "global"
+  };
+  await assert.rejects(
+    () => postgresQueryPlugin.execute(input),
+    /only accept kind="postgres"/
+  );
+});
+
+test("postgres_query still works via the legacy secrets.dsn path (no connection)", async (t) => {
+  const driver = installFakeDriver(t);
+  driver.enqueue({ rows: [{ legacy: true }], rowCount: 1 });
+  const out = await postgresQueryPlugin.execute(
+    pluginInput({ config: { sql: "SELECT TRUE AS legacy" } })
+  );
+  assert.equal(out.outputs.rowCount, 1);
+  assert.equal(driver.calls[1]!.text, "SELECT TRUE AS legacy");
+});
+
+test("postgres_query: connections share a pool keyed by connection.id (ADR-0021)", async (t) => {
+  const driver = installFakeDriver(t);
+  // Two queries against the SAME connection id — should re-use one pool.
+  driver.enqueue({ rows: [], rowCount: 0 });
+  driver.enqueue({ rows: [], rowCount: 0 });
+  const baseInput = pluginInput({
+    config: { sql: "SELECT 1" },
+    secrets: {}
+  });
+  const conn = {
+    id: "shared-conn",
+    slug: "shared",
+    kind: "postgres",
+    secret: "postgres://shared:shared@db:5432/shared",
+    options: {},
+    cascadeReason: "global" as const
+  };
+  (baseInput as { connection?: unknown }).connection = conn;
+  await postgresQueryPlugin.execute(baseInput);
+  // Build a fresh input object referencing the same connection.
+  const input2 = pluginInput({ config: { sql: "SELECT 1" }, secrets: {} });
+  (input2 as { connection?: unknown }).connection = conn;
+  await postgresQueryPlugin.execute(input2);
+  // One pool created across both calls — the key is connection.id.
+  assert.equal(driver.pools.length, 1);
 });

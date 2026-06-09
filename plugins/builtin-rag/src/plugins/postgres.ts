@@ -31,23 +31,33 @@
  *    DROP a table.
  */
 
-import type { InProcessPlugin, JsonSchemaLike } from "../../../../packages/plugin-sdk/src/index.ts";
+import type {
+  InProcessPlugin,
+  JsonSchemaLike,
+  ResolvedExternalConnection
+} from "../../../../packages/plugin-sdk/src/index.ts";
 import {
   acquire,
   assertLooksReadOnly,
   getPool,
-  quoteIdentifier
+  getPoolForConnection,
+  quoteIdentifier,
+  type PoolEntry
 } from "../postgres-core.ts";
 
+// `dsn` is no longer required at manifest level — registry-aware nodes
+// (those carrying `connection: { slug }`) get their DSN from the
+// resolved external connection's secret. Pre-registry nodes still need
+// `secrets.dsn`; the runtime check in dsnFromSecrets() enforces it
+// only when no registry connection is provided.
 const POSTGRES_SECRETS_SCHEMA: JsonSchemaLike = {
   type: "object",
-  required: ["dsn"],
   properties: {
     dsn: {
       type: "string",
       format: "secret-ref",
       description:
-        "Postgres connection string (e.g. postgres://user:pass@host:5432/db). Resolved per-environment by the secret store; the same `connection` label backed by different DSNs in dev vs prod is the expected pattern."
+        "Postgres connection string (e.g. postgres://user:pass@host:5432/db). Resolved per-environment by the secret store. NOT required when the node references an external connection via `connection: { slug }` — the DSN comes from the connection's secret instead."
     }
   },
   additionalProperties: false
@@ -57,7 +67,7 @@ function dsnFromSecrets(secrets: Record<string, string>): string {
   const dsn = secrets.dsn;
   if (!dsn || typeof dsn !== "string") {
     throw new Error(
-      "postgres plugins require a `dsn` secret-ref (set node.secrets.dsn to a managed secret)."
+      "postgres plugins require either a `dsn` secret-ref (set node.secrets.dsn) OR a registry connection (set node.connection.slug pointing at a kind=\"postgres\" external connection)."
     );
   }
   return dsn;
@@ -68,6 +78,31 @@ function connectionLabel(config: Record<string, unknown>): string {
   if (raw === undefined || raw === null || raw === "") return "default";
   return String(raw);
 }
+
+/**
+ * ADR-0021 transition: resolve a pool from EITHER the new registry
+ * connection (when `input.connection` is set + kind=postgres) OR the
+ * legacy `secrets.dsn` path (everything else). Plugins call this once
+ * at the top of `execute()` and forget the two-paths distinction.
+ *
+ * The runtime stamps `input.connection` only when the node carries
+ * `connection: { slug }` AND the connections registry resolved it.
+ * Nodes without that field keep the old behaviour verbatim.
+ */
+async function acquirePoolForNode(args: {
+  connection?: ResolvedExternalConnection;
+  config: Record<string, unknown>;
+  secrets: Record<string, string>;
+}): Promise<PoolEntry> {
+  if (args.connection) {
+    return getPoolForConnection(args.connection);
+  }
+  return getPool({
+    dsn: dsnFromSecrets(args.secrets),
+    name: connectionLabel(args.config)
+  });
+}
+
 
 function rowLimitFrom(config: Record<string, unknown>, fallback: number): number {
   const raw = config.maxRows ?? fallback;
@@ -105,6 +140,9 @@ export const postgresQueryPlugin: InProcessPlugin = {
     name: "Postgres Query",
     version: "1.0.0",
     category: "tool",
+    // contract 2: the runtime hands us `input.connection` when the node
+    // carries `connection: { slug }` and the registry resolves it.
+    contract: 2,
     description:
       "Runs a parameterised SELECT against an external Postgres database. The SQL is fixed in config; runtime values flow only through `inputs.params` as bound parameters. Opens a READ ONLY transaction so writes fail at the database, never at the application.",
     configSchema: {
@@ -180,7 +218,11 @@ export const postgresQueryPlugin: InProcessPlugin = {
     // analytic queries use OFFSET. We cap by slicing the result set
     // post-fetch; the maxRows is also enforced as a row-count budget so
     // a pathologically large query still trips it via row truncation.
-    const entry = await getPool({ dsn: dsnFromSecrets(secrets), name: connectionLabel(config) });
+    const entry = await acquirePoolForNode({
+      connection: input.connection,
+      config,
+      secrets
+    });
     const client = await acquire(entry);
     const startedAt = Date.now();
     try {
@@ -238,6 +280,7 @@ export const postgresUpsertPlugin: InProcessPlugin = {
     name: "Postgres Upsert",
     version: "1.0.0",
     category: "sink",
+    contract: 2,
     description:
       "Bulk-inserts (and optionally updates on conflict) rows into an external Postgres table. Identifiers come from config and are validated/quoted; values bind as parameters.",
     configSchema: {
@@ -347,8 +390,11 @@ export const postgresUpsertPlugin: InProcessPlugin = {
     );
     const batchSize = Math.max(1, Math.floor(Number(config.batchSize ?? 500)));
 
-    const dsn = dsnFromSecrets(secrets);
-    const entry = await getPool({ dsn, name: connectionLabel(config) });
+    const entry = await acquirePoolForNode({
+      connection: input.connection,
+      config,
+      secrets
+    });
     const client = await acquire(entry);
     let inserted = 0;
     let updated = 0;
@@ -465,6 +511,7 @@ export const postgresDeletePlugin: InProcessPlugin = {
     name: "Postgres Delete",
     version: "1.0.0",
     category: "sink",
+    contract: 2,
     description:
       "Bulk-deletes rows from an external Postgres table whose `where` columns match the input rows. Pairs with `delta_filter.deleted` for delta-aware ingestion when the operator's table has a column matching the delta input's key (typically `docId`). Identifiers come from config and are validated/quoted; values bind as parameters. Multi-column `where` (e.g. `[\"tenant_id\", \"doc_id\"]`) is recommended for multi-tenant tables as defense-in-depth.",
     configSchema: {
@@ -555,8 +602,11 @@ export const postgresDeletePlugin: InProcessPlugin = {
       }
     }
 
-    const dsn = dsnFromSecrets(secrets);
-    const entry = await getPool({ dsn, name: connectionLabel(config) });
+    const entry = await acquirePoolForNode({
+      connection: input.connection,
+      config,
+      secrets
+    });
     const client = await acquire(entry);
     let deleted = 0;
     const startedAt = Date.now();
@@ -651,6 +701,7 @@ export const postgresExecPlugin: InProcessPlugin = {
     name: "Postgres Exec (DDL)",
     version: "1.0.0",
     category: "tool",
+    contract: 2,
     description:
       "Runs DDL / one-shot SQL statements against an external Postgres. Hard-gated by `allowDDL: true` to prevent accidental destructive runs. NOT recommended inside synchronous or MCP-exposed pipelines.",
     configSchema: {
@@ -704,8 +755,11 @@ export const postgresExecPlugin: InProcessPlugin = {
       return stmt;
     });
 
-    const dsn = dsnFromSecrets(secrets);
-    const entry = await getPool({ dsn, name: connectionLabel(config) });
+    const entry = await acquirePoolForNode({
+      connection: input.connection,
+      config,
+      secrets
+    });
     const client = await acquire(entry);
     let executed = 0;
     const startedAt = Date.now();

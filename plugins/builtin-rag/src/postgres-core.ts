@@ -144,6 +144,10 @@ function ensureShutdownHook(): void {
  *
  * `overrides` is for tests and advanced operators who need to tune
  * `max`, `idleTimeoutMillis`, etc. Most callers pass nothing.
+ *
+ * Legacy path — keyed by DSN hash. New nodes that reference a registry
+ * connection should call {@link getPoolForConnection} instead so the
+ * pool is keyed by `connection.id` (explainable pooling per ADR-0021).
  */
 export async function getPool(args: {
   dsn: string;
@@ -154,7 +158,9 @@ export async function getPool(args: {
     throw new Error("postgres-core: dsn is required (set the connection secret).");
   }
   ensureShutdownHook();
-  const key = dsnKey(args.dsn);
+  // Prefix the cache key so the legacy DSN-keyed pools live in the same
+  // map as the new connection-id-keyed ones without ever colliding.
+  const key = `dsn:${dsnKey(args.dsn)}`;
   const existing = POOL_CACHE.get(key);
   if (existing) return existing;
 
@@ -164,6 +170,59 @@ export async function getPool(args: {
   // otherwise crash the process. The next acquire will simply rebuild.
   pool.on("error", () => undefined);
   const entry: PoolEntry = { name: args.name, pool, acquireWaitMs: 0, acquireCount: 0 };
+  POOL_CACHE.set(key, entry);
+  return entry;
+}
+
+/**
+ * ADR-0021 path — resolve a pool from a ResolvedExternalConnection.
+ *
+ * Keyed by `connection.id` (NOT by DSN hash) so two pipelines pointing
+ * at the same registered connection share one pool, and two pipelines
+ * pointing at different connections with identical underlying DSNs get
+ * different pools. This is the property ADR-0021 calls out as
+ * "explainable pool isolation" vs the legacy DSN-keyed accidental
+ * identity.
+ *
+ * The connection must have its `secret` populated (the runtime
+ * resolves it through SecretProvider before handing it to the plugin)
+ * and its `kind` must be "postgres" — wrong-kind connections throw
+ * loudly so a typo in the spec doesn't silently get a Mongo URI fed
+ * into pg.Pool.
+ */
+export async function getPoolForConnection(
+  connection: {
+    id: string;
+    slug: string;
+    kind: string;
+    secret?: string;
+    options?: Record<string, unknown>;
+  },
+  overrides?: PoolOverrides
+): Promise<PoolEntry> {
+  if (connection.kind !== "postgres") {
+    throw new Error(
+      `postgres-core: connection "${connection.slug}" kind=${connection.kind} — postgres plugins only accept kind="postgres" connections.`
+    );
+  }
+  if (!connection.secret) {
+    throw new Error(
+      `postgres-core: connection "${connection.slug}" has no resolved secret (set the connection's secretRefId to a managed DSN).`
+    );
+  }
+  ensureShutdownHook();
+  const key = `conn:${connection.id}`;
+  const existing = POOL_CACHE.get(key);
+  if (existing) return existing;
+
+  const pool = await poolFactory({ dsn: connection.secret, overrides });
+  pool.on("error", () => undefined);
+  const entry: PoolEntry = {
+    name: connection.slug,
+    pool,
+    acquireWaitMs: 0,
+    acquireCount: 0
+  };
   POOL_CACHE.set(key, entry);
   return entry;
 }
