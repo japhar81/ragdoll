@@ -20,7 +20,7 @@ import { PipelineBuilder } from "./components/PipelineBuilder.tsx";
 import { PipelinesScreen } from "./components/PipelinesScreen.tsx";
 import { DatasetsScreen } from "./components/DatasetsScreen.tsx";
 import { ConnectionsScreen } from "./components/ConnectionsScreen.tsx";
-import { ExternalConnectionsScreen } from "./components/ExternalConnectionsScreen.tsx";
+// ExternalConnectionsScreen folded into ConnectionsScreen (ADR-0023).
 import { SchedulerScreen } from "./components/SchedulerScreen.tsx";
 import { TenantsScreen } from "./components/TenantsScreen.tsx";
 import { ConfigScreen } from "./components/ConfigScreen.tsx";
@@ -162,16 +162,7 @@ const NAV_GROUPS: Array<{ group: string; items: NavItem[] }> = [
       // Per-(tenant, env) backing-store host + creds registry. Datasets
       // reference these by name; plugins resolve them through the dataset
       // and never see the host directly.
-      { path: "/connections", label: "Connections", perms: ["dataset:read"] },
-      // ADR-0021 — named external connections (MongoDB, ClickHouse, …).
-      // Distinct from /connections which is the per-tenant datasource
-      // registry; this is the new RBAC'd registry pipeline nodes
-      // reference by slug.
-      {
-        path: "/external-connections",
-        label: "Ext. Connections",
-        perms: ["connection:read"]
-      }
+      { path: "/connections", label: "Connections", perms: ["connection:read"] }
     ]
   },
   {
@@ -360,10 +351,7 @@ function Shell() {
         <Route path="/config" element={<ConfigScreen />} />
         <Route path="/secrets" element={<SecretsScreen />} />
         <Route path="/connections" element={<ConnectionsScreen />} />
-        <Route
-          path="/external-connections"
-          element={<ExternalConnectionsScreen />}
-        />
+        {/* /external-connections folded into /connections (ADR-0023). */}
         <Route path="/executions" element={<ExecutionsScreen />} />
         <Route path="/audit" element={<AuditScreen />} />
         <Route path="/usage" element={<UsageScreen />} />
