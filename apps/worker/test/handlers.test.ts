@@ -15,7 +15,8 @@ import {
   InMemoryProviderModelRepository,
   InMemoryVectorCollectionRepository,
   InMemoryDatasourceConnectionRepository,
-  InMemoryUsageRecordRepository
+  InMemoryUsageRecordRepository,
+  InMemoryExternalConnectionRepository
 } from "../../../packages/db/src/index.ts";
 import {
   InMemoryVectorStore
@@ -236,7 +237,8 @@ function buildRepositories(): WorkerRepositories {
     providerModels: new InMemoryProviderModelRepository(),
     vectorCollections: new InMemoryVectorCollectionRepository(),
     datasourceConnections: new InMemoryDatasourceConnectionRepository(),
-    usageRecords: new InMemoryUsageRecordRepository()
+    usageRecords: new InMemoryUsageRecordRepository(),
+    externalConnections: new InMemoryExternalConnectionRepository()
   };
 }
 
@@ -760,6 +762,79 @@ test("reindex_tenant reingests datasource connections", async () => {
     tenantId: "tenant-a"
   });
   assert.equal(hits.length, 1);
+});
+
+test("connection_probe_sweep — iterates rows, invokes the driver, records ok/error", async () => {
+  // Register a fake driver: returns ok for "good" slug, throws for "bad".
+  const { registerConnectionDriver, resetConnectionRegistry } = await import(
+    "../../../packages/external-connections/src/index.ts"
+  );
+  resetConnectionRegistry();
+  registerConnectionDriver("fakekind", {
+    async create(conn) {
+      return { slug: conn.slug };
+    },
+    async dispose() {},
+    async probe(client) {
+      if ((client as { slug: string }).slug === "bad") {
+        throw new Error("connection refused");
+      }
+    }
+  });
+  const deps = await buildDeps();
+  // Seed 2 connections — one healthy, one not.
+  const now = new Date().toISOString();
+  await deps.repositories.externalConnections!.create({
+    id: "11111111-1111-1111-1111-111111111111",
+    scope: "global",
+    slug: "good",
+    displayName: "Good",
+    kind: "fakekind",
+    options: {},
+    createdAt: now,
+    updatedAt: now
+  });
+  await deps.repositories.externalConnections!.create({
+    id: "22222222-2222-2222-2222-222222222222",
+    scope: "global",
+    slug: "bad",
+    displayName: "Bad",
+    kind: "fakekind",
+    options: {},
+    createdAt: now,
+    updatedAt: now
+  });
+  const worker = createWorker(deps);
+  const result = (await worker.handle({
+    id: "job-probe-sweep",
+    type: "connection_probe_sweep",
+    payload: {}
+  })) as { total: number; ok: number; failed: number; skipped: number };
+  assert.equal(result.total, 2);
+  assert.equal(result.ok, 1);
+  assert.equal(result.failed, 1);
+  // Recorded state matches.
+  const good = await deps.repositories.externalConnections!.get(
+    "11111111-1111-1111-1111-111111111111"
+  );
+  const bad = await deps.repositories.externalConnections!.get(
+    "22222222-2222-2222-2222-222222222222"
+  );
+  assert.equal(good!.lastProbeOk, true);
+  assert.equal(bad!.lastProbeOk, false);
+  assert.match(bad!.lastProbeError ?? "", /connection refused/);
+  resetConnectionRegistry();
+});
+
+test("connection_probe_sweep — empty registry returns zeros without error", async () => {
+  const deps = await buildDeps();
+  const worker = createWorker(deps);
+  const result = (await worker.handle({
+    id: "job-probe-sweep-empty",
+    type: "connection_probe_sweep",
+    payload: {}
+  })) as { total: number; ok: number; failed: number; skipped: number };
+  assert.deepEqual(result, { total: 0, ok: 0, failed: 0, skipped: 0 });
 });
 
 test("InMemoryQueue retry + deadLetter transitions", async () => {

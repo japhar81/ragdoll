@@ -21,7 +21,13 @@ export type QueueJobType =
   // worker picks them up through the same BullMQ concurrency pool, so they
   // run alongside pipelines without blocking either side.
   | "stale_exec_sweep"
-  | "retention_sweep";
+  | "retention_sweep"
+  // ADR-0021 — periodic probe sweep that exercises every non-archived
+  // external connection's driver health check and stores the result on
+  // the row so the Builder / admin UI can render badges. Job-shaped
+  // (not in-process) so multiple workers cooperate via BullMQ's
+  // single-runner-per-job guarantee.
+  | "connection_probe_sweep";
 
 export type QueueJobStatus =
   | "queued"
