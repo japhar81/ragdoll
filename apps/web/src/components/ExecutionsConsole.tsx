@@ -14,13 +14,16 @@ import {
   appendEntry,
   emptyConsole,
   type ConsoleState,
-  type LogEntry,
-  type LogLevel
+  type LogEntry
 } from "../lib/consoleLog.ts";
-import type { ChangeEvent } from "../../../../packages/events/src/index.ts";
+import { api } from "../lib/api.ts";
+import {
+  entryForEvent,
+  backfillEntries
+} from "./executionsConsoleEntries.ts";
 
 type Action =
-  | { type: "append"; entry: Omit<LogEntry, "id" | "ts"> }
+  | { type: "append"; entry: Omit<LogEntry, "id" | "ts"> & { ts?: number } }
   | { type: "clear" };
 
 function reducer(state: ConsoleState, action: Action): ConsoleState {
@@ -28,64 +31,9 @@ function reducer(state: ConsoleState, action: Action): ConsoleState {
   return appendEntry(state, action.entry);
 }
 
-/** Format one execution-related ChangeEvent into a console row. */
-function entryForEvent(
-  event: ChangeEvent
-): Omit<LogEntry, "id" | "ts"> | null {
-  if (!event.action.startsWith("execution.")) return null;
-  const exec = event.targetId.slice(0, 8);
-  const payload = (event.payload ?? {}) as Record<string, unknown>;
-  const status = String(payload.status ?? "");
-  const nodeId = payload.nodeId ? String(payload.nodeId) : undefined;
-  const error = payload.error ? String(payload.error) : undefined;
-  switch (event.action) {
-    case "execution.started":
-      return {
-        level: "info",
-        label: `▶ ${exec} started`,
-        http: { method: "", path: "" },
-        detail: payload
-      };
-    case "execution.node.started":
-      return {
-        level: "info",
-        label: `  · ${exec} ${nodeId ?? "?"} running`,
-        detail: payload
-      };
-    case "execution.node.completed": {
-      const lvl: LogLevel = status === "failed" ? "error" : "success";
-      return {
-        level: lvl,
-        label: `  · ${exec} ${nodeId ?? "?"} ${status || "completed"}`,
-        detail: payload
-      };
-    }
-    case "execution.completed":
-      return {
-        level: "success",
-        label: `✓ ${exec} succeeded`,
-        detail: payload
-      };
-    case "execution.failed":
-      return {
-        level: "error",
-        label: `✗ ${exec} failed${error ? `: ${error.slice(0, 200)}` : ""}`,
-        detail: payload
-      };
-    case "execution.denied":
-      return {
-        level: "error",
-        label: `✗ ${exec} denied`,
-        detail: payload
-      };
-    case "execution.updated":
-      // Skip noisy intermediates — completed/failed cover the terminal
-      // states and node.* covers per-step progress.
-      return null;
-    default:
-      return null;
-  }
-}
+// entryForEvent + backfillEntries live in ./executionsConsoleEntries.ts
+// so node --test (which strips .ts but rejects .tsx) can unit-test them.
+// See apps/web/test/executionsConsole.test.ts.
 
 function fmtTime(ts: number): string {
   const d = new Date(ts);
@@ -113,11 +61,12 @@ function ConsoleRow(props: {
   const [open, setOpen] = useState(false);
   const hasDetail =
     entry.detail !== undefined && entry.detail !== null && entry.detail !== "";
-  // Extract executionId from the label prefix (first 8 chars after the
-  // ▶/✓/✗/· icon). Used to deep-link to the row in the grid.
-  const execId =
-    (entry.detail as { executionId?: string })?.executionId ??
-    entry.label.match(/[a-f0-9]{8}/)?.[0];
+  // Read the FULL execution UUID from the detail payload. Every entry
+  // produced by entryForEvent / backfillEntries stamps this field. We
+  // intentionally do NOT fall back to a regex over the label — the
+  // label only carries the 8-char prefix for readability, and feeding
+  // that short id into /api/executions/:id/trace 404s (bug 1).
+  const execId = (entry.detail as { executionId?: string } | undefined)?.executionId;
   return (
     <li className={`console-row console-${entry.level}`}>
       <button
@@ -175,12 +124,22 @@ function capEntries(state: ConsoleState): ConsoleState {
 }
 
 /**
- * The live-tail panel. Optional `onJumpToExecution` lets the parent
- * select a row in the grid when the user clicks the `jump` badge on
- * an event line.
+ * The live-tail panel.
+ *
+ * Optional `onJumpToExecution` lets the parent select a row in the
+ * grid when the user clicks the `jump` badge on an event line.
+ *
+ * Optional `scopeExecutionId` puts the console into focused mode (Bug 2
+ * fix): the entry stream is filtered to ONLY that execution AND the
+ * console seeds itself with the run's historical trace so the user
+ * sees the full story of the run (pre-jump events included) instead
+ * of an empty panel waiting for the next live event. When the prop
+ * clears, the console returns to the global "everything I'm authorized
+ * to see" view.
  */
 export function ExecutionsConsole(props: {
   onJumpToExecution?: (executionId: string) => void;
+  scopeExecutionId?: string;
 }) {
   const [state, dispatch] = useReducer(
     (s: ConsoleState, a: Action) => capEntries(reducer(s, a)),
@@ -194,9 +153,46 @@ export function ExecutionsConsole(props: {
   pausedRef.current = paused;
   const listRef = useRef<HTMLUListElement | null>(null);
   const lastCount = useRef(0);
+  // Closure-captured ref so the WS subscriber sees the latest scope
+  // (matches the pausedRef pattern — useChangeEvents holds its
+  // callback for the subscription's lifetime).
+  const scopeRef = useRef<string | undefined>(props.scopeExecutionId);
+  scopeRef.current = props.scopeExecutionId;
+
+  // Scope change: clear current entries, then (when scope is set)
+  // backfill from the execution's recorded trace so the panel shows
+  // the run's full history before live events start arriving.
+  useEffect(() => {
+    const scope = props.scopeExecutionId;
+    dispatch({ type: "clear" });
+    if (!scope) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const data = await api.getExecutionTrace(scope);
+        if (cancelled) return;
+        const seeds = backfillEntries({
+          executionId: scope,
+          execution: data.execution,
+          nodes: data.nodes ?? []
+        });
+        for (const entry of seeds) dispatch({ type: "append", entry });
+      } catch {
+        // Don't poison the panel on a failed backfill — live events
+        // for the same execution will still stream in normally.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [props.scopeExecutionId]);
 
   useChangeEvents((event) => {
     if (pausedRef.current) return;
+    // Bug 2: when a specific execution is selected, suppress every
+    // event for OTHER executions so the panel stays focused on the
+    // run the user is investigating.
+    if (scopeRef.current && event.targetId !== scopeRef.current) return;
     const entry = entryForEvent(event);
     if (entry) dispatch({ type: "append", entry });
   });

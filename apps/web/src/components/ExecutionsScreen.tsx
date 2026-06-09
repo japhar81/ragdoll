@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "react-router-dom";
-import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
+import { useInfiniteQuery, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../lib/api.ts";
 import { useLookups } from "../lib/lookups.ts";
 import type { ExecutionRecord } from "../lib/types.ts";
@@ -11,7 +11,7 @@ import {
   sampleForDisplay,
   summarizeExecution
 } from "../lib/execTrace.ts";
-import { useEvents } from "../events/EventsProvider.tsx";
+import { useEvents, useChangeEvents } from "../events/EventsProvider.tsx";
 import type { ExecutionNodeRecord } from "../lib/types.ts";
 import { ExecutionsConsole } from "./ExecutionsConsole.tsx";
 
@@ -135,6 +135,7 @@ export function ExecutionsScreen() {
   // snappy on accounts with thousands of rows; the sentinel at the
   // bottom of the DataGrid loads the next page as the user scrolls.
   const lookups = useLookups();
+  const qc = useQueryClient();
   const executions = useInfiniteQuery({
     queryKey: ["executions", "page"],
     queryFn: ({ pageParam }) =>
@@ -144,6 +145,60 @@ export function ExecutionsScreen() {
       }),
     initialPageParam: undefined as string | undefined,
     getNextPageParam: (last) => last.nextCursor ?? undefined
+  });
+
+  // Bug 4: keep the grid in sync with terminal events even when the
+  // user opened the page AFTER the completion fired. The global
+  // invalidation in EventsProvider only refetches when an observer
+  // re-runs the query — for already-loaded infinite-query pages it's
+  // racy. Direct cache patching keeps the row authoritative without
+  // requiring a network round-trip.
+  useChangeEvents((event) => {
+    if (!event.action.startsWith("execution.")) return;
+    const targetId = event.targetId;
+    if (!targetId) return;
+    const payload = (event.payload ?? {}) as Record<string, unknown>;
+    const patch: Partial<ExecutionRecord> = {};
+    if (
+      event.action === "execution.completed" ||
+      event.action === "execution.failed" ||
+      event.action === "execution.denied"
+    ) {
+      const status =
+        event.action === "execution.completed"
+          ? "succeeded"
+          : event.action === "execution.failed"
+            ? "failed"
+            : "denied";
+      patch.status = status as ExecutionRecord["status"];
+      const completedAt =
+        typeof payload.completedAt === "string"
+          ? payload.completedAt
+          : new Date().toISOString();
+      patch.completedAt = completedAt;
+      if (typeof payload.error === "string") patch.error = payload.error;
+    } else if (event.action === "execution.started") {
+      patch.status = "running";
+    } else {
+      return; // node.* / updated — no row-level mutation here
+    }
+    qc.setQueryData<typeof executions.data>(
+      ["executions", "page"],
+      (old) => {
+        if (!old) return old;
+        let touched = false;
+        const nextPages = old.pages.map((page) => {
+          const rows = page.executions;
+          const idx = rows.findIndex((r) => r.executionId === targetId);
+          if (idx < 0) return page;
+          touched = true;
+          const nextRows = rows.slice();
+          nextRows[idx] = { ...nextRows[idx], ...patch };
+          return { ...page, executions: nextRows };
+        });
+        return touched ? { ...old, pages: nextPages } : old;
+      }
+    );
   });
   const executionRows = useMemo(
     () => executions.data?.pages.flatMap((p) => p.executions) ?? [],
@@ -386,7 +441,10 @@ export function ExecutionsScreen() {
           )}
         </section>
       )}
-      <ExecutionsConsole onJumpToExecution={(id) => setSelected(id)} />
+      <ExecutionsConsole
+        onJumpToExecution={(id) => setSelected(id)}
+        scopeExecutionId={selected}
+      />
     </Screen>
   );
 }
