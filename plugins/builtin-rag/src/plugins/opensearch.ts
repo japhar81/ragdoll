@@ -255,8 +255,7 @@ export const openSearchInputPlugin: InProcessPlugin = {
     version: "1.0.0",
     category: "datasource",
     contract: 2,
-    requires: [{ modality: "text", provider: "opensearch" }],
-    datasetModalities: ["text"],
+    requires: [{ binding: "text", kind: "opensearch" }],
     description:
       "Reads documents from an OpenSearch index (optionally filtered by a query_string) and emits them for ingestion or context.",
     configSchema: {
@@ -329,8 +328,7 @@ export const openSearchOutputPlugin: InProcessPlugin = {
     version: "1.0.0",
     category: "sink",
     contract: 2,
-    requires: [{ modality: "text", provider: "opensearch" }],
-    datasetModalities: ["text"],
+    requires: [{ binding: "text", kind: "opensearch" }],
     description:
       "Bulk-indexes documents (or embedded chunks) into an OpenSearch index. Tags each doc with the tenant id and can provision a kNN index.",
     configSchema: {
@@ -526,8 +524,7 @@ export const openSearchBm25RetrieverPlugin: InProcessPlugin = {
     version: "1.0.0",
     category: "retriever",
     contract: 2,
-    requires: [{ modality: "text", provider: "opensearch" }],
-    datasetModalities: ["text"],
+    requires: [{ binding: "text", kind: "opensearch" }],
     description:
       "Lexical (BM25) retrieval over an OpenSearch index using multi_match, scoped to the execution tenant.",
     configSchema: {
@@ -611,8 +608,7 @@ export const openSearchVectorRetrieverPlugin: InProcessPlugin = {
     name: "OpenSearch Vector Retriever",
     version: "1.0.0",
     category: "retriever",
-    requires: [{ modality: "vector", provider: "opensearch" }],
-    datasetModalities: ["vector"],
+    requires: [{ binding: "vectors", kind: "opensearch" }],
     contract: 2,
     description:
       "kNN vector retrieval over an OpenSearch knn_vector index. Embeds the question when no queryVector is supplied.",
@@ -727,10 +723,9 @@ export const openSearchHybridRetrieverPlugin: InProcessPlugin = {
     category: "retriever",
     contract: 2,
     requires: [
-      { modality: "vector", provider: "opensearch" },
-      { modality: "text", provider: "opensearch" }
+      { binding: "vectors", kind: "opensearch" },
+      { binding: "text", kind: "opensearch" }
     ],
-    datasetModalities: ["vector", "text"],
     description:
       "Hybrid retrieval: runs BM25 lexical and kNN vector search over one OpenSearch index and fuses them (RRF or weighted).",
     configSchema: {

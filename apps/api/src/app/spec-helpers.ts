@@ -50,6 +50,13 @@ export function projectPlugin(plugin: RegisteredPlugin): {
   category: string;
   contract?: number;
   datasetModalities?: string[];
+  requires?: Array<{
+    binding?: string;
+    kind?: string;
+    kindOneOf?: string[];
+    modality?: string;
+    provider?: string;
+  }>;
   description: string;
   mode: string;
   capabilities: string[];
@@ -88,8 +95,13 @@ export function projectPlugin(plugin: RegisteredPlugin): {
     // must pin a slug. Without this on the wire, the client treats every
     // plugin as v1 and the badge never lights up.
     ...(m.contract !== undefined ? { contract: m.contract } : {}),
-    // datasetModalities drives the Builder's "compatible slugs" picker and
-    // the `dataset_modality_mismatch` validator — see PluginManifest doc.
+    // ADR-0023: `requires` drives the Builder's compatible-slugs filter
+    // and the `dataset_binding_missing` / `dataset_binding_kind_mismatch`
+    // validator. Surfaced on the wire so the client-side validator can
+    // hint the operator before they hit Run. Legacy
+    // `datasetModalities` carried alongside for plugins that still
+    // declare it.
+    ...(m.requires !== undefined ? { requires: m.requires } : {}),
     ...(m.datasetModalities !== undefined
       ? { datasetModalities: m.datasetModalities }
       : {}),

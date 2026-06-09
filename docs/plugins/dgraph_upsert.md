@@ -6,8 +6,9 @@ executing tenant id so multi-tenant isolation is enforced at the
 storage layer.
 
 Pairs with `dgraph_query` for retrieval — both plugins declare
-`contract: 2` + `datasetModalities: ["graph"]`, so the Builder picker
-only offers them datasets whose modalities include `graph`.
+`contract: 2` + `requires: [{binding: "graph", kind: "dgraph"}]`, so
+the Builder picker only offers datasets with a `graph` binding backed
+by a Dgraph connection.
 
 ## Inputs
 
@@ -29,9 +30,10 @@ only offers them datasets whose modalities include `graph`.
 
 ## Config
 
-- `url` (optional) — Dgraph HTTP endpoint. Falls back to the bound
-  dataset's `backends.graph.url`, then to the platform's `DGRAPH_URL`
-  env, then to the in-memory store (offline mode).
+- `url` (optional) — Dgraph HTTP endpoint. Resolved from the bound
+  dataset's `bindings.graph.connectionHost` (+ port + scheme stitched
+  by the runtime), then to the platform's `DGRAPH_URL` env, then to
+  the in-memory store (offline mode).
 - `schema` (optional) — DQL schema fragment applied via `/alter`
   before the first write. Idempotent on Dgraph's side; use it to
   declare indexed predicates.
@@ -55,8 +57,8 @@ charges per round-trip, not per node.
   outgrow a flat vector index.
 - You need graph traversal at query time (k-hop neighbors, shortest
   path, etc.).
-- You want the same corpus joined across multiple modalities — pair a
-  `graph` modality with a `vector` modality on the same dataset slug
+- You want the same corpus joined across multiple bindings — pair a
+  `graph` binding with a `vectors` binding on the same dataset slug
   and let `dgraph_query` complement `dataset_search`.
 
 ## When NOT to use

@@ -787,12 +787,12 @@ export const qdrantRetrieverPlugin: InProcessPlugin = {
     version: "1.0.0",
     category: "retriever",
     contract: 2,
-    // `requires` pins both the modality AND the provider. The Builder
-    // hides datasets that don't match, the spec validator surfaces
-    // mismatches at edit time, and the runtime hard-fails any node
-    // whose dataset doesn't resolve a `vector` connection.
-    requires: [{ modality: "vector", provider: "qdrant" }],
-    datasetModalities: ["vector"],
+    // ADR-0023: `requires` pins binding NAME + connection KIND. The
+    // Builder hides datasets without a matching binding, the spec
+    // validator surfaces mismatches at edit time, and the runtime
+    // hard-fails any node whose dataset doesn't resolve a `vectors`
+    // binding backed by a `qdrant` connection.
+    requires: [{ binding: "vectors", kind: "qdrant" }],
     description: "Queries a Qdrant vector store for the top-K most similar documents.",
     configSchema: {
       // PR1 of the requires roll-out: DSN fields (url/apiKey for cluster
@@ -921,8 +921,8 @@ export const vectorUpsertPlugin: InProcessPlugin = {
     version: "1.0.0",
     category: "sink",
     contract: 2,
-    requires: [{ modality: "vector", provider: "qdrant" }],
-    datasetModalities: ["vector"],
+    // ADR-0023: needs a `vectors` binding backed by a qdrant connection.
+    requires: [{ binding: "vectors", kind: "qdrant" }],
     description:
       "Ensures a Qdrant collection exists and upserts embedded chunks into it. Qdrant-specific despite the name; see opensearch_output for the OpenSearch sibling.",
     configSchema: {
@@ -1232,8 +1232,8 @@ export const qdrantVectorStorePlugin: InProcessPlugin = {
     version: "1.0.0",
     category: "vector_store",
     contract: 2,
-    requires: [{ modality: "vector", provider: "qdrant" }],
-    datasetModalities: ["vector"],
+    // ADR-0023: needs a `vectors` binding backed by a qdrant connection.
+    requires: [{ binding: "vectors", kind: "qdrant" }],
     description:
       "Ensures a Qdrant collection exists and upserts embedded chunks/vectors into it.",
     configSchema: {

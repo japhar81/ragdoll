@@ -12,10 +12,11 @@
  *    `$tenant_id` variable so queries can filter without the operator
  *    knowing the platform's internal IDs.
  *
- * Both plugins declare `contract: 2` + `datasetModalities: ["graph"]`,
- * so the Builder's slug picker only offers datasets whose modalities
- * include `graph` and the validator catches mis-wired pipelines at
- * edit time.
+ * All three plugins declare `contract: 2` +
+ * `requires: [{binding: "graph", kind: "dgraph"}]`, so the Builder's
+ * slug picker only offers datasets with a `graph` binding backed by
+ * a Dgraph connection and the validator catches mis-wired pipelines
+ * at edit time.
  */
 import type {
   InProcessPlugin,
@@ -73,8 +74,7 @@ export const dgraphUpsertPlugin: InProcessPlugin = {
     version: "1.0.0",
     category: "sink",
     contract: 2,
-    requires: [{ modality: "graph", provider: "dgraph" }],
-    datasetModalities: ["graph"],
+    requires: [{ binding: "graph", kind: "dgraph" }],
     description:
       "Writes nodes (and edges, encoded as nested-object arrays under the predicate name) into Dgraph. Stamps `tenant_id` on every node so multi-tenant isolation is enforced at the storage layer.",
     configSchema: {
@@ -152,8 +152,7 @@ export const dgraphQueryPlugin: InProcessPlugin = {
     version: "1.0.0",
     category: "retriever",
     contract: 2,
-    requires: [{ modality: "graph", provider: "dgraph" }],
-    datasetModalities: ["graph"],
+    requires: [{ binding: "graph", kind: "dgraph" }],
     description:
       "Runs a DQL query against Dgraph and emits the data block as `results`. The current tenantId is exposed to the query as `$tenant_id` so queries can filter without hardcoding ids.",
     configSchema: {
@@ -217,8 +216,7 @@ export const dgraphDeletePlugin: InProcessPlugin = {
     version: "1.0.0",
     category: "sink",
     contract: 2,
-    requires: [{ modality: "graph", provider: "dgraph" }],
-    datasetModalities: ["graph"],
+    requires: [{ binding: "graph", kind: "dgraph" }],
     description:
       "Deletes every node whose `doc_id` is in the supplied list AND whose `tenant_id` matches the executing tenant. Pairs with `delta_filter.deleted` for delta-aware graph ingestion: when a source document disappears, every node derived from it goes too. Producer plugins (typically `dgraph_upsert` upstream of a knowledge-extractor) must stamp `doc_id` on every node for this delete to match.",
     configSchema: {

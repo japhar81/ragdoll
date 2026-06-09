@@ -1,39 +1,49 @@
-# Datasource connections + dataset bindings
+# Connections + dataset bindings
 
-This doc covers the operator-facing model for **how a pipeline knows where to read and write**. There are three layers — keep them straight and the rest follows.
+This doc covers the operator-facing model for **how a pipeline knows where to read and write**. Three layers — keep them straight and the rest follows.
+
+ADR-0023 retired the old "backends.&lt;modality&gt;" + "modalities[]" shape on the dataset and the matching "modality + provider" shape on plugin manifests. Both are gone from the data model entirely. If you've read older drafts of this doc, the visible difference is:
+
+| old                                                 | new                                              |
+| --------------------------------------------------- | ------------------------------------------------ |
+| `backends.vector.{provider, connectionName}`        | `bindings.vectors.{connection}`                  |
+| `modalities: ["vector"]`                            | (gone — derived from `bindings` keys)            |
+| plugin `requires: [{modality, provider}]`           | plugin `requires: [{binding, kind \| kindOneOf}]`|
+| `dataset_modality_mismatch` / `_provider_mismatch`  | `dataset_binding_missing` / `_binding_kind_mismatch`|
 
 ## The three layers
 
 ```
-                      ┌────────────────────────────┐
-                      │ Plugin (qdrant_vector_store)│
-                      │   requires: [{vector, qdrant}]│
-                      └──────────────┬─────────────┘
+                      ┌────────────────────────────────────────┐
+                      │ Plugin (qdrant_vector_store)           │
+                      │   requires: [{binding:"vectors",       │
+                      │              kind:"qdrant"}]           │
+                      └──────────────┬─────────────────────────┘
                                      │ no host/url config — just declares what it needs
                                      ▼
-                ┌────────────────────────────────────┐
-                │ Dataset (slug: "docs")             │
-                │   backends.vector = {              │
-                │     provider: "qdrant",            │
-                │     connectionName: "qdrant-main", │
-                │     collection: "docs_v1"          │
-                │   }                                │
-                └──────────────┬─────────────────────┘
+                ┌────────────────────────────────────────────┐
+                │ Dataset (slug: "docs")                     │
+                │   bindings.vectors = {                     │
+                │     connection: "qdrant-main",             │
+                │     collection: "docs_v1",                 │
+                │     namespace:  "by-tenant"                │
+                │   }                                        │
+                └──────────────┬─────────────────────────────┘
                                │ pinned per (tenant, env) by the runtime
                                ▼
         ┌───────────────────────────────────────────────┐
-        │ Connection (name: "qdrant-main")              │
+        │ Connection (slug: "qdrant-main")              │
         │   tenant=NULL, env=NULL  → host: shared       │
         │   tenant=A,    env=NULL  → host: a.example    │
-        │   tenant=B,    env=prod  → host: b-prod.example│
+        │   tenant=B,    env=prod  → host: b-prod.ex    │
         └───────────────────────────────────────────────┘
 ```
 
-**Plugin** — declares the shape of dataset it needs (modality + optional provider) via `requires` in its manifest. Knows NOTHING about hosts, ports, URLs. The runtime hard-fails before the plugin runs if no connection resolves.
+**Plugin** — declares the dataset slot it needs (binding name + acceptable connection kind) via `requires` in its manifest. Knows NOTHING about hosts, ports, URLs. The runtime hard-fails before the plugin runs if the binding doesn't resolve.
 
-**Dataset** — operator-defined logical corpus. Per-modality backend blocks carry the provider, the index/collection name, and a `connectionName` pointer. The dataset is referenced by `{slug, alias}` from pipeline specs; the runtime walks env→tenant→global to pick the actual row. Per-(pipeline, tenant, env) **binding overrides** can pin a specific physical row for one pipeline-on-this-scope.
+**Dataset** — operator-defined logical corpus. The `bindings:` map names slots (free-text — common ones are `vectors`, `text`, `graph`, `rows`) and each slot points at a `connection` slug + optional `collection` override + optional `namespace` policy. The dataset is referenced by `{slug, alias}` from pipeline specs; the runtime walks env→tenant→global to pick the actual row. Per-(pipeline, tenant, env) **binding overrides** can pin a specific physical row for one pipeline-on-this-scope.
 
-**Connection** — per-(tenant, env) host + credentials. Globals (tenant=NULL) act as cluster-wide defaults that tenants inherit. Cascade:
+**Connection** — per-(tenant, env) host + credentials + kind. Globals (tenant=NULL) act as cluster-wide defaults that tenants inherit. Cascade:
 
 ```
 (tenant=T, env=E)        env-specific match (tier 3)
@@ -54,7 +64,7 @@ Every storage-touching plugin's manifest declares what it needs:
   id: "qdrant_vector_store",
   contract: 2,
   requires: [
-    { modality: "vector", provider: "qdrant" }
+    { binding: "vectors", kind: "qdrant" }
   ],
   configSchema: {
     // NO host/url/endpoint here. Per-call knobs only.
@@ -67,31 +77,33 @@ Every storage-touching plugin's manifest declares what it needs:
 }
 ```
 
+`kindOneOf: ["qdrant", "opensearch"]` lets a plugin accept any of several kinds; `kind: "qdrant"` is sugar for a 1-element `kindOneOf`. Omitting both = any kind acceptable (just need the binding by name).
+
 Hybrid plugins list every slot they need:
 
 ```typescript
 requires: [
-  { modality: "vector", provider: "opensearch" },
-  { modality: "text",   provider: "opensearch" }
+  { binding: "vectors", kind: "opensearch" },
+  { binding: "text",    kind: "opensearch" }
 ]
 ```
 
 Validation happens twice:
 
-- **At edit time** (Builder): the spec validator checks the bound dataset's modalities and provider against the plugin's `requires`. Mismatches surface as `dataset_modality_mismatch` and `dataset_provider_mismatch` — Run / Deploy are blocked until fixed.
-- **At execute time** (worker): if the resolved dataset's `backends[modality].connection` doesn't exist, the plugin throws a preflight error pointing at the offending dataset slug. The execution row is marked `failed` before any work runs.
+- **At edit time** (Builder): the spec validator checks the bound dataset's binding names + connection kinds against the plugin's `requires`. Mismatches surface as `dataset_binding_missing` and `dataset_binding_kind_mismatch` — Run / Deploy are blocked until fixed.
+- **At execute time** (worker): if the resolved dataset's `bindings.<name>.connection` doesn't resolve, the plugin throws a preflight error pointing at the offending dataset slug. The execution row is marked `failed` before any work runs.
 
 ## Connection cascade
 
-Connections live in `datasource_connections`. The resolver walks three tiers, picking the most-specific match for `(tenant T, env E, name N)`:
+Connections live in the unified `connections` table (ADR-0023 §1). The resolver walks three tiers, picking the most-specific match for `(tenant T, env E, slug N)`:
 
 | Tier | Row shape                                  | Use case                              |
 | ---- | ------------------------------------------ | ------------------------------------- |
-| 3    | `tenant_id=T, environment_id=E, name=N`    | Per-env override for tenant T         |
-| 2    | `tenant_id=T, environment_id=NULL, name=N` | Tenant-wide override (all envs)       |
-| 1    | `tenant_id=NULL, environment_id=NULL, name=N` | Cluster-wide default for every tenant |
+| 3    | `tenant_id=T, environment_id=E, slug=N`    | Per-env override for tenant T         |
+| 2    | `tenant_id=T, environment_id=NULL, slug=N` | Tenant-wide override (all envs)       |
+| 1    | `tenant_id=NULL, environment_id=NULL, slug=N` | Cluster-wide default for every tenant |
 
-Globals require `config:edit_global`; tenant rows require `dataset:admin` on the tenant.
+Globals require `connection:admin` at scope `*`; tenant rows require `connection:admin` on the tenant.
 
 ### Example
 
@@ -99,14 +111,14 @@ Tenant A has one OpenSearch cluster shared across envs; Tenant B has three (one 
 
 ```
 Connections:
-  name=os, tenant=NULL, env=NULL    → host: dev-default.example   # safety net
-  name=os, tenant=A, env=NULL        → host: os.tenantA.example   # tenant-wide
-  name=os, tenant=B, env=dev         → host: os-dev.tenantB.example
-  name=os, tenant=B, env=prod        → host: os-prod.tenantB.example
-  name=os, tenant=B, env=qa          → host: os-qa.tenantB.example
+  slug=os, tenant=NULL, env=NULL    → host: dev-default.example   # safety net
+  slug=os, tenant=A, env=NULL        → host: os.tenantA.example   # tenant-wide
+  slug=os, tenant=B, env=dev         → host: os-dev.tenantB.example
+  slug=os, tenant=B, env=prod        → host: os-prod.tenantB.example
+  slug=os, tenant=B, env=qa          → host: os-qa.tenantB.example
 ```
 
-The pipeline spec just says `dataset: {slug: "docs", alias: "stable"}` and the dataset's `backends.text.connectionName = "os"`. Each tenant resolves "os" to their own cluster — no spec change, no per-tenant dataset copies.
+The pipeline spec just says `dataset: {slug: "docs", alias: "stable"}` and the dataset's `bindings.text.connection = "os"`. Each tenant resolves "os" to their own cluster — no spec change, no per-tenant dataset copies.
 
 ## Dataset binding overrides
 
@@ -121,7 +133,7 @@ For each `dataset: {slug: S}` in pipeline P running as (tenant T, env E):
 
 Common use case: "Tenant B's prod pipeline writes to a schema-v2 dataset; everything else stays on v1." Create one binding row pinning slug `docs` → dataset `docs-v2-tenantB` for (pipeline=ingest, tenant=B, env=prod). No spec change.
 
-Manage via the Datasets screen's "Binding overrides targeting this dataset" section, or the per-pipeline bindings API:
+Manage via the Datasets screen's "Used by" panel (which shows every pipeline node wiring this slug, with a deep-link to the Builder) or the per-pipeline bindings API:
 
 ```
 GET    /api/pipelines/:id/dataset-bindings
@@ -132,16 +144,17 @@ DELETE /api/dataset-bindings/:id
 
 ## CRUD APIs
 
-### Connections
+### Connections (ADR-0023 unified registry)
 
 | Verb   | Path                                | Notes                                                   |
 | ------ | ----------------------------------- | ------------------------------------------------------- |
 | GET    | `/api/connections`                  | with `x-tenant-id`: tenant + inherited globals; without: globals only (admin) |
 | GET    | `/api/connections/:id`              | single row                                              |
-| POST   | `/api/connections`                  | `{ tenantId, environmentId?, name, datasourceType, config, secretRefId? }` — pass `tenantId: null` for a global row |
-| PATCH  | `/api/connections/:id`              | partial update                                          |
-| DELETE | `/api/connections/:id`              | hard delete                                             |
-| GET    | `/api/connections/resolve/:name`    | diagnostic — returns `{ resolved, reason }` where reason is `env_specific`, `tenant_fallback`, or `no_match` |
+| POST   | `/api/connections`                  | `{ scope, tenantId?, environmentId?, slug, displayName, kind, config, secretRefId? }` |
+| PUT    | `/api/connections/:id`              | replace                                                 |
+| DELETE | `/api/connections/:id`              | soft archive                                            |
+| POST   | `/api/connections/:id/probe`        | synchronous probe via the driver's `probe()` hook       |
+| GET    | `/api/connection-kinds`             | every registered driver's `displayName` + `configSchema` + `datasetBindings` |
 
 ### Bindings
 
@@ -151,20 +164,21 @@ DELETE /api/dataset-bindings/:id
 | POST   | `/api/pipelines/:id/dataset-bindings`         | `{ tenantId, environmentId?, sourceSlug, targetDatasetId }` |
 | PATCH  | `/api/dataset-bindings/:id`                   | retarget (`targetDatasetId` only)                    |
 | DELETE | `/api/dataset-bindings/:id`                   |                                                      |
+| GET    | `/api/datasets/:id/used-by`                   | server-side cross-ref of pipelines + nodes wiring this dataset |
 
-### Supported `datasourceType`
+### Supported connection kinds
 
-`opensearch`, `qdrant`, `dgraph`, `pgvector`, `postgres`, `redis`. Adding a new type means adding a backend in the resolver + a plugin that knows how to consume it.
+The set of registered driver kinds is whatever's installed today — `GET /api/connection-kinds` returns the live list. Out of the box: `qdrant`, `opensearch`, `dgraph`, `postgres`, `mongodb`, `clickhouse`. Adding a new kind = adding a driver plugin (ADR-0024); the Connections screen's "Type" picker populates from the same endpoint, no UI changes needed.
 
 ## Dataset namespace policy
 
-A dataset's `backends.<modality>` block accepts an optional `namespace`
+A dataset's `bindings.<name>` block accepts an optional `namespace`
 field that controls how the collection / index / predicate name is
 **isolated across tenants and environments at resolve-time**. The base
 collection name lives on the dataset version
-(`dataset_versions.backend_collections.<modality>`); the resolver
-appends a deterministic, sanitised suffix before any plugin sees it.
-Plugins read the effective name from `ResolvedDataset.backendCollections`
+(`dataset_versions.backend_collections.<name>`); the resolver appends a
+deterministic, sanitised suffix before any plugin sees it. Plugins read
+the effective name from `ResolvedDataset.bindings.<name>.collection`
 unchanged — no plugin changes are required to adopt this.
 
 ### Why on the dataset, not the connection
@@ -218,15 +232,14 @@ runtime with a wired tenant/env context.
 
 ### Setting the policy
 
-UI: Datasets → pick a dataset → "Backend namespace policy" disclosure
-under "Modalities + backends" → per-modality dropdown with a live
-preview of the effective collection name. The validator runs both
-client-side (option list filtered to legal values for the scope) and
-server-side (POST + PATCH both call `validateNamespacePolicyForScope`).
+UI: Datasets → pick a dataset → Bindings table → per-binding "Namespace"
+dropdown. Legal values are filtered to what the dataset's scope allows;
+the validator runs server-side too (POST + PATCH both call
+`validateNamespacePolicyForScope`).
 
-API: include `namespace` on any `backends.<modality>` block in
+API: include `namespace` on any `bindings.<name>` block in
 `POST /api/datasets` or `PATCH /api/datasets/:id`. Illegal combinations
-return 422 with `path: "backends.<modality>.namespace"`.
+return 422 with `path: "bindings.<name>.namespace"`.
 
 ### Recommendations
 
@@ -237,16 +250,3 @@ return 422 with `path: "backends.<modality>.namespace"`.
 - **Tenant datasets**: prefer `shared` unless you actually need per-env
   splits. The tenant cascade already isolates by tenant via the
   connection.
-- **Environment datasets**: nothing to choose — only `shared` applies.
-
-## Multi-connection per dataset — deferred
-
-For v1, **one (dataset, modality) resolves to exactly one connection**. Read-replica / write-primary splits, multi-region failover, and shard fan-out all need a "give me the *read* connection on this dataset" / "the *write* one" distinction. The model has room for it (a `role: "read" | "write"` field on the dataset's backend connection ref) but the UI + plugin-side selection are out of scope for now.
-
-If you have a real use case for multi-connection, file it with the read/write split details and we'll prioritise. The above sentence is the entire deferral commitment — no implicit fallback semantics, no half-shipped v0.
-
-## Secret handling
-
-`connection.secretRefId` points at a row in `secret_refs` (same table the plugin `secrets:` block uses). Connection rows never store plaintext — the secret resolves via `DatabaseEncryptedSecretProvider` at runtime, scoped by the calling tenant.
-
-Plugins today still get credentials via their own `secrets:` block in the spec; PR-followup work will let the runtime auto-resolve a connection's `secretRefId` into the plugin's `secrets` map under well-known keys (e.g. `secrets.username`, `secrets.password`). Tracked separately.

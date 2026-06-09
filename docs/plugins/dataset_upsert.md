@@ -2,9 +2,9 @@
 
 The v2-native write primitive. Same role as `vector_upsert` but reads
 the backend (Qdrant / pgvector) from the resolved Dataset's
-`backends.vector.provider` instead of from `config.url`. Lets you swap a
-dataset from Qdrant to pgvector by editing the dataset row — no
-pipeline edit, no re-deploy.
+`bindings.vectors.connectionKind` instead of from `config.url`. Lets you
+swap a dataset from Qdrant to pgvector by editing the binding on the
+Datasets screen — no pipeline edit, no re-deploy.
 
 ## Inputs
 

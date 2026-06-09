@@ -29,7 +29,7 @@ collection itself; that came in over Phase 5's dataset resolver.
   provider for each invocation. Set `config.provider: "ollama"` for
   local zero-cost embedding; OpenAI / Anthropic for hosted models.
 - pgvector backend selection: when the Dataset's
-  `backends.vector.provider === "pgvector"` the plugin uses
+  `bindings.vectors.connectionKind === "pgvector"` the plugin uses
   `PgVectorStore` regardless of `RAGDOLL_VECTOR_BACKEND` — the dataset
   wins.
 

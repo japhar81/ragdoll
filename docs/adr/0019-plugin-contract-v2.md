@@ -2,7 +2,15 @@
 
 ## Status
 
-Accepted.
+Accepted. **Partially superseded by ADR-0023** — the
+`requires: [{modality, provider}]` plugin manifest shape has been
+replaced by `requires: [{binding, kind | kindOneOf}]`. The
+"dataset-aware plugins receive a ResolvedDataset and pluck connection
+info from it instead of taking host/url config" core remains. Anything
+referencing `dataset.backends.<modality>` should be read as describing
+the OLD shape; today plugins read from `dataset.bindings.<name>` and
+the validator emits `dataset_binding_missing` /
+`dataset_binding_kind_mismatch` codes.
 
 ## Context
 

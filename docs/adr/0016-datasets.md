@@ -2,7 +2,14 @@
 
 ## Status
 
-Accepted.
+Accepted. **Partially superseded by ADR-0023** — the `backends.<modality>`
++ `modalities[]` shape on the dataset has been replaced by
+`bindings: {<name>: {connection, collection?, namespace?}}`. The
+"datasets as first-class corpora with slug/alias resolution + scope
+cascade + per-tenant connection injection" core remains. Anything in
+this doc that references `backends.<modality>` or modality enums
+should be read as describing the OLD shape; ADR-0023 is the
+authoritative current model.
 
 ## Context
 

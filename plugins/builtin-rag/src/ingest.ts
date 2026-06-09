@@ -1001,8 +1001,7 @@ export const qdrantDeletePlugin: InProcessPlugin = {
     version: "1.0.0",
     category: "sink",
     contract: 2,
-    requires: [{ modality: "vector", provider: "qdrant" }],
-    datasetModalities: ["vector"],
+    requires: [{ binding: "vectors", kind: "qdrant" }],
     description:
       "Deletes points by id from a Qdrant collection. Pairs with `delta_filter.deleted` for delta-aware ingestion: when source documents disappear from disk, their vector rows go too.",
     configSchema: {
@@ -1143,8 +1142,7 @@ export const opensearchDeletePlugin: InProcessPlugin = {
     version: "1.0.0",
     category: "sink",
     contract: 2,
-    requires: [{ modality: "text", provider: "opensearch" }],
-    datasetModalities: ["text"],
+    requires: [{ binding: "text", kind: "opensearch" }],
     description:
       "Deletes every chunk for the given docIds from an OpenSearch index (filter by docId + tenantId on the doc body — the upsert side sets `_id` per-chunk so the caller doesn't know the chunk count to recompute the per-chunk ids). Tenant-scoped: the filter requires the indexed doc's `tenantId` field to match the executing tenant, defense against a docId collision across tenants. Pairs with `delta_filter.deleted` for delta-aware ingestion.",
     configSchema: {

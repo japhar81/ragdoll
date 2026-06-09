@@ -368,14 +368,12 @@ test("dgraph_delete: empty input no-ops", async () => {
 
 // ---- manifest sanity ------------------------------------------------------
 
-test("dgraph_upsert + dgraph_query + dgraph_delete manifests declare graph modality", () => {
-  assert.equal(dgraphUpsertPlugin.manifest.contract, 2);
-  assert.deepEqual(dgraphUpsertPlugin.manifest.datasetModalities, ["graph"]);
+test("dgraph_upsert + dgraph_query + dgraph_delete manifests require the graph binding on a dgraph connection", () => {
+  for (const p of [dgraphUpsertPlugin, dgraphQueryPlugin, dgraphDeletePlugin]) {
+    assert.equal(p.manifest.contract, 2);
+    assert.deepEqual(p.manifest.requires, [{ binding: "graph", kind: "dgraph" }]);
+  }
   assert.equal(dgraphUpsertPlugin.manifest.category, "sink");
-  assert.equal(dgraphQueryPlugin.manifest.contract, 2);
-  assert.deepEqual(dgraphQueryPlugin.manifest.datasetModalities, ["graph"]);
   assert.equal(dgraphQueryPlugin.manifest.category, "retriever");
-  assert.equal(dgraphDeletePlugin.manifest.contract, 2);
-  assert.deepEqual(dgraphDeletePlugin.manifest.datasetModalities, ["graph"]);
   assert.equal(dgraphDeletePlugin.manifest.category, "sink");
 });
