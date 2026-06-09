@@ -1846,6 +1846,13 @@ export {
   clickhouseDeletePlugin
 } from "./plugins/clickhouse.ts";
 
+// Side-effect import: registers Qdrant / OpenSearch / Dgraph drivers in
+// the unified Connections registry (ADR-0024). No exports — the
+// registrations happen at module load. Without this import the
+// Connections screen + periodic probe report "no driver registered"
+// for those kinds.
+import "./plugins/storage-drivers.ts";
+
 // Email pre-processing family — pure text, no LLM, no I/O.
 // `preprocessEmailBody` and `aggregateThreads` are pure helpers re-
 // exported for unit tests.
