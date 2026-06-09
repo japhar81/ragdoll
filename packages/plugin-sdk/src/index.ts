@@ -344,6 +344,28 @@ export interface ResolvedDataset {
 }
 
 /**
+ * ADR-0021: Resolved external connection delivered to v2 plugins.
+ *
+ * Mirrors the structural shape in `@ragdoll/external-connections` so
+ * plugin authors don't need an inter-package import. The runtime
+ * assembles this from the connections registry + SecretProvider before
+ * calling the plugin.
+ *
+ * `secret` is the resolved credential payload — typically a DSN /
+ * connection URI / API key. Drivers parse it according to their kind
+ * (MongoDB expects a `mongodb://` URI; ClickHouse expects a password
+ * with host+port in `options`, etc).
+ */
+export interface ResolvedExternalConnection {
+  id: string;
+  slug: string;
+  kind: string;
+  secret?: string;
+  options: Record<string, unknown>;
+  cascadeReason: "global" | "tenant" | "environment";
+}
+
+/**
  * Resolves {@link DatasetRef} against the running context's
  * (tenantId, environment) — walking env → tenant → global, first match
  * wins. Returns `undefined` when no dataset matches (the runtime then
@@ -394,6 +416,15 @@ export interface PluginExecutionInput {
    * branch on this; v1 plugins ignore it.
    */
   dataset?: ResolvedDataset;
+  /**
+   * Resolved external connection (ADR-0021). Populated when the node
+   * carries `connection: { slug }` AND the runtime found a matching
+   * row in the connections registry AND the principal holds
+   * `external_connection:use` at the row's scope. Carries the
+   * connection's resolved secret (DSN / URI / API key) so plugins
+   * never see the secret-ref machinery.
+   */
+  connection?: ResolvedExternalConnection;
   /**
    * Nested synchronous pipeline invocation (Phase 9, Round 2). Only
    * populated when the current pipeline is itself running in

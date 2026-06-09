@@ -42,6 +42,7 @@ import type {
   DatasetRepository,
   DatasetVersionRepository,
   DatasetAliasRepository,
+  ExternalConnectionRepository,
   PipelineDatasetBindingRepository,
   TenantRepository,
   EnvironmentRepository
@@ -103,6 +104,15 @@ export interface WorkerRepositories {
    */
   tenants?: TenantRepository;
   environments?: EnvironmentRepository;
+  /**
+   * Optional external-connections registry (ADR-0021). When wired, the
+   * worker's executor receives an ExternalConnectionResolver and v2
+   * plugins reading `input.connection` get a resolved object instead of
+   * `undefined`. Omitting it preserves the legacy `secrets.dsn` path
+   * (matches the API behaviour when AppDeps.externalConnections is
+   * absent).
+   */
+  externalConnections?: ExternalConnectionRepository;
 }
 
 export interface WorkerDeps {

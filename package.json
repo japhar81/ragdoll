@@ -45,6 +45,7 @@
   "dependencies": {
     "@anthropic-ai/sdk": "^0.39.0",
     "@bufbuild/protobuf": "^2.12.0",
+    "@clickhouse/client": "^1.20.0",
     "@connectrpc/connect": "^2.1.1",
     "@connectrpc/connect-node": "^2.1.1",
     "@fastify/cors": "^11.2.0",
@@ -77,6 +78,7 @@
     "ioredis": "^5.5.0",
     "jmespath": "^0.16.0",
     "jsonata": "^2.0.6",
+    "mongodb": "^7.2.0",
     "openai": "^4.85.0",
     "pg": "^8.13.1",
     "zod": "^3.24.2"

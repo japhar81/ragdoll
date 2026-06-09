@@ -1,11 +1,13 @@
-# ADR 0021: External Connections Registry (Proposed)
+# ADR 0021: External Connections Registry
 
 ## Status
 
-Proposed. No code lands with this ADR; it captures the design we'd
-adopt the next time a non-Postgres external backend (MySQL, ClickHouse,
-an HTTP-as-DB API, a tenant-owned S3 bucket) needs to participate in a
-pipeline.
+**Accepted.** Implemented in the MongoDB + ClickHouse families that
+landed alongside this ADR's promotion. The registry is live; back-compat
+with ADR-0020's `postgres-core` is preserved (a node without a
+`connection:` field falls back to the legacy `secrets.dsn` path).
+
+Operator documentation: `docs/admin/external-connections.md`.
 
 ## Context
 
@@ -117,12 +119,16 @@ client; per-driver factories (postgres, mysql, …) register themselves
 the way provider adapters register today (ADR 0008 / providers
 package).
 
-## Decision (deferred)
+## Decision
 
-This ADR is **Proposed**, not Accepted. We adopt it the next time a
-second external-DB plugin family lands — that's the point at which the
-cost of duplication exceeds the cost of building the registry. Until
-then, ADR 0020's internal core is the right abstraction.
+**Accepted** when MongoDB + ClickHouse families landed. The cost of
+building the registry was paid for by two families (not just one)
+sharing the resolver / pool cache / RBAC / probe infrastructure
+out-of-the-gate, validating the abstraction was the right shape.
+
+The `postgres-core` migration is a planned follow-up — preserving
+back-compat for every pipeline written under ADR-0020 by keeping the
+internal core as the fallback path until those pipelines opt in.
 
 ## Consequences (if accepted)
 

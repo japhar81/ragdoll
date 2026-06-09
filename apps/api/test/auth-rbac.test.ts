@@ -145,11 +145,12 @@ test("signup mode open_default_role grants the configured role", async () => {
     path: "/api/auth/me",
     headers: { authorization: `Bearer ${res.body.token}` }
   });
-  // viewer = execution:view_logs + dataset:read (Phase 4: every role with
-  // any read scope gains dataset:read so the Datasets tab is visible).
+  // viewer = execution:view_logs + dataset:read + external_connection:read
+  // (read scopes also cover external connections per ADR-0021).
   assert.deepEqual(me.body.permissions.sort(), [
     "dataset:read",
-    "execution:view_logs"
+    "execution:view_logs",
+    "external_connection:read"
   ]);
 });
 
