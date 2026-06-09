@@ -159,7 +159,40 @@ export interface PipelineSpec {
     parameters?: ConfigDefinition[];
     nodes: PipelineNode[];
     edges: PipelineEdge[];
+    /**
+     * ADR-0023: Pipeline-level binding declarations. Each entry names a
+     * binding the pipeline references; nodes consume them via
+     * `node.binding: <id>`. This is the canonical shape for the
+     * "multiple datasets / connections per pipeline" use case (e.g.
+     * three knowledge graphs queried by three nodes).
+     *
+     * Examples:
+     *   bindings:
+     *     - { id: people,   dataset: people-kg }
+     *     - { id: company,  dataset: company-kg }
+     *     - { id: warehouse, connection: clickhouse-prod }
+     *
+     * Inline `node.dataset` / `node.connection` references continue to
+     * work — the spec-load shim desugars them to anonymous bindings.
+     * Per-(tenant, env) binding overrides live in the existing
+     * `pipeline_dataset_bindings` table (now generalised to also
+     * carry connection targets).
+     */
+    bindings?: PipelineBindingDecl[];
   };
+}
+
+/**
+ * ADR-0023: one entry in the pipeline-level `bindings:` block.
+ * Exactly one of `dataset` / `connection` must be set — datasets are
+ * the storage-shaped bindings; connections are the direct-query
+ * bindings (mongo_find, clickhouse_query, etc).
+ */
+export interface PipelineBindingDecl {
+  id: string;
+  dataset?: string;
+  connection?: string;
+  description?: string;
 }
 
 export interface PipelineNode {
@@ -188,6 +221,13 @@ export interface PipelineNode {
    * `connection:use` before invoking the plugin.
    */
   connection?: { slug: string };
+  /**
+   * ADR-0023: bind this node to a pipeline-level binding by id. Wins
+   * over inline `dataset` / `connection` when set. The Builder's top
+   * inspector edits the `spec.bindings:` block and nodes pick from
+   * the declared list — see PipelineSpec.spec.bindings.
+   */
+  binding?: string;
   ui?: Record<string, unknown>;
 }
 
