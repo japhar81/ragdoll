@@ -277,15 +277,36 @@ export function validatePipelineSpec(
         const manifest = registry?.get(node.plugin)?.manifest as
           | {
               datasetModalities?: string[];
-              requires?: Array<{ modality: string; provider?: string }>;
+              requires?: Array<{
+                // Legacy ADR-0019 fields:
+                modality?: string;
+                provider?: string;
+                // ADR-0023 fields:
+                binding?: string;
+                kind?: string;
+                kindOneOf?: string[];
+              }>;
             }
           | undefined;
-        // Two sources of "what does this plugin need":
+        // Three sources of "what does this plugin need":
         //   - legacy `datasetModalities: ["vector"]` (modality only)
-        //   - new `requires: [{modality: "vector", provider: "qdrant"}]`
-        //     which can ALSO enforce provider.
+        //   - legacy `requires: [{modality, provider?}]`
+        //   - new ADR-0023 `requires: [{binding, kind|kindOneOf}]`
+        // Normalize all three to {modality, provider?} so the rest of
+        // the validator below doesn't care which shape the plugin used.
+        // The binding NAME is the modality value; the connection kind
+        // is the provider value — that's the structural equivalence
+        // ADR-0023 §3 calls out.
         const legacyMods = manifest?.datasetModalities ?? [];
-        const newRequires = manifest?.requires ?? [];
+        const rawRequires = manifest?.requires ?? [];
+        const newRequires = rawRequires
+          .map((r) => {
+            const mod = r.binding ?? r.modality;
+            if (!mod) return undefined; // tool-only requirement (kind w/o binding) skipped here
+            const provider = r.kind ?? r.provider;
+            return { modality: mod, provider } as { modality: string; provider?: string };
+          })
+          .filter((r): r is { modality: string; provider?: string } => Boolean(r));
         const requiredMods = [
           ...legacyMods,
           ...newRequires.map((r) => r.modality)

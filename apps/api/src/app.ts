@@ -81,7 +81,7 @@ import {
   InMemoryTenantPipelineRepository,
   InMemoryEnvironmentRepository,
   InMemoryDatasetRepository,
-  InMemoryExternalConnectionRepository,
+  InMemoryConnectionRepository,
   InMemoryDatasetVersionRepository,
   InMemoryDatasetAliasRepository,
   InMemoryRetentionSettingsRepository,
@@ -90,7 +90,6 @@ import {
   type DatasetVersionRepository,
   type DatasetVersionRow,
   type DatasetAliasRepository,
-  type ExternalConnectionRepository,
   type DatasetAliasRow,
   InMemoryUserRepository,
   InMemoryUserIdentityRepository,
@@ -129,7 +128,7 @@ import {
   type RetentionSettingsRepository,
   type PluginRepository,
   type ProviderRepository,
-  type DatasourceConnectionRepository,
+  type ConnectionRepository,
   type VectorCollectionRepository,
   type TenantRow,
   type EnvironmentRow,
@@ -224,7 +223,6 @@ import { registerFoldersRoutes } from "./app/routes/folders.ts";
 import { registerConfigRoutes } from "./app/routes/config.ts";
 import { registerSchedulesRoutes } from "./app/routes/schedules.ts";
 import { registerDatasetsRoutes } from "./app/routes/datasets.ts";
-import { registerExternalConnectionsRoutes } from "./app/routes/external-connections.ts";
 import { registerConnectionsRoutes } from "./app/routes/connections.ts";
 import { registerPipelineBindingsRoutes } from "./app/routes/pipeline-bindings.ts";
 import { registerTenantPipelinesRoutes } from "./app/routes/tenant-pipelines.ts";
@@ -290,8 +288,8 @@ export function createApp(deps: AppDeps): App {
     deps.datasetVersions ?? new InMemoryDatasetVersionRepository();
   const datasetAliases: DatasetAliasRepository =
     deps.datasetAliases ?? new InMemoryDatasetAliasRepository();
-  const externalConnections: ExternalConnectionRepository =
-    deps.externalConnections ?? new InMemoryExternalConnectionRepository();
+  const connections: ConnectionRepository =
+    deps.connections ?? new InMemoryConnectionRepository();
   const retentionSettings: RetentionSettingsRepository =
     deps.retentionSettings ?? new InMemoryRetentionSettingsRepository();
 
@@ -492,17 +490,16 @@ export function createApp(deps: AppDeps): App {
   registerConfigRoutes({ route }, { deps, audit });
 
   registerDatasetsRoutes({ route }, { deps, audit, datasets, datasetVersions, datasetAliases, environments, tenantScope });
-  registerExternalConnectionsRoutes({ route }, { deps, audit, externalConnections, tenantScope });
 
-  // Datasource connections — per-(tenant, env) host/creds registry that
-  // datasets reference by name (PR2 wires the reference into backend
-  // resolution; this PR just lights up CRUD + the cascade resolver).
+  // ADR-0023 Unified Connections Registry. Routes at /api/connections
+  // are the single CRUD surface; old /api/external-connections is gone
+  // (registerExternalConnectionsRoutes deleted alongside this).
   registerConnectionsRoutes(
     { route },
     {
       deps,
       audit,
-      connections: deps.datasources,
+      connections,
       environments,
       tenants: deps.tenants,
       tenantScope

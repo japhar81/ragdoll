@@ -46,30 +46,70 @@ interface MongoConnectionOptions {
 }
 
 // Driver: builds (and pools) one MongoClient per connection.id.
-registerConnectionDriver<MongoClient>("mongodb", {
-  async create(conn) {
-    if (!conn.secret) {
-      throw new Error(
-        `mongodb connection "${conn.slug}" has no secret — set a secretRefId pointing at the URI`
-      );
+// Registered with an ADR-0024 manifest so the Connections UI renders
+// a schema-driven form (database / appName / maxPoolSize) without
+// hand-rolled per-kind TSX.
+registerConnectionDriver<MongoClient>(
+  "mongodb",
+  {
+    async create(conn) {
+      if (!conn.secret) {
+        throw new Error(
+          `mongodb connection "${conn.slug}" has no secret — set a secretRefId pointing at the URI`
+        );
+      }
+      const opts = (conn.options ?? {}) as MongoConnectionOptions;
+      const mod = (await import("mongodb")) as { MongoClient: new (uri: string, opts?: any) => MongoClient };
+      const client = new mod.MongoClient(conn.secret, {
+        appName: opts.appName ?? "ragdoll",
+        maxPoolSize: opts.maxPoolSize ?? 10
+      });
+      await client.connect();
+      return client;
+    },
+    async dispose(client) {
+      await client.close().catch(() => undefined);
+    },
+    async probe(client) {
+      // `admin().ping()` is the canonical liveness check.
+      await client.db("admin").command({ ping: 1 });
     }
-    const opts = (conn.options ?? {}) as MongoConnectionOptions;
-    const mod = (await import("mongodb")) as { MongoClient: new (uri: string, opts?: any) => MongoClient };
-    const client = new mod.MongoClient(conn.secret, {
-      appName: opts.appName ?? "ragdoll",
-      maxPoolSize: opts.maxPoolSize ?? 10
-    });
-    await client.connect();
-    return client;
   },
-  async dispose(client) {
-    await client.close().catch(() => undefined);
-  },
-  async probe(client) {
-    // `admin().ping()` is the canonical liveness check.
-    await client.db("admin").command({ ping: 1 });
+  {
+    displayName: "MongoDB",
+    description:
+      "Document store. Used by mongo_find / mongo_insert / mongo_delete / mongo_aggregate.",
+    configSchema: {
+      type: "object",
+      properties: {
+        database: {
+          type: "string",
+          description: "Default database name. Plugins read input.connection.options.database."
+        },
+        appName: {
+          type: "string",
+          default: "ragdoll",
+          description: "appName advertised to the server (visible in mongostat)."
+        },
+        maxPoolSize: {
+          type: "integer",
+          default: 10,
+          description: "Maximum pool size for the underlying driver."
+        }
+      },
+      required: ["database"],
+      additionalProperties: false
+    },
+    secretSchema: {
+      type: "string",
+      description: "mongodb:// or mongodb+srv:// URI (may include credentials)."
+    },
+    // Mongo today is a tool-only kind — no Dataset binding wires through
+    // to mongo_*. Atlas Vector Search support would add "vectors" here.
+    datasetBindings: [],
+    transport: "in_process"
   }
-});
+);
 
 function dbFor(client: MongoClient, conn: { options: Record<string, unknown> }): Db {
   const dbName = String(conn.options.database ?? "");

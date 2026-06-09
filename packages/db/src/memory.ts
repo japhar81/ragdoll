@@ -20,7 +20,7 @@ export {
   InMemoryDatasetAliasRepository
 } from "./memory/datasets.ts";
 
-export { InMemoryExternalConnectionRepository } from "./memory/external-connections.ts";
+export { InMemoryConnectionRepository } from "./memory/connections.ts";
 
 export {
   InMemoryPipelineRepository,
@@ -37,7 +37,6 @@ export {
   InMemoryPluginVersionRepository,
   InMemoryProviderRepository,
   InMemoryProviderModelRepository,
-  InMemoryDatasourceConnectionRepository,
   InMemoryPipelineDatasetBindingRepository,
   InMemoryVectorCollectionRepository
 } from "./memory/catalog.ts";

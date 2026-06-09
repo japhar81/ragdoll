@@ -1,257 +1,237 @@
 /**
- * Datasource connections CRUD.
+ * Connections REST surface (ADR-0023).
  *
- * A connection is the per-(tenant, env) record carrying the host /
- * port / credentials for a backing store (OpenSearch, Qdrant, Dgraph,
- * Postgres, etc). Datasets reference connections by name; plugins
- * resolve the connection via the dataset's backend block at runtime
- * (so plugins themselves never know the hostname or secret).
+ * Single CRUD + probe surface for the unified connections registry.
+ * Supersedes the per-tenant `datasource_connections` routes (ADR-0020)
+ * AND the `external_connections` routes (ADR-0021) — both folded in
+ * here. Slug resolution is env → tenant → global; cascade visibility
+ * shows globals + tenant + env-scoped rows in one list when scope
+ * context is provided.
  *
- * Cascade: when a row carries `environment_id`, it wins for that env;
- * otherwise the `environment_id IS NULL` row (= tenant-wide default)
- * applies. The repository's `resolveForEnv` enforces this order.
+ * Auth:
+ *   - GET endpoints: `connection:read`
+ *   - POST/PUT/DELETE/probe: `connection:admin`
  *
- * RBAC: a connection is an admin-only resource — it carries the
- * secret_ref that grants access to a backing store. We piggyback on
- * the existing `dataset:admin` permission since both are part of the
- * same operator-grade "this is what we point at" surface.
+ * `connection:use` is enforced separately by the runtime at executor
+ * entry — see ADR-0023 §6.
+ *
+ * Secrets are never returned. `secretRefId` is an opaque pointer the
+ * operator resolves out-of-band.
  */
 import { randomUUID } from "node:crypto";
 import { enforce } from "../../../../../packages/auth/src/index.ts";
 import type {
-  DatasourceConnectionRow,
-  DatasourceConnectionRepository,
+  ConnectionRow,
+  ConnectionRepository,
   EnvironmentRepository,
   TenantRepository
 } from "../../../../../packages/db/src/index.ts";
-import { ok, error, isObject, nowIso, headerValue } from "../http-utils.ts";
+import {
+  ExternalConnectionResolver,
+  probeConnection,
+  listConnectionKinds
+} from "../../../../../packages/external-connections/src/index.ts";
+import { ok, error, isObject, nowIso } from "../http-utils.ts";
 import type { AppDeps } from "../types.ts";
 import type { RouteContext, RouteRegistry, AuditWriter } from "./types.ts";
 
 interface ConnectionsServices {
   deps: AppDeps;
   audit: AuditWriter;
-  connections: DatasourceConnectionRepository;
+  connections: ConnectionRepository;
   environments: EnvironmentRepository;
   tenants: TenantRepository;
   tenantScope: (ctx: RouteContext) => string | undefined;
 }
 
-/**
- * Public projection. `configRedacted` already strips secrets via the
- * postgres jsonb column; we additionally surface a UI-friendly
- * `secretRefId` indicator without exposing the credential value.
- */
-function publicConnection(row: DatasourceConnectionRow): Record<string, unknown> {
+function rowResource(row: {
+  scope: ConnectionRow["scope"];
+  tenantId?: string | null;
+  environmentId?: string | null;
+}): { tenantId?: string; environment?: string } {
+  if (row.scope === "tenant") return { tenantId: row.tenantId ?? undefined };
+  if (row.scope === "environment") {
+    return {
+      tenantId: row.tenantId ?? undefined,
+      environment: row.environmentId ?? undefined
+    };
+  }
+  return {};
+}
+
+function publicConnection(row: ConnectionRow): Record<string, unknown> {
   return {
     id: row.id,
+    scope: row.scope,
     tenantId: row.tenantId ?? null,
     environmentId: row.environmentId ?? null,
-    name: row.name,
-    datasourceType: row.datasourceType,
+    slug: row.slug,
+    displayName: row.displayName,
+    description: row.description ?? null,
+    kind: row.kind,
+    config: row.config ?? {},
     secretRefId: row.secretRefId ?? null,
-    config: row.configRedacted,
-    allowedHosts: row.allowedHosts,
-    denyPrivateNetworks: row.denyPrivateNetworks,
+    allowedHosts: row.allowedHosts ?? [],
+    denyPrivateNetworks: !!row.denyPrivateNetworks,
+    lastProbedAt: row.lastProbedAt ?? null,
+    lastProbeOk: row.lastProbeOk ?? null,
+    lastProbeError: row.lastProbeError ?? null,
+    archivedAt: row.archivedAt ?? null,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt
   };
 }
 
-const ALLOWED_TYPES = new Set([
-  "opensearch",
-  "qdrant",
-  "dgraph",
-  "pgvector",
-  "postgres",
-  "redis"
-]);
+function validateScopeShape(
+  body: Record<string, unknown>
+): Array<{ path: string; message: string }> {
+  const scope = body.scope;
+  const tenantId = body.tenantId;
+  const envId = body.environmentId;
+  const issues: Array<{ path: string; message: string }> = [];
+  if (scope === "global") {
+    if (tenantId != null)
+      issues.push({ path: "tenantId", message: "must be null at global scope" });
+    if (envId != null)
+      issues.push({ path: "environmentId", message: "must be null at global scope" });
+  } else if (scope === "tenant") {
+    if (typeof tenantId !== "string")
+      issues.push({ path: "tenantId", message: "required at tenant scope" });
+    if (envId != null)
+      issues.push({ path: "environmentId", message: "must be null at tenant scope" });
+  } else if (scope === "environment") {
+    if (typeof tenantId !== "string")
+      issues.push({ path: "tenantId", message: "required at environment scope" });
+    if (typeof envId !== "string")
+      issues.push({ path: "environmentId", message: "required at environment scope" });
+  } else {
+    issues.push({
+      path: "scope",
+      message: "must be one of: global, tenant, environment"
+    });
+  }
+  return issues;
+}
 
 export function registerConnectionsRoutes(
   api: RouteRegistry,
   svc: ConnectionsServices
 ): void {
-  const { audit, connections, environments, tenants, tenantScope } = svc;
+  const { deps, audit, connections, tenantScope } = svc;
 
-  // List — optional `?environmentId=` filter narrows to "rows that win
-  // in this env" (env-specific + tenant-wide fallback). Without the
-  // filter, lists every connection in the tenant.
-  //
-  // PR2: also includes global rows (tenantId IS NULL) so the UI can
-  // render the full cascade (Global → Tenant → Env) at every node.
-  // Listing without x-tenant-id surfaces ONLY globals (admin view).
+  // ADR-0024: catalog of loaded connection driver plugins. The web UI
+  // calls this to populate the Type dropdown + render the per-kind
+  // config form from the driver's manifest.configSchema (no
+  // hand-rolled TSX per kind). Open to any authenticated user with
+  // `connection:read` — the catalog has no secrets.
+  api.route("GET", "/api/connection-kinds", async (ctx) => {
+    enforce(ctx.principal, "connection:read");
+    return ok({ kinds: listConnectionKinds() });
+  });
+
   api.route("GET", "/api/connections", async (ctx) => {
-    enforce(ctx.principal, "dataset:read");
+    enforce(ctx.principal, "connection:read");
     const tenantId = tenantScope(ctx);
-    if (!tenantId) {
-      // No tenant context: admin "globals only" view.
-      const all = await connections.list();
-      const globals = all.filter((r) => !r.tenantId);
-      return ok({ connections: globals.map(publicConnection) });
-    }
-    const [tenantRows, allRows] = await Promise.all([
-      connections.listByTenant(tenantId),
-      connections.list()
-    ]);
-    const globals = allRows.filter((r) => !r.tenantId);
-    const rows = [...globals, ...tenantRows];
-    const envFilter =
-      typeof ctx.request.query?.environmentId === "string"
-        ? ctx.request.query.environmentId
-        : headerValue(ctx.request.headers, "x-environment");
-    const filtered = envFilter
-      ? // Surface the row that WOULD apply per the cascade: env-specific
-        // when present, otherwise the env=NULL tenant-wide fallback. We
-        // dedupe by `name` so the listing matches what the resolver picks.
-        Object.values(
-          rows
-            .filter((r) => r.environmentId === envFilter || r.environmentId == null)
-            .reduce<Record<string, DatasourceConnectionRow>>((acc, row) => {
-              const existing = acc[row.name];
-              if (!existing) acc[row.name] = row;
-              else if (existing.environmentId == null && row.environmentId === envFilter) {
-                acc[row.name] = row;
-              }
-              return acc;
-            }, {})
-        )
-      : rows;
-    return ok({ connections: filtered.map(publicConnection) });
+    const envHeader = ctx.request.headers["x-ragdoll-env"];
+    const envId = typeof envHeader === "string" ? envHeader : undefined;
+    const rows = tenantId
+      ? await connections.listVisibleAt({ tenantId, environmentId: envId })
+      : await connections.listAll({ scope: "global" });
+    return ok({ connections: rows.map(publicConnection) });
   });
 
   api.route("GET", "/api/connections/:id", async (ctx) => {
     const row = await connections.get(ctx.params.id);
-    if (!row) return error(404, "not_found", { message: "connection not found" });
-    enforce(ctx.principal, "dataset:read", { tenantId: row.tenantId ?? undefined });
+    if (!row) return error(404, "not_found");
+    enforce(ctx.principal, "connection:read", rowResource(row));
     return ok({ connection: publicConnection(row) });
   });
 
   api.route("POST", "/api/connections", async (ctx) => {
-    const body = ctx.request.body;
-    if (!isObject(body)) {
-      return error(422, "validation_failed", { issues: [{ message: "body required" }] });
-    }
-    // Three scopes are valid for a connection:
-    //   - explicit `tenantId: null` in the body → global (admin-only)
-    //   - explicit `tenantId: "<uuid>"` → that tenant
-    //   - omitted → falls back to x-tenant-id header
-    // Global creation requires the operator's principal to hold
-    // `config:edit_global` (enforced below alongside dataset:admin).
-    const explicitGlobal = body.tenantId === null;
-    const tenantId =
-      explicitGlobal
-        ? null
-        : (typeof body.tenantId === "string" && body.tenantId) || tenantScope(ctx) || null;
-    if (!explicitGlobal && !tenantId) {
-      return error(422, "validation_failed", {
-        issues: [{ path: "tenantId", message: "tenantId required (or pass null for a global connection)" }]
-      });
-    }
-    if (typeof body.name !== "string" || !/^[a-z0-9][a-z0-9_-]{0,62}$/.test(body.name)) {
-      return error(422, "validation_failed", {
-        issues: [{ path: "name", message: "name must be lowercase alphanumeric + _- (1..63 chars)" }]
-      });
-    }
-    if (typeof body.datasourceType !== "string" || !ALLOWED_TYPES.has(body.datasourceType)) {
-      return error(422, "validation_failed", {
-        issues: [{ path: "datasourceType", message: `must be one of: ${[...ALLOWED_TYPES].join(", ")}` }]
-      });
-    }
-    // env_id is OPTIONAL. NULL = "tenant-wide default applied to every
-    // env"; a non-null value scopes this row to a single env.
-    const environmentId =
-      typeof body.environmentId === "string" && body.environmentId
-        ? body.environmentId
-        : null;
-
-    if (tenantId) {
-      const tenant = await tenants.get(tenantId);
-      if (!tenant) {
-        return error(422, "validation_failed", {
-          issues: [{ path: "tenantId", message: "unknown tenant" }]
-        });
-      }
-      if (environmentId) {
-        const envs = await environments.listByTenant(tenantId);
-        if (!envs.find((e) => e.name === environmentId)) {
-          return error(422, "validation_failed", {
-            issues: [{ path: "environmentId", message: `unknown environment: ${environmentId}` }]
-          });
-        }
-      }
-    } else if (environmentId) {
-      // Global rows can't carry an env scope — there's no tenant whose
-      // env catalog would validate it, and the cascade resolver only
-      // looks at (NULL, NULL) for the global tier.
-      return error(422, "validation_failed", {
-        issues: [{ path: "environmentId", message: "global connections cannot carry an environment" }]
-      });
-    }
-    // Global creation needs config:edit_global (it affects every tenant).
-    // Tenant-scoped creation needs dataset:admin on that tenant.
+    const body = isObject(ctx.request.body) ? ctx.request.body : {};
     enforce(
       ctx.principal,
-      tenantId ? "dataset:admin" : "config:edit_global",
-      tenantId ? { tenantId, environment: environmentId ?? undefined } : {}
+      "connection:admin",
+      body.scope === "tenant" || body.scope === "environment"
+        ? rowResource({
+            scope: body.scope as ConnectionRow["scope"],
+            tenantId: typeof body.tenantId === "string" ? body.tenantId : null,
+            environmentId:
+              typeof body.environmentId === "string" ? body.environmentId : null
+          })
+        : {}
     );
-
+    const scopeIssues = validateScopeShape(body);
+    if (
+      typeof body.slug !== "string" ||
+      typeof body.displayName !== "string" ||
+      typeof body.kind !== "string"
+    ) {
+      scopeIssues.push({
+        path: "",
+        message: "slug, displayName, kind are required strings"
+      });
+    }
+    if (scopeIssues.length > 0) {
+      return error(422, "validation_failed", { issues: scopeIssues });
+    }
     const now = nowIso();
-    const created = await connections.create({
-      id: randomUUID(),
-      tenantId,
-      environmentId,
-      name: body.name,
-      datasourceType: body.datasourceType,
+    const row: ConnectionRow = {
+      id: typeof body.id === "string" ? body.id : randomUUID(),
+      scope: body.scope as ConnectionRow["scope"],
+      tenantId: typeof body.tenantId === "string" ? body.tenantId : null,
+      environmentId:
+        typeof body.environmentId === "string" ? body.environmentId : null,
+      slug: body.slug as string,
+      displayName: body.displayName as string,
+      description:
+        typeof body.description === "string" ? body.description : null,
+      kind: body.kind as string,
+      config: isObject(body.config) ? body.config : {},
       secretRefId:
-        typeof body.secretRefId === "string" && body.secretRefId ? body.secretRefId : null,
-      configRedacted: isObject(body.config) ? body.config : {},
-      allowedHosts:
-        Array.isArray(body.allowedHosts)
-          ? body.allowedHosts.filter((h: unknown): h is string => typeof h === "string")
-          : [],
-      denyPrivateNetworks: body.denyPrivateNetworks !== false,
+        typeof body.secretRefId === "string" ? body.secretRefId : null,
+      allowedHosts: Array.isArray(body.allowedHosts)
+        ? (body.allowedHosts as string[])
+        : [],
+      denyPrivateNetworks: !!body.denyPrivateNetworks,
       createdAt: now,
       updatedAt: now
-    });
-    await audit(ctx, "connection.create", "connection", created.id, undefined, publicConnection(created));
+    };
+    const created = await connections.create(row);
+    await audit(
+      ctx,
+      "connection.create",
+      "connection",
+      created.id,
+      undefined,
+      publicConnection(created)
+    );
     return ok({ connection: publicConnection(created) }, 201);
   });
 
-  api.route("PATCH", "/api/connections/:id", async (ctx) => {
+  api.route("PUT", "/api/connections/:id", async (ctx) => {
     const before = await connections.get(ctx.params.id);
-    if (!before) return error(404, "not_found", { message: "connection not found" });
-    enforce(
-      ctx.principal,
-      before.tenantId ? "dataset:admin" : "config:edit_global",
-      before.tenantId
-        ? { tenantId: before.tenantId, environment: before.environmentId ?? undefined }
-        : {}
-    );
-    const body = ctx.request.body;
-    if (!isObject(body)) {
-      return error(422, "validation_failed", { issues: [{ message: "body required" }] });
-    }
-    const patch: Partial<DatasourceConnectionRow> = {};
-    if (typeof body.name === "string" && /^[a-z0-9][a-z0-9_-]{0,62}$/.test(body.name)) {
-      patch.name = body.name;
-    }
-    if (typeof body.datasourceType === "string" && ALLOWED_TYPES.has(body.datasourceType)) {
-      patch.datasourceType = body.datasourceType;
-    }
-    if (typeof body.secretRefId === "string" || body.secretRefId === null) {
-      patch.secretRefId = (body.secretRefId as string | null) || null;
-    }
-    if (isObject(body.config)) patch.configRedacted = body.config;
-    if (Array.isArray(body.allowedHosts)) {
-      patch.allowedHosts = body.allowedHosts.filter(
-        (h: unknown): h is string => typeof h === "string"
-      );
-    }
-    if (typeof body.denyPrivateNetworks === "boolean") {
+    if (!before) return error(404, "not_found");
+    enforce(ctx.principal, "connection:admin", rowResource(before));
+    const body = isObject(ctx.request.body) ? ctx.request.body : {};
+    const patch: Partial<ConnectionRow> = {};
+    if (typeof body.displayName === "string") patch.displayName = body.displayName;
+    if ("description" in body)
+      patch.description =
+        typeof body.description === "string" ? body.description : null;
+    if (typeof body.kind === "string") patch.kind = body.kind;
+    if ("secretRefId" in body)
+      patch.secretRefId =
+        typeof body.secretRefId === "string" ? body.secretRefId : null;
+    if (isObject(body.config)) patch.config = body.config;
+    if (Array.isArray(body.allowedHosts))
+      patch.allowedHosts = body.allowedHosts as string[];
+    if (typeof body.denyPrivateNetworks === "boolean")
       patch.denyPrivateNetworks = body.denyPrivateNetworks;
-    }
-    patch.updatedAt = nowIso();
-    const updated = await connections.update(before.id, patch);
+    if ("archivedAt" in body)
+      patch.archivedAt =
+        typeof body.archivedAt === "string" ? body.archivedAt : null;
+    const updated = await connections.update(ctx.params.id, patch);
     await audit(
       ctx,
       "connection.update",
@@ -265,40 +245,48 @@ export function registerConnectionsRoutes(
 
   api.route("DELETE", "/api/connections/:id", async (ctx) => {
     const before = await connections.get(ctx.params.id);
-    if (!before) return error(404, "not_found", { message: "connection not found" });
-    enforce(
-      ctx.principal,
-      before.tenantId ? "dataset:admin" : "config:edit_global",
-      before.tenantId
-        ? { tenantId: before.tenantId, environment: before.environmentId ?? undefined }
-        : {}
+    if (!before) return error(404, "not_found");
+    enforce(ctx.principal, "connection:admin", rowResource(before));
+    await connections.update(ctx.params.id, { archivedAt: nowIso() });
+    await audit(
+      ctx,
+      "connection.archive",
+      "connection",
+      ctx.params.id,
+      publicConnection(before),
+      undefined
     );
-    await connections.delete(before.id);
-    await audit(ctx, "connection.delete", "connection", before.id, publicConnection(before), undefined);
     return { status: 204, body: undefined, headers: {} };
   });
 
-  // Diagnostic: "for this name in this env, what would the cascade
-  // resolve to?" Useful when an operator is debugging why a pipeline
-  // hit the wrong cluster. Returns the winning row (or null) without
-  // exposing the secret value.
-  api.route("GET", "/api/connections/resolve/:name", async (ctx) => {
-    enforce(ctx.principal, "dataset:read");
-    const tenantId = tenantScope(ctx);
-    if (!tenantId) {
-      return error(400, "tenant_required", { message: "x-tenant-id header required" });
+  api.route("POST", "/api/connections/:id/probe", async (ctx) => {
+    const row = await connections.get(ctx.params.id);
+    if (!row) return error(404, "not_found");
+    enforce(ctx.principal, "connection:admin", rowResource(row));
+    const resolver = new ExternalConnectionResolver(
+      connections,
+      deps.secretProvider
+    );
+    const resolved = await resolver.resolve({
+      slug: row.slug,
+      tenantId: row.tenantId ?? undefined,
+      environmentId: row.environmentId ?? undefined
+    });
+    if (!resolved) {
+      return error(500, "probe_failed", {
+        message: "connection resolved to undefined (race with archive?)"
+      });
     }
-    const envId =
-      typeof ctx.request.query?.environmentId === "string"
-        ? ctx.request.query.environmentId
-        : headerValue(ctx.request.headers, "x-environment");
-    const winner = await connections.resolveForEnv(tenantId, envId ?? undefined, ctx.params.name);
-    if (!winner) {
-      return ok({ resolved: null, reason: "no_match" });
-    }
+    const result = await probeConnection(resolved);
+    await connections.recordProbe(row.id, {
+      ok: result.ok,
+      error: result.error,
+      at: nowIso()
+    });
     return ok({
-      resolved: publicConnection(winner),
-      reason: winner.environmentId ? "env_specific" : "tenant_fallback"
+      ok: result.ok,
+      error: result.error ?? null,
+      probedAt: nowIso()
     });
   });
 }

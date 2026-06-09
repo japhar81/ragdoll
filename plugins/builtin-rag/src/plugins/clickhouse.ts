@@ -38,34 +38,69 @@ interface ClickHouseConnectionOptions {
   username?: string;
 }
 
-registerConnectionDriver<ClickHouseClient>("clickhouse", {
-  async create(conn) {
-    const opts = (conn.options ?? {}) as ClickHouseConnectionOptions;
-    if (!opts.url) {
-      throw new Error(
-        `clickhouse connection "${conn.slug}" missing options.url (e.g. "http://localhost:8123")`
-      );
+registerConnectionDriver<ClickHouseClient>(
+  "clickhouse",
+  {
+    async create(conn) {
+      const opts = (conn.options ?? {}) as ClickHouseConnectionOptions;
+      if (!opts.url) {
+        throw new Error(
+          `clickhouse connection "${conn.slug}" missing options.url (e.g. "http://localhost:8123")`
+        );
+      }
+      const mod = (await import("@clickhouse/client")) as {
+        createClient: (cfg: Record<string, unknown>) => ClickHouseClient;
+      };
+      return mod.createClient({
+        url: opts.url,
+        database: opts.database ?? "default",
+        username: opts.username ?? "default",
+        // Password is the only secret. ClickHouse accepts no-auth setups; an
+        // absent secret is therefore legal — many local installs run that way.
+        password: conn.secret ?? ""
+      });
+    },
+    async dispose(client) {
+      await client.close().catch(() => undefined);
+    },
+    async probe(client) {
+      // ClickHouse's canonical liveness check.
+      await client.ping();
     }
-    const mod = (await import("@clickhouse/client")) as {
-      createClient: (cfg: Record<string, unknown>) => ClickHouseClient;
-    };
-    return mod.createClient({
-      url: opts.url,
-      database: opts.database ?? "default",
-      username: opts.username ?? "default",
-      // Password is the only secret. ClickHouse accepts no-auth setups; an
-      // absent secret is therefore legal — many local installs run that way.
-      password: conn.secret ?? ""
-    });
   },
-  async dispose(client) {
-    await client.close().catch(() => undefined);
-  },
-  async probe(client) {
-    // ClickHouse's canonical liveness check.
-    await client.ping();
+  {
+    displayName: "ClickHouse",
+    description:
+      "Analytics database. Used by clickhouse_query / clickhouse_insert / clickhouse_delete.",
+    configSchema: {
+      type: "object",
+      properties: {
+        url: {
+          type: "string",
+          description: "Base URL — e.g. http://localhost:8123."
+        },
+        database: {
+          type: "string",
+          default: "default",
+          description: "Default database. Plugins may override per-query."
+        },
+        username: {
+          type: "string",
+          default: "default",
+          description: "Username for HTTP auth. Password lives in the secret ref."
+        }
+      },
+      required: ["url"],
+      additionalProperties: false
+    },
+    secretSchema: {
+      type: "string",
+      description: "Password for the configured username. Optional (no-auth installs)."
+    },
+    datasetBindings: [],
+    transport: "in_process"
   }
-});
+);
 
 function requireClickHouseConnection(
   input: { connection?: { kind: string } },

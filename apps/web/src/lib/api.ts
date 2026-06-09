@@ -805,63 +805,8 @@ export const api = {
   deleteDataset: (id: string) =>
     request<void>("DELETE", `/api/datasets/${encodeURIComponent(id)}`),
 
-  // ---- External Connections Registry (ADR-0021) -------------------------
-  // Distinct from `listConnections` (the per-tenant datasource registry
-  // from ADR-0020) — these are the named, RBAC'd connections in the new
-  // `external_connections` table. Plugin nodes reference them via
-  // `connection: { slug }`.
-  listExternalConnections: () =>
-    request<{ connections: ExternalConnectionView[] }>(
-      "GET",
-      "/api/external-connections"
-    ),
-  getExternalConnection: (id: string) =>
-    request<{ connection: ExternalConnectionView }>(
-      "GET",
-      `/api/external-connections/${encodeURIComponent(id)}`
-    ),
-  createExternalConnection: (input: {
-    scope: "global" | "tenant" | "environment";
-    slug: string;
-    displayName: string;
-    description?: string | null;
-    kind: string;
-    tenantId?: string | null;
-    environmentId?: string | null;
-    secretRefId?: string | null;
-    options?: Record<string, unknown>;
-  }) =>
-    request<{ connection: ExternalConnectionView }>(
-      "POST",
-      "/api/external-connections",
-      input
-    ),
-  updateExternalConnection: (
-    id: string,
-    patch: {
-      displayName?: string;
-      description?: string | null;
-      kind?: string;
-      secretRefId?: string | null;
-      options?: Record<string, unknown>;
-      archivedAt?: string | null;
-    }
-  ) =>
-    request<{ connection: ExternalConnectionView }>(
-      "PUT",
-      `/api/external-connections/${encodeURIComponent(id)}`,
-      patch
-    ),
-  deleteExternalConnection: (id: string) =>
-    request<void>(
-      "DELETE",
-      `/api/external-connections/${encodeURIComponent(id)}`
-    ),
-  probeExternalConnection: (id: string) =>
-    request<{ ok: boolean; error: string | null; probedAt: string }>(
-      "POST",
-      `/api/external-connections/${encodeURIComponent(id)}/probe`
-    ),
+  // (External Connections methods removed — folded into the unified
+  // `listConnections` / `createConnection` etc. below per ADR-0023.)
   listDatasetVersions: (id: string) =>
     request<{
       versions: DatasetVersionView[];
@@ -892,19 +837,19 @@ export const api = {
       { versionId }
     ),
 
-  // ---- datasource connections ------------------------------------------
-  // Per-(tenant, env) host + creds for backing stores. The list endpoint's
-  // optional env filter dedupes by name and surfaces the row the cascade
-  // resolver would actually pick (env-specific > tenant-wide fallback).
-  listConnections: (filter: { tenantId?: string; environmentId?: string }) =>
+  // ---- ADR-0023 Unified Connections Registry ---------------------------
+  // Single CRUD + probe surface for the `connections` table. Replaces
+  // the old per-tenant `datasource_connections` surface AND the
+  // ADR-0021 `external_connections` surface — both folded into this
+  // unified shape.
+  listConnections: (filter: { tenantId?: string; environmentId?: string } = {}) =>
     request<{ connections: ConnectionView[] }>(
       "GET",
-      `/api/connections${qs({ environmentId: filter.environmentId })}`,
+      "/api/connections",
       undefined,
       {
-        // Empty tenantId → admin-only "globals" view; no header sent.
         ...(filter.tenantId ? { "x-tenant-id": filter.tenantId } : {}),
-        ...(filter.environmentId ? { "x-environment": filter.environmentId } : {})
+        ...(filter.environmentId ? { "x-ragdoll-env": filter.environmentId } : {})
       }
     ),
   getConnection: (id: string) =>
@@ -912,51 +857,51 @@ export const api = {
       "GET",
       `/api/connections/${encodeURIComponent(id)}`
     ),
-  createConnection: (
-    tenantId: string,
-    input: {
-      name: string;
-      datasourceType: string;
-      /** Pass `null` in the body to create a global connection. */
-      tenantId?: string | null;
-      environmentId?: string | null;
-      secretRefId?: string | null;
-      config?: Record<string, unknown>;
-      allowedHosts?: string[];
-      denyPrivateNetworks?: boolean;
-    }
-  ) =>
+  createConnection: (input: {
+    scope: "global" | "tenant" | "environment";
+    slug: string;
+    displayName: string;
+    description?: string | null;
+    kind: string;
+    tenantId?: string | null;
+    environmentId?: string | null;
+    secretRefId?: string | null;
+    config?: Record<string, unknown>;
+    allowedHosts?: string[];
+    denyPrivateNetworks?: boolean;
+  }) =>
     request<{ connection: ConnectionView }>(
       "POST",
       "/api/connections",
-      input,
-      tenantId ? { "x-tenant-id": tenantId } : {}
+      input
     ),
   updateConnection: (
     id: string,
-    tenantId: string,
     patch: {
-      name?: string;
-      datasourceType?: string;
+      displayName?: string;
+      description?: string | null;
+      kind?: string;
       secretRefId?: string | null;
       config?: Record<string, unknown>;
       allowedHosts?: string[];
       denyPrivateNetworks?: boolean;
+      archivedAt?: string | null;
     }
   ) =>
     request<{ connection: ConnectionView }>(
-      "PATCH",
+      "PUT",
       `/api/connections/${encodeURIComponent(id)}`,
-      patch,
-      { "x-tenant-id": tenantId }
+      patch
     ),
-  deleteConnection: (id: string, tenantId: string) =>
-    request<void>(
-      "DELETE",
-      `/api/connections/${encodeURIComponent(id)}`,
-      undefined,
-      { "x-tenant-id": tenantId }
+  deleteConnection: (id: string) =>
+    request<void>("DELETE", `/api/connections/${encodeURIComponent(id)}`),
+  probeConnection: (id: string) =>
+    request<{ ok: boolean; error: string | null; probedAt: string }>(
+      "POST",
+      `/api/connections/${encodeURIComponent(id)}/probe`
     ),
+  listConnectionKinds: () =>
+    request<{ kinds: ConnectionKindInfo[] }>("GET", "/api/connection-kinds"),
   /**
    * Diagnostic: "what does the cascade resolver actually pick for this
    * name in this env?" Used by the UI's `Datasets` and `Builder` panels
@@ -1027,18 +972,44 @@ export interface PipelineDatasetBindingView {
   updatedAt: string;
 }
 
+/**
+ * ADR-0023 unified connection row as returned by /api/connections.
+ * Replaces the old per-tenant DatasourceConnectionView AND the
+ * ADR-0021 ExternalConnectionView — one shape, one screen.
+ */
 export interface ConnectionView {
   id: string;
-  tenantId: string;
+  scope: "global" | "tenant" | "environment";
+  tenantId: string | null;
   environmentId: string | null;
-  name: string;
-  datasourceType: string;
-  secretRefId: string | null;
+  slug: string;
+  displayName: string;
+  description: string | null;
+  kind: string;
   config: Record<string, unknown>;
+  secretRefId: string | null;
   allowedHosts: string[];
   denyPrivateNetworks: boolean;
+  lastProbedAt: string | null;
+  lastProbeOk: boolean | null;
+  lastProbeError: string | null;
+  archivedAt: string | null;
   createdAt: string;
   updatedAt: string;
+}
+
+/**
+ * ADR-0024 catalog entry returned by /api/connection-kinds. Drives the
+ * per-kind config form + dataset binding picker filtering.
+ */
+export interface ConnectionKindInfo {
+  kind: string;
+  displayName: string;
+  description?: string;
+  configSchema: JsonSchemaLike;
+  secretSchema?: JsonSchemaLike;
+  datasetBindings?: string[];
+  transport?: "in_process" | "external";
 }
 
 // ---- response row shapes (loosely typed; only fields the UI reads) -------
@@ -1380,30 +1351,7 @@ export interface DatasetView {
   updatedAt: string;
 }
 
-/**
- * ADR-0021: External connection (named, RBAC'd, health-tracked pointer
- * to an external DB). What the API returns from /api/external-connections
- * — the secret VALUE never appears here; `secretRefId` is an opaque
- * pointer the operator resolves out-of-band.
- */
-export interface ExternalConnectionView {
-  id: string;
-  scope: "global" | "tenant" | "environment";
-  tenantId: string | null;
-  environmentId: string | null;
-  slug: string;
-  displayName: string;
-  description: string | null;
-  kind: string;
-  secretRefId: string | null;
-  options: Record<string, unknown>;
-  lastProbedAt: string | null;
-  lastProbeOk: boolean | null;
-  lastProbeError: string | null;
-  archivedAt: string | null;
-  createdAt: string;
-  updatedAt: string;
-}
+// ExternalConnectionView removed — folded into ConnectionView (ADR-0023).
 
 export interface DatasetVersionView {
   id: string;

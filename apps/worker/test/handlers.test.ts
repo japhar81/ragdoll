@@ -14,9 +14,8 @@ import {
   InMemoryProviderRepository,
   InMemoryProviderModelRepository,
   InMemoryVectorCollectionRepository,
-  InMemoryDatasourceConnectionRepository,
-  InMemoryUsageRecordRepository,
-  InMemoryExternalConnectionRepository
+  InMemoryConnectionRepository,
+  InMemoryUsageRecordRepository
 } from "../../../packages/db/src/index.ts";
 import {
   InMemoryVectorStore
@@ -236,9 +235,8 @@ function buildRepositories(): WorkerRepositories {
     providers: new InMemoryProviderRepository(),
     providerModels: new InMemoryProviderModelRepository(),
     vectorCollections: new InMemoryVectorCollectionRepository(),
-    datasourceConnections: new InMemoryDatasourceConnectionRepository(),
-    usageRecords: new InMemoryUsageRecordRepository(),
-    externalConnections: new InMemoryExternalConnectionRepository()
+    connections: new InMemoryConnectionRepository(),
+    usageRecords: new InMemoryUsageRecordRepository()
   };
 }
 
@@ -729,12 +727,14 @@ test("evaluate_pipeline and batch_run build on run_pipeline", async () => {
 test("reindex_tenant reingests datasource connections", async () => {
   const deps = await buildDeps();
   const worker = createWorker(deps);
-  await deps.repositories.datasourceConnections.create({
+  await deps.repositories.connections.create({
     id: "ds-1",
+    scope: "tenant",
     tenantId: "tenant-a",
-    name: "docs",
-    datasourceType: "manual",
-    configRedacted: {
+    slug: "docs",
+    displayName: "docs",
+    kind: "manual",
+    config: {
       pipelineId: "pipe-r",
       collection: "reindex_collection",
       documents: [{ text: "hello world" }],
@@ -784,23 +784,23 @@ test("connection_probe_sweep — iterates rows, invokes the driver, records ok/e
   const deps = await buildDeps();
   // Seed 2 connections — one healthy, one not.
   const now = new Date().toISOString();
-  await deps.repositories.externalConnections!.create({
+  await deps.repositories.connections!.create({
     id: "11111111-1111-1111-1111-111111111111",
     scope: "global",
     slug: "good",
     displayName: "Good",
     kind: "fakekind",
-    options: {},
+    config: {}, allowedHosts: [], denyPrivateNetworks: false,
     createdAt: now,
     updatedAt: now
   });
-  await deps.repositories.externalConnections!.create({
+  await deps.repositories.connections!.create({
     id: "22222222-2222-2222-2222-222222222222",
     scope: "global",
     slug: "bad",
     displayName: "Bad",
     kind: "fakekind",
-    options: {},
+    config: {}, allowedHosts: [], denyPrivateNetworks: false,
     createdAt: now,
     updatedAt: now
   });
@@ -814,10 +814,10 @@ test("connection_probe_sweep — iterates rows, invokes the driver, records ok/e
   assert.equal(result.ok, 1);
   assert.equal(result.failed, 1);
   // Recorded state matches.
-  const good = await deps.repositories.externalConnections!.get(
+  const good = await deps.repositories.connections!.get(
     "11111111-1111-1111-1111-111111111111"
   );
-  const bad = await deps.repositories.externalConnections!.get(
+  const bad = await deps.repositories.connections!.get(
     "22222222-2222-2222-2222-222222222222"
   );
   assert.equal(good!.lastProbeOk, true);

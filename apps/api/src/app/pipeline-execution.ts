@@ -238,7 +238,7 @@ export function buildApiDatasetResolver(
     datasets: deps.datasets,
     datasetVersions: deps.datasetVersions,
     datasetAliases: deps.datasetAliases,
-    datasources: deps.datasources,
+    connections: deps.connections,
     pipelineDatasetBindings: deps.pipelineDatasetBindings,
     tenants: deps.tenants,
     environments: deps.environments
@@ -359,8 +359,8 @@ export async function runSyncPipeline(args: {
   // without a connections repo get `undefined` and `connection:`-bearing
   // nodes simply receive `input.connection = undefined` (no behaviour
   // change for legacy pipelines).
-  const externalConnectionResolver = deps.externalConnections
-    ? new ExternalConnectionResolver(deps.externalConnections, deps.secretProvider)
+  const externalConnectionResolver = deps.connections
+    ? new ExternalConnectionResolver(deps.connections, deps.secretProvider)
     : undefined;
   const executor = new DagExecutor({
     pluginRegistry: deps.pluginRegistry,

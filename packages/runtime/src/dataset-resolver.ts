@@ -22,7 +22,7 @@ import type {
   DatasetRepository,
   DatasetVersionRepository,
   DatasetAliasRepository,
-  DatasourceConnectionRepository,
+  ConnectionRepository,
   PipelineDatasetBindingRepository,
   DatasetRow,
   TenantRepository,
@@ -36,7 +36,7 @@ export interface DatasetResolverDeps {
   datasetAliases: DatasetAliasRepository;
   /** Optional. When set, `backends[m].connectionName` resolves to a
    *  per-(tenant, env) connection row injected onto the backend block. */
-  datasources?: DatasourceConnectionRepository;
+  connections?: ConnectionRepository;
   /** Optional. When set + pipelineId passed to resolve(), the binding
    *  cascade beats the default slug resolution. */
   pipelineDatasetBindings?: PipelineDatasetBindingRepository;
@@ -91,22 +91,29 @@ export function buildDatasetResolver(deps: DatasetResolverDeps): DatasetResolver
         const block: Record<string, unknown> = { ...(raw as Record<string, unknown>) };
         const connName =
           typeof block.connectionName === "string" ? block.connectionName : undefined;
-        if (connName && deps.datasources && args.tenantId) {
-          const conn = await deps.datasources.resolveForEnv(
-            args.tenantId,
-            args.environmentId,
-            connName
-          );
+        if (connName && deps.connections && args.tenantId) {
+          // ADR-0023: unified connection registry. Slug resolution walks
+          // env → tenant → global (datasets stop at tenant in the old
+          // model, but the unified resolver naturally handles globals
+          // too, so a global dataset referencing a global connection
+          // works without special-casing).
+          const conn = await deps.connections.resolveSlug({
+            slug: connName,
+            tenantId: args.tenantId,
+            environmentId: args.environmentId
+          });
           if (conn) {
-            const cfg = conn.configRedacted as { host?: unknown; port?: unknown };
+            const cfg = (conn.config ?? {}) as { host?: unknown; port?: unknown };
             block.connection = {
-              name: conn.name,
-              type: conn.datasourceType,
+              name: conn.slug,
+              type: conn.kind,
               host: typeof cfg.host === "string" ? cfg.host : undefined,
               port: typeof cfg.port === "number" ? cfg.port : undefined,
               secretRefId: conn.secretRefId ?? null,
-              config: conn.configRedacted,
-              cascadeReason: conn.environmentId ? "env_specific" : "tenant_fallback"
+              config: conn.config,
+              cascadeReason: conn.environmentId
+                ? "env_specific"
+                : "tenant_fallback"
             };
           }
         }
@@ -168,6 +175,37 @@ export function buildDatasetResolver(deps: DatasetResolverDeps): DatasetResolver
         });
       }
 
+      // ADR-0023: build the `bindings` view alongside `backends`. For
+      // datasets with an explicit `bindings:` block, use it. For legacy
+      // datasets (only `backends` populated), derive each binding from
+      // the matching backend block — the migration backfill normally
+      // populates `bindings`, but synthesise here too so in-memory test
+      // datasets without a backfill still surface bindings.
+      const bindings: Record<
+        string,
+        { connectionSlug?: string; collection?: string }
+      > = {};
+      const bindingsSource = (ds.bindings ?? {}) as Record<
+        string,
+        { connection?: string; collection?: string } | undefined
+      >;
+      const allBindingNames = new Set<string>([
+        ...Object.keys(bindingsSource),
+        ...Object.keys(backends)
+      ]);
+      for (const name of allBindingNames) {
+        const explicit = bindingsSource[name];
+        const legacyBlock = backends[name] as Record<string, unknown> | undefined;
+        const connectionSlug =
+          explicit?.connection ??
+          (legacyBlock?.connectionName as string | undefined);
+        const collection =
+          explicit?.collection ??
+          (legacyBlock?.collection as string | undefined) ??
+          effectiveCollections[name];
+        bindings[name] = { connectionSlug, collection };
+      }
+
       return {
         id: ds.id,
         slug: ds.slug,
@@ -183,7 +221,8 @@ export function buildDatasetResolver(deps: DatasetResolverDeps): DatasetResolver
           status: ver.status
         },
         backendCollections: effectiveCollections,
-        backends: backends as Record<string, ResolvedDatasetBackend>
+        backends: backends as Record<string, ResolvedDatasetBackend>,
+        bindings
       };
     }
   };

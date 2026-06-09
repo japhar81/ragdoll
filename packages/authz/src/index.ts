@@ -71,9 +71,9 @@ export type Permission =
   //           bypass entirely).
   // `read`  = list / get connection metadata (no secrets exposed).
   // `admin` = create / update / archive / probe.
-  | "external_connection:use"
-  | "external_connection:read"
-  | "external_connection:admin";
+  | "connection:use"
+  | "connection:read"
+  | "connection:admin";
 
 export interface Principal {
   id: string;
@@ -101,15 +101,15 @@ export const DEFAULT_ROLE_PERMISSIONS: Record<Role, Permission[]> = {
     "audit:view", "pipeline:run", "plugin:manage", "provider:manage",
     "user:manage", "role:manage", "idp:manage", "auth:settings",
     "dataset:read", "dataset:write", "dataset:admin",
-    "external_connection:use", "external_connection:read", "external_connection:admin"
+    "connection:use", "connection:read", "connection:admin"
   ],
-  environment_admin: ["pipeline:deploy", "config:edit_pipeline", "execution:view_logs", "audit:view", "pipeline:run", "dataset:read", "dataset:write", "external_connection:use", "external_connection:read"],
-  pipeline_admin: ["pipeline:create", "pipeline:update", "pipeline:delete", "pipeline:deploy", "config:edit_pipeline", "execution:view_logs", "pipeline:run", "dataset:read", "dataset:write", "dataset:admin", "external_connection:use", "external_connection:read"],
-  pipeline_editor: ["pipeline:create", "pipeline:update", "config:edit_pipeline", "pipeline:run", "dataset:read", "dataset:write", "external_connection:use", "external_connection:read"],
-  tenant_admin: ["config:edit_tenant", "secret:manage_tenant", "execution:view_logs", "pipeline:run", "user:manage", "dataset:read", "dataset:write", "dataset:admin", "external_connection:use", "external_connection:read", "external_connection:admin"],
-  tenant_operator: ["execution:view_logs", "pipeline:run", "dataset:read", "external_connection:use", "external_connection:read"],
-  viewer: ["execution:view_logs", "dataset:read", "external_connection:read"],
-  auditor: ["audit:view", "execution:view_logs", "dataset:read", "external_connection:read"]
+  environment_admin: ["pipeline:deploy", "config:edit_pipeline", "execution:view_logs", "audit:view", "pipeline:run", "dataset:read", "dataset:write", "connection:use", "connection:read"],
+  pipeline_admin: ["pipeline:create", "pipeline:update", "pipeline:delete", "pipeline:deploy", "config:edit_pipeline", "execution:view_logs", "pipeline:run", "dataset:read", "dataset:write", "dataset:admin", "connection:use", "connection:read"],
+  pipeline_editor: ["pipeline:create", "pipeline:update", "config:edit_pipeline", "pipeline:run", "dataset:read", "dataset:write", "connection:use", "connection:read"],
+  tenant_admin: ["config:edit_tenant", "secret:manage_tenant", "execution:view_logs", "pipeline:run", "user:manage", "dataset:read", "dataset:write", "dataset:admin", "connection:use", "connection:read", "connection:admin"],
+  tenant_operator: ["execution:view_logs", "pipeline:run", "dataset:read", "connection:use", "connection:read"],
+  viewer: ["execution:view_logs", "dataset:read", "connection:read"],
+  auditor: ["audit:view", "execution:view_logs", "dataset:read", "connection:read"]
 };
 
 /** Back-compat alias (was the only exported catalog before scopes existed). */

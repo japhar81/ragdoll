@@ -38,7 +38,7 @@ import {
   InMemoryPluginRepository,
   InMemoryProviderRepository,
   InMemoryProviderModelRepository,
-  InMemoryDatasourceConnectionRepository,
+  InMemoryConnectionRepository,
   InMemoryVectorCollectionRepository,
   InMemoryExecutionStore,
   InMemoryApiKeyRepository
@@ -167,7 +167,7 @@ export function buildE2EHarness(options: BuildOptions = {}): E2EHarness {
   const configValues = new InMemoryConfigValueRepository();
   const providers = new InMemoryProviderRepository();
   const vectorCollections = new InMemoryVectorCollectionRepository();
-  const datasources = new InMemoryDatasourceConnectionRepository();
+  const connections = new InMemoryConnectionRepository();
   const usageRecords = new InMemoryUsageRecordRepository();
 
   const apiKeys = new ApiKeyService(new InMemoryApiKeyRepository());
@@ -190,7 +190,7 @@ export function buildE2EHarness(options: BuildOptions = {}): E2EHarness {
     usageRecords,
     plugins: new InMemoryPluginRepository(),
     providers,
-    datasources,
+    connections,
     vectorCollections,
     executionStore,
     auth,
@@ -212,7 +212,7 @@ export function buildE2EHarness(options: BuildOptions = {}): E2EHarness {
     providers,
     providerModels: new InMemoryProviderModelRepository(),
     vectorCollections,
-    datasourceConnections: datasources,
+    connections,
     usageRecords
   };
 

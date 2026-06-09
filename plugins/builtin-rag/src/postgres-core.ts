@@ -342,3 +342,74 @@ export function assertLooksReadOnly(sql: string): void {
   // Unknown leading keyword — let it through; the READ ONLY txn will reject
   // anything that mutates, and `EXPLAIN ANALYZE` style statements are safe.
 }
+
+// ===========================================================================
+// ADR-0024: register the postgres kind with the connection driver registry
+// so the Connections UI can render its config form + the connection-kinds
+// API enumerates it. acquire() wraps getPoolForConnection so two pipelines
+// referencing the same connection slug share one pool (per ADR-0023).
+// ===========================================================================
+
+import { registerConnectionDriver } from "../../../packages/external-connections/src/index.ts";
+
+registerConnectionDriver(
+  "postgres",
+  {
+    async create(conn) {
+      // Reuse the pool-keyed-by-connection.id path so direct query
+      // tools (postgres_query/postgres_upsert) AND any future
+      // pgvector-as-dataset-backend usage share the same pool.
+      return getPoolForConnection({
+        id: conn.id,
+        slug: conn.slug,
+        kind: conn.kind,
+        secret: conn.secret,
+        options: conn.options
+      });
+    },
+    async dispose(client) {
+      const entry = client as PoolEntry;
+      await entry.pool.end().catch(() => undefined);
+    },
+    async probe(client) {
+      const entry = client as PoolEntry;
+      const pg = await acquire(entry);
+      try {
+        await pg.query("SELECT 1");
+      } finally {
+        pg.release();
+      }
+    }
+  },
+  {
+    displayName: "PostgreSQL",
+    description:
+      "Relational database. Used by postgres_query / postgres_upsert / postgres_delete / postgres_exec, and (via pgvector) as a Dataset vector backend.",
+    configSchema: {
+      type: "object",
+      // postgres uses DSN-as-the-secret, no per-kind non-secret config.
+      // Listing the property explicitly keeps the form non-empty so the
+      // UI shows the secret-ref picker even when the form is "empty".
+      properties: {
+        applicationName: {
+          type: "string",
+          default: "ragdoll",
+          description:
+            "application_name advertised to the server (visible in pg_stat_activity)."
+        }
+      },
+      additionalProperties: false
+    },
+    secretSchema: {
+      type: "string",
+      description:
+        "Postgres DSN (e.g. postgres://user:pass@host:5432/db). The platform never persists the value here — only its secrets-table id."
+    },
+    // pgvector dataset binding lands as part of ADR-0023 §3 follow-up
+    // (`backends.vectors` resolving against a kind=postgres connection).
+    // Listed pre-emptively so the dataset binding picker offers it once
+    // a plugin declares `requires: { binding: "vectors", kind: "postgres" }`.
+    datasetBindings: ["vectors", "rows"],
+    transport: "in_process"
+  }
+);
