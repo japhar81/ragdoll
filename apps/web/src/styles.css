@@ -1045,6 +1045,23 @@ table.datagrid tbody tr.row-highlighted {
   background: #fef3c7;
 }
 
+/* Shared "this row is the one whose detail panel is open" affordance.
+ * Used by Datasets / Connections — any screen with a list-then-detail
+ * layout where the operator should see at a glance which row produced
+ * the panel below. Light blue ties to the accent colour without
+ * overwhelming the row text; left border is the strong cue. */
+table.grid tbody tr.row-selected,
+table.grid tbody tr.row-selected:hover {
+  background: #dbeafe;
+  box-shadow: inset 3px 0 0 0 #2563eb;
+}
+table.grid tbody tr.row-selectable {
+  cursor: pointer;
+}
+table.grid tbody tr.row-selectable:hover {
+  background: #f1f5f9;
+}
+
 .muted {
   color: #64748b;
   font-size: 13px;

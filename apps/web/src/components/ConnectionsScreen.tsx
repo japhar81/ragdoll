@@ -463,8 +463,13 @@ export function ConnectionsScreen() {
               {rows.map((c) => {
                 const refs = usedBy.get(c.slug) ?? [];
                 const info = kindByName.get(c.kind);
+                const isOpen = editing === c.id;
                 return (
-                  <tr key={c.id} style={c.archivedAt ? { opacity: 0.55 } : undefined}>
+                  <tr
+                    key={c.id}
+                    className={isOpen ? "row-selected" : undefined}
+                    style={c.archivedAt ? { opacity: 0.55 } : undefined}
+                  >
                     <td>
                       <code>{c.slug}</code>
                     </td>

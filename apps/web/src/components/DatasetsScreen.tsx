@@ -1020,11 +1020,11 @@ export function DatasetsScreen() {
                 <tr
                   key={d.id}
                   onClick={() => setSelectedId(d.id)}
-                  style={{
-                    cursor: "pointer",
-                    background: d.id === selected?.id ? "var(--row-highlight, #1f2937)" : undefined,
-                    opacity: d.archivedAt ? 0.55 : 1
-                  }}
+                  className={
+                    "row-selectable" +
+                    (d.id === selected?.id ? " row-selected" : "")
+                  }
+                  style={d.archivedAt ? { opacity: 0.55 } : undefined}
                 >
                   <td>
                     <code>{d.slug}</code>
