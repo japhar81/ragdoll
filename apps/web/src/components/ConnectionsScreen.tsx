@@ -31,6 +31,7 @@ import type { JsonSchemaLike } from "../lib/api.ts";
 import { buildScopeTree, findScopeNode, type ScopeNode } from "../lib/orgtree.ts";
 import { tenantIdFromScopeKey } from "../lib/tenantContext.ts";
 import { useTenants } from "./useTenants.tsx";
+import { useEnvironments, EnvironmentSelect } from "./useEnvironments.tsx";
 import { useAuth } from "../auth/AuthContext.tsx";
 import { Screen } from "./Screen.tsx";
 import { ScopeTree } from "./ConfigScreen.tsx";
@@ -81,6 +82,47 @@ function fmtTimestamp(value: string | null | undefined): string {
   if (!value) return "—";
   const d = new Date(value);
   return Number.isNaN(d.getTime()) ? value : d.toLocaleString();
+}
+
+/**
+ * Per-tenant environment dropdown for the "New connection" form.
+ * Wraps the shared <EnvironmentSelect>: when the user hasn't picked a
+ * tenant yet, render a disabled placeholder; once the tenant is
+ * chosen, fetch its environments and hand them to the select. Same
+ * shape as Datasets / Builder / Scheduler — operators don't have to
+ * remember per-tenant env names.
+ */
+function DraftEnvironmentSelect(props: {
+  tenantId: string;
+  value: string;
+  onChange: (name: string) => void;
+  disabled?: boolean;
+}) {
+  const { environments, isLoading } = useEnvironments(props.tenantId);
+  if (!props.tenantId) {
+    return (
+      <select value="" disabled>
+        <option value="">— pick a tenant first —</option>
+      </select>
+    );
+  }
+  if (props.disabled) {
+    return (
+      <input
+        value={props.value}
+        disabled
+        title="environment is pinned at create time and cannot be changed"
+      />
+    );
+  }
+  return (
+    <EnvironmentSelect
+      environments={environments}
+      value={props.value}
+      onChange={props.onChange}
+      isLoading={isLoading}
+    />
+  );
 }
 
 function ProbeBadge(props: {
@@ -595,11 +637,13 @@ export function ConnectionsScreen() {
                 {draft.scope === "environment" && (
                   <label>
                     <div className="muted">Environment</div>
-                    <input
+                    <DraftEnvironmentSelect
+                      tenantId={draft.tenantId}
                       value={draft.environmentId}
+                      onChange={(v) =>
+                        setDraft({ ...draft, environmentId: v })
+                      }
                       disabled={editing !== "new"}
-                      onChange={(e) => setDraft({ ...draft, environmentId: e.target.value })}
-                      placeholder="dev / prod"
                     />
                   </label>
                 )}
