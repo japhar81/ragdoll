@@ -804,6 +804,64 @@ export const api = {
     ),
   deleteDataset: (id: string) =>
     request<void>("DELETE", `/api/datasets/${encodeURIComponent(id)}`),
+
+  // ---- External Connections Registry (ADR-0021) -------------------------
+  // Distinct from `listConnections` (the per-tenant datasource registry
+  // from ADR-0020) — these are the named, RBAC'd connections in the new
+  // `external_connections` table. Plugin nodes reference them via
+  // `connection: { slug }`.
+  listExternalConnections: () =>
+    request<{ connections: ExternalConnectionView[] }>(
+      "GET",
+      "/api/external-connections"
+    ),
+  getExternalConnection: (id: string) =>
+    request<{ connection: ExternalConnectionView }>(
+      "GET",
+      `/api/external-connections/${encodeURIComponent(id)}`
+    ),
+  createExternalConnection: (input: {
+    scope: "global" | "tenant" | "environment";
+    slug: string;
+    displayName: string;
+    description?: string | null;
+    kind: string;
+    tenantId?: string | null;
+    environmentId?: string | null;
+    secretRefId?: string | null;
+    options?: Record<string, unknown>;
+  }) =>
+    request<{ connection: ExternalConnectionView }>(
+      "POST",
+      "/api/external-connections",
+      input
+    ),
+  updateExternalConnection: (
+    id: string,
+    patch: {
+      displayName?: string;
+      description?: string | null;
+      kind?: string;
+      secretRefId?: string | null;
+      options?: Record<string, unknown>;
+      archivedAt?: string | null;
+    }
+  ) =>
+    request<{ connection: ExternalConnectionView }>(
+      "PUT",
+      `/api/external-connections/${encodeURIComponent(id)}`,
+      patch
+    ),
+  deleteExternalConnection: (id: string) =>
+    request<void>(
+      "DELETE",
+      `/api/external-connections/${encodeURIComponent(id)}`
+    ),
+  probeExternalConnection: (id: string) =>
+    request<{ ok: boolean; error: string | null; probedAt: string }>(
+      "POST",
+      `/api/external-connections/${encodeURIComponent(id)}/probe`
+    ),
   listDatasetVersions: (id: string) =>
     request<{
       versions: DatasetVersionView[];
@@ -1319,6 +1377,31 @@ export interface DatasetView {
   archivedAt: string | null;
   createdAt: string;
   createdBy: string | null;
+  updatedAt: string;
+}
+
+/**
+ * ADR-0021: External connection (named, RBAC'd, health-tracked pointer
+ * to an external DB). What the API returns from /api/external-connections
+ * — the secret VALUE never appears here; `secretRefId` is an opaque
+ * pointer the operator resolves out-of-band.
+ */
+export interface ExternalConnectionView {
+  id: string;
+  scope: "global" | "tenant" | "environment";
+  tenantId: string | null;
+  environmentId: string | null;
+  slug: string;
+  displayName: string;
+  description: string | null;
+  kind: string;
+  secretRefId: string | null;
+  options: Record<string, unknown>;
+  lastProbedAt: string | null;
+  lastProbeOk: boolean | null;
+  lastProbeError: string | null;
+  archivedAt: string | null;
+  createdAt: string;
   updatedAt: string;
 }
 

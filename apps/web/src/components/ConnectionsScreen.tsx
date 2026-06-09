@@ -317,14 +317,21 @@ export function ConnectionsScreen() {
         </aside>
         <div className="scope-body">
           <ScopeHeader node={node} />
-          {!ctx.tenantId && (
+          {/* `hasScope` covers tenant/env nodes AND the global root —
+              previously the table was gated only on `ctx.tenantId`, so
+              clicking Global showed the inheritance source for tenants
+              but never let an admin SEE or EDIT the global rows
+              themselves. */}
+          {!ctx.tenantId && !ctx.isGlobal && (
             <p className="muted">Select a tenant or environment on the left to view connections.</p>
           )}
-          {ctx.tenantId && connections.isLoading && <p className="muted">Loading…</p>}
-          {ctx.tenantId && connections.isError && (
+          {(ctx.tenantId || ctx.isGlobal) && connections.isLoading && (
+            <p className="muted">Loading…</p>
+          )}
+          {(ctx.tenantId || ctx.isGlobal) && connections.isError && (
             <p className="error">{errText(connections.error)}</p>
           )}
-          {ctx.tenantId && !connections.isLoading && (
+          {(ctx.tenantId || ctx.isGlobal) && !connections.isLoading && (
             <ConnectionTable
               rows={rowViews}
               envId={ctx.envId}
