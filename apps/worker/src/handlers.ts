@@ -191,7 +191,7 @@ export function createWorker(deps: WorkerDeps): Worker {
           datasets: deps.repositories.datasets,
           datasetVersions: deps.repositories.datasetVersions,
           datasetAliases: deps.repositories.datasetAliases,
-          datasources: deps.repositories.datasourceConnections,
+          connections: deps.repositories.connections,
           pipelineDatasetBindings: deps.repositories.pipelineDatasetBindings,
           tenants: deps.repositories.tenants,
           environments: deps.repositories.environments
@@ -201,9 +201,9 @@ export function createWorker(deps: WorkerDeps): Worker {
   // ADR-0021: External connection resolver wired the same way as
   // datasetResolver — undefined when the optional repo is absent so the
   // legacy install-free test paths keep working unchanged.
-  const externalConnectionResolver = deps.repositories.externalConnections
+  const externalConnectionResolver = deps.repositories.connections
     ? new ExternalConnectionResolver(
-        deps.repositories.externalConnections,
+        deps.repositories.connections,
         deps.secretProvider
       )
     : undefined;
@@ -792,20 +792,23 @@ export function createWorker(deps: WorkerDeps): Worker {
     payload: ReindexTenantJob,
     signal?: AbortSignal
   ): Promise<ReindexResult> {
-    const connections = await deps.repositories.datasourceConnections.listByTenant(
-      payload.tenantId
-    );
+    const connections = await deps.repositories.connections.listAll({
+      tenantId: payload.tenantId
+    });
     const targets = payload.datasourceConnectionIds
-      ? connections.filter((c) => payload.datasourceConnectionIds!.includes(c.id))
+      ? connections.filter(
+          (c: { id: string }) =>
+            payload.datasourceConnectionIds!.includes(c.id)
+        )
       : connections;
     const reindexed: ReindexResult["reindexed"] = [];
     for (const connection of targets) {
-      const config = connection.configRedacted as Record<string, unknown>;
+      const config = connection.config as Record<string, unknown>;
       const result = await ingestDatasource(
         {
           tenantId: payload.tenantId,
           pipelineId:
-            payload.pipelineId ?? String(config.pipelineId ?? connection.datasourceType),
+            payload.pipelineId ?? String(config.pipelineId ?? connection.kind),
           environment: payload.environment,
           datasourceConnectionId: connection.id,
           text: typeof config.text === "string" ? config.text : "",
@@ -1100,7 +1103,7 @@ export function createWorker(deps: WorkerDeps): Worker {
     failed: number;
     skipped: number;
   }> {
-    const repo = deps.repositories.externalConnections;
+    const repo = deps.repositories.connections;
     if (!repo) {
       deps.logger?.info(
         "connection_probe_sweep skipped: externalConnections repo not wired"
@@ -1138,7 +1141,7 @@ export function createWorker(deps: WorkerDeps): Worker {
           slug: row.slug,
           kind: row.kind,
           secret,
-          options: row.options ?? {},
+          options: row.config ?? {},
           cascadeReason:
             row.scope === "environment"
               ? "environment"

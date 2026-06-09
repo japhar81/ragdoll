@@ -27,7 +27,7 @@ import {
   InMemoryProviderRepository,
   InMemoryProviderModelRepository,
   InMemoryVectorCollectionRepository,
-  InMemoryDatasourceConnectionRepository,
+  InMemoryConnectionRepository,
   InMemoryUsageRecordRepository,
   InMemoryScheduleRepository
 } from "../../../packages/db/src/index.ts";
@@ -109,7 +109,7 @@ function buildRepositories(): WorkerRepositories {
     providers: new InMemoryProviderRepository(),
     providerModels: new InMemoryProviderModelRepository(),
     vectorCollections: new InMemoryVectorCollectionRepository(),
-    datasourceConnections: new InMemoryDatasourceConnectionRepository(),
+    connections: new InMemoryConnectionRepository(),
     usageRecords: new InMemoryUsageRecordRepository(),
     pipelines: new InMemoryPipelineRepository(),
     activations: new InMemoryPipelineActivationRepository()

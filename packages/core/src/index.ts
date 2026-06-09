@@ -185,7 +185,7 @@ export interface PipelineNode {
    * `input.connection`. Plugins that touch external DBs (MongoDB,
    * ClickHouse, HTTP-as-DB, …) read connection info from there instead
    * of from `secrets.dsn`; the runtime enforces
-   * `external_connection:use` before invoking the plugin.
+   * `connection:use` before invoking the plugin.
    */
   connection?: { slug: string };
   ui?: Record<string, unknown>;

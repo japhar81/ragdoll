@@ -52,51 +52,121 @@ export class PostgresProviderModelRepository
 }
 
 
-export class PostgresDatasourceConnectionRepository
-  extends PostgresCrudRepository<T.DatasourceConnectionRow>
-  implements T.DatasourceConnectionRepository
+/**
+ * Postgres repository over the unified `connections` table (ADR-0023,
+ * migration 019). Supersedes PostgresDatasourceConnectionRepository
+ * (per-tenant ADR-0020 registry) and PostgresExternalConnectionRepository
+ * (ADR-0021). Both old types are gone.
+ */
+export class PostgresConnectionRepository
+  extends PostgresCrudRepository<T.ConnectionRow>
+  implements T.ConnectionRepository
 {
   constructor(pool: PoolLike) {
-    super(pool, "datasource_connections", "datasource_connection", [
-      "configRedacted"
-    ]);
+    super(pool, "connections", "connection", ["config"]);
   }
-  async listByTenant(tenantId: string): Promise<T.DatasourceConnectionRow[]> {
+
+  async resolveSlug(args: {
+    slug: string;
+    tenantId?: string;
+    environmentId?: string;
+  }): Promise<T.ConnectionRow | undefined> {
+    if (args.tenantId && args.environmentId) {
+      const envRow = (
+        await this.queryRows(
+          `SELECT * FROM connections
+           WHERE slug = $1 AND scope = 'environment'
+             AND tenant_id = $2 AND environment_id = $3
+             AND archived_at IS NULL`,
+          [args.slug, args.tenantId, args.environmentId]
+        )
+      )[0];
+      if (envRow) return envRow;
+    }
+    if (args.tenantId) {
+      const tenantRow = (
+        await this.queryRows(
+          `SELECT * FROM connections
+           WHERE slug = $1 AND scope = 'tenant'
+             AND tenant_id = $2 AND archived_at IS NULL`,
+          [args.slug, args.tenantId]
+        )
+      )[0];
+      if (tenantRow) return tenantRow;
+    }
+    return (
+      await this.queryRows(
+        `SELECT * FROM connections
+         WHERE slug = $1 AND scope = 'global' AND archived_at IS NULL`,
+        [args.slug]
+      )
+    )[0];
+  }
+
+  async listVisibleAt(args: {
+    tenantId?: string;
+    environmentId?: string;
+  }): Promise<T.ConnectionRow[]> {
     return this.queryRows(
-      `SELECT * FROM datasource_connections WHERE tenant_id = $1 ORDER BY name, environment_id NULLS FIRST`,
-      [tenantId]
+      `SELECT * FROM connections
+       WHERE archived_at IS NULL
+         AND (
+           scope = 'global'
+           OR (scope = 'tenant' AND tenant_id = $1)
+           OR (scope = 'environment' AND tenant_id = $1 AND environment_id = $2)
+         )
+       ORDER BY scope, kind, slug`,
+      [args.tenantId ?? null, args.environmentId ?? null]
     );
   }
-  async resolveForEnv(
-    tenantId: string,
-    environmentId: string | undefined,
-    name: string
-  ): Promise<T.DatasourceConnectionRow | undefined> {
-    // Three-tier cascade. Each tier scored as a small integer so the
-    // single SELECT can pick the winner in one query:
-    //   3 = (tenant=T, env=E)     env-specific match
-    //   2 = (tenant=T, env=NULL)  tenant-wide override
-    //   1 = (tenant=NULL, env=NULL) global default
-    // Anything else (e.g. some other tenant's row) is excluded by the WHERE.
-    const rows = await this.queryRows(
-      `SELECT *,
-              CASE
-                WHEN tenant_id = $1 AND environment_id = $3 THEN 3
-                WHEN tenant_id = $1 AND environment_id IS NULL THEN 2
-                WHEN tenant_id IS NULL AND environment_id IS NULL THEN 1
-                ELSE 0
-              END AS _tier
-       FROM datasource_connections
-       WHERE name = $2
-         AND (
-           (tenant_id = $1 AND (environment_id = $3 OR environment_id IS NULL))
-           OR (tenant_id IS NULL AND environment_id IS NULL)
-         )
-       ORDER BY _tier DESC
-       LIMIT 1`,
-      [tenantId, name, environmentId ?? null]
+
+  async listAll(
+    filter: {
+      scope?: T.ConnectionRow["scope"];
+      tenantId?: string;
+      environmentId?: string;
+      kind?: string;
+      includeArchived?: boolean;
+    } = {}
+  ): Promise<T.ConnectionRow[]> {
+    const clauses: string[] = [];
+    const params: unknown[] = [];
+    if (!filter.includeArchived) clauses.push(`archived_at IS NULL`);
+    if (filter.scope) {
+      params.push(filter.scope);
+      clauses.push(`scope = $${params.length}`);
+    }
+    if (filter.tenantId) {
+      params.push(filter.tenantId);
+      clauses.push(`tenant_id = $${params.length}`);
+    }
+    if (filter.environmentId) {
+      params.push(filter.environmentId);
+      clauses.push(`environment_id = $${params.length}`);
+    }
+    if (filter.kind) {
+      params.push(filter.kind);
+      clauses.push(`kind = $${params.length}`);
+    }
+    const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
+    return this.queryRows(
+      `SELECT * FROM connections ${where} ORDER BY scope, kind, slug`,
+      params
     );
-    return rows[0];
+  }
+
+  async recordProbe(
+    id: string,
+    result: { ok: boolean; error?: string; at: string }
+  ): Promise<void> {
+    await this.pool.query(
+      `UPDATE connections
+         SET last_probed_at = $2,
+             last_probe_ok = $3,
+             last_probe_error = $4
+       WHERE id = $1`,
+      [id, result.at, result.ok, result.error ?? null]
+    );
   }
 }
 

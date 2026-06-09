@@ -70,42 +70,8 @@ export class InMemoryProviderModelRepository
 }
 
 
-export class InMemoryDatasourceConnectionRepository
-  extends InMemoryCrudRepository<T.DatasourceConnectionRow>
-  implements T.DatasourceConnectionRepository
-{
-  constructor() {
-    super("datasource_connection");
-  }
-  async listByTenant(tenantId: UUID): Promise<T.DatasourceConnectionRow[]> {
-    return (await this.list()).filter((row) => row.tenantId === tenantId);
-  }
-  async resolveForEnv(
-    tenantId: UUID,
-    environmentId: string | undefined,
-    name: string
-  ): Promise<T.DatasourceConnectionRow | undefined> {
-    const all = (await this.list()).filter((r) => r.name === name);
-    // Three-tier cascade, mirrors postgres CASE-tier query.
-    // Tier 3: this tenant + this env.
-    const t3 = all.find(
-      (r) => r.tenantId === tenantId && r.environmentId === environmentId
-    );
-    if (t3) return t3;
-    // Tier 2: this tenant + no env (tenant-wide override).
-    const t2 = all.find(
-      (r) => r.tenantId === tenantId && (r.environmentId === null || r.environmentId === undefined)
-    );
-    if (t2) return t2;
-    // Tier 1: no tenant + no env (global default).
-    const t1 = all.find(
-      (r) =>
-        (r.tenantId === null || r.tenantId === undefined) &&
-        (r.environmentId === null || r.environmentId === undefined)
-    );
-    return t1;
-  }
-}
+// InMemoryDatasourceConnectionRepository is gone — superseded by
+// InMemoryConnectionRepository in ./connections.ts (ADR-0023).
 
 
 export class InMemoryPipelineDatasetBindingRepository

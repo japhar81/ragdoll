@@ -57,7 +57,7 @@ import {
   InMemoryProviderRepository,
   InMemoryProviderModelRepository,
   InMemoryVectorCollectionRepository,
-  InMemoryDatasourceConnectionRepository,
+  InMemoryConnectionRepository,
   InMemoryUsageRecordRepository,
   InMemoryScheduleRepository
 } from "../../../packages/db/src/index.ts";
@@ -114,7 +114,7 @@ async function buildDeps(): Promise<BuiltDeps> {
       providers: new db.PostgresProviderRepository(pool),
       providerModels: new db.PostgresProviderModelRepository(pool),
       vectorCollections: new db.PostgresVectorCollectionRepository(pool),
-      datasourceConnections: new db.PostgresDatasourceConnectionRepository(
+      connections: new db.PostgresConnectionRepository(
         pool
       ),
       usageRecords: new db.PostgresUsageRecordRepository(pool),
@@ -125,9 +125,6 @@ async function buildDeps(): Promise<BuiltDeps> {
       datasets: new db.PostgresDatasetRepository(pool),
       datasetVersions: new db.PostgresDatasetVersionRepository(pool),
       datasetAliases: new db.PostgresDatasetAliasRepository(pool),
-      // ADR-0021: external connections registry (so v2 plugins reading
-      // `input.connection` get a resolved object instead of undefined).
-      externalConnections: new db.PostgresExternalConnectionRepository(pool),
       // PR3: per-pipeline dataset binding overrides consulted by the
       // shared resolver. Must be wired here OR the worker will silently
       // ignore bindings configured via /pipelines/:id/bindings.
@@ -157,7 +154,7 @@ async function buildDeps(): Promise<BuiltDeps> {
       providers: new InMemoryProviderRepository(),
       providerModels: new InMemoryProviderModelRepository(),
       vectorCollections: new InMemoryVectorCollectionRepository(),
-      datasourceConnections: new InMemoryDatasourceConnectionRepository(),
+      connections: new InMemoryConnectionRepository(),
       usageRecords: new InMemoryUsageRecordRepository(),
       // Org-versioning resolution for schedule-originated run_pipeline jobs.
       pipelines: new InMemoryPipelineRepository(),
@@ -166,7 +163,6 @@ async function buildDeps(): Promise<BuiltDeps> {
       datasets: new db.InMemoryDatasetRepository(),
       datasetVersions: new db.InMemoryDatasetVersionRepository(),
       datasetAliases: new db.InMemoryDatasetAliasRepository(),
-      externalConnections: new db.InMemoryExternalConnectionRepository(),
       pipelineDatasetBindings: new db.InMemoryPipelineDatasetBindingRepository(),
       tenants: new db.InMemoryTenantRepository(),
       environments: new db.InMemoryEnvironmentRepository()

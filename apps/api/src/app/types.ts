@@ -13,7 +13,7 @@ import type {
   RetentionSettingsRepository,
   PluginRepository,
   ProviderRepository,
-  DatasourceConnectionRepository,
+  ConnectionRepository,
   PipelineDatasetBindingRepository,
   VectorCollectionRepository,
   TenantRepository,
@@ -29,7 +29,6 @@ import type {
   DatasetRepository,
   DatasetVersionRepository,
   DatasetAliasRepository,
-  ExternalConnectionRepository,
   UserRepository,
   UserIdentityRepository,
   IdentityProviderRepository,
@@ -145,10 +144,6 @@ export interface AppDeps {
   datasets?: DatasetRepository;
   datasetVersions?: DatasetVersionRepository;
   datasetAliases?: DatasetAliasRepository;
-  /** ADR-0021: External Connections Registry. Optional like datasets so
-   *  legacy harnesses keep building a valid AppDeps; createApp falls back
-   *  to a fresh InMemory instance. */
-  externalConnections?: ExternalConnectionRepository;
   configDefinitions: ConfigDefinitionRepository;
   configValues: ConfigValueRepository;
   auditLogs: AuditLogRepository;
@@ -158,7 +153,10 @@ export interface AppDeps {
   retentionSettings?: RetentionSettingsRepository;
   plugins: PluginRepository;
   providers: ProviderRepository;
-  datasources: DatasourceConnectionRepository;
+  /** ADR-0023 Unified Connections Registry. Consolidates the old
+   *  `datasources` (ADR-0020) and `externalConnections` (ADR-0021)
+   *  fields into one. */
+  connections: ConnectionRepository;
   /** Per-(pipeline, tenant, env) dataset binding overrides (PR3). */
   pipelineDatasetBindings?: PipelineDatasetBindingRepository;
   vectorCollections: VectorCollectionRepository;

@@ -420,7 +420,7 @@ export interface PluginExecutionInput {
    * Resolved external connection (ADR-0021). Populated when the node
    * carries `connection: { slug }` AND the runtime found a matching
    * row in the connections registry AND the principal holds
-   * `external_connection:use` at the row's scope. Carries the
+   * `connection:use` at the row's scope. Carries the
    * connection's resolved secret (DSN / URI / API key) so plugins
    * never see the secret-ref machinery.
    */

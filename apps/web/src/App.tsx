@@ -170,7 +170,7 @@ const NAV_GROUPS: Array<{ group: string; items: NavItem[] }> = [
       {
         path: "/external-connections",
         label: "Ext. Connections",
-        perms: ["external_connection:read"]
+        perms: ["connection:read"]
       }
     ]
   },

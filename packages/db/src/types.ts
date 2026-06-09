@@ -383,31 +383,83 @@ export interface ProviderModelRow {
   metadata: Record<string, unknown>;
 }
 
-export interface DatasourceConnectionRow {
+/**
+ * ADR-0023: Unified Connections Registry.
+ *
+ * Single canonical row type for the `connections` table. Supersedes
+ * `DatasourceConnectionRow` (ADR-0020 per-tenant registry) and
+ * `ExternalConnectionRow` (ADR-0021 external registry) — both tables
+ * collapsed into `connections` by migration 019.
+ *
+ * Field naming notes:
+ *  - `slug` is the operator-facing handle (was `name` on
+ *    datasource_connections). Per-scope unique.
+ *  - `kind` is the open-ended driver identifier (was `datasourceType`).
+ *    See ADR-0024 — kinds are themselves plugins.
+ *  - `config` is per-kind non-secret config (was `configRedacted`).
+ *  - `secretRefId` points into managed secrets — value never travels
+ *    on the connection row.
+ */
+export interface ConnectionRow {
   id: UUID;
-  /**
-   * Owning tenant. `null` means "global" — applies to every tenant
-   * as a fallback the per-tenant rows can override. Operators with
-   * `config:edit_global` create globals; tenant-admins can only
-   * create rows scoped to their own tenant.
-   */
+  scope: "global" | "tenant" | "environment";
+  /** Required when scope=tenant or scope=environment; null otherwise. */
   tenantId?: UUID | null;
-  /**
-   * Per-environment scope. `null` means "applies to every environment
-   * in this tenant" (the tenant-wide fallback). When set to an
-   * environment name, this row beats the tenant-wide one for that env.
-   * The resolver cascade is:
-   *   (tenant=T, env=E) → (tenant=T, env=null) → (tenant=null, env=null)
-   */
+  /** Required when scope=environment; null otherwise. */
   environmentId?: string | null;
-  name: string;
-  datasourceType: string;
+  /** Operator-facing handle. Resolved via env → tenant → global cascade. */
+  slug: string;
+  displayName: string;
+  description?: string | null;
+  /** Driver kind. Open-ended; the driver-plugin registry (ADR-0024)
+   *  declares which kinds are known + their config schemas. */
+  kind: string;
+  config: Record<string, unknown>;
   secretRefId?: UUID | null;
-  configRedacted: Record<string, unknown>;
+  /** SSRF guardrail — empty array means "no restriction." */
   allowedHosts: string[];
+  /** SSRF guardrail — when true, requests to RFC-1918 / link-local
+   *  addresses are refused even if `allowedHosts` permits the host. */
   denyPrivateNetworks: boolean;
+  /** Populated by the periodic connection_probe_sweep worker job. */
+  lastProbedAt?: string | null;
+  lastProbeOk?: boolean | null;
+  lastProbeError?: string | null;
+  archivedAt?: string | null;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface ConnectionRepository {
+  create(row: ConnectionRow): Promise<ConnectionRow>;
+  get(id: UUID): Promise<ConnectionRow | undefined>;
+  require(id: UUID): Promise<ConnectionRow>;
+  update(id: UUID, patch: Partial<ConnectionRow>): Promise<ConnectionRow>;
+  delete(id: UUID): Promise<void>;
+  /** env → tenant → global slug resolution. */
+  resolveSlug(args: {
+    slug: string;
+    tenantId?: string;
+    environmentId?: string;
+  }): Promise<ConnectionRow | undefined>;
+  /** Connections visible at a scope after the cascade. */
+  listVisibleAt(args: {
+    tenantId?: string;
+    environmentId?: string;
+  }): Promise<ConnectionRow[]>;
+  /** Admin filter — used by the listing screen. */
+  listAll(filter?: {
+    scope?: ConnectionRow["scope"];
+    tenantId?: string;
+    environmentId?: string;
+    kind?: string;
+    includeArchived?: boolean;
+  }): Promise<ConnectionRow[]>;
+  /** Record the result of a health probe. */
+  recordProbe(
+    id: UUID,
+    result: { ok: boolean; error?: string; at: string }
+  ): Promise<void>;
 }
 
 export interface VectorCollectionRow {
@@ -559,81 +611,8 @@ export interface DatasetRepository {
   listAll(filter?: { scope?: DatasetRow["scope"]; tenantId?: string; environmentId?: string; includeArchived?: boolean }): Promise<DatasetRow[]>;
 }
 
-// ---------------------------------------------------------------------------
-// ADR-0021: External Connections Registry
-// ---------------------------------------------------------------------------
-
-/**
- * A named, RBAC'd, health-tracked connection to a non-Postgres external
- * backend (MongoDB, ClickHouse, HTTP API, …). The DSN / credential
- * itself lives in `secrets` and is pointed to by `secretRefId`; this
- * row carries only the operator-facing identity and per-kind options.
- *
- * Scope resolution mirrors datasets: env → tenant → global, first match
- * wins. Slug is unique-per-scope; the same `acme-reporting` slug can
- * exist at global AND in tenant A.
- */
-export interface ExternalConnectionRow {
-  id: UUID;
-  scope: "global" | "tenant" | "environment";
-  tenantId?: string | null;
-  environmentId?: string | null;
-  slug: string;
-  displayName: string;
-  description?: string | null;
-  /** Open-ended kind tag — "postgres" | "mongodb" | "clickhouse" | "http" | …
-   *  The driver registry picks an adapter based on this value. */
-  kind: string;
-  /** UUID of a row in `secrets`. The connection string / API key / mongo
-   *  URI lives there and is fetched through SecretProvider at use time. */
-  secretRefId?: string | null;
-  /** Per-kind structured options that are NOT a secret. e.g. max pool
-   *  size, default database, TLS verify mode. Driver factories interpret
-   *  this; the registry treats it as an opaque jsonb. */
-  options: Record<string, unknown>;
-  lastProbedAt?: string | null;
-  lastProbeOk?: boolean | null;
-  lastProbeError?: string | null;
-  archivedAt?: string | null;
-  createdAt: string;
-  updatedAt: string;
-}
-
-export interface ExternalConnectionRepository {
-  create(row: ExternalConnectionRow): Promise<ExternalConnectionRow>;
-  get(id: UUID): Promise<ExternalConnectionRow | undefined>;
-  /** Throws NotFoundError when id is unknown. */
-  require(id: UUID): Promise<ExternalConnectionRow>;
-  update(
-    id: UUID,
-    patch: Partial<ExternalConnectionRow>
-  ): Promise<ExternalConnectionRow>;
-  delete(id: UUID): Promise<void>;
-  /** env → tenant → global slug resolution. */
-  resolveSlug(args: {
-    slug: string;
-    tenantId?: string;
-    environmentId?: string;
-  }): Promise<ExternalConnectionRow | undefined>;
-  /** Connections visible at a scope after the cascade. */
-  listVisibleAt(args: {
-    tenantId?: string;
-    environmentId?: string;
-  }): Promise<ExternalConnectionRow[]>;
-  /** Admin filter. */
-  listAll(filter?: {
-    scope?: ExternalConnectionRow["scope"];
-    tenantId?: string;
-    environmentId?: string;
-    kind?: string;
-    includeArchived?: boolean;
-  }): Promise<ExternalConnectionRow[]>;
-  /** Record the result of a health probe. */
-  recordProbe(
-    id: UUID,
-    result: { ok: boolean; error?: string; at: string }
-  ): Promise<void>;
-}
+// ExternalConnectionRow + ExternalConnectionRepository are gone —
+// folded into ConnectionRow + ConnectionRepository above. ADR-0023.
 
 export interface DatasetVersionRepository {
   create(row: DatasetVersionRow): Promise<DatasetVersionRow>;
@@ -915,22 +894,8 @@ export interface PipelineDatasetBindingRepository
   }): Promise<PipelineDatasetBindingRow | undefined>;
 }
 
-export interface DatasourceConnectionRepository extends CrudRepository<DatasourceConnectionRow> {
-  listByTenant(tenantId: UUID): Promise<DatasourceConnectionRow[]>;
-  /**
-   * Cascade resolver. Returns the most-specific connection matching
-   * `name` for the given (tenantId, environmentId): an env-specific
-   * row wins; otherwise the tenant-wide row with `environment_id IS
-   * NULL`; otherwise undefined. Mirrors the dataset resolver's
-   * env→tenant→global fall-through (datasets have one extra global
-   * tier; connections stop at tenant).
-   */
-  resolveForEnv(
-    tenantId: UUID,
-    environmentId: string | undefined,
-    name: string
-  ): Promise<DatasourceConnectionRow | undefined>;
-}
+// DatasourceConnectionRepository is gone — replaced by ConnectionRepository
+// (defined alongside ConnectionRow above). ADR-0023.
 
 export interface VectorCollectionRepository extends CrudRepository<VectorCollectionRow> {
   findByName(collectionName: string): Promise<VectorCollectionRow | undefined>;

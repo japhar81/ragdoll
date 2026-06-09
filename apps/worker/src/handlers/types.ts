@@ -35,14 +35,13 @@ import type {
   ProviderRepository,
   ProviderModelRepository,
   VectorCollectionRepository,
-  DatasourceConnectionRepository,
+  ConnectionRepository,
   UsageRecordRepository,
   PipelineRepository,
   PipelineActivationRepository,
   DatasetRepository,
   DatasetVersionRepository,
   DatasetAliasRepository,
-  ExternalConnectionRepository,
   PipelineDatasetBindingRepository,
   TenantRepository,
   EnvironmentRepository
@@ -60,7 +59,9 @@ export interface WorkerRepositories {
   providers: ProviderRepository;
   providerModels: ProviderModelRepository;
   vectorCollections: VectorCollectionRepository;
-  datasourceConnections: DatasourceConnectionRepository;
+  /** ADR-0023 Unified Connections Registry. Replaces the older
+   *  `datasourceConnections` + `externalConnections` fields. */
+  connections: ConnectionRepository;
   usageRecords: UsageRecordRepository;
   /**
    * Optional pipeline repository. When present (alongside `activations`) the
@@ -104,15 +105,6 @@ export interface WorkerRepositories {
    */
   tenants?: TenantRepository;
   environments?: EnvironmentRepository;
-  /**
-   * Optional external-connections registry (ADR-0021). When wired, the
-   * worker's executor receives an ExternalConnectionResolver and v2
-   * plugins reading `input.connection` get a resolved object instead of
-   * `undefined`. Omitting it preserves the legacy `secrets.dsn` path
-   * (matches the API behaviour when AppDeps.externalConnections is
-   * absent).
-   */
-  externalConnections?: ExternalConnectionRepository;
 }
 
 export interface WorkerDeps {

@@ -145,12 +145,12 @@ test("signup mode open_default_role grants the configured role", async () => {
     path: "/api/auth/me",
     headers: { authorization: `Bearer ${res.body.token}` }
   });
-  // viewer = execution:view_logs + dataset:read + external_connection:read
-  // (read scopes also cover external connections per ADR-0021).
+  // viewer = execution:view_logs + dataset:read + connection:read
+  // (ADR-0023 collapsed external_connection:* into connection:*).
   assert.deepEqual(me.body.permissions.sort(), [
+    "connection:read",
     "dataset:read",
-    "execution:view_logs",
-    "external_connection:read"
+    "execution:view_logs"
   ]);
 });
 

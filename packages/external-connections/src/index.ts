@@ -20,10 +20,10 @@
  *     forcing the runtime to import every driver's npm package).
  */
 
-import type { ExternalConnectionRepository, ExternalConnectionRow } from "../../db/src/types.ts";
+import type { ConnectionRepository, ConnectionRow } from "../../db/src/types.ts";
 import type { SecretProvider } from "../../secrets/src/index.ts";
 
-export type { ExternalConnectionRow, ExternalConnectionRepository };
+export type { ConnectionRow, ConnectionRepository };
 
 /**
  * The shape handed to a plugin at execute time. Carries the row,
@@ -51,10 +51,10 @@ export interface ResolveConnectionArgs {
 }
 
 export class ExternalConnectionResolver {
-  private repo: ExternalConnectionRepository;
+  private repo: ConnectionRepository;
   private secrets: SecretProvider;
 
-  constructor(repo: ExternalConnectionRepository, secrets: SecretProvider) {
+  constructor(repo: ConnectionRepository, secrets: SecretProvider) {
     this.repo = repo;
     this.secrets = secrets;
   }
@@ -88,7 +88,7 @@ export class ExternalConnectionResolver {
       slug: row.slug,
       kind: row.kind,
       secret,
-      options: row.options ?? {},
+      options: row.config ?? {},
       cascadeReason:
         row.scope === "environment"
           ? "environment"
