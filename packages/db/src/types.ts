@@ -559,6 +559,82 @@ export interface DatasetRepository {
   listAll(filter?: { scope?: DatasetRow["scope"]; tenantId?: string; environmentId?: string; includeArchived?: boolean }): Promise<DatasetRow[]>;
 }
 
+// ---------------------------------------------------------------------------
+// ADR-0021: External Connections Registry
+// ---------------------------------------------------------------------------
+
+/**
+ * A named, RBAC'd, health-tracked connection to a non-Postgres external
+ * backend (MongoDB, ClickHouse, HTTP API, …). The DSN / credential
+ * itself lives in `secrets` and is pointed to by `secretRefId`; this
+ * row carries only the operator-facing identity and per-kind options.
+ *
+ * Scope resolution mirrors datasets: env → tenant → global, first match
+ * wins. Slug is unique-per-scope; the same `acme-reporting` slug can
+ * exist at global AND in tenant A.
+ */
+export interface ExternalConnectionRow {
+  id: UUID;
+  scope: "global" | "tenant" | "environment";
+  tenantId?: string | null;
+  environmentId?: string | null;
+  slug: string;
+  displayName: string;
+  description?: string | null;
+  /** Open-ended kind tag — "postgres" | "mongodb" | "clickhouse" | "http" | …
+   *  The driver registry picks an adapter based on this value. */
+  kind: string;
+  /** UUID of a row in `secrets`. The connection string / API key / mongo
+   *  URI lives there and is fetched through SecretProvider at use time. */
+  secretRefId?: string | null;
+  /** Per-kind structured options that are NOT a secret. e.g. max pool
+   *  size, default database, TLS verify mode. Driver factories interpret
+   *  this; the registry treats it as an opaque jsonb. */
+  options: Record<string, unknown>;
+  lastProbedAt?: string | null;
+  lastProbeOk?: boolean | null;
+  lastProbeError?: string | null;
+  archivedAt?: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ExternalConnectionRepository {
+  create(row: ExternalConnectionRow): Promise<ExternalConnectionRow>;
+  get(id: UUID): Promise<ExternalConnectionRow | undefined>;
+  /** Throws NotFoundError when id is unknown. */
+  require(id: UUID): Promise<ExternalConnectionRow>;
+  update(
+    id: UUID,
+    patch: Partial<ExternalConnectionRow>
+  ): Promise<ExternalConnectionRow>;
+  delete(id: UUID): Promise<void>;
+  /** env → tenant → global slug resolution. */
+  resolveSlug(args: {
+    slug: string;
+    tenantId?: string;
+    environmentId?: string;
+  }): Promise<ExternalConnectionRow | undefined>;
+  /** Connections visible at a scope after the cascade. */
+  listVisibleAt(args: {
+    tenantId?: string;
+    environmentId?: string;
+  }): Promise<ExternalConnectionRow[]>;
+  /** Admin filter. */
+  listAll(filter?: {
+    scope?: ExternalConnectionRow["scope"];
+    tenantId?: string;
+    environmentId?: string;
+    kind?: string;
+    includeArchived?: boolean;
+  }): Promise<ExternalConnectionRow[]>;
+  /** Record the result of a health probe. */
+  recordProbe(
+    id: UUID,
+    result: { ok: boolean; error?: string; at: string }
+  ): Promise<void>;
+}
+
 export interface DatasetVersionRepository {
   create(row: DatasetVersionRow): Promise<DatasetVersionRow>;
   get(id: UUID): Promise<DatasetVersionRow | undefined>;

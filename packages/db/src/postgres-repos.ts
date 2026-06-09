@@ -25,6 +25,8 @@ export {
   PostgresDatasetAliasRepository
 } from "./postgres/datasets.ts";
 
+export { PostgresExternalConnectionRepository } from "./postgres/external-connections.ts";
+
 export {
   PostgresPipelineRepository,
   PostgresPipelineVersionRepository,

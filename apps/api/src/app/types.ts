@@ -29,6 +29,7 @@ import type {
   DatasetRepository,
   DatasetVersionRepository,
   DatasetAliasRepository,
+  ExternalConnectionRepository,
   UserRepository,
   UserIdentityRepository,
   IdentityProviderRepository,
@@ -144,6 +145,10 @@ export interface AppDeps {
   datasets?: DatasetRepository;
   datasetVersions?: DatasetVersionRepository;
   datasetAliases?: DatasetAliasRepository;
+  /** ADR-0021: External Connections Registry. Optional like datasets so
+   *  legacy harnesses keep building a valid AppDeps; createApp falls back
+   *  to a fresh InMemory instance. */
+  externalConnections?: ExternalConnectionRepository;
   configDefinitions: ConfigDefinitionRepository;
   configValues: ConfigValueRepository;
   auditLogs: AuditLogRepository;

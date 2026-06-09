@@ -81,6 +81,7 @@ import {
   InMemoryTenantPipelineRepository,
   InMemoryEnvironmentRepository,
   InMemoryDatasetRepository,
+  InMemoryExternalConnectionRepository,
   InMemoryDatasetVersionRepository,
   InMemoryDatasetAliasRepository,
   InMemoryRetentionSettingsRepository,
@@ -89,6 +90,7 @@ import {
   type DatasetVersionRepository,
   type DatasetVersionRow,
   type DatasetAliasRepository,
+  type ExternalConnectionRepository,
   type DatasetAliasRow,
   InMemoryUserRepository,
   InMemoryUserIdentityRepository,
@@ -287,6 +289,8 @@ export function createApp(deps: AppDeps): App {
     deps.datasetVersions ?? new InMemoryDatasetVersionRepository();
   const datasetAliases: DatasetAliasRepository =
     deps.datasetAliases ?? new InMemoryDatasetAliasRepository();
+  const externalConnections: ExternalConnectionRepository =
+    deps.externalConnections ?? new InMemoryExternalConnectionRepository();
   const retentionSettings: RetentionSettingsRepository =
     deps.retentionSettings ?? new InMemoryRetentionSettingsRepository();
 
