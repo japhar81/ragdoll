@@ -75,7 +75,7 @@
     "croner": "^9.0.0",
     "fast-xml-parser": "^4.5.1",
     "fastify": "^5.2.0",
-    "ioredis": "^5.5.0",
+    "ioredis": "^5.11.1",
     "jmespath": "^0.16.0",
     "jsonata": "^2.0.6",
     "mongodb": "^7.2.0",
