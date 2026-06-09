@@ -489,7 +489,7 @@ export function createApp(deps: AppDeps): App {
   registerSchedulesRoutes({ route }, { schedules, audit });
   registerConfigRoutes({ route }, { deps, audit });
 
-  registerDatasetsRoutes({ route }, { deps, audit, datasets, datasetVersions, datasetAliases, environments, tenantScope });
+  registerDatasetsRoutes({ route }, { deps, audit, datasets, datasetVersions, datasetAliases, environments, pipelines: deps.pipelines, pipelineVersions: deps.pipelineVersions, tenantScope });
 
   // ADR-0023 Unified Connections Registry. Routes at /api/connections
   // are the single CRUD surface; old /api/external-connections is gone

@@ -112,7 +112,12 @@ ON CONFLICT (pipeline_id, environment, tenant_id) DO NOTHING;
 -- and a stable alias so the runtime can look up backend_collections without
 -- the operator having to create a version first.
 
-INSERT INTO datasets (id, scope, slug, display_name, description, embedding_profile, modalities, backends)
+-- ADR-0023: bindings is the only storage-shape column. The dataset's
+-- binding map names slots ("vectors" / "text") and each slot maps to
+-- a connection slug + optional collection override + optional namespace
+-- policy. The legacy `modalities` + `backends` columns are gone
+-- (migration 021).
+INSERT INTO datasets (id, scope, slug, display_name, description, embedding_profile, bindings)
 VALUES
   (
     '00000000-0000-0000-0000-0000000d40d1',
@@ -121,12 +126,11 @@ VALUES
     'Codebase Ingest (code)',
     'Global dataset of polyglot source-code chunks. Each tenant gets its own Qdrant collection (`codebase_<tenantSlug>`) via the by-tenant namespace policy.',
     '{"provider":"ollama","model":"nomic-embed-text","dimensions":768,"distance":"cosine"}'::jsonb,
-    ARRAY['vector'],
-    -- PR6: by-tenant namespace + connectionName wired up-front. Every
+    -- by-tenant namespace + connection slug wired up-front. Every
     -- tenant inherits the global `qdrant` connection (seeded in
     -- zzzzzzz-demo-connections.sql) and writes into its own
-    -- per-tenant Qdrant collection — no operator copy-paste per tenant.
-    '{"vector":{"provider":"qdrant","connectionName":"qdrant","namespace":"by-tenant"}}'::jsonb
+    -- per-tenant Qdrant collection — no operator copy-paste.
+    '{"vectors":{"connection":"qdrant","namespace":"by-tenant"}}'::jsonb
   ),
   (
     '00000000-0000-0000-0000-0000000d40d2',
@@ -135,22 +139,15 @@ VALUES
     'Codebase Ingest (docs)',
     'Global dataset of doc text. Each tenant gets its own OpenSearch index (`codebase_docs_<tenantSlug>`) via the by-tenant namespace policy.',
     -- nomic-embed-text emits 768-d vectors; the opensearch_output's KNN
-    -- index config (in the pipeline spec above) must match this. 1536
-    -- was the legacy value from an earlier text-embedding-ada-002 default.
+    -- index config (in the pipeline spec above) must match this.
     '{"provider":"ollama","model":"nomic-embed-text","dimensions":768,"distance":"cosine"}'::jsonb,
-    ARRAY['text', 'vector'],
-    '{"text":{"provider":"opensearch","connectionName":"opensearch","namespace":"by-tenant"},"vector":{"provider":"opensearch","connectionName":"opensearch","namespace":"by-tenant"}}'::jsonb
+    '{"text":{"connection":"opensearch","namespace":"by-tenant"},"vectors":{"connection":"opensearch","namespace":"by-tenant"}}'::jsonb
   )
--- ON CONFLICT (id) DO UPDATE so re-seeding picks up description /
--- backend / namespace changes on an existing install. New installs
--- get the row fresh; upgrades get the PR6 namespace + connectionName
--- merged in without losing any operator-added fields elsewhere.
 ON CONFLICT (id) DO UPDATE
   SET display_name      = EXCLUDED.display_name,
       description       = EXCLUDED.description,
       embedding_profile = EXCLUDED.embedding_profile,
-      modalities        = EXCLUDED.modalities,
-      backends          = EXCLUDED.backends,
+      bindings          = EXCLUDED.bindings,
       updated_at        = now();
 
 INSERT INTO dataset_versions (id, dataset_id, version_label, schema_spec, backend_collections, status, ready_at)

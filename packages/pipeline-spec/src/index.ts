@@ -175,28 +175,24 @@ export interface PipelineValidationResult {
 }
 
 /**
- * Optional slug → modalities map injected by the Builder. The validator uses
- * this to check that a node bound to a slug has all the modalities the
- * plugin requires (e.g. opensearch_delete pinned to a vector-only dataset).
- * When omitted, modality mismatches go silently — the worker re-validates
- * at execute time with the real dataset rows.
+ * Slug → bindings index used by the validator.
  *
- * @deprecated Pass {@link DatasetBindingIndex} instead — it also surfaces
- * per-modality providers so the validator can enforce a plugin's `requires`
- * provider constraint (e.g. opensearch_output stuck on a qdrant dataset).
- */
-export type DatasetModalityIndex = (slug: string) => string[] | undefined;
-
-/**
- * Richer slug → binding map: both the dataset's modalities AND the
- * backend provider per modality. Powers the new `requires: [{modality,
- * provider?}]` plugin-manifest check on top of the existing modality
- * gate. The validator accepts either type — `DatasetBindingIndex` is
- * preferred for any caller that has provider info to share.
+ * The Builder injects this so a node binding a slug can be checked
+ * against the plugin's `requires: [{binding, kind|kindOneOf}]`. When
+ * omitted, mismatches go silently and the worker re-validates at
+ * execute time against real dataset rows.
+ *
+ * Returns the dataset's binding map: each binding name → its connection
+ * kind (when known). The connection kind comes from the unified
+ * registry resolution; the Builder typically loads it alongside the
+ * dataset list.
  */
 export type DatasetBindingIndex = (
   slug: string
-) => { modalities: string[]; providers: Record<string, string> } | undefined;
+) => { bindings: Record<string, { connectionKind?: string }> } | undefined;
+
+/** @deprecated ADR-0023: use {@link DatasetBindingIndex}. Same shape. */
+export type DatasetModalityIndex = DatasetBindingIndex;
 
 export function validatePipelineSpec(
   spec: PipelineSpec,
@@ -267,86 +263,72 @@ export function validatePipelineSpec(
         slug: dataset.slug,
         alias: dataset.alias ?? "stable"
       });
-      // Modality + provider check: if both the plugin AND the bound
-      // slug declare their backends, every modality the plugin needs
-      // must be present on the dataset AND any provider constraint must
-      // match. Reported as errors so the canvas badge lights up and
-      // Run/Deploy are blocked the same way `missing_required_dataset`
-      // does — operators don't get to ship a doomed wiring.
+      // ADR-0023 binding + kind check: if both the plugin AND the
+      // bound slug declare their bindings, every binding name the
+      // plugin needs must be present on the dataset AND any kind
+      // constraint (`kind` / `kindOneOf`) must match the connection
+      // kind on that binding. Reported as errors so the canvas badge
+      // lights up and Run/Deploy are blocked the same way
+      // `missing_required_dataset` does — operators don't ship doomed
+      // wirings. Legacy {modality, provider} entries on plugin
+      // manifests are mapped 1:1 to {binding, kind} per ADR-0023 §3.
       if (node.plugin && datasetIndex) {
         const manifest = registry?.get(node.plugin)?.manifest as
           | {
               datasetModalities?: string[];
               requires?: Array<{
-                // Legacy ADR-0019 fields:
                 modality?: string;
                 provider?: string;
-                // ADR-0023 fields:
                 binding?: string;
                 kind?: string;
                 kindOneOf?: string[];
               }>;
             }
           | undefined;
-        // Three sources of "what does this plugin need":
-        //   - legacy `datasetModalities: ["vector"]` (modality only)
-        //   - legacy `requires: [{modality, provider?}]`
-        //   - new ADR-0023 `requires: [{binding, kind|kindOneOf}]`
-        // Normalize all three to {modality, provider?} so the rest of
-        // the validator below doesn't care which shape the plugin used.
-        // The binding NAME is the modality value; the connection kind
-        // is the provider value — that's the structural equivalence
-        // ADR-0023 §3 calls out.
-        const legacyMods = manifest?.datasetModalities ?? [];
-        const rawRequires = manifest?.requires ?? [];
-        const newRequires = rawRequires
-          .map((r) => {
-            const mod = r.binding ?? r.modality;
-            if (!mod) return undefined; // tool-only requirement (kind w/o binding) skipped here
-            const provider = r.kind ?? r.provider;
-            return { modality: mod, provider } as { modality: string; provider?: string };
-          })
-          .filter((r): r is { modality: string; provider?: string } => Boolean(r));
-        const requiredMods = [
-          ...legacyMods,
-          ...newRequires.map((r) => r.modality)
-        ];
-        // The index callback returns EITHER a string[] (legacy
-        // modality-only) OR a {modalities, providers} object (new
-        // binding index). Normalise to the richer shape.
-        const raw = datasetIndex(dataset.slug);
-        const binding =
-          Array.isArray(raw)
-            ? { modalities: raw, providers: {} as Record<string, string> }
-            : raw;
-        if (binding && requiredMods.length > 0) {
-          const missing = requiredMods.filter(
-            (m) => !binding.modalities.includes(m)
-          );
-          if (missing.length > 0) {
-            issues.push({
-              level: "error",
-              code: "dataset_modality_mismatch",
-              message: `node "${node.id}" needs the ${[...new Set(missing)].join("/")} backend on dataset "${dataset.slug}" but it isn't declared — add it on the Datasets screen or pick a different slug`,
-              nodeId: node.id
-            });
-          }
+        type BindingRequire = { binding: string; kindOneOf?: string[] };
+        const requires: BindingRequire[] = [];
+        for (const m of manifest?.datasetModalities ?? []) {
+          requires.push({ binding: m });
         }
-        if (binding && newRequires.length > 0) {
-          for (const req of newRequires) {
-            if (!req.provider) continue;
-            const actual = binding.providers[req.modality];
-            // Skip when actual is unknown (legacy index without
-            // provider info) — Builder rebuilds with the binding
-            // index next render, and the worker re-checks at execute
-            // with real rows.
-            if (actual && actual !== req.provider) {
+        for (const r of manifest?.requires ?? []) {
+          const binding = r.binding ?? r.modality;
+          if (!binding) continue;
+          const kindOneOf = r.kindOneOf
+            ? r.kindOneOf
+            : r.kind
+              ? [r.kind]
+              : r.provider
+                ? [r.provider]
+                : undefined;
+          requires.push(kindOneOf ? { binding, kindOneOf } : { binding });
+        }
+
+        const index = datasetIndex(dataset.slug);
+        if (index && requires.length > 0) {
+          for (const req of requires) {
+            const present = index.bindings[req.binding];
+            if (!present) {
               issues.push({
                 level: "error",
-                code: "dataset_provider_mismatch",
-                message: `node "${node.id}" requires the ${req.modality} backend to be provider "${req.provider}", but dataset "${dataset.slug}" has it set to "${actual}" — pick a different dataset or change its backend provider`,
+                code: "dataset_binding_missing",
+                message: `node "${node.id}" needs the "${req.binding}" binding on dataset "${dataset.slug}" but it isn't declared — add it on the Datasets screen or pick a different slug`,
                 nodeId: node.id
               });
+              continue;
+            }
+            if (req.kindOneOf && req.kindOneOf.length > 0) {
+              const actual = present.connectionKind;
+              // Skip when actual kind is unknown (no connection wired
+              // yet — the operator still has to pick a connection). The
+              // worker re-checks at execute time.
+              if (actual && !req.kindOneOf.includes(actual)) {
+                issues.push({
+                  level: "error",
+                  code: "dataset_binding_kind_mismatch",
+                  message: `node "${node.id}" requires binding "${req.binding}" backed by ${req.kindOneOf.join(" | ")}, but dataset "${dataset.slug}" has it wired to a "${actual}" connection — pick a different dataset or change its binding`,
+                  nodeId: node.id
+                });
+              }
             }
           }
         }

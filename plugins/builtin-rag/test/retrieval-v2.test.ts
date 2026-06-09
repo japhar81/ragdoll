@@ -45,12 +45,12 @@ function fakeDataset(overrides: Partial<ResolvedDataset> = {}): ResolvedDataset 
     scope: "environment",
     tenantId: "t-1",
     environmentId: "dev",
-    modalities: ["vector"],
     embeddingProfile: {},
     chunkSchema: {},
     version: { id: "v-1", versionLabel: "v1", status: "ready" },
-    backendCollections: { vector: "kb_v1" },
-    backends: {},
+    bindings: {
+      vectors: { collection: "kb_v1" }
+    },
     ...overrides
   };
 }

@@ -104,7 +104,9 @@ test("create / get / list a tenant-scoped dataset", async () => {
   assert.equal(created.body.dataset.slug, "support-kb");
   assert.equal(created.body.dataset.tenantId, tenantId);
   assert.equal(created.body.dataset.environmentId, null);
-  assert.deepEqual(created.body.dataset.modalities, ["vector"]);
+  // ADR-0023: datasets no longer carry a modalities array; bindings
+  // are the storage shape. A new dataset starts with empty bindings.
+  assert.deepEqual(created.body.dataset.bindings, {});
 
   const got = await h.request({
     method: "GET",

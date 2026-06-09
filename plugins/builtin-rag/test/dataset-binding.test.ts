@@ -1,34 +1,29 @@
 /**
- * Tests for the connection-aware backend URL helper (PR3).
+ * Tests for the connection-aware binding URL helper (ADR-0023).
  *
- * `pickBackendUrl` is what every storage plugin reads to figure out
- * which backing-store host to talk to. The precedence chain the
- * tests pin down:
+ * `pickBindingUrl` (legacy alias `pickBackendUrl`) is what every
+ * storage plugin reads to figure out which backing-store host to talk
+ * to. The precedence chain the tests pin down:
  *
- *   1. Dataset's resolved `connection.host` (+ optional port) wins.
- *   2. Legacy `config[cfgKey]` next — call sites log a deprecation.
+ *   1. Dataset's resolved binding `connectionHost` (+ optional port) wins.
+ *   2. Legacy `config[cfgKey]` next.
  *   3. `process.env[envFallback]` last — for installs that pin
  *      a single cluster via helm env injection.
  *   4. undefined when nothing matches.
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { pickBackendUrl } from "../src/dataset-binding.ts";
+import { pickBindingUrl } from "../src/dataset-binding.ts";
 import type { PluginExecutionInput } from "../../../packages/plugin-sdk/src/index.ts";
 
 function inputWith(opts: {
   config?: Record<string, unknown>;
-  datasetBackend?: {
-    provider?: string;
-    connection?: {
-      name: string;
-      type: string;
-      host?: string;
-      port?: number;
-      secretRefId?: string | null;
-      config: Record<string, unknown>;
-      cascadeReason: "env_specific" | "tenant_fallback";
-    };
+  binding?: {
+    connectionSlug?: string;
+    connectionKind?: string;
+    connectionHost?: string;
+    connectionPort?: number;
+    cascadeReason?: "global" | "tenant" | "environment";
   };
 }): PluginExecutionInput {
   return {
@@ -51,107 +46,92 @@ function inputWith(opts: {
     inputs: {},
     config: opts.config ?? {},
     secrets: {},
-    dataset: opts.datasetBackend
+    dataset: opts.binding
       ? ({
           id: "d",
           slug: "ds",
           scope: "global",
-          modalities: ["vector"],
           embeddingProfile: {},
           chunkSchema: {},
           version: { id: "vv", versionLabel: "v1", status: "ready" },
-          backendCollections: {},
-          backends: { vector: opts.datasetBackend as Record<string, unknown> }
+          bindings: { vectors: opts.binding }
         } as any)
       : undefined
   };
 }
 
-test("pickBackendUrl: dataset connection wins, host+port stitched with scheme", () => {
-  const r = pickBackendUrl(
+test("pickBindingUrl: dataset binding wins, host+port stitched with scheme", () => {
+  const r = pickBindingUrl(
     inputWith({
       config: { url: "should-not-be-used" },
-      datasetBackend: {
-        provider: "qdrant",
-        connection: {
-          name: "qdrant-main",
-          type: "qdrant",
-          host: "qdrant.acme.example",
-          port: 6333,
-          secretRefId: null,
-          config: {},
-          cascadeReason: "tenant_fallback"
-        }
+      binding: {
+        connectionSlug: "qdrant-main",
+        connectionKind: "qdrant",
+        connectionHost: "qdrant.acme.example",
+        connectionPort: 6333,
+        cascadeReason: "tenant"
       }
     }),
-    "vector",
+    "vectors",
     { cfgKey: "url", defaultPort: 6333 }
   );
   assert.deepEqual(r, {
     url: "http://qdrant.acme.example:6333",
-    source: "dataset_connection",
-    connectionName: "qdrant-main",
-    cascadeReason: "tenant_fallback"
+    source: "binding",
+    connectionSlug: "qdrant-main",
+    connectionKind: "qdrant",
+    cascadeReason: "tenant"
   });
 });
 
-test("pickBackendUrl: defaultPort used when connection lacks port", () => {
-  const r = pickBackendUrl(
+test("pickBindingUrl: defaultPort used when binding lacks port", () => {
+  const r = pickBindingUrl(
     inputWith({
-      datasetBackend: {
-        provider: "opensearch",
-        connection: {
-          name: "os",
-          type: "opensearch",
-          host: "os.acme.example",
-          secretRefId: null,
-          config: {},
-          cascadeReason: "env_specific"
-        }
+      binding: {
+        connectionSlug: "os",
+        connectionKind: "opensearch",
+        connectionHost: "os.acme.example",
+        cascadeReason: "environment"
       }
     }),
-    "vector",
+    "vectors",
     { cfgKey: "endpoint", defaultPort: 9200 }
   );
   assert.equal(r?.url, "http://os.acme.example:9200");
-  assert.equal(r?.cascadeReason, "env_specific");
+  assert.equal(r?.cascadeReason, "environment");
 });
 
-test("pickBackendUrl: host without port and without defaultPort omits :port", () => {
-  const r = pickBackendUrl(
+test("pickBindingUrl: host without port and without defaultPort omits :port", () => {
+  const r = pickBindingUrl(
     inputWith({
-      datasetBackend: {
-        connection: {
-          name: "x",
-          type: "qdrant",
-          host: "x.example",
-          secretRefId: null,
-          config: {},
-          cascadeReason: "tenant_fallback"
-        }
+      binding: {
+        connectionSlug: "x",
+        connectionKind: "qdrant",
+        connectionHost: "x.example",
+        cascadeReason: "tenant"
       }
     }),
-    "vector",
+    "vectors",
     { cfgKey: "url" }
   );
   assert.equal(r?.url, "http://x.example");
 });
 
-test("pickBackendUrl: legacy config[cfgKey] fallback when no connection", () => {
-  const r = pickBackendUrl(
+test("pickBindingUrl: legacy config[cfgKey] fallback when no binding", () => {
+  const r = pickBindingUrl(
     inputWith({ config: { url: "http://legacy-config.example:6333" } }),
-    "vector",
+    "vectors",
     { cfgKey: "url" }
   );
   assert.equal(r?.url, "http://legacy-config.example:6333");
   assert.equal(r?.source, "config");
 });
 
-test("pickBackendUrl: env fallback last when nothing else set", () => {
+test("pickBindingUrl: env fallback last when nothing else set", () => {
   const prev = process.env.QDRANT_URL;
   process.env.QDRANT_URL = "http://env-qdrant.example:6333";
   try {
-    const r = pickBackendUrl(inputWith({}), "vector", {
+    const r = pickBindingUrl(inputWith({}), "vectors", {
       cfgKey: "url",
       envFallback: "QDRANT_URL"
     });
@@ -163,11 +143,11 @@ test("pickBackendUrl: env fallback last when nothing else set", () => {
   }
 });
 
-test("pickBackendUrl: undefined when no path resolves", () => {
+test("pickBindingUrl: undefined when no path resolves", () => {
   const prev = process.env.QDRANT_URL;
   delete process.env.QDRANT_URL;
   try {
-    const r = pickBackendUrl(inputWith({}), "vector", {
+    const r = pickBindingUrl(inputWith({}), "vectors", {
       cfgKey: "url",
       envFallback: "QDRANT_URL"
     });
@@ -177,51 +157,43 @@ test("pickBackendUrl: undefined when no path resolves", () => {
   }
 });
 
-test("pickBackendUrl: scheme override (https) honoured", () => {
-  const r = pickBackendUrl(
+test("pickBindingUrl: scheme override (https) honoured", () => {
+  const r = pickBindingUrl(
     inputWith({
-      datasetBackend: {
-        connection: {
-          name: "x",
-          type: "opensearch",
-          host: "os.acme.example",
-          port: 9200,
-          secretRefId: null,
-          config: {},
-          cascadeReason: "tenant_fallback"
-        }
+      binding: {
+        connectionSlug: "x",
+        connectionKind: "opensearch",
+        connectionHost: "os.acme.example",
+        connectionPort: 9200,
+        cascadeReason: "tenant"
       }
     }),
-    "vector",
+    "vectors",
     { cfgKey: "endpoint", scheme: "https://" }
   );
   assert.equal(r?.url, "https://os.acme.example:9200");
 });
 
-test("pickBackendUrl: dataset connection wins over BOTH config and env", () => {
+test("pickBindingUrl: dataset binding wins over BOTH config and env", () => {
   const prev = process.env.QDRANT_URL;
   process.env.QDRANT_URL = "http://env.example";
   try {
-    const r = pickBackendUrl(
+    const r = pickBindingUrl(
       inputWith({
         config: { url: "http://config.example" },
-        datasetBackend: {
-          connection: {
-            name: "x",
-            type: "qdrant",
-            host: "winner.example",
-            port: 6333,
-            secretRefId: null,
-            config: {},
-            cascadeReason: "env_specific"
-          }
+        binding: {
+          connectionSlug: "x",
+          connectionKind: "qdrant",
+          connectionHost: "winner.example",
+          connectionPort: 6333,
+          cascadeReason: "environment"
         }
       }),
-      "vector",
+      "vectors",
       { cfgKey: "url", envFallback: "QDRANT_URL" }
     );
     assert.equal(r?.url, "http://winner.example:6333");
-    assert.equal(r?.source, "dataset_connection");
+    assert.equal(r?.source, "binding");
   } finally {
     if (prev === undefined) delete process.env.QDRANT_URL;
     else process.env.QDRANT_URL = prev;

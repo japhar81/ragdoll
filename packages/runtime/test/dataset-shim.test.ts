@@ -28,12 +28,12 @@ function fakeResolved(overrides: Partial<ResolvedDataset> = {}): ResolvedDataset
     scope: "environment",
     tenantId: "t-1",
     environmentId: "prod",
-    modalities: ["vector"],
     embeddingProfile: {},
     chunkSchema: {},
     version: { id: "v-1", versionLabel: "v1", status: "ready" },
-    backendCollections: { vector: "rag_kb_v1" },
-    backends: {},
+    bindings: {
+      vectors: { collection: "rag_kb_v1" }
+    },
     ...overrides
   };
 }
@@ -45,10 +45,12 @@ test("applyDatasetShim leaves config alone when no dataset resolves", () => {
   assert.equal(applyDatasetShim(1, cfg, undefined), cfg);
 });
 
-test("applyDatasetShim splices vector + keyword into v1 config", () => {
+test("applyDatasetShim splices vectors + text into v1 config", () => {
   const resolved = fakeResolved({
-    modalities: ["vector", "keyword"],
-    backendCollections: { vector: "rag_kb_v1", keyword: "rag_kb_v1_bm25" }
+    bindings: {
+      vectors: { collection: "rag_kb_v1" },
+      text: { collection: "rag_kb_v1_bm25" }
+    }
   });
   const out = applyDatasetShim(1, {}, resolved);
   assert.equal(out.collection, "rag_kb_v1");
@@ -165,7 +167,7 @@ test("v2 plugin receives input.dataset and NOT config.collection", async () => {
   await executor.execute({ spec: SPEC, context: CONTEXT, input: {} });
   assert.equal(seen.config?.collection, undefined);
   assert.equal(seen.dataset?.slug, "kb");
-  assert.equal(seen.dataset?.backendCollections.vector, "rag_kb_v1");
+  assert.equal(seen.dataset?.bindings.vectors.collection, "rag_kb_v1");
 });
 
 test("unresolved dataset falls through quietly without shim or dataset injection", async () => {

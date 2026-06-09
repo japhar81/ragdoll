@@ -1,6 +1,6 @@
 /**
- * API surface tests for the namespace-policy field on dataset backends
- * (PR6).
+ * API surface tests for the namespace-policy field on dataset bindings
+ * (ADR-0023).
  *
  * Validation matrix is exhaustively unit-tested in
  * `packages/runtime/test/dataset-namespace.test.ts`; these tests prove
@@ -41,14 +41,13 @@ test("POST /api/datasets accepts namespace=by-tenant on a global dataset", async
       scope: "global",
       slug: "docs",
       displayName: "Docs",
-      modalities: ["text"],
-      backends: {
-        text: { provider: "opensearch", index: "docs", namespace: "by-tenant" }
+      bindings: {
+        text: { connection: "opensearch", namespace: "by-tenant" }
       }
     }
   });
   assert.equal(res.status, 201, JSON.stringify(res.body));
-  assert.equal(res.body.dataset.backends.text.namespace, "by-tenant");
+  assert.equal(res.body.dataset.bindings.text.namespace, "by-tenant");
 });
 
 test("POST /api/datasets rejects namespace=by-env on a global dataset (scope mismatch)", async () => {
@@ -60,9 +59,8 @@ test("POST /api/datasets rejects namespace=by-env on a global dataset (scope mis
       scope: "global",
       slug: "docs",
       displayName: "Docs",
-      modalities: ["text"],
-      backends: {
-        text: { provider: "opensearch", namespace: "by-env" }
+      bindings: {
+        text: { connection: "opensearch", namespace: "by-env" }
       }
     }
   });
@@ -70,7 +68,7 @@ test("POST /api/datasets rejects namespace=by-env on a global dataset (scope mis
   assert.equal(res.body.error, "validation_failed");
   assert.ok(
     res.body.issues.some(
-      (i: { path?: string }) => i.path === "backends.text.namespace"
+      (i: { path?: string }) => i.path === "bindings.text.namespace"
     )
   );
 });
@@ -86,16 +84,15 @@ test("POST /api/datasets rejects namespace=by-tenant on a tenant-scope dataset (
       tenantId,
       slug: "docs",
       displayName: "Docs",
-      modalities: ["text"],
-      backends: {
-        text: { provider: "opensearch", namespace: "by-tenant" }
+      bindings: {
+        text: { connection: "opensearch", namespace: "by-tenant" }
       }
     }
   });
   assert.equal(res.status, 422);
   assert.ok(
     res.body.issues.some(
-      (i: { path?: string }) => i.path === "backends.text.namespace"
+      (i: { path?: string }) => i.path === "bindings.text.namespace"
     )
   );
 });
@@ -121,9 +118,8 @@ test("POST /api/datasets rejects ANY non-shared policy on an environment-scope d
       environmentId: "prod",
       slug: "docs",
       displayName: "Docs",
-      modalities: ["text"],
-      backends: {
-        text: { provider: "opensearch", namespace: "by-tenant-env" }
+      bindings: {
+        text: { connection: "opensearch", namespace: "by-tenant-env" }
       }
     }
   });
@@ -139,8 +135,7 @@ test("POST /api/datasets allows missing namespace (= shared) on any scope", asyn
       scope: "global",
       slug: "docs",
       displayName: "Docs",
-      modalities: ["text"],
-      backends: { text: { provider: "opensearch", index: "docs" } }
+      bindings: { text: { connection: "opensearch" } }
     }
   });
   assert.equal(res.status, 201);
@@ -148,7 +143,6 @@ test("POST /api/datasets allows missing namespace (= shared) on any scope", asyn
 
 test("PATCH /api/datasets/:id revalidates namespace against the EXISTING scope", async () => {
   const h = buildHarness();
-  // Create a tenant-scope dataset first.
   const tenantId = await seedTenant(h);
   const createRes = await h.request({
     method: "POST",
@@ -158,8 +152,7 @@ test("PATCH /api/datasets/:id revalidates namespace against the EXISTING scope",
       tenantId,
       slug: "internal-kb",
       displayName: "Internal KB",
-      modalities: ["text"],
-      backends: { text: { provider: "opensearch" } }
+      bindings: { text: { connection: "opensearch" } }
     }
   });
   assert.equal(createRes.status, 201);
@@ -169,8 +162,8 @@ test("PATCH /api/datasets/:id revalidates namespace against the EXISTING scope",
     method: "PATCH",
     path: `/api/datasets/${id}`,
     body: {
-      backends: {
-        text: { provider: "opensearch", namespace: "by-tenant" }
+      bindings: {
+        text: { connection: "opensearch", namespace: "by-tenant" }
       }
     }
   });
@@ -180,11 +173,11 @@ test("PATCH /api/datasets/:id revalidates namespace against the EXISTING scope",
     method: "PATCH",
     path: `/api/datasets/${id}`,
     body: {
-      backends: {
-        text: { provider: "opensearch", namespace: "by-env" }
+      bindings: {
+        text: { connection: "opensearch", namespace: "by-env" }
       }
     }
   });
   assert.equal(patchOk.status, 200);
-  assert.equal(patchOk.body.dataset.backends.text.namespace, "by-env");
+  assert.equal(patchOk.body.dataset.bindings.text.namespace, "by-env");
 });

@@ -779,8 +779,11 @@ export const api = {
     description?: string;
     tenantId?: string;
     environmentId?: string;
-    modalities?: string[];
-    backends?: Record<string, unknown>;
+    /** ADR-0023: bindings replace the legacy backends/modalities shape. */
+    bindings?: Record<
+      string,
+      { connection?: string; collection?: string; namespace?: string }
+    >;
     embeddingProfile?: Record<string, unknown>;
     chunkSchema?: Record<string, unknown>;
   }) =>
@@ -791,8 +794,10 @@ export const api = {
       displayName?: string;
       description?: string | null;
       archived?: boolean;
-      modalities?: string[];
-      backends?: Record<string, unknown>;
+      bindings?: Record<
+        string,
+        { connection?: string; collection?: string; namespace?: string }
+      >;
       embeddingProfile?: Record<string, unknown>;
       chunkSchema?: Record<string, unknown>;
     }
@@ -804,6 +809,20 @@ export const api = {
     ),
   deleteDataset: (id: string) =>
     request<void>("DELETE", `/api/datasets/${encodeURIComponent(id)}`),
+  /** ADR-0023: server-side cross-ref. Returns the pipelines + nodes
+   *  that wire this dataset, plus per-binding slot usage. Replaces
+   *  the client-side fan-out across /api/pipelines + /api/pipelines/
+   *  :id/dataset-bindings the old screen did. */
+  getDatasetUsedBy: (id: string) =>
+    request<{
+      pipelines: Array<{
+        id: string;
+        slug: string;
+        name: string;
+        nodes: Array<{ id: string; bindingName?: string }>;
+      }>;
+      bindingSlots: Record<string, { connectionSlug?: string; count: number }>;
+    }>("GET", `/api/datasets/${encodeURIComponent(id)}/used-by`),
 
   // (External Connections methods removed — folded into the unified
   // `listConnections` / `createConnection` etc. below per ADR-0023.)
@@ -1342,8 +1361,13 @@ export interface DatasetView {
   description: string | null;
   embeddingProfile: Record<string, unknown>;
   chunkSchema: Record<string, unknown>;
-  modalities: string[];
-  backends: Record<string, unknown>;
+  /** ADR-0023: the only storage-binding shape. Free-text binding name
+   *  → connection slug + optional collection override + optional
+   *  namespace policy. Replaces backends/modalities. */
+  bindings: Record<
+    string,
+    { connection?: string; collection?: string; namespace?: string }
+  >;
   currentVersionId: string | null;
   archivedAt: string | null;
   createdAt: string;

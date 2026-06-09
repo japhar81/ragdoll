@@ -77,9 +77,10 @@ export function PipelineDatasetsPanel(props: {
         the alias inline.
       </p>
       {groups.map((group) => {
+        // ADR-0023: surface binding NAMES (slots) instead of modalities.
         const modalities = new Set<string>();
         for (const v of group.variants)
-          for (const m of v.modalities ?? []) modalities.add(m);
+          for (const n of Object.keys(v.bindings ?? {})) modalities.add(n);
         const anyVariant = group.variants[0];
         return (
           <section

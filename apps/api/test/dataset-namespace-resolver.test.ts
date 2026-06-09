@@ -60,7 +60,12 @@ async function seedDataset(
     tenantId?: string | null;
     environmentId?: string | null;
     slug: string;
-    backends: Record<string, Record<string, unknown>>;
+    /** ADR-0023: free-text binding name → connection + optional
+     *  collection override + optional namespace policy. */
+    bindings: Record<
+      string,
+      { connection?: string; collection?: string; namespace?: string }
+    >;
     backendCollections: Record<string, string>;
   }
 ) {
@@ -77,8 +82,7 @@ async function seedDataset(
     description: null,
     embeddingProfile: {},
     chunkSchema: {},
-    modalities: Object.keys(opts.backends),
-    backends: opts.backends,
+    bindings: opts.bindings,
     currentVersionId: versionId,
     archivedAt: null,
     createdAt: now,
@@ -107,14 +111,14 @@ test("namespace=shared (default): tenant A and tenant B see the same collection"
   await seedDataset(h, {
     scope: "global",
     slug: "docs",
-    backends: { text: { provider: "opensearch", index: "docs" } },
+    bindings: { text: { connection: "opensearch" } },
     backendCollections: { text: "docs_v1" }
   });
   const resolver = buildApiDatasetResolver(h.deps)!;
   const a = await resolver.resolve({ ref: { slug: "docs" }, tenantId: "tA" });
   const b = await resolver.resolve({ ref: { slug: "docs" }, tenantId: "tB" });
-  assert.equal(a!.backendCollections.text, "docs_v1");
-  assert.equal(b!.backendCollections.text, "docs_v1");
+  assert.equal(a!.bindings.text.collection, "docs_v1");
+  assert.equal(b!.bindings.text.collection, "docs_v1");
 });
 
 test("namespace=by-tenant on a global dataset: tenant A and tenant B get DIFFERENT collections from the same slug", async () => {
@@ -124,19 +128,19 @@ test("namespace=by-tenant on a global dataset: tenant A and tenant B get DIFFERE
   await seedDataset(h, {
     scope: "global",
     slug: "docs",
-    backends: {
-      text: { provider: "opensearch", index: "docs", namespace: "by-tenant" }
+    bindings: {
+      text: { connection: "opensearch", namespace: "by-tenant" }
     },
     backendCollections: { text: "docs_v1" }
   });
   const resolver = buildApiDatasetResolver(h.deps)!;
   const a = await resolver.resolve({ ref: { slug: "docs" }, tenantId: "tA" });
   const b = await resolver.resolve({ ref: { slug: "docs" }, tenantId: "tB" });
-  assert.equal(a!.backendCollections.text, "docs_v1_tenant_a");
-  assert.equal(b!.backendCollections.text, "docs_v1_tenant_b");
-  // The raw `backends.text.namespace` is still carried through so the
-  // UI can display the policy without re-fetching.
-  assert.equal(a!.backends.text.namespace, "by-tenant");
+  assert.equal(a!.bindings.text.collection, "docs_v1_tenant_a");
+  assert.equal(b!.bindings.text.collection, "docs_v1_tenant_b");
+  // The binding's `namespace` policy is still carried through so the
+  // UI can display it without re-fetching.
+  assert.equal(a!.bindings.text.namespace, "by-tenant");
 });
 
 test("namespace=by-tenant-env on a global dataset: per-(tenant,env) split", async () => {
@@ -147,8 +151,8 @@ test("namespace=by-tenant-env on a global dataset: per-(tenant,env) split", asyn
   await seedDataset(h, {
     scope: "global",
     slug: "docs",
-    backends: {
-      vector: { provider: "qdrant", namespace: "by-tenant-env" }
+    bindings: {
+      vector: { connection: "qdrant", namespace: "by-tenant-env" }
     },
     backendCollections: { vector: "docs" }
   });
@@ -163,8 +167,8 @@ test("namespace=by-tenant-env on a global dataset: per-(tenant,env) split", asyn
     tenantId: "tA",
     environmentId: "eProd"
   });
-  assert.equal(dev!.backendCollections.vector, "docs_tenant_a_dev");
-  assert.equal(prod!.backendCollections.vector, "docs_tenant_a_prod");
+  assert.equal(dev!.bindings.vector.collection, "docs_tenant_a_dev");
+  assert.equal(prod!.bindings.vector.collection, "docs_tenant_a_prod");
 });
 
 test("namespace=by-tenant-env without env context: falls back to base (tenant-admin walking globals)", async () => {
@@ -173,14 +177,14 @@ test("namespace=by-tenant-env without env context: falls back to base (tenant-ad
   await seedDataset(h, {
     scope: "global",
     slug: "docs",
-    backends: { vector: { provider: "qdrant", namespace: "by-tenant-env" } },
+    bindings: { vector: { connection: "qdrant", namespace: "by-tenant-env" } },
     backendCollections: { vector: "docs" }
   });
   const resolver = buildApiDatasetResolver(h.deps)!;
   const r = await resolver.resolve({ ref: { slug: "docs" }, tenantId: "tA" });
   // Missing env → degrades to base name. Resolver MUST NOT throw — the
   // dataset can still be used for cluster-admin inspection.
-  assert.equal(r!.backendCollections.vector, "docs");
+  assert.equal(r!.bindings.vector.collection, "docs");
 });
 
 test("namespace=by-env on a tenant-scope dataset: per-env split, NO tenant suffix (tenant is implicit)", async () => {
@@ -192,8 +196,8 @@ test("namespace=by-env on a tenant-scope dataset: per-env split, NO tenant suffi
     scope: "tenant",
     tenantId: "tA",
     slug: "internal-kb",
-    backends: {
-      text: { provider: "opensearch", index: "kb", namespace: "by-env" }
+    bindings: {
+      text: { connection: "opensearch", namespace: "by-env" }
     },
     backendCollections: { text: "kb" }
   });
@@ -208,8 +212,8 @@ test("namespace=by-env on a tenant-scope dataset: per-env split, NO tenant suffi
     tenantId: "tA",
     environmentId: "eStg"
   });
-  assert.equal(dev!.backendCollections.text, "kb_dev");
-  assert.equal(stg!.backendCollections.text, "kb_staging");
+  assert.equal(dev!.bindings.text.collection, "kb_dev");
+  assert.equal(stg!.bindings.text.collection, "kb_staging");
 });
 
 test("namespace expansion runs per-modality independently", async () => {
@@ -219,10 +223,10 @@ test("namespace expansion runs per-modality independently", async () => {
   await seedDataset(h, {
     scope: "global",
     slug: "docs",
-    backends: {
-      // One modality fully scoped, the other shared.
-      vector: { provider: "qdrant", namespace: "by-tenant-env" },
-      text: { provider: "opensearch", namespace: "shared" }
+    bindings: {
+      // One binding fully scoped, the other shared.
+      vector: { connection: "qdrant", namespace: "by-tenant-env" },
+      text: { connection: "opensearch", namespace: "shared" }
     },
     backendCollections: { vector: "docs_vec", text: "docs_text" }
   });
@@ -232,8 +236,8 @@ test("namespace expansion runs per-modality independently", async () => {
     tenantId: "tA",
     environmentId: "eProd"
   });
-  assert.equal(r!.backendCollections.vector, "docs_vec_tenant_a_prod");
-  assert.equal(r!.backendCollections.text, "docs_text");
+  assert.equal(r!.bindings.vector.collection, "docs_vec_tenant_a_prod");
+  assert.equal(r!.bindings.text.collection, "docs_text");
 });
 
 test("sanitiser pass-through: special chars in tenant slug get normalised in the suffix", async () => {
@@ -243,11 +247,11 @@ test("sanitiser pass-through: special chars in tenant slug get normalised in the
   await seedDataset(h, {
     scope: "global",
     slug: "docs",
-    backends: { vector: { provider: "qdrant", namespace: "by-tenant" } },
+    bindings: { vector: { connection: "qdrant", namespace: "by-tenant" } },
     backendCollections: { vector: "docs" }
   });
   const resolver = buildApiDatasetResolver(h.deps)!;
   const r = await resolver.resolve({ ref: { slug: "docs" }, tenantId: "tA" });
   // Hyphen collapsed to underscore, lowercased.
-  assert.equal(r!.backendCollections.vector, "docs_tenant_a");
+  assert.equal(r!.bindings.vector.collection, "docs_tenant_a");
 });

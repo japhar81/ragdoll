@@ -263,10 +263,13 @@ export function ConnectionsScreen() {
     queryFn: () => api.listDatasets()
   });
   const usedBy = useMemo(() => {
-    const out = new Map<string, string[]>(); // slug -> [dataset slug, ...]
+    // ADR-0023: walks dataset.bindings.<name>.connection (the slug
+    // pointing at a connection row). Replaces the modality-keyed
+    // backends.<m>.connectionName walk the old DatasetView shape used.
+    const out = new Map<string, string[]>(); // connection slug -> [dataset slug, ...]
     for (const ds of datasets.data?.datasets ?? []) {
-      for (const [, b] of Object.entries(ds.backends ?? {})) {
-        const cn = (b as { connectionName?: string })?.connectionName;
+      for (const [, b] of Object.entries(ds.bindings ?? {})) {
+        const cn = b?.connection;
         if (typeof cn === "string") {
           (out.get(cn) ?? out.set(cn, []).get(cn)!).push(ds.slug);
         }

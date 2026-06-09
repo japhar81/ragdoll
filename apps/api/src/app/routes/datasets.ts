@@ -1,5 +1,5 @@
 /**
- * Dataset CRUD + dataset versions + dataset aliases.
+ * Dataset CRUD + dataset versions + dataset aliases + binding cross-refs.
  *
  * Datasets are the first-class corpus a pipeline reads from / writes
  * into; they decouple ingestion from retrieval (multiple pipelines can
@@ -7,6 +7,10 @@
  * naming. Scopes: global / tenant / environment — each row's scope
  * controls which authorize check (tenantId / environmentId pair) the
  * RBAC layer evaluates.
+ *
+ * ADR-0023: the only storage-binding shape is `bindings: {<name>:
+ * {connection, collection?, namespace?}}`. The legacy `backends.<modality>`
+ * + `modalities[]` columns were dropped in migration 021.
  */
 import { randomUUID } from "node:crypto";
 import { enforce } from "../../../../../packages/auth/src/index.ts";
@@ -17,7 +21,9 @@ import type {
   DatasetRepository,
   DatasetVersionRepository,
   DatasetAliasRepository,
-  EnvironmentRepository
+  EnvironmentRepository,
+  PipelineRepository,
+  PipelineVersionRepository
 } from "../../../../../packages/db/src/index.ts";
 import { ok, error, isObject, nowIso, headerValue } from "../http-utils.ts";
 import type { AppDeps } from "../types.ts";
@@ -25,29 +31,63 @@ import type { RouteContext, RouteRegistry, AuditWriter } from "./types.ts";
 import { validateNamespacePolicyForScope } from "../../../../../packages/runtime/src/index.ts";
 
 /**
- * Walk a `backends` JSONB object and validate any `namespace` policy
- * field against the dataset scope. Mirrors the matrix in
- * `validateNamespacePolicyForScope` — returns a list of 422 issues, or
- * an empty list when every modality's policy is legal (or absent).
+ * Walk a `bindings` object and validate each entry's shape + namespace
+ * policy. Returns a list of 422 issues; empty list when every binding
+ * is well-formed.
+ *
+ * Per-binding rules:
+ *   - the value MUST be an object.
+ *   - `connection`, `collection` (if set) MUST be strings.
+ *   - `namespace` (if set) MUST be a legal DatasetNamespacePolicy that
+ *     matches the dataset's scope (global datasets can't pin
+ *     namespace="shared" + a tenant-specific suffix, etc — same matrix
+ *     as the old per-backend validator).
  */
-function validateBackendsNamespaceForScope(
+function validateBindings(
   scope: DatasetRow["scope"],
-  backends: Record<string, unknown>
+  bindings: Record<string, unknown>
 ): Array<{ path: string; message: string }> {
   const issues: Array<{ path: string; message: string }> = [];
-  for (const [modality, raw] of Object.entries(backends)) {
-    if (!raw || typeof raw !== "object") continue;
-    const block = raw as Record<string, unknown>;
-    if (!("namespace" in block)) continue;
-    const result = validateNamespacePolicyForScope(scope, block.namespace);
-    if (!result.ok) {
-      issues.push({
-        path: `backends.${modality}.namespace`,
-        message: result.message ?? "invalid namespace policy"
-      });
+  for (const [name, raw] of Object.entries(bindings)) {
+    if (!raw || typeof raw !== "object") {
+      issues.push({ path: `bindings.${name}`, message: "binding value must be an object" });
+      continue;
+    }
+    const b = raw as Record<string, unknown>;
+    if (b.connection !== undefined && typeof b.connection !== "string") {
+      issues.push({ path: `bindings.${name}.connection`, message: "connection must be a string slug" });
+    }
+    if (b.collection !== undefined && typeof b.collection !== "string") {
+      issues.push({ path: `bindings.${name}.collection`, message: "collection must be a string" });
+    }
+    if (b.namespace !== undefined) {
+      const result = validateNamespacePolicyForScope(scope, b.namespace);
+      if (!result.ok) {
+        issues.push({
+          path: `bindings.${name}.namespace`,
+          message: result.message ?? "invalid namespace policy"
+        });
+      }
     }
   }
   return issues;
+}
+
+/** Normalise a body's bindings field — drops unknown keys per binding. */
+function normaliseBindings(
+  raw: Record<string, unknown>
+): Record<string, { connection?: string; collection?: string; namespace?: string }> {
+  const out: Record<string, { connection?: string; collection?: string; namespace?: string }> = {};
+  for (const [name, value] of Object.entries(raw)) {
+    if (!value || typeof value !== "object") continue;
+    const b = value as Record<string, unknown>;
+    const entry: { connection?: string; collection?: string; namespace?: string } = {};
+    if (typeof b.connection === "string" && b.connection) entry.connection = b.connection;
+    if (typeof b.collection === "string" && b.collection) entry.collection = b.collection;
+    if (typeof b.namespace === "string" && b.namespace) entry.namespace = b.namespace;
+    out[name] = entry;
+  }
+  return out;
 }
 
 interface DatasetsServices {
@@ -57,6 +97,8 @@ interface DatasetsServices {
   datasetVersions: DatasetVersionRepository;
   datasetAliases: DatasetAliasRepository;
   environments: EnvironmentRepository;
+  pipelines: PipelineRepository;
+  pipelineVersions: PipelineVersionRepository;
   tenantScope: (ctx: RouteContext) => string | undefined;
 }
 
@@ -86,10 +128,6 @@ function publicDataset(row: DatasetRow): Record<string, unknown> {
     description: row.description ?? null,
     embeddingProfile: row.embeddingProfile,
     chunkSchema: row.chunkSchema,
-    modalities: row.modalities,
-    backends: row.backends,
-    // ADR-0023: the new bindings view — present alongside `backends` so
-    // both shapes are visible during the transition.
     bindings: row.bindings ?? {},
     currentVersionId: row.currentVersionId ?? null,
     archivedAt: row.archivedAt ?? null,
@@ -136,6 +174,8 @@ export function registerDatasetsRoutes(
     datasetVersions,
     datasetAliases,
     environments,
+    pipelines,
+    pipelineVersions,
     tenantScope
   } = svc;
 
@@ -155,6 +195,81 @@ export function registerDatasetsRoutes(
     if (!row) return error(404, "not_found", { message: "dataset not found" });
     enforce(ctx.principal, "dataset:read", datasetScopeResource(row));
     return ok({ dataset: publicDataset(row) });
+  });
+
+  /**
+   * Server-side "used by" cross-reference. Walks every pipeline's latest
+   * version spec and returns the nodes that wire this dataset slug
+   * (either via inline `node.dataset.slug` or via a `spec.bindings:`
+   * entry whose dataset id matches this row).
+   *
+   * Shape:
+   *   {
+   *     pipelines: [{ id, slug, name, nodes: [{id, bindingName?}] }],
+   *     bindingSlots: { vectors: { connectionKind: "qdrant", count: 3 }, ... }
+   *   }
+   *
+   * Client-side aggregation across N pipelines was the cheaper path
+   * before bindings; once each dataset carries N bindings AND N pipelines
+   * carry node-level overrides, the round-trip count grew enough to
+   * justify centralising the walk here.
+   */
+  api.route("GET", "/api/datasets/:id/used-by", async (ctx) => {
+    const ds = await datasets.get(ctx.params.id);
+    if (!ds) return error(404, "not_found", { message: "dataset not found" });
+    enforce(ctx.principal, "dataset:read", datasetScopeResource(ds));
+    const allPipelines = await pipelines.list();
+    const out: Array<{
+      id: string;
+      slug: string;
+      name: string;
+      nodes: Array<{ id: string; bindingName?: string }>;
+    }> = [];
+    for (const p of allPipelines) {
+      const vers = await pipelineVersions.listByPipeline(p.id);
+      if (vers.length === 0) continue;
+      const latest = vers[vers.length - 1];
+      const spec = (latest.spec ?? {}) as {
+        spec?: {
+          nodes?: Array<{ id: string; dataset?: { slug?: string }; binding?: string }>;
+          bindings?: Array<{ id: string; dataset?: string }>;
+        };
+      };
+      const nodes = spec.spec?.nodes ?? [];
+      const pipelineBindings = spec.spec?.bindings ?? [];
+      const datasetBindingIds = new Set(
+        pipelineBindings.filter((b) => b.dataset === ds.slug).map((b) => b.id)
+      );
+      const matches: Array<{ id: string; bindingName?: string }> = [];
+      for (const n of nodes) {
+        const matchInline = n.dataset?.slug === ds.slug;
+        const matchBinding = n.binding && datasetBindingIds.has(n.binding);
+        if (matchInline || matchBinding) {
+          matches.push({ id: n.id, bindingName: n.binding });
+        }
+      }
+      if (matches.length > 0) {
+        out.push({
+          id: p.id,
+          slug: p.slug ?? p.id,
+          name: p.name,
+          nodes: matches
+        });
+      }
+    }
+    // Slot summary: for each binding declared on this dataset, surface
+    // the connection kind and how many pipeline-nodes actually use it.
+    // Cheap heuristic — counts a pipeline as touching every binding
+    // since plugins read bindings by name. Future enhancement: cross-
+    // reference plugin manifests' `requires` to attribute per-binding.
+    const bindingSlots: Record<string, { connectionSlug?: string; count: number }> = {};
+    for (const [name, b] of Object.entries(ds.bindings ?? {})) {
+      bindingSlots[name] = {
+        connectionSlug: b?.connection,
+        count: out.length
+      };
+    }
+    return ok({ pipelines: out, bindingSlots });
   });
 
   api.route("POST", "/api/datasets", async (ctx) => {
@@ -217,10 +332,10 @@ export function registerDatasetsRoutes(
     }
     enforce(ctx.principal, "dataset:admin", { tenantId, environment: environmentId });
 
-    const backends = isObject(body.backends) ? body.backends : {};
-    const nsIssues = validateBackendsNamespaceForScope(scope, backends);
-    if (nsIssues.length > 0) {
-      return error(422, "validation_failed", { issues: nsIssues });
+    const rawBindings = isObject(body.bindings) ? body.bindings : {};
+    const issues = validateBindings(scope, rawBindings);
+    if (issues.length > 0) {
+      return error(422, "validation_failed", { issues });
     }
 
     const now = nowIso();
@@ -234,17 +349,7 @@ export function registerDatasetsRoutes(
       description: typeof body.description === "string" ? body.description : null,
       embeddingProfile: isObject(body.embeddingProfile) ? body.embeddingProfile : {},
       chunkSchema: isObject(body.chunkSchema) ? body.chunkSchema : {},
-      modalities:
-        Array.isArray(body.modalities) && body.modalities.length > 0
-          ? (body.modalities.filter((m) => typeof m === "string") as string[])
-          : ["vector"],
-      backends,
-      // ADR-0023: explicit bindings block. When omitted, the runtime
-      // synthesises one from backends at resolve time, so legacy
-      // backends-only creates still work end-to-end.
-      bindings: isObject(body.bindings)
-        ? (body.bindings as Record<string, { connection?: string; collection?: string }>)
-        : undefined,
+      bindings: normaliseBindings(rawBindings),
       currentVersionId: null,
       archivedAt: null,
       createdAt: now,
@@ -270,21 +375,12 @@ export function registerDatasetsRoutes(
     }
     if (isObject(body.chunkSchema)) patch.chunkSchema = body.chunkSchema;
     if (isObject(body.embeddingProfile)) patch.embeddingProfile = body.embeddingProfile;
-    if (isObject(body.backends)) {
-      const nsIssues = validateBackendsNamespaceForScope(before.scope, body.backends);
-      if (nsIssues.length > 0) {
-        return error(422, "validation_failed", { issues: nsIssues });
-      }
-      patch.backends = body.backends;
-    }
-    if (Array.isArray(body.modalities) && body.modalities.length > 0) {
-      patch.modalities = body.modalities.filter((m) => typeof m === "string") as string[];
-    }
     if (isObject(body.bindings)) {
-      patch.bindings = body.bindings as Record<
-        string,
-        { connection?: string; collection?: string }
-      >;
+      const issues = validateBindings(before.scope, body.bindings);
+      if (issues.length > 0) {
+        return error(422, "validation_failed", { issues });
+      }
+      patch.bindings = normaliseBindings(body.bindings);
     }
     if (body.archived === true) patch.archivedAt = nowIso();
     if (body.archived === false) patch.archivedAt = null;
@@ -342,8 +438,6 @@ export function registerDatasetsRoutes(
       createdAt: nowIso(),
       readyAt: body.status === "ready" ? nowIso() : null
     });
-    // If this is the dataset's first version and no `current_version_id`
-    // is set yet, pin it and create the `stable` alias.
     if (!ds.currentVersionId) {
       await datasets.update(ds.id, { currentVersionId: created.id, updatedAt: nowIso() });
       await datasetAliases.upsert({

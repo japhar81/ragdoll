@@ -267,8 +267,10 @@ function DatasetPickerSection(props: {
     queryFn: () => api.listDatasets({})
   });
   // Group by slug — one row per logical corpus. Track the union of
-  // modalities across all scope variants so we can decide compatibility
-  // even when only an env override carries the new backend.
+  // ADR-0023: dataset compatibility is now keyed on binding NAMES
+  // (slot names like "vectors", "text", "graph") instead of modality
+  // enums. Plugins declare which bindings they need; the dataset
+  // declares which binding names it provides; intersection = filter.
   const distinctSlugs = useMemo(() => {
     const seen = new Map<
       string,
@@ -276,20 +278,21 @@ function DatasetPickerSection(props: {
         slug: string;
         displayName?: string;
         variants: number;
-        modalities: Set<string>;
+        bindingNames: Set<string>;
       }
     >();
     for (const d of datasets.data?.datasets ?? []) {
+      const names = Object.keys(d.bindings ?? {});
       const entry = seen.get(d.slug);
       if (entry) {
         entry.variants += 1;
-        for (const m of d.modalities ?? []) entry.modalities.add(m);
+        for (const n of names) entry.bindingNames.add(n);
       } else {
         seen.set(d.slug, {
           slug: d.slug,
           displayName: d.displayName ?? undefined,
           variants: 1,
-          modalities: new Set(d.modalities ?? [])
+          bindingNames: new Set(names)
         });
       }
     }
@@ -299,7 +302,7 @@ function DatasetPickerSection(props: {
   const compatibleSlugs = useMemo(() => {
     if (required.length === 0) return distinctSlugs;
     return distinctSlugs.filter((d) =>
-      required.every((m) => d.modalities.has(m))
+      required.every((m) => d.bindingNames.has(m))
     );
   }, [distinctSlugs, required]);
   const current = props.node.dataset as
@@ -323,53 +326,50 @@ function DatasetPickerSection(props: {
   const suggestedSlug = props.pipelineSlug?.trim() || "";
   const modalityLabel =
     required.length === 0 ? "" : required.join(" + ");
-  const defaultProvider = (m: string): string =>
-    m === "vector" ? "qdrant" : m === "text" ? "opensearch" : m;
+  // ADR-0023: default connection slug per well-known binding name.
+  // Operators can rebind on the Datasets screen; this is just the
+  // out-of-the-box wiring for a fresh dataset spun up from the Builder.
+  const defaultConnection = (binding: string): string =>
+    binding === "vectors" || binding === "vector"
+      ? "qdrant"
+      : binding === "text" || binding === "keyword"
+        ? "opensearch"
+        : binding === "graph"
+          ? "dgraph"
+          : binding;
   const create = useMutation({
     mutationFn: async (slug: string): Promise<{ slug: string }> => {
       // Always create at GLOBAL scope from the builder — pipelines are
       // tenant-/env-agnostic templates. Tenant / env overrides happen at
-      // deploy time, where the operator picks the target context.
-      //
-      // Conflict-aware: if a global row with this slug already exists
-      // (typical when an operator previously created a vector-only
-      // `code_indexer` and is now wiring an opensearch sink), POST 409s.
-      // PATCH the missing modalities + backends onto the existing row
-      // instead — the new node wants the existing corpus to gain one
-      // more index, not a duplicate slug.
-      const modalities = required.length > 0 ? required : ["vector"];
+      // deploy time. Conflict-aware: if a global row with this slug
+      // already exists (operator previously created the dataset and is
+      // now wiring an additional plugin), PATCH the missing bindings
+      // onto the existing row instead of POSTing a duplicate slug.
+      const bindingNames = required.length > 0 ? required : ["vectors"];
       const existingGlobal = (datasets.data?.datasets ?? []).find(
         (d) => d.slug === slug && d.scope === "global"
       );
       if (existingGlobal) {
-        const nextModalities = [
-          ...new Set([...existingGlobal.modalities, ...modalities])
-        ];
-        const nextBackends: Record<string, unknown> = {
-          ...(existingGlobal.backends ?? {})
-        };
-        // Backfill a default backend for EVERY declared modality that
-        // doesn't yet have one — covers the legacy case where an earlier
-        // create wrote `modalities: ["vector"]` but `backends: {}`. Without
-        // this, the Datasets view shows only the newly-added backend and
-        // the older modality looks empty.
-        for (const m of nextModalities) {
-          if (!nextBackends[m]) nextBackends[m] = { provider: defaultProvider(m) };
+        const nextBindings: Record<
+          string,
+          { connection?: string; collection?: string; namespace?: string }
+        > = { ...(existingGlobal.bindings ?? {}) };
+        for (const n of bindingNames) {
+          if (!nextBindings[n]) nextBindings[n] = { connection: defaultConnection(n) };
         }
-        await api.updateDataset(existingGlobal.id, {
-          modalities: nextModalities,
-          backends: nextBackends
-        });
+        await api.updateDataset(existingGlobal.id, { bindings: nextBindings });
         return { slug: existingGlobal.slug };
       }
-      const backends: Record<string, unknown> = {};
-      for (const m of modalities) backends[m] = { provider: defaultProvider(m) };
+      const bindings: Record<
+        string,
+        { connection?: string; collection?: string; namespace?: string }
+      > = {};
+      for (const n of bindingNames) bindings[n] = { connection: defaultConnection(n) };
       const res = await api.createDataset({
         scope: "global",
         slug,
         displayName: slug,
-        modalities,
-        backends
+        bindings
       });
       return { slug: res.dataset.slug };
     },
@@ -409,8 +409,8 @@ function DatasetPickerSection(props: {
           {visibleSlugs.map((d) => (
             <option key={d.slug} value={d.slug}>
               {d.slug}
-              {d.modalities.size > 0
-                ? ` · ${[...d.modalities].join("/")}`
+              {d.bindingNames.size > 0
+                ? ` · ${[...d.bindingNames].join("/")}`
                 : ""}
               {d.variants > 1 ? ` · ${d.variants} scopes` : ""}
             </option>
@@ -1057,17 +1057,42 @@ export function PipelineBuilder(props: {
     queryKey: ["datasets-slugs"],
     queryFn: () => api.listDatasets({})
   });
+  // ADR-0023: per-slug binding index for the spec validator. Walks
+  // every (tenant, env) variant of the slug and merges declared
+  // bindings — gives the validator the union view, so e.g. a global
+  // dataset declaring "vectors" still validates a node that needs
+  // "vectors" even when only an env override declares "text" too.
   const datasetModalityIndex = useMemo(() => {
     if (!datasetsForValidation.data) return undefined;
-    const bySlug = new Map<string, Set<string>>();
+    const bySlug = new Map<
+      string,
+      Map<string, { connectionKind?: string }>
+    >();
     for (const d of datasetsForValidation.data.datasets) {
-      const set = bySlug.get(d.slug) ?? new Set<string>();
-      for (const m of d.modalities ?? []) set.add(m);
-      bySlug.set(d.slug, set);
+      const slugMap = bySlug.get(d.slug) ?? new Map();
+      for (const [name, b] of Object.entries(d.bindings ?? {})) {
+        // The DatasetView's bindings carry the connection SLUG, not the
+        // resolved kind — the validator's kind check kicks in only when
+        // the Builder also has the connection catalog loaded. Pass
+        // through what we have; mismatch checks degrade gracefully when
+        // connectionKind is undefined (the worker re-validates).
+        if (!slugMap.has(name)) slugMap.set(name, {});
+        const existing = slugMap.get(name)!;
+        if (!existing.connectionKind && b.connection) {
+          // Heuristic: the connection slug often matches the kind for
+          // bundled connections (qdrant slug → qdrant kind). When it
+          // doesn't, the worker still catches the mismatch at execute.
+          existing.connectionKind = b.connection;
+        }
+      }
+      bySlug.set(d.slug, slugMap);
     }
-    return (slug: string): string[] | undefined => {
-      const set = bySlug.get(slug);
-      return set ? [...set] : undefined;
+    return (slug: string) => {
+      const slugMap = bySlug.get(slug);
+      if (!slugMap) return undefined;
+      const bindings: Record<string, { connectionKind?: string }> = {};
+      for (const [name, info] of slugMap.entries()) bindings[name] = info;
+      return { bindings };
     };
   }, [datasetsForValidation.data]);
 

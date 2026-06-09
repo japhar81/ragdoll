@@ -77,22 +77,19 @@ function SlotRow(props: {
     ? props.variants.find((v) => v.id === props.override)
     : undefined;
   const effective = overrideRow ?? resolved;
-  // Inherit modalities + backends from the existing slug variants so the
-  // new env/tenant override starts compatible with everything the parent
-  // already declared. Without this the new row would default to a single
-  // `["vector"]` modality and immediately fail the picker's mismatch check
-  // for any text/hybrid plugin pinned to the same slug.
-  const inheritedModalities = useMemo(() => {
-    const set = new Set<string>();
-    for (const v of props.variants)
-      for (const m of v.modalities ?? []) set.add(m);
-    return set.size > 0 ? [...set] : ["vector"];
-  }, [props.variants]);
-  const inheritedBackends = useMemo(() => {
-    const out: Record<string, unknown> = {};
+  // ADR-0023: inherit BINDINGS from existing slug variants so the new
+  // env/tenant override starts compatible with everything the parent
+  // already declared. Without this, the new row would land with empty
+  // bindings and immediately fail the picker's compatibility check for
+  // any plugin pinned to the same slug.
+  const inheritedBindings = useMemo(() => {
+    const out: Record<
+      string,
+      { connection?: string; collection?: string; namespace?: string }
+    > = {};
     for (const v of props.variants) {
-      for (const [m, cfg] of Object.entries(v.backends ?? {})) {
-        if (!out[m]) out[m] = cfg;
+      for (const [name, b] of Object.entries(v.bindings ?? {})) {
+        if (!out[name]) out[name] = { ...b };
       }
     }
     return out;
@@ -112,35 +109,41 @@ function SlotRow(props: {
           v.environmentId === props.environment
         );
       });
-      const defaultProvider = (m: string): string =>
-        m === "vector" ? "qdrant" : m === "text" ? "opensearch" : m;
+      const defaultConnection = (name: string): string =>
+        name === "vectors" || name === "vector"
+          ? "qdrant"
+          : name === "text" || name === "keyword"
+            ? "opensearch"
+            : name === "graph"
+              ? "dgraph"
+              : name;
       if (existing) {
-        // Same merge semantics as the picker: union modalities + fill
-        // missing backends from the union of all variants of this slug,
-        // then backfill defaults for any modality still without a backend.
-        const nextModalities = [
-          ...new Set([...(existing.modalities ?? []), ...inheritedModalities])
-        ];
-        const nextBackends: Record<string, unknown> = {
-          ...(existing.backends ?? {})
-        };
-        for (const [m, cfg] of Object.entries(inheritedBackends)) {
-          if (!nextBackends[m]) nextBackends[m] = cfg;
+        // Merge: existing bindings win; union missing ones from parent;
+        // synthesise a default connection for any binding still empty.
+        const nextBindings: Record<
+          string,
+          { connection?: string; collection?: string; namespace?: string }
+        > = { ...(existing.bindings ?? {}) };
+        for (const [name, b] of Object.entries(inheritedBindings)) {
+          if (!nextBindings[name]) nextBindings[name] = { ...b };
         }
-        for (const m of nextModalities) {
-          if (!nextBackends[m]) nextBackends[m] = { provider: defaultProvider(m) };
+        for (const name of Object.keys(nextBindings)) {
+          if (!nextBindings[name].connection)
+            nextBindings[name].connection = defaultConnection(name);
         }
         const patched = await api.updateDataset(existing.id, {
-          modalities: nextModalities,
-          backends: nextBackends
+          bindings: nextBindings
         });
         return patched.dataset;
       }
-      // Fresh row: make sure every modality has a backend so the Datasets
-      // view doesn't show a half-populated dataset.
-      const seededBackends: Record<string, unknown> = { ...inheritedBackends };
-      for (const m of inheritedModalities) {
-        if (!seededBackends[m]) seededBackends[m] = { provider: defaultProvider(m) };
+      // Fresh row: ensure every inherited binding has a connection.
+      const seededBindings: Record<
+        string,
+        { connection?: string; collection?: string; namespace?: string }
+      > = { ...inheritedBindings };
+      for (const name of Object.keys(seededBindings)) {
+        if (!seededBindings[name].connection)
+          seededBindings[name].connection = defaultConnection(name);
       }
       const res = await api.createDataset({
         slug: props.slot.slug,
@@ -148,8 +151,7 @@ function SlotRow(props: {
         tenantId: createScope === "global" ? undefined : props.tenantId,
         environmentId: createScope === "environment" ? props.environment : undefined,
         displayName: props.slot.slug,
-        modalities: inheritedModalities,
-        backends: seededBackends
+        bindings: seededBindings
       });
       return res.dataset;
     },

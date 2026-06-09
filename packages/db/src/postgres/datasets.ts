@@ -28,7 +28,7 @@ export class PostgresDatasetRepository
       pool,
       "datasets",
       "dataset",
-      ["embeddingProfile", "chunkSchema", "backends", "bindings"],
+      ["embeddingProfile", "chunkSchema", "bindings"],
       ["createdBy"]
     );
   }

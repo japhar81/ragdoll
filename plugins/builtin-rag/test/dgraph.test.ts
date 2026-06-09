@@ -61,24 +61,16 @@ function fakeGraphDataset(host = "memory"): ResolvedDataset {
     id: "ds-test",
     slug: "test",
     scope: "global",
-    modalities: ["graph"],
     embeddingProfile: {},
     chunkSchema: {},
     version: { id: "v1", versionLabel: "v1", status: "ready" },
-    backendCollections: {},
-    backends: {
+    bindings: {
       graph: {
-        provider: "dgraph",
-        connectionName: "test-dgraph",
-        connection: {
-          name: "test-dgraph",
-          type: "dgraph",
-          host,
-          port: 8080,
-          secretRefId: null,
-          config: { host, port: 8080 },
-          cascadeReason: "tenant_fallback"
-        }
+        connectionSlug: "test-dgraph",
+        connectionKind: "dgraph",
+        connectionHost: host,
+        connectionPort: 8080,
+        cascadeReason: "tenant"
       }
     }
   };

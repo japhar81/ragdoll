@@ -1,138 +1,128 @@
 /**
- * Phase 7 helper: pick the backend collection / index name for a
- * v2-contract storage plugin given the execution input.
+ * ADR-0023 helpers — pick collection / connection out of a resolved
+ * dataset's bindings map. Replaces the legacy `backends.<modality>`
+ * accessors used pre-ADR-0023.
  *
- * The runtime no longer splices `config.collection` for `contract: 2`
- * plugins (the shim is v1-only), so each v2 plugin reads the name out
- * of `input.dataset.backendCollections` first and falls back to the
- * legacy `config.collection` / `config.index` so a pipeline that's NOT
- * been migrated to a dataset reference keeps working unchanged.
+ * Two helpers, both binding-name keyed:
+ *   - pickBindingCollection: returns the effective collection /
+ *     index / table name a plugin should read or write. Honours an
+ *     explicit `config[cfgKey]` first, then the resolved binding's
+ *     `collection`, then the legacy `config.collection` /
+ *     `config.index` for v1 plugins that haven't migrated.
+ *   - requireBindingConnection: strict variant for plugins that
+ *     declare `requires: [{binding, kind}]`. Returns the resolved
+ *     {url, slug, kind, cascade} or THROWS with an actionable error
+ *     pointing the operator at the Datasets screen.
  *
- * Falls through to `undefined` when neither source provides a name —
- * the plugin then decides whether to throw or default ("default", the
- * resolved-config value, etc.) to preserve the exact pre-Phase-5
- * behaviour.
+ * Binding NAMES are free text — picked by the plugin author. The
+ * common vocabulary today: "vectors" (vector retrievers / writers),
+ * "text" (BM25 / lexical), "graph" (Dgraph / Neo4j), "rows"
+ * (Postgres / ClickHouse tool-shaped reads).
  */
 import type { PluginExecutionInput } from "../../../packages/plugin-sdk/src/index.ts";
 
-/** Modality keys used in `dataset.backendCollections`. */
-export type StorageModality = "vector" | "keyword" | "graph" | "text";
-
 /**
- * Returns the backend collection name for the given modality.
+ * Resolve the effective collection / index / table name for the given
+ * binding.
  *
- * @param input  the full plugin execution input — we read both
- *               `dataset.backendCollections` and `config[cfgKey]`.
- * @param modality which side of the dataset to fetch.
- * @param cfgKey the legacy config key. Defaults to "collection" for
- *               vector and "index" for keyword (the keys every existing
- *               plugin uses today).
+ * @param input    full plugin execution input — reads `dataset.bindings`.
+ * @param binding  the binding name the plugin uses (e.g. "vectors").
+ * @param cfgKey   optional legacy config fallback key (e.g. "collection",
+ *                 "index", "table"). When omitted the helper picks
+ *                 "collection" for "vectors" and "index" for "text".
  */
-export function pickBackendName(
+export function pickBindingCollection(
   input: PluginExecutionInput,
-  modality: StorageModality,
+  binding: string,
   cfgKey?: string
 ): string | undefined {
-  const fromDataset = input.dataset?.backendCollections?.[modality];
+  const fromDataset = input.dataset?.bindings?.[binding]?.collection;
   if (fromDataset) return fromDataset;
-  const key = cfgKey ?? (modality === "vector" ? "collection" : "index");
+  const key = cfgKey ?? (binding === "vectors" || binding === "vector" ? "collection" : "index");
   const fromConfig = input.config[key];
   return typeof fromConfig === "string" ? fromConfig : undefined;
 }
 
 /**
- * PR3 helper: pick the BASE URL for a storage backend given the
- * execution input. Mirrors `pickBackendName` but for hostnames + ports.
+ * Strict variant for plugins that declare
+ * `requires: [{binding, kind|kindOneOf}]`. Returns the binding's
+ * resolved URL or THROWS with a clear "wire a connection" error
+ * pointing at the offending dataset slug + binding name.
  *
- * Resolution order:
- *   1. `input.dataset.backends.<modality>.connection.{host, port}`
- *      — set by the dataset resolver when the backend block referenced
- *      a connection by name and that connection was found.
- *   2. Legacy: `input.config[cfgKey]` (e.g. `config.url` for qdrant,
- *      `config.endpoint` for opensearch) — surfaced via the `source`
- *      field so callers can log a deprecation hint.
- *   3. `process.env[envFallback]` — last-resort env var (e.g.
- *      QDRANT_URL) so installs that pin a single backend cluster don't
- *      have to define connections at all.
- *
- * Returns undefined when nothing matches; the caller decides whether
- * to throw or default further (e.g. to localhost).
+ * Use this in any plugin that depends on a host being present (every
+ * storage-touching plugin). The error message is the preflight signal
+ * an operator sees in the execution-node row when the bind is
+ * missing — keep it actionable.
  */
-export interface BackendUrlResolution {
-  url: string;
-  /** Where the URL came from — for diagnostic logging. */
-  source: "dataset_connection" | "config" | "env";
-  /** When source === "dataset_connection", the connection name +
-   *  cascade reason so the call site can include them in logs. */
-  connectionName?: string;
-  cascadeReason?: "env_specific" | "tenant_fallback";
-}
-
-/**
- * Strict variant for v2-plus plugins that declare
- * `requires: [{modality, provider?}]`. Returns the dataset's resolved
- * connection URL or THROWS with a clear "you need to bind a
- * connection" error pointing at the offending dataset slug.
- *
- * Use this in any plugin that depends on a host being present
- * (i.e. all storage-touching plugins). The error message is the
- * preflight signal an operator sees in the execution-node row when
- * the bind is missing — keep it actionable.
- */
-export function requireBackendConnection(
+export function requireBindingConnection(
   input: PluginExecutionInput,
-  modality: StorageModality,
+  binding: string,
   args: {
     pluginId: string;
-    /** Used in the URL constructor when the connection lacks a port. */
+    /** Default port when the resolved connection lacks one. */
     defaultPort?: number;
     scheme?: string;
   }
-): { url: string; connectionName: string; cascadeReason: string } {
-  const conn = input.dataset?.backends?.[modality]?.connection;
-  if (!conn?.host) {
+): {
+  url: string;
+  connectionSlug: string;
+  connectionKind: string;
+  cascadeReason: "global" | "tenant" | "environment";
+} {
+  const b = input.dataset?.bindings?.[binding];
+  if (!b?.connectionHost) {
     const slug = input.dataset?.slug ?? "(no dataset bound)";
     throw new Error(
-      `${args.pluginId} requires a ${modality} connection on dataset "${slug}". ` +
-        `Wire it on the Connections screen (one per (tenant, env)) and reference it from ` +
-        `the dataset's backends.${modality}.connectionName.`
+      `${args.pluginId} requires a "${binding}" binding on dataset "${slug}". ` +
+        `Wire a connection on the Datasets screen — add a binding named "${binding}" ` +
+        `pointing at a compatible connection (Connections screen lists what's available).`
     );
   }
-  const port = typeof conn.port === "number" ? conn.port : args.defaultPort;
+  const port = typeof b.connectionPort === "number" ? b.connectionPort : args.defaultPort;
   const scheme = args.scheme ?? "http://";
   return {
-    url: port ? `${scheme}${conn.host}:${port}` : `${scheme}${conn.host}`,
-    connectionName: conn.name,
-    cascadeReason: conn.cascadeReason
+    url: port ? `${scheme}${b.connectionHost}:${port}` : `${scheme}${b.connectionHost}`,
+    connectionSlug: b.connectionSlug ?? "(unknown)",
+    connectionKind: b.connectionKind ?? "(unknown)",
+    cascadeReason: b.cascadeReason ?? "global"
   };
 }
 
-export function pickBackendUrl(
+/**
+ * Loose variant — same lookup but returns undefined instead of
+ * throwing. Useful for plugins that fall back to a config-supplied
+ * URL when no binding is wired (legacy path being phased out).
+ */
+export interface BindingUrlResolution {
+  url: string;
+  source: "binding" | "config" | "env";
+  connectionSlug?: string;
+  connectionKind?: string;
+  cascadeReason?: "global" | "tenant" | "environment";
+}
+
+export function pickBindingUrl(
   input: PluginExecutionInput,
-  modality: StorageModality,
+  binding: string,
   args: {
     /** Legacy config key on the node, e.g. "url" / "endpoint". */
     cfgKey: string;
     /** Env var fallback, e.g. "QDRANT_URL". */
     envFallback?: string;
-    /** When the resolved connection lacks an explicit port, append
-     *  this default before constructing the URL. */
     defaultPort?: number;
-    /** Scheme to use when constructing from host+port. Defaults to
-     *  "http://" since cluster-internal traffic is the common path. */
     scheme?: string;
   }
-): BackendUrlResolution | undefined {
-  const conn = input.dataset?.backends?.[modality]?.connection;
-  if (conn && typeof conn.host === "string") {
-    const port = typeof conn.port === "number" ? conn.port : args.defaultPort;
+): BindingUrlResolution | undefined {
+  const b = input.dataset?.bindings?.[binding];
+  if (b?.connectionHost) {
+    const port = typeof b.connectionPort === "number" ? b.connectionPort : args.defaultPort;
     const scheme = args.scheme ?? "http://";
-    const url = port ? `${scheme}${conn.host}:${port}` : `${scheme}${conn.host}`;
     return {
-      url,
-      source: "dataset_connection",
-      connectionName: conn.name,
-      cascadeReason: conn.cascadeReason
+      url: port ? `${scheme}${b.connectionHost}:${port}` : `${scheme}${b.connectionHost}`,
+      source: "binding",
+      connectionSlug: b.connectionSlug,
+      connectionKind: b.connectionKind,
+      cascadeReason: b.cascadeReason
     };
   }
   const cfg = input.config[args.cfgKey];
@@ -145,3 +135,68 @@ export function pickBackendUrl(
   }
   return undefined;
 }
+
+// ===========================================================================
+// Legacy aliases — kept for one release so plugins authored against the
+// modality vocabulary keep compiling. New plugins should use the
+// binding-keyed helpers above. The plugin-binding migration script
+// rewrites callers in one pass.
+// ===========================================================================
+
+/** @deprecated ADR-0023: use {@link pickBindingCollection} with a binding name. */
+export type StorageModality = "vector" | "keyword" | "graph" | "text";
+
+/** @deprecated ADR-0023: use {@link pickBindingCollection}. The modality
+ *  argument is mapped to a binding name via:
+ *    vector  → "vectors"  (falls back to "vector")
+ *    keyword → "text"     (falls back to "keyword")
+ *    text    → "text"
+ *    graph   → "graph"
+ */
+export function pickBackendName(
+  input: PluginExecutionInput,
+  modality: StorageModality,
+  cfgKey?: string
+): string | undefined {
+  const candidates = MODALITY_BINDING_FALLBACKS[modality];
+  for (const name of candidates) {
+    const v = pickBindingCollection(input, name, cfgKey);
+    if (v) return v;
+  }
+  return undefined;
+}
+
+/** @deprecated ADR-0023: use {@link requireBindingConnection}. */
+export function requireBackendConnection(
+  input: PluginExecutionInput,
+  modality: StorageModality,
+  args: { pluginId: string; defaultPort?: number; scheme?: string }
+): { url: string; connectionName: string; cascadeReason: string } {
+  const candidates = MODALITY_BINDING_FALLBACKS[modality];
+  for (const name of candidates) {
+    const b = input.dataset?.bindings?.[name];
+    if (b?.connectionHost) {
+      const r = requireBindingConnection(input, name, args);
+      return {
+        url: r.url,
+        connectionName: r.connectionSlug,
+        cascadeReason: r.cascadeReason
+      };
+    }
+  }
+  // Trigger the strict error on the canonical binding name so the
+  // operator sees an actionable hint.
+  return requireBindingConnection(input, candidates[0], args) as never;
+}
+
+const MODALITY_BINDING_FALLBACKS: Record<StorageModality, string[]> = {
+  vector: ["vectors", "vector"],
+  keyword: ["text", "keyword"],
+  text: ["text", "keyword"],
+  graph: ["graph"]
+};
+
+/** @deprecated ADR-0023: use {@link pickBindingUrl}. */
+export const pickBackendUrl = pickBindingUrl;
+/** @deprecated ADR-0023: use {@link BindingUrlResolution}. */
+export type BackendUrlResolution = BindingUrlResolution;

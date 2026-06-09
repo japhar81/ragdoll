@@ -188,9 +188,12 @@ export const datasetSearchPlugin: InProcessPlugin = {
     if (modality === "vector") {
       // Decide backend by what's declared on the dataset; createVectorStore
       // honors RAGDOLL_VECTOR_BACKEND but the dataset wins.
+      // ADR-0023: the connection kind on the "vectors" binding determines
+      // which VectorStore impl to use. "vector" name kept as a fallback
+      // for in-memory test datasets that still use the legacy slot name.
       const vectorBackend = (
-        (dataset as unknown as { backends?: { vector?: { provider?: string } } })
-          .backends?.vector?.provider
+        dataset.bindings?.vectors?.connectionKind ??
+        dataset.bindings?.vector?.connectionKind
       ) as "qdrant" | "pgvector" | undefined;
       const collection = pickBackendName(input, "vector");
       if (!collection) {
@@ -333,8 +336,8 @@ export const datasetUpsertPlugin: InProcessPlugin = {
       throw new Error("dataset_upsert: dataset has no vector backend collection");
     }
     const vectorBackend = (
-      (dataset as unknown as { backends?: { vector?: { provider?: string } } })
-        .backends?.vector?.provider
+      dataset.bindings?.vectors?.connectionKind ??
+      dataset.bindings?.vector?.connectionKind
     ) as "qdrant" | "pgvector" | undefined;
     const store = createVectorStore({
       ...(vectorBackend ? { provider: vectorBackend } : {})
@@ -450,8 +453,8 @@ export const datasetDeletePlugin: InProcessPlugin = {
       .filter((id): id is string => !!id);
     if (docIds.length === 0) return { outputs: { deletedCount: 0 } };
     const vectorBackend = (
-      (dataset as unknown as { backends?: { vector?: { provider?: string } } })
-        .backends?.vector?.provider
+      dataset.bindings?.vectors?.connectionKind ??
+      dataset.bindings?.vector?.connectionKind
     ) as "qdrant" | "pgvector" | undefined;
     const store = createVectorStore({
       ...(vectorBackend ? { provider: vectorBackend } : {})

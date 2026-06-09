@@ -135,7 +135,10 @@ ON CONFLICT (pipeline_id, environment, tenant_id) DO NOTHING;
 -- node in each demo can pin its slug + alias. Backends point at the dgraph
 -- service; per-tenant overrides land on the Datasets screen at deploy time.
 
-INSERT INTO datasets (id, scope, slug, display_name, description, modalities, backends)
+-- ADR-0023: bindings-only shape. Both graph datasets declare a single
+-- `graph` binding pointing at the global `dgraph` connection with the
+-- by-tenant namespace policy.
+INSERT INTO datasets (id, scope, slug, display_name, description, bindings)
 VALUES
   (
     '00000000-0000-0000-0000-0000000df040',
@@ -143,12 +146,11 @@ VALUES
     'github-knowledge-graph',
     'GitHub Knowledge Graph',
     'Graph of code + docs chunks pulled from GitHub. Global scope with namespace: by-tenant — each tenant writes into its own predicate prefix.',
-    ARRAY['graph'],
-    -- PR6: namespace=by-tenant. The resolver appends `_<tenantSlug>` to
-    -- the base collection name in `backend_collections.graph`, so
-    -- tenant A's writes never overlap tenant B's even though both
-    -- pipelines reference the SAME global dataset slug.
-    '{"graph":{"provider":"dgraph","connectionName":"dgraph","namespace":"by-tenant"}}'::jsonb
+    -- namespace=by-tenant: the resolver appends `_<tenantSlug>` to the
+    -- base collection name in `backend_collections.graph`, so tenant
+    -- A's writes never overlap tenant B's even though both pipelines
+    -- reference the SAME global dataset slug.
+    '{"graph":{"connection":"dgraph","namespace":"by-tenant"}}'::jsonb
   ),
   (
     '00000000-0000-0000-0000-0000000df041',
@@ -156,17 +158,12 @@ VALUES
     'crawl-knowledge-graph',
     'Crawl Knowledge Graph',
     'Graph of crawled page chunks keyed by source_url. Global scope with namespace: by-tenant — each tenant writes into its own predicate prefix.',
-    ARRAY['graph'],
-    '{"graph":{"provider":"dgraph","connectionName":"dgraph","namespace":"by-tenant"}}'::jsonb
+    '{"graph":{"connection":"dgraph","namespace":"by-tenant"}}'::jsonb
   )
--- ON CONFLICT (id) DO UPDATE so re-seeding picks up description /
--- backend / namespace changes on existing installs (see PR6 seed
--- update notes in zzzz-codebase-ingest.sql).
 ON CONFLICT (id) DO UPDATE
   SET display_name = EXCLUDED.display_name,
       description  = EXCLUDED.description,
-      modalities   = EXCLUDED.modalities,
-      backends     = EXCLUDED.backends,
+      bindings     = EXCLUDED.bindings,
       updated_at   = now();
 
 INSERT INTO dataset_versions (id, dataset_id, version_label, schema_spec, backend_collections, status, ready_at)

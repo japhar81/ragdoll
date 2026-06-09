@@ -303,39 +303,47 @@ export type DatasetNamespacePolicy =
   | "by-tenant-env"
   | "by-env";
 
-export interface ResolvedDatasetBackend {
-  /** "opensearch" | "qdrant" | "dgraph" | "pgvector" | "postgres" | … */
-  provider?: string;
-  /** Name of the connection the dataset's backend references. Always
-   *  carried through from the raw block so the UI can render the chain. */
-  connectionName?: string;
-  /** Namespace policy carried through from the raw backend block. The
-   *  resolver has ALREADY applied it to the corresponding entry in
-   *  `ResolvedDataset.backendCollections` — plugins should keep reading
-   *  the collection name from there, not re-derive from this field. */
+/**
+ * ADR-0023 resolved dataset binding. The runtime hands one of these to
+ * the plugin for every entry in `dataset.bindings`. Plugins declaring
+ * `requires: [{binding, kind|kindOneOf}]` read
+ * `input.dataset.bindings[<name>]` to pick up the resolved connection
+ * + effective collection.
+ *
+ * The slug + kind + host/port fields are duplicated outside the nested
+ * `connection` object so plugins that only need the URL don't have to
+ * crack open the full connection envelope — useful for hot paths and
+ * for plugins authored before the unified ResolvedExternalConnection
+ * shape was finalised.
+ */
+export interface ResolvedDatasetBinding {
+  /** Operator-facing connection slug from the dataset's bindings block. */
+  connectionSlug?: string;
+  /** Connection `kind` ("qdrant" | "opensearch" | "dgraph" | …). Lifted
+   *  out of `connection` so plugins can branch on backend type without
+   *  reading the full envelope. */
+  connectionKind?: string;
+  /** Hostname from the resolved connection's config. Convenience field. */
+  connectionHost?: string;
+  /** Port from the resolved connection's config. Convenience field. */
+  connectionPort?: number;
+  /** Effective collection / index / table / predicate name the plugin
+   *  should read or write. The resolver has ALREADY applied any
+   *  namespace policy from the binding — plugins should not re-derive
+   *  the suffix. Falls back to the dataset version's
+   *  `backendCollections[<bindingName>]` when the binding doesn't
+   *  override. */
+  collection?: string;
+  /** Namespace policy declared on the binding. Diagnostic / UI only —
+   *  the resolver has already expanded it onto `collection`. */
   namespace?: DatasetNamespacePolicy;
-  /** Resolved connection — only set when `connectionName` was on the raw
-   *  block AND the cascade resolver found a matching row. */
-  connection?: {
-    /** Connection name (= connectionName for back-reference). */
-    name: string;
-    /** Datasource type, e.g. "opensearch". */
-    type: string;
-    /** Host and port surfaced for convenience; full config lives in
-     *  `config` (the raw connection.configRedacted). */
-    host?: string;
-    port?: number;
-    /** Secret reference the plugin uses to fetch credentials via the
-     *  existing SecretProvider. Plugins never see plaintext here. */
-    secretRefId?: string | null;
-    config: Record<string, unknown>;
-    /** Diagnostic — `env_specific` when an env override was applied,
-     *  `tenant_fallback` when the env=null tenant-wide row was used. */
-    cascadeReason: "env_specific" | "tenant_fallback";
-  };
-  /** Any other modality-specific fields from the raw block (collection,
-   *  index, table name, etc.) come through unchanged. */
-  [key: string]: unknown;
+  /** Diagnostic — how the binding's connection was resolved through
+   *  the unified registry cascade. */
+  cascadeReason?: "global" | "tenant" | "environment";
+  /** Resolved external connection (slug → registry row → SecretProvider).
+   *  Carries kind + secret + per-kind options. Same shape as
+   *  ResolvedExternalConnection delivered via `input.connection`. */
+  connection?: ResolvedExternalConnection;
 }
 
 export interface ResolvedDataset {
@@ -344,7 +352,6 @@ export interface ResolvedDataset {
   scope: "global" | "tenant" | "environment";
   tenantId?: string;
   environmentId?: string;
-  modalities: string[];
   embeddingProfile: Record<string, unknown>;
   chunkSchema: Record<string, unknown>;
   /** Resolved version metadata (id, label, status, doc_count, …). */
@@ -353,49 +360,19 @@ export interface ResolvedDataset {
     versionLabel: string;
     status: "building" | "ready" | "archived";
   };
-  /** Backend collection / index names per modality, as recorded on the
-   *  resolved version. e.g. `{ vector: "rag_acme_kb_v3" }`. Plugins that
-   *  use `pickBackendName()` keep reading this for the collection name. */
-  backendCollections: Record<string, string>;
-  /** Per-modality resolved backend blocks (PR2). Each block carries the
-   *  provider + any backend-specific fields, plus an optional resolved
-   *  `connection` (host/port/creds) when the dataset's backend pointed at
-   *  a connection name. v2+ plugins read `connection.host` / `secretRefId`
-   *  from here instead of taking them as their own `config.url` etc. */
-  backends: Record<string, ResolvedDatasetBackend>;
   /**
-   * ADR-0023: per-binding resolved view. The dataset's `bindings:` block
-   * names slots like "vectors" / "keywords" / "graph"; the runtime
-   * resolves each one's `connection` (slug → ConnectionRow) and
-   * `collection` (override or computed default). Plugins authored
-   * against ADR-0023's `requires: [{binding, kind}]` read
-   * `input.dataset.bindings[<name>]` to pick up the resolved
-   * connection + collection.
+   * ADR-0023: the ONLY way to address storage. Plugins authored against
+   * the old `dataset.backends.<modality>` shape have been migrated to
+   * read `dataset.bindings.<name>` — the modality concept is gone from
+   * the dataset surface entirely.
    *
-   * `backends` (above) is auto-populated alongside this for legacy
-   * plugins reading by modality. Either shape works during the
-   * transition.
+   * Binding name vocabulary is free-text — plugin authors and dataset
+   * authors agree on slot names (common ones: "vectors", "text",
+   * "graph", "rows", "ingress"). The connection kind determines what
+   * the underlying backend is; the binding name is the slot a plugin
+   * requests.
    */
-  bindings?: Record<string, ResolvedDatasetBinding>;
-}
-
-/**
- * ADR-0023 resolved dataset binding. Mirror of ResolvedDatasetBackend
- * minus the modality-flavoured fields. Plugins receive these via
- * `input.dataset.bindings[<binding-name>]` once they declare the new
- * `requires: [{binding, kind}]` shape.
- */
-export interface ResolvedDatasetBinding {
-  /** Operator-facing connection slug from the dataset's bindings block. */
-  connectionSlug?: string;
-  /** Effective collection / index / table name the plugin should read or
-   *  write against. Defaults to `${dataset.slug}_${binding}_v${version}`
-   *  when the dataset doesn't override. */
-  collection?: string;
-  /** Resolved external connection (slug → registry row → SecretProvider).
-   *  Carries kind + secret + per-kind options. Same shape as
-   *  ResolvedExternalConnection delivered via `input.connection`. */
-  connection?: ResolvedExternalConnection;
+  bindings: Record<string, ResolvedDatasetBinding>;
 }
 
 /**

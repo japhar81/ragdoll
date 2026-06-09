@@ -103,24 +103,16 @@ test("vectorUpsert -> qdrantRetriever end-to-end via in-memory singleton", async
     id: "ds-test",
     slug: "test",
     scope: "global" as const,
-    modalities: ["vector"],
     embeddingProfile: {},
     chunkSchema: {},
     version: { id: "v1", versionLabel: "v1", status: "ready" as const },
-    backendCollections: {},
-    backends: {
-      vector: {
-        provider: "qdrant",
-        connectionName: "test-qdrant",
-        connection: {
-          name: "test-qdrant",
-          type: "qdrant",
-          host: "memory",
-          port: 6333,
-          secretRefId: null,
-          config: { host: "memory", port: 6333 },
-          cascadeReason: "tenant_fallback" as const
-        }
+    bindings: {
+      vectors: {
+        connectionSlug: "test-qdrant",
+        connectionKind: "qdrant",
+        connectionHost: "memory",
+        connectionPort: 6333,
+        cascadeReason: "tenant" as const
       }
     }
   };

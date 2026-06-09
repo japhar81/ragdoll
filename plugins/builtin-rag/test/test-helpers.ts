@@ -1,47 +1,47 @@
 /**
  * Shared test helpers for plugin unit tests.
  *
- * Every storage plugin now declares `requires: [{modality, provider?}]`
- * and hard-fails on a missing connection (PR1 of the requires
- * roll-out). Plugin unit tests don't want to stand up a real Qdrant /
- * OpenSearch / Dgraph — they use the in-memory store as a stand-in.
+ * Every storage plugin declares either legacy `requires: [{modality,
+ * provider?}]` or ADR-0023 `requires: [{binding, kind|kindOneOf}]` and
+ * hard-fails on a missing binding. Plugin unit tests don't want to
+ * stand up a real Qdrant / OpenSearch / Dgraph — they use the
+ * in-memory store as a stand-in.
  *
  * To keep the plugin's hard-fail path exercised end-to-end (so tests
- * catch a refactor that loses the requireBackendConnection call), we
- * synthesise a fake ResolvedDataset whose backend connection uses the
- * sentinel `memory` host. The vector / graph store factories recognise
- * that host and route to the in-memory store. Tests therefore go
- * through the SAME code path as production except for the very last
- * step (storage layer choice), which is exactly the slice we want.
+ * catch a refactor that loses the require* call), we synthesise a
+ * fake ResolvedDataset whose binding's connection uses the sentinel
+ * `memory` host. The vector / graph store factories recognise that
+ * host and route to the in-memory store. Tests therefore go through
+ * the SAME code path as production except for the very last step
+ * (storage layer choice), which is exactly the slice we want.
+ *
+ * Binding names follow the ADR-0023 vocabulary: "vectors" / "text" /
+ * "graph". The fakes still respond to the legacy modality-keyed
+ * accessors (pickBackendName / requireBackendConnection) via the
+ * fallback table in dataset-binding.ts.
  */
 import type { ResolvedDataset } from "../../../packages/plugin-sdk/src/index.ts";
 
 /** Fake vector-backend dataset for qdrant_* plugin tests. */
-export function fakeVectorDataset(opts: { provider?: string; host?: string } = {}): ResolvedDataset {
+export function fakeVectorDataset(
+  opts: { provider?: string; host?: string } = {}
+): ResolvedDataset {
   const host = opts.host ?? "memory";
   const provider = opts.provider ?? "qdrant";
   return {
     id: "ds-test-vector",
     slug: "test-vector",
     scope: "global",
-    modalities: ["vector"],
     embeddingProfile: {},
     chunkSchema: {},
     version: { id: "v1", versionLabel: "v1", status: "ready" },
-    backendCollections: {},
-    backends: {
-      vector: {
-        provider,
-        connectionName: `test-${provider}`,
-        connection: {
-          name: `test-${provider}`,
-          type: provider,
-          host,
-          port: 6333,
-          secretRefId: null,
-          config: { host, port: 6333 },
-          cascadeReason: "tenant_fallback"
-        }
+    bindings: {
+      vectors: {
+        connectionSlug: `test-${provider}`,
+        connectionKind: provider,
+        connectionHost: host,
+        connectionPort: 6333,
+        cascadeReason: "tenant"
       }
     }
   };
@@ -54,61 +54,41 @@ export function fakeTextDataset(opts: { host?: string } = {}): ResolvedDataset {
     id: "ds-test-text",
     slug: "test-text",
     scope: "global",
-    modalities: ["text"],
     embeddingProfile: {},
     chunkSchema: {},
     version: { id: "v1", versionLabel: "v1", status: "ready" },
-    backendCollections: {},
-    backends: {
+    bindings: {
       text: {
-        provider: "opensearch",
-        connectionName: "test-opensearch",
-        connection: {
-          name: "test-opensearch",
-          type: "opensearch",
-          host,
-          port: 9200,
-          secretRefId: null,
-          config: { host, port: 9200 },
-          cascadeReason: "tenant_fallback"
-        }
+        connectionSlug: "test-opensearch",
+        connectionKind: "opensearch",
+        connectionHost: host,
+        connectionPort: 9200,
+        cascadeReason: "tenant"
       }
     }
   };
 }
 
-/** Fake hybrid (text + vector) dataset for opensearch_hybrid_retriever tests. */
+/** Fake hybrid (text + vectors) dataset for opensearch_hybrid_retriever tests. */
 export function fakeHybridDataset(opts: { host?: string } = {}): ResolvedDataset {
   const host = opts.host ?? "memory";
   const conn = {
-    name: "test-opensearch",
-    type: "opensearch",
-    host,
-    port: 9200,
-    secretRefId: null,
-    config: { host, port: 9200 },
-    cascadeReason: "tenant_fallback" as const
+    connectionSlug: "test-opensearch",
+    connectionKind: "opensearch",
+    connectionHost: host,
+    connectionPort: 9200,
+    cascadeReason: "tenant" as const
   };
   return {
     id: "ds-test-hybrid",
     slug: "test-hybrid",
     scope: "global",
-    modalities: ["text", "vector"],
     embeddingProfile: {},
     chunkSchema: {},
     version: { id: "v1", versionLabel: "v1", status: "ready" },
-    backendCollections: {},
-    backends: {
-      text: {
-        provider: "opensearch",
-        connectionName: "test-opensearch",
-        connection: conn
-      },
-      vector: {
-        provider: "opensearch",
-        connectionName: "test-opensearch",
-        connection: conn
-      }
+    bindings: {
+      text: { ...conn },
+      vectors: { ...conn }
     }
   };
 }
@@ -120,24 +100,16 @@ export function fakeGraphDataset(opts: { host?: string } = {}): ResolvedDataset 
     id: "ds-test-graph",
     slug: "test-graph",
     scope: "global",
-    modalities: ["graph"],
     embeddingProfile: {},
     chunkSchema: {},
     version: { id: "v1", versionLabel: "v1", status: "ready" },
-    backendCollections: {},
-    backends: {
+    bindings: {
       graph: {
-        provider: "dgraph",
-        connectionName: "test-dgraph",
-        connection: {
-          name: "test-dgraph",
-          type: "dgraph",
-          host,
-          port: 8080,
-          secretRefId: null,
-          config: { host, port: 8080 },
-          cascadeReason: "tenant_fallback"
-        }
+        connectionSlug: "test-dgraph",
+        connectionKind: "dgraph",
+        connectionHost: host,
+        connectionPort: 8080,
+        cascadeReason: "tenant"
       }
     }
   };
