@@ -175,6 +175,37 @@ export function buildDatasetResolver(deps: DatasetResolverDeps): DatasetResolver
         });
       }
 
+      // ADR-0023: build the `bindings` view alongside `backends`. For
+      // datasets with an explicit `bindings:` block, use it. For legacy
+      // datasets (only `backends` populated), derive each binding from
+      // the matching backend block — the migration backfill normally
+      // populates `bindings`, but synthesise here too so in-memory test
+      // datasets without a backfill still surface bindings.
+      const bindings: Record<
+        string,
+        { connectionSlug?: string; collection?: string }
+      > = {};
+      const bindingsSource = (ds.bindings ?? {}) as Record<
+        string,
+        { connection?: string; collection?: string } | undefined
+      >;
+      const allBindingNames = new Set<string>([
+        ...Object.keys(bindingsSource),
+        ...Object.keys(backends)
+      ]);
+      for (const name of allBindingNames) {
+        const explicit = bindingsSource[name];
+        const legacyBlock = backends[name] as Record<string, unknown> | undefined;
+        const connectionSlug =
+          explicit?.connection ??
+          (legacyBlock?.connectionName as string | undefined);
+        const collection =
+          explicit?.collection ??
+          (legacyBlock?.collection as string | undefined) ??
+          effectiveCollections[name];
+        bindings[name] = { connectionSlug, collection };
+      }
+
       return {
         id: ds.id,
         slug: ds.slug,
@@ -190,7 +221,8 @@ export function buildDatasetResolver(deps: DatasetResolverDeps): DatasetResolver
           status: ver.status
         },
         backendCollections: effectiveCollections,
-        backends: backends as Record<string, ResolvedDatasetBackend>
+        backends: backends as Record<string, ResolvedDatasetBackend>,
+        bindings
       };
     }
   };

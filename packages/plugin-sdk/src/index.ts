@@ -135,9 +135,31 @@ export interface PluginManifest {
    * specific plugin family.
    */
   requires?: Array<{
-    modality: DatasetModality;
-    /** Optional. When set, validator + runtime check the bound
-     *  dataset's `backends[modality].provider` matches. */
+    /**
+     * ADR-0023 (new shape). The dataset binding name this plugin needs
+     * filled (e.g. "vectors" for a vector retriever, "graph" for a
+     * neo4j query plugin). The binding name vocabulary is free text
+     * chosen jointly by the plugin author and the dataset author —
+     * the picker UI matches plugins to bindings by NAME, and to
+     * connection rows by `kind` / `kindOneOf` below.
+     *
+     * Tool-only plugins (mongo_find, clickhouse_query) that take an
+     * `input.connection` directly without going through a Dataset
+     * omit `binding` and supply only `kind`/`kindOneOf`.
+     */
+    binding?: string;
+    /** ADR-0023. Acceptable connection kind. Single string is sugar for
+     *  a 1-element kindOneOf. */
+    kind?: string;
+    kindOneOf?: string[];
+    /**
+     * Legacy ADR-0019 shape — preserved so plugins authored against the
+     * modality+provider contract keep working. The runtime translates
+     * `{modality, provider}` to `{binding: modality, kind: provider}`
+     * at validation time, so new plugins should prefer the binding
+     * shape above. Both shapes coexist for one release.
+     */
+    modality?: DatasetModality;
     provider?: string;
   }>;
   configSchema?: JsonSchemaLike;
@@ -341,6 +363,39 @@ export interface ResolvedDataset {
    *  a connection name. v2+ plugins read `connection.host` / `secretRefId`
    *  from here instead of taking them as their own `config.url` etc. */
   backends: Record<string, ResolvedDatasetBackend>;
+  /**
+   * ADR-0023: per-binding resolved view. The dataset's `bindings:` block
+   * names slots like "vectors" / "keywords" / "graph"; the runtime
+   * resolves each one's `connection` (slug → ConnectionRow) and
+   * `collection` (override or computed default). Plugins authored
+   * against ADR-0023's `requires: [{binding, kind}]` read
+   * `input.dataset.bindings[<name>]` to pick up the resolved
+   * connection + collection.
+   *
+   * `backends` (above) is auto-populated alongside this for legacy
+   * plugins reading by modality. Either shape works during the
+   * transition.
+   */
+  bindings?: Record<string, ResolvedDatasetBinding>;
+}
+
+/**
+ * ADR-0023 resolved dataset binding. Mirror of ResolvedDatasetBackend
+ * minus the modality-flavoured fields. Plugins receive these via
+ * `input.dataset.bindings[<binding-name>]` once they declare the new
+ * `requires: [{binding, kind}]` shape.
+ */
+export interface ResolvedDatasetBinding {
+  /** Operator-facing connection slug from the dataset's bindings block. */
+  connectionSlug?: string;
+  /** Effective collection / index / table name the plugin should read or
+   *  write against. Defaults to `${dataset.slug}_${binding}_v${version}`
+   *  when the dataset doesn't override. */
+  collection?: string;
+  /** Resolved external connection (slug → registry row → SecretProvider).
+   *  Carries kind + secret + per-kind options. Same shape as
+   *  ResolvedExternalConnection delivered via `input.connection`. */
+  connection?: ResolvedExternalConnection;
 }
 
 /**

@@ -88,6 +88,9 @@ function publicDataset(row: DatasetRow): Record<string, unknown> {
     chunkSchema: row.chunkSchema,
     modalities: row.modalities,
     backends: row.backends,
+    // ADR-0023: the new bindings view — present alongside `backends` so
+    // both shapes are visible during the transition.
+    bindings: row.bindings ?? {},
     currentVersionId: row.currentVersionId ?? null,
     archivedAt: row.archivedAt ?? null,
     createdAt: row.createdAt,
@@ -236,6 +239,12 @@ export function registerDatasetsRoutes(
           ? (body.modalities.filter((m) => typeof m === "string") as string[])
           : ["vector"],
       backends,
+      // ADR-0023: explicit bindings block. When omitted, the runtime
+      // synthesises one from backends at resolve time, so legacy
+      // backends-only creates still work end-to-end.
+      bindings: isObject(body.bindings)
+        ? (body.bindings as Record<string, { connection?: string; collection?: string }>)
+        : undefined,
       currentVersionId: null,
       archivedAt: null,
       createdAt: now,
@@ -270,6 +279,12 @@ export function registerDatasetsRoutes(
     }
     if (Array.isArray(body.modalities) && body.modalities.length > 0) {
       patch.modalities = body.modalities.filter((m) => typeof m === "string") as string[];
+    }
+    if (isObject(body.bindings)) {
+      patch.bindings = body.bindings as Record<
+        string,
+        { connection?: string; collection?: string }
+      >;
     }
     if (body.archived === true) patch.archivedAt = nowIso();
     if (body.archived === false) patch.archivedAt = null;

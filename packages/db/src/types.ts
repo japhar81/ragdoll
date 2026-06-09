@@ -546,8 +546,35 @@ export interface DatasetRow {
   description?: string | null;
   embeddingProfile: Record<string, unknown>;
   chunkSchema: Record<string, unknown>;
+  /**
+   * @deprecated ADR-0023: superseded by `bindings`. Modality is no longer
+   * a first-class concept on the connection / dataset layer — plugins
+   * declare which binding name they need; the binding name is free text.
+   * Kept on the row for one release so existing reads don't break.
+   */
   modalities: string[];
+  /**
+   * @deprecated ADR-0023: superseded by `bindings`. The old per-modality
+   * backend block — { vector: { provider, collection, connectionName,
+   * namespace, ... } }. The dataset resolver continues to populate this
+   * alongside `bindings` so legacy plugins keep working unchanged.
+   */
   backends: Record<string, unknown>;
+  /**
+   * ADR-0023: the new binding shape. Free-text binding name → resolved
+   * (connection-slug, optional collection-name-override) pair. Plugins
+   * declaring `requires: [{binding, kind}]` (ADR-0023) read these via
+   * `input.dataset.bindings`.
+   *
+   *   bindings: {
+   *     vectors:  { connection: "opensearch-prod", collection: "kb_vec_v1" },
+   *     keywords: { connection: "opensearch-prod", collection: "kb_kw_v1" }
+   *   }
+   *
+   * Optional during the transition; either `backends` or `bindings`
+   * (or both) may be present.
+   */
+  bindings?: Record<string, { connection?: string; collection?: string }>;
   currentVersionId?: string | null;
   archivedAt?: string | null;
   createdAt: string;
