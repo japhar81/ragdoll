@@ -28,7 +28,8 @@ import type {
 } from "../../../../../packages/db/src/index.ts";
 import {
   ExternalConnectionResolver,
-  probeConnection
+  probeConnection,
+  listConnectionKinds
 } from "../../../../../packages/external-connections/src/index.ts";
 import { ok, error, isObject, nowIso } from "../http-utils.ts";
 import type { AppDeps } from "../types.ts";
@@ -117,6 +118,16 @@ export function registerConnectionsRoutes(
   svc: ConnectionsServices
 ): void {
   const { deps, audit, connections, tenantScope } = svc;
+
+  // ADR-0024: catalog of loaded connection driver plugins. The web UI
+  // calls this to populate the Type dropdown + render the per-kind
+  // config form from the driver's manifest.configSchema (no
+  // hand-rolled TSX per kind). Open to any authenticated user with
+  // `connection:read` — the catalog has no secrets.
+  api.route("GET", "/api/connection-kinds", async (ctx) => {
+    enforce(ctx.principal, "connection:read");
+    return ok({ kinds: listConnectionKinds() });
+  });
 
   api.route("GET", "/api/connections", async (ctx) => {
     enforce(ctx.principal, "connection:read");

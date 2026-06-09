@@ -121,26 +121,120 @@ export interface ConnectionDriver<TClient = unknown> {
   probe?(client: TClient): Promise<void>;
 }
 
-type AnyDriver = ConnectionDriver<unknown>;
+/**
+ * Minimal JSON-schema-like shape (matches `JsonSchemaLike` in plugin-sdk
+ * — declared structurally here to avoid the cross-package import). The
+ * Connections form in the web UI renders directly from this.
+ */
+export interface ConnectionConfigSchema {
+  type?: string;
+  required?: string[];
+  properties?: Record<string, ConnectionConfigSchema>;
+  description?: string;
+  default?: unknown;
+  enum?: unknown[];
+  format?: string;
+  items?: ConnectionConfigSchema;
+  additionalProperties?: boolean | ConnectionConfigSchema;
+}
 
-const drivers = new Map<string, AnyDriver>();
+/**
+ * ADR-0024 manifest metadata for a connection driver.
+ *
+ * Bundled with the driver factory at registration time so the
+ * Connections UI can render a per-kind config form WITHOUT hand-rolled
+ * TSX, the picker can filter by "which plugin slots does this kind
+ * fill," and the connection-kinds API can enumerate every loaded
+ * driver dynamically.
+ *
+ * Driver authors install via `registerConnectionDriver(kind, driver,
+ * manifest)`. New manifest fields are additive; the legacy two-arg
+ * call (driver only) still works for now and produces a synthesized
+ * manifest with empty schemas.
+ */
+export interface ConnectionDriverManifest {
+  /** Operator-facing label rendered in the Type dropdown. */
+  displayName: string;
+  /** One-line summary shown next to the dropdown option. */
+  description?: string;
+  /** JSON-schema-like shape for the per-kind config form (host, port,
+   *  database, TLS verify, etc.). Secrets DO NOT appear here — they're
+   *  referenced via `secretRefId` on the connection row. */
+  configSchema: ConnectionConfigSchema;
+  /** Optional schema describing the expected resolved-secret shape
+   *  (string DSN vs split-creds object). UI hint only. */
+  secretSchema?: ConnectionConfigSchema;
+  /** Binding names this kind can fill in a Dataset (e.g. ["vectors"]
+   *  for qdrant, ["vectors","keywords"] for opensearch). Empty array
+   *  = tool-only kind, never appears in dataset binding pickers. The
+   *  binding-name vocabulary is plugin-declared per ADR-0023 §3. */
+  datasetBindings?: string[];
+  /** Whether the driver runs in-process (bundled with the platform)
+   *  or via Connect transport (external sidecar, ADR-0022). External
+   *  drivers ship as separate plugins; in-process are the families
+   *  the platform bundles today (postgres / mongodb / clickhouse). */
+  transport?: "in_process" | "external";
+}
+
+interface DriverEntry {
+  driver: ConnectionDriver<unknown>;
+  manifest: ConnectionDriverManifest;
+}
+
+const drivers = new Map<string, DriverEntry>();
 const clientCache = new Map<string, unknown>();
+
+const DEFAULT_MANIFEST: ConnectionDriverManifest = {
+  displayName: "(unnamed)",
+  configSchema: { type: "object", properties: {}, additionalProperties: true },
+  datasetBindings: [],
+  transport: "in_process"
+};
 
 /**
  * Register a driver factory for a connection kind. Idempotent: a re-register
  * with the same kind replaces the prior factory (useful in tests). Drivers
  * for shipped families (`mongodb`, `clickhouse`, …) register at module-load
  * time of their plugin file.
+ *
+ * Two call shapes:
+ *  - `registerConnectionDriver(kind, driver)` — legacy, synthesizes an
+ *    empty manifest. The Connections UI will show a raw JSON editor for
+ *    this kind (no rendered form).
+ *  - `registerConnectionDriver(kind, driver, manifest)` — ADR-0024, the
+ *    Connections UI renders the per-kind form from `manifest.configSchema`
+ *    and the dataset picker filters by `manifest.datasetBindings`.
  */
 export function registerConnectionDriver<T>(
   kind: string,
-  driver: ConnectionDriver<T>
+  driver: ConnectionDriver<T>,
+  manifest?: ConnectionDriverManifest
 ): void {
-  drivers.set(kind, driver as AnyDriver);
+  drivers.set(kind, {
+    driver: driver as ConnectionDriver<unknown>,
+    manifest: manifest
+      ? { ...DEFAULT_MANIFEST, ...manifest }
+      : { ...DEFAULT_MANIFEST, displayName: kind }
+  });
 }
 
 export function getRegisteredDriverKinds(): string[] {
   return [...drivers.keys()].sort();
+}
+
+/**
+ * Public catalog used by `GET /api/connection-kinds`. Returns a stable
+ * snapshot of the loaded driver manifests so the UI can populate the
+ * Type dropdown + render config forms dynamically.
+ */
+export interface ConnectionKindInfo extends ConnectionDriverManifest {
+  kind: string;
+}
+
+export function listConnectionKinds(): ConnectionKindInfo[] {
+  return [...drivers.entries()]
+    .map(([kind, entry]) => ({ kind, ...entry.manifest }))
+    .sort((a, b) => a.kind.localeCompare(b.kind));
 }
 
 /**
@@ -156,13 +250,13 @@ export async function acquireClient<T = unknown>(
 ): Promise<T> {
   const cached = clientCache.get(connection.id);
   if (cached !== undefined) return cached as T;
-  const driver = drivers.get(connection.kind);
-  if (!driver) {
+  const entry = drivers.get(connection.kind);
+  if (!entry) {
     throw new Error(
       `no driver registered for connection kind "${connection.kind}" — call registerConnectionDriver() in the plugin module`
     );
   }
-  const client = await driver.create(connection);
+  const client = await entry.driver.create(connection);
   clientCache.set(connection.id, client);
   return client as T;
 }
@@ -178,10 +272,10 @@ export async function closeClient(connectionId: string): Promise<void> {
   clientCache.delete(connectionId);
   // Find the driver by walking registrations — connection.kind isn't
   // stored separately in the cache; the registry is small so this is cheap.
-  for (const driver of drivers.values()) {
-    if (driver.dispose) {
+  for (const entry of drivers.values()) {
+    if (entry.driver.dispose) {
       try {
-        await driver.dispose(client);
+        await entry.driver.dispose(client);
       } catch {
         /* best-effort */
       }
@@ -207,12 +301,12 @@ export async function probeConnection(
   connection: ResolvedExternalConnection
 ): Promise<{ ok: boolean; error?: string }> {
   try {
-    const driver = drivers.get(connection.kind);
-    if (!driver) {
+    const entry = drivers.get(connection.kind);
+    if (!entry) {
       return { ok: false, error: `no driver registered for kind "${connection.kind}"` };
     }
     const client = await acquireClient(connection);
-    if (driver.probe) await driver.probe(client);
+    if (entry.driver.probe) await entry.driver.probe(client);
     return { ok: true };
   } catch (e) {
     return { ok: false, error: e instanceof Error ? e.message : String(e) };
