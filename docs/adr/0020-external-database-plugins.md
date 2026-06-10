@@ -2,7 +2,32 @@
 
 ## Status
 
-Accepted.
+Accepted. **Superseded by ADR-0023 + ADR-0024.**
+
+The architectural rules in this doc (SQL-as-config, params-as-data,
+connections-as-secrets, no host/port/URL in plugin config) are still
+the contract. What changed:
+
+- The per-tenant `datasource_connections` registry this ADR introduced
+  has been collapsed into the **unified `connections` table** (ADR-0023
+  §1). Slugs preserved; cascade resolution (env → tenant → global)
+  unchanged.
+- Datasets no longer reference backends via `backends.<modality>.connectionName`;
+  the binding shape is `bindings.<name>.{connection, collection?, namespace?}`
+  per ADR-0023 §2.
+- The `postgres` driver itself is now a `ConnectionDriverPlugin`
+  (`postgresConnectionDriver` in `plugins/builtin-rag/src/postgres-core.ts`)
+  picked up by the loader's module scan per ADR-0024. The imperative
+  `registerConnectionDriver()` shim still exists for legacy tests but
+  is no longer the registration path drivers ship through.
+- The `postgres_query` / `postgres_upsert` / `postgres_delete` /
+  `postgres_exec` plugins are unchanged in their public contract; they
+  resolve their pooled client through `acquireClient(input.connection)`
+  the same way every other family in the registry does.
+
+Read this ADR for the per-plugin rules; read ADR-0023 + ADR-0024 for
+the registry + driver-loading architecture that everything is built on
+today.
 
 ## Context
 

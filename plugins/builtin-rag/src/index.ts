@@ -1812,10 +1812,12 @@ export {
 } from "./plugins/opensearch.ts";
 
 // External-database (Postgres) plugin family. The three plugins share a
-// pooled-connection core in `./postgres-core.ts`; see ADR 0020 for the
-// architectural rules (SQL-as-config, params-as-data, connections-as-secrets).
-// `buildBatchUpsert` is re-exported so the unit tests can assert the
-// generated SQL shape without standing up a database.
+// pooled-connection core in `./postgres-core.ts`; see ADR 0020 (superseded
+// by ADR 0023) for the SQL-as-config / params-as-data / connections-as-
+// secrets architectural rules. `buildBatchUpsert` is re-exported so the
+// unit tests can assert the generated SQL shape without standing up a
+// database. The `postgresConnectionDriver` export is the ADR-0024
+// connection-driver plugin the loader discovers via module scan.
 export {
   postgresQueryPlugin,
   postgresUpsertPlugin,
@@ -1824,34 +1826,44 @@ export {
   buildBatchUpsert,
   buildBatchDelete
 } from "./plugins/postgres.ts";
+// `postgresConnectionDriver` is exported from the pooled-core module
+// (`./postgres-core.ts`) where the driver factory + pool live.
+export { postgresConnectionDriver } from "./postgres-core.ts";
 
-// MongoDB plugin family (ADR-0021 — first non-Postgres external DB).
-// Consumes the new External Connections Registry; the driver factory
-// registers itself at module load via registerConnectionDriver("mongodb").
+// MongoDB plugin family (ADR-0021, superseded by ADR-0023). Consumes the
+// unified Connections registry; the `mongodbConnectionDriver` export is
+// the ADR-0024 connection-driver plugin the loader picks up by category.
 export {
   mongoFindPlugin,
   mongoInsertPlugin,
   mongoDeletePlugin,
-  mongoAggregatePlugin
+  mongoAggregatePlugin,
+  mongodbConnectionDriver
 } from "./plugins/mongo.ts";
 
-// ClickHouse plugin family (ADR-0021 — second non-Postgres external DB).
-// Same connection-registry pattern as MongoDB; driver registers itself at
-// module load via registerConnectionDriver("clickhouse"). Designed for
-// analytics-shaped workloads: parameterized SELECT, bulk INSERT,
-// ALTER…DELETE WHERE with tenant-id guard.
+// ClickHouse plugin family (ADR-0021, superseded by ADR-0023). Same
+// connection-registry pattern as MongoDB; the `clickhouseConnectionDriver`
+// export is the ADR-0024 connection-driver plugin. Designed for analytics-
+// shaped workloads: parameterized SELECT, bulk INSERT, ALTER…DELETE WHERE
+// with tenant-id guard.
 export {
   clickhouseQueryPlugin,
   clickhouseInsertPlugin,
-  clickhouseDeletePlugin
+  clickhouseDeletePlugin,
+  clickhouseConnectionDriver
 } from "./plugins/clickhouse.ts";
 
-// Side-effect import: registers Qdrant / OpenSearch / Dgraph drivers in
-// the unified Connections registry (ADR-0024). No exports — the
-// registrations happen at module load. Without this import the
-// Connections screen + periodic probe report "no driver registered"
-// for those kinds.
-import "./plugins/storage-drivers.ts";
+// Storage-backend connection drivers (qdrant / opensearch / dgraph). Each
+// exports a ConnectionDriverPlugin (ADR-0024) that the platform loader
+// discovers via module scan, routes into the imperative driver map, and
+// surfaces under /api/plugins + /api/connection-kinds. Without these
+// exports the Connections screen + periodic probe report "no driver
+// registered" for those kinds.
+export {
+  qdrantConnectionDriver,
+  opensearchConnectionDriver,
+  dgraphConnectionDriver
+} from "./plugins/storage-drivers.ts";
 
 // Email pre-processing family — pure text, no LLM, no I/O.
 // `preprocessEmailBody` and `aggregateThreads` are pure helpers re-

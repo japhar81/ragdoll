@@ -148,11 +148,15 @@ function ProbeBadge(props: {
 }
 
 /**
- * Render a single field from a driver plugin's configSchema. Stays
- * deliberately simple — types we know about (string / integer /
- * number / boolean) get the right input; everything else gets a JSON
- * textarea. Future enhancement: hand off to the shared schemaForm
- * utility once that file gains support for the kinds we need.
+ * Render a single field from a driver plugin's configSchema. Connection
+ * configs are tighter than pipeline-node configs (no `${config.X}`
+ * template bindings, no formHints — every field is a literal value the
+ * driver consumes at resolve time), so we deliberately do NOT share
+ * the heavier `ConfigForm` widget here. Strings / integers / numbers /
+ * booleans map to the matching native input; anything else falls back
+ * to a plain text input. ADR-0024 §3: every field on this form is
+ * driven by the loaded driver manifest's `configSchema` — no per-kind
+ * TSX, no platform release required to add a new kind.
  */
 function SchemaField(props: {
   name: string;

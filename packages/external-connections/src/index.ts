@@ -312,3 +312,119 @@ export async function probeConnection(
     return { ok: false, error: e instanceof Error ? e.message : String(e) };
   }
 }
+
+// ---------------------------------------------------------------------------
+// ADR-0024: drivers ship as plugin manifests.
+// ---------------------------------------------------------------------------
+//
+// `ConnectionDriverPlugin` is the shape an in-process driver exports so the
+// platform's plugin-loader can discover it through the same module-scan that
+// finds every other in-process plugin. The loader bridges these into the
+// imperative driver map via `registerConnectionDriverPlugin` so existing
+// `acquireClient` / `probeConnection` paths keep working unchanged.
+//
+// External (Connect-transport) drivers ship as `category: "connection_driver"`
+// plugins too — the manifest's `id` / `version` flow through the standard
+// external-plugin registration path; the loader calls into a Connect client
+// adapter for the driver hooks. That keeps "ship a Snowflake sidecar" on the
+// SAME contract as "ship an in-process Qdrant driver".
+
+import type { PluginManifest } from "../../plugin-sdk/src/index.ts";
+
+/**
+ * A driver shipped as a plugin. Combines:
+ *  - `kind` — the connection kind this driver fills (globally unique across
+ *    every loaded driver plugin; the loader refuses two with the same kind).
+ *  - `driverManifest` — the UI/picker metadata (display name, configSchema,
+ *    secretSchema, datasetBindings, transport).
+ *  - `driver` — the runtime factory (`create` / optional `dispose` / optional
+ *    `probe`).
+ *  - `manifest` — a regular {@link PluginManifest} with
+ *    `category: "connection_driver"`. The conventional id is
+ *    `connection_driver.<kind>` so it doesn't collide with execute-able
+ *    plugins under the same kind label.
+ *
+ * Use {@link defineConnectionDriverPlugin} to build one — the helper sets the
+ * conventional id and the empty config/output schemas the registry expects.
+ */
+export interface ConnectionDriverPlugin {
+  kind: string;
+  manifest: PluginManifest;
+  driverManifest: ConnectionDriverManifest;
+  driver: ConnectionDriver<unknown>;
+}
+
+export interface DefineConnectionDriverPluginArgs<TClient = unknown> {
+  /** Connection kind string (e.g. `"qdrant"`, `"clickhouse"`). */
+  kind: string;
+  /** Plugin name shown in `/api/plugins`. Defaults to the displayName. */
+  name?: string;
+  /** Plugin version. Defaults to `"1.0.0"`. */
+  version?: string;
+  /** Driver factory + lifecycle hooks. */
+  driver: ConnectionDriver<TClient>;
+  /** UI/picker metadata (forwarded to {@link ConnectionKindInfo}). */
+  manifest: ConnectionDriverManifest;
+}
+
+/**
+ * Build a {@link ConnectionDriverPlugin} that the plugin-loader will
+ * discover via its standard module scan. Sets the conventional
+ * `connection_driver.<kind>` id and a no-op execute() so the same
+ * RegisteredPlugin record can be listed by `/api/plugins` without
+ * polluting the executable-plugin set (the runtime never calls execute()
+ * on a connection_driver — the driver hooks are pulled off `driver`).
+ */
+export function defineConnectionDriverPlugin<TClient = unknown>(
+  args: DefineConnectionDriverPluginArgs<TClient>
+): ConnectionDriverPlugin {
+  const manifest: PluginManifest = {
+    id: `connection_driver.${args.kind}`,
+    name: args.name ?? args.manifest.displayName,
+    version: args.version ?? "1.0.0",
+    category: "connection_driver",
+    description:
+      args.manifest.description ?? `Connection driver for kind "${args.kind}".`,
+    configSchema: args.manifest.configSchema as Record<string, unknown>,
+    secretsSchema: args.manifest.secretSchema as Record<string, unknown> | undefined
+  };
+  return {
+    kind: args.kind,
+    manifest,
+    driverManifest: args.manifest,
+    driver: args.driver as ConnectionDriver<unknown>
+  };
+}
+
+/** Duck-types a value as a {@link ConnectionDriverPlugin}. Used by the plugin
+ *  loader to distinguish driver exports from regular InProcessPlugin exports
+ *  during the module-namespace scan. */
+export function isConnectionDriverPlugin(value: unknown): value is ConnectionDriverPlugin {
+  if (!value || typeof value !== "object") return false;
+  const v = value as {
+    kind?: unknown;
+    manifest?: { category?: unknown };
+    driverManifest?: unknown;
+    driver?: { create?: unknown };
+  };
+  return (
+    typeof v.kind === "string" &&
+    !!v.manifest &&
+    v.manifest.category === "connection_driver" &&
+    !!v.driverManifest &&
+    !!v.driver &&
+    typeof v.driver.create === "function"
+  );
+}
+
+/**
+ * Register a driver plugin into the imperative driver map. The platform's
+ * plugin-loader calls this for every discovered {@link ConnectionDriverPlugin}
+ * so the existing `acquireClient` / `probeConnection` / `closeClient`
+ * machinery keeps working without changes. Direct callers should prefer
+ * exporting a {@link ConnectionDriverPlugin} — this entry point is the bridge,
+ * not the primary contract.
+ */
+export function registerConnectionDriverPlugin(plugin: ConnectionDriverPlugin): void {
+  registerConnectionDriver(plugin.kind, plugin.driver, plugin.driverManifest);
+}

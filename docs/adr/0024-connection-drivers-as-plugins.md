@@ -2,10 +2,23 @@
 
 ## Status
 
-**Accepted.** Companion to [ADR 0023 — Unified Connections Registry](./0023-unified-connections-registry.md).
+**Implemented.** Companion to [ADR 0023 — Unified Connections Registry](./0023-unified-connections-registry.md).
 0023 establishes that connection `kind` is open-ended text; this ADR
 specifies how the platform learns about new kinds without a code
 change.
+
+The six in-process drivers shipped today (`postgres`, `mongodb`,
+`clickhouse`, `qdrant`, `opensearch`, `dgraph`) are loaded via
+`ConnectionDriverPlugin` manifests; `plugins/builtin-rag/src/index.ts`
+re-exports each so `packages/plugin-loader` discovers them through its
+standard module-namespace scan. The imperative
+`registerConnectionDriver(kind, driver, manifest)` API is kept as a
+public shim for tests / out-of-tree consumers and is no longer the
+registration path drivers ship through.
+
+`GET /api/connection-kinds` enumerates the loaded catalog; the
+Connections form in the web UI renders schema-driven from each kind's
+`configSchema` with zero per-kind TSX.
 
 ## Context
 

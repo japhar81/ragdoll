@@ -103,7 +103,13 @@ export type PluginCategory =
   | "router"
   | "control"
   | "memory"
-  | "sink";
+  | "sink"
+  // ADR-0024: connection drivers ship as plugin manifests so a sidecar
+  // can add a new connection kind (snowflake / databricks / trino) without
+  // a platform release. The runtime never executes() these — the plugin
+  // loader pulls the driver hooks off `connectionDriver` and routes them
+  // into the external-connections registry instead.
+  | "connection_driver";
 
 export interface PluginRef {
   category: PluginCategory;

@@ -33,7 +33,7 @@
  */
 
 import type { InProcessPlugin } from "../../../../packages/plugin-sdk/src/index.ts";
-import { registerConnectionDriver } from "../../../../packages/external-connections/src/index.ts";
+import { defineConnectionDriverPlugin } from "../../../../packages/external-connections/src/index.ts";
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 type MongoClient = any;
@@ -46,12 +46,15 @@ interface MongoConnectionOptions {
 }
 
 // Driver: builds (and pools) one MongoClient per connection.id.
-// Registered with an ADR-0024 manifest so the Connections UI renders
-// a schema-driven form (database / appName / maxPoolSize) without
+// Shipped as an ADR-0024 connection-driver plugin: the loader auto-
+// discovers it through the standard module scan, registers the driver
+// hooks into the imperative driver map, and surfaces the manifest under
+// /api/plugins + /api/connection-kinds so the Connections UI renders a
+// schema-driven form (database / appName / maxPoolSize) without
 // hand-rolled per-kind TSX.
-registerConnectionDriver<MongoClient>(
-  "mongodb",
-  {
+export const mongodbConnectionDriver = defineConnectionDriverPlugin<MongoClient>({
+  kind: "mongodb",
+  driver: {
     async create(conn) {
       if (!conn.secret) {
         throw new Error(
@@ -75,7 +78,7 @@ registerConnectionDriver<MongoClient>(
       await client.db("admin").command({ ping: 1 });
     }
   },
-  {
+  manifest: {
     displayName: "MongoDB",
     description:
       "Document store. Used by mongo_find / mongo_insert / mongo_delete / mongo_aggregate.",
@@ -109,7 +112,7 @@ registerConnectionDriver<MongoClient>(
     datasetBindings: [],
     transport: "in_process"
   }
-);
+});
 
 function dbFor(client: MongoClient, conn: { options: Record<string, unknown> }): Db {
   const dbName = String(conn.options.database ?? "");

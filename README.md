@@ -334,8 +334,10 @@ The wrapper invokes `apps/cli/src/index.ts` directly via Node's
 - **Start here** (3-minute concepts read): `docs/users-guide.md`
 - Architecture: `docs/architecture/initial-design.md`,
   `docs/architecture/runtime.md`
-- ADRs: `docs/adr/0001`–`0022` (`0022-connect-rpc-plugin-transport.md`
-  is the current plugin-transport contract)
+- ADRs: `docs/adr/0001`–`0024` (`0023-unified-connections-registry.md`
+  + `0024-connection-drivers-as-plugins.md` are the most recent —
+  unified Connections table + drivers-as-plugin-manifests, supersedes
+  0020 + 0021)
 - Developer: `docs/developer/local-development.md`,
   `docs/developer/plugin-development.md`,
   `docs/developer/provider-development.md`

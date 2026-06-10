@@ -344,17 +344,19 @@ export function assertLooksReadOnly(sql: string): void {
 }
 
 // ===========================================================================
-// ADR-0024: register the postgres kind with the connection driver registry
-// so the Connections UI can render its config form + the connection-kinds
-// API enumerates it. acquire() wraps getPoolForConnection so two pipelines
-// referencing the same connection slug share one pool (per ADR-0023).
+// ADR-0024: the postgres kind ships as a connection-driver plugin so the
+// platform's plugin-loader discovers it through the standard module scan,
+// registers the driver hooks into the imperative driver map, and lists it
+// under /api/plugins + /api/connection-kinds with its config schema. The
+// `create()` factory wraps getPoolForConnection so two pipelines referencing
+// the same connection slug share one pool (per ADR-0023).
 // ===========================================================================
 
-import { registerConnectionDriver } from "../../../packages/external-connections/src/index.ts";
+import { defineConnectionDriverPlugin } from "../../../packages/external-connections/src/index.ts";
 
-registerConnectionDriver(
-  "postgres",
-  {
+export const postgresConnectionDriver = defineConnectionDriverPlugin({
+  kind: "postgres",
+  driver: {
     async create(conn) {
       // Reuse the pool-keyed-by-connection.id path so direct query
       // tools (postgres_query/postgres_upsert) AND any future
@@ -381,7 +383,7 @@ registerConnectionDriver(
       }
     }
   },
-  {
+  manifest: {
     displayName: "PostgreSQL",
     description:
       "Relational database. Used by postgres_query / postgres_upsert / postgres_delete / postgres_exec, and (via pgvector) as a Dataset vector backend.",
@@ -412,4 +414,4 @@ registerConnectionDriver(
     datasetBindings: ["vectors", "rows"],
     transport: "in_process"
   }
-);
+});
