@@ -579,6 +579,27 @@ test("qdrant_delete tolerates empty input", async () => {
   assert.equal(result.outputs.deletedCount, 0);
 });
 
+test("qdrant_delete is a no-op when the collection doesn't exist (first-run ingest)", async () => {
+  // Reproduces the regression: a fresh stack has the dataset bound but
+  // no Qdrant collection yet; the very first ingest's delta_filter
+  // emits some `deleted` entries and qdrant_delete fires BEFORE any
+  // upsert has materialised the collection. Pre-fix this raised a 404
+  // and failed the whole pipeline; post-fix it succeeds with
+  // deletedCount equal to the requested set (the docIds the caller
+  // asked us to remove are gone — vacuously, because nothing existed).
+  resetInMemoryVectorStore();
+  // NOTE: no ensureCollection() — the collection genuinely doesn't exist.
+  const result = await qdrantDeletePlugin.execute({
+    context: fakeContext(),
+    node: { id: "del", plugin: qdrantDeletePlugin.manifest, config: {}, secrets: {} },
+    inputs: { deleted: [{ docId: "a.ts" }, { docId: "b.ts" }] },
+    config: { collection: "fresh_collection_that_does_not_exist" },
+    secrets: {},
+    dataset: fakeVectorDataset()
+  } as unknown as PluginExecutionInput);
+  assert.equal(result.outputs.deletedCount, 2);
+});
+
 // ---------------------------------------------------------------------------
 // opensearch_delete
 // ---------------------------------------------------------------------------

@@ -2,8 +2,10 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   InMemoryVectorStore,
+  QdrantVectorStore,
   createVectorStore,
   getInMemoryVectorStore,
+  isCollectionMissingError,
   resetInMemoryVectorStore,
   score
 } from "../src/index.ts";
@@ -160,4 +162,132 @@ test("vectorUpsert -> qdrantRetriever end-to-end via in-memory singleton", async
     dataset: fakeVecDataset
   });
   assert.equal((otherTenant.outputs.documents as unknown[]).length, 0);
+});
+
+// ---------------------------------------------------------------------------
+// "Delete X from a collection that doesn't exist" must be a no-op, not a
+// 404 — first-run ingest pipelines hit qdrant_delete BEFORE any upsert
+// has created the collection, and a raised error there fails the whole
+// pipeline for what is actually a clean state.
+// ---------------------------------------------------------------------------
+
+test("isCollectionMissingError detects every Qdrant client error shape we see in practice", () => {
+  // HTTP 404 alone — minimum we should always recognise.
+  assert.ok(isCollectionMissingError({ status: 404, message: "Not Found" }));
+  // Status + structured body with the canonical wording.
+  assert.ok(
+    isCollectionMissingError({
+      status: 404,
+      message: "Not Found",
+      data: { status: { error: "Not found: Collection `codebase` doesn't exist!" } }
+    })
+  );
+  // No status, only the structured body — newer client versions.
+  assert.ok(
+    isCollectionMissingError({
+      data: { status: { error: "Collection `kb_v1` does not exist!" } }
+    })
+  );
+  // Message-only signal — older proxies that swallow the body.
+  assert.ok(isCollectionMissingError(new Error("Collection 'docs' doesn't exist!")));
+  // Non-collection errors must NOT trigger the no-op path.
+  assert.equal(isCollectionMissingError({ status: 500, message: "internal" }), false);
+  assert.equal(isCollectionMissingError(new Error("Bad Request: dim mismatch")), false);
+  assert.equal(isCollectionMissingError(undefined), false);
+  assert.equal(isCollectionMissingError(null), false);
+  assert.equal(isCollectionMissingError("oops"), false);
+});
+
+/**
+ * Fake-client harness for QdrantVectorStore. The real store lazy-imports
+ * `@qdrant/js-client-rest`; here we cheat by populating the private
+ * `clientPromise` so `client()` returns our stub. Keeps the test
+ * install-free + deterministic.
+ *
+ * Subtle gotcha: a Proxy that intercepts EVERY property access turns
+ * the fake into an unintentional thenable — `await Promise.resolve(fake)`
+ * then calls the proxied `.then` and unwraps it. We guard by returning
+ * `undefined` for `then`/`catch`/`finally`/Symbol so V8's await/Promise
+ * machinery treats the fake as a plain object.
+ */
+function stubQdrant(store: QdrantVectorStore, calls: Array<{ method: string; args: unknown[]; throws?: unknown }>) {
+  const log: Array<{ method: string; args: unknown[] }> = [];
+  const fake = new Proxy({}, {
+    get(_target, prop) {
+      if (prop === "then" || prop === "catch" || prop === "finally" || typeof prop === "symbol") {
+        return undefined;
+      }
+      return (...args: unknown[]) => {
+        log.push({ method: String(prop), args });
+        const expected = calls.shift();
+        if (expected && expected.throws) return Promise.reject(expected.throws);
+        return Promise.resolve(undefined);
+      };
+    }
+  });
+  // Inject by overwriting the private cache the lazy `client()` reads.
+  (store as unknown as { clientPromise: Promise<unknown> }).clientPromise = Promise.resolve(fake);
+  return log;
+}
+
+test("QdrantVectorStore.deleteByDocIds is a no-op when the collection doesn't exist", async () => {
+  const store = new QdrantVectorStore({ url: "http://qdrant.invalid" });
+  const log = stubQdrant(store, [
+    {
+      method: "delete",
+      args: [],
+      throws: {
+        status: 404,
+        message: "Not Found",
+        data: { status: { error: "Not found: Collection `codebase` doesn't exist!" } }
+      }
+    }
+  ]);
+  // The bug was: this used to reject with the enriched 404 error.
+  await assert.doesNotReject(
+    store.deleteByDocIds("codebase", "tenant-x", ["doc1", "doc2"])
+  );
+  // Sanity: we DID call delete (i.e. we didn't short-circuit upstream).
+  assert.equal(log[0].method, "delete");
+});
+
+test("QdrantVectorStore.deleteByIds is a no-op when the collection doesn't exist", async () => {
+  const store = new QdrantVectorStore({ url: "http://qdrant.invalid" });
+  stubQdrant(store, [
+    {
+      method: "delete",
+      args: [],
+      throws: { status: 404, message: "Collection not found" }
+    }
+  ]);
+  await assert.doesNotReject(store.deleteByIds("ghost", ["id1"]));
+});
+
+test("QdrantVectorStore.deleteByTenant is a no-op when the collection doesn't exist", async () => {
+  const store = new QdrantVectorStore({ url: "http://qdrant.invalid" });
+  stubQdrant(store, [
+    {
+      method: "delete",
+      args: [],
+      throws: { status: 404, data: { status: { error: "doesn't exist" } } }
+    }
+  ]);
+  await assert.doesNotReject(store.deleteByTenant("ghost", "tenant-x"));
+});
+
+test("QdrantVectorStore.deleteByDocIds still PROPAGATES non-missing errors", async () => {
+  const store = new QdrantVectorStore({ url: "http://qdrant.invalid" });
+  stubQdrant(store, [
+    {
+      method: "delete",
+      args: [],
+      throws: { status: 500, message: "Internal Server Error" }
+    }
+  ]);
+  // A real backend error must still surface — the no-op fix is scoped
+  // strictly to "collection missing", not "Qdrant is having a bad day".
+  await assert.rejects(
+    store.deleteByDocIds("docs", "tenant-x", ["doc1"]),
+    (err: unknown) => (err as { status?: number }).status === 500
+  );
 });

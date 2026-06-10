@@ -227,7 +227,16 @@ export class PgVectorStore implements VectorStore {
   async deleteByIds(collection: string, ids: string[]): Promise<void> {
     if (ids.length === 0) return;
     const table = sanitizeCollection(collection);
-    await this.requireMeta(table);
+    // "Delete X from a table that doesn't exist" is a no-op — that's the
+    // case ingest pipelines hit on first run, before any upsert has
+    // materialised the collection. Symmetric with QdrantVectorStore's
+    // isCollectionMissingError handling.
+    try {
+      await this.requireMeta(table);
+    } catch (err) {
+      if (err instanceof CollectionNotFoundError) return;
+      throw err;
+    }
     await this.pool.query(
       `DELETE FROM ${table} WHERE id = ANY($1::text[])`,
       [ids]
@@ -237,7 +246,12 @@ export class PgVectorStore implements VectorStore {
   async deleteByDocIds(collection: string, tenantId: string, docIds: string[]): Promise<void> {
     if (docIds.length === 0) return;
     const table = sanitizeCollection(collection);
-    await this.requireMeta(table);
+    try {
+      await this.requireMeta(table);
+    } catch (err) {
+      if (err instanceof CollectionNotFoundError) return;
+      throw err;
+    }
     // payload->>'docId' = ANY($2) — tenant scope mandatory (same
     // defense-in-depth as the Qdrant + InMemory paths).
     await this.pool.query(
@@ -248,7 +262,12 @@ export class PgVectorStore implements VectorStore {
 
   async deleteByTenant(collection: string, tenantId: string): Promise<void> {
     const table = sanitizeCollection(collection);
-    await this.requireMeta(table);
+    try {
+      await this.requireMeta(table);
+    } catch (err) {
+      if (err instanceof CollectionNotFoundError) return;
+      throw err;
+    }
     await this.pool.query(
       `DELETE FROM ${table} WHERE tenant_id = $1`,
       [tenantId]
