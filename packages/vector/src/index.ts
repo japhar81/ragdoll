@@ -184,13 +184,20 @@ export class InMemoryVectorStore implements VectorStore {
 
   async deleteByIds(collection: string, ids: string[]): Promise<void> {
     if (ids.length === 0) return;
-    const stored = this.requireCollection(collection);
+    // "Delete X from a collection that doesn't exist" is a no-op — same
+    // posture every other VectorStore impl applies (Qdrant: 404 swallow,
+    // pgvector: CollectionNotFoundError swallow, OpenSearch: 404 tolerate).
+    // First-run ingest pipelines hit this branch before any upsert
+    // materialises the collection.
+    const stored = this.collections.get(collection);
+    if (!stored) return;
     for (const id of ids) stored.points.delete(id);
   }
 
   async deleteByDocIds(collection: string, tenantId: string, docIds: string[]): Promise<void> {
     if (docIds.length === 0) return;
-    const stored = this.requireCollection(collection);
+    const stored = this.collections.get(collection);
+    if (!stored) return;
     const set = new Set(docIds);
     for (const [id, point] of stored.points) {
       if (point.tenantId !== tenantId) continue;
@@ -202,7 +209,8 @@ export class InMemoryVectorStore implements VectorStore {
   }
 
   async deleteByTenant(collection: string, tenantId: string): Promise<void> {
-    const stored = this.requireCollection(collection);
+    const stored = this.collections.get(collection);
+    if (!stored) return;
     for (const [id, point] of stored.points) {
       if (point.tenantId === tenantId) {
         stored.points.delete(id);
@@ -312,39 +320,108 @@ export class QdrantVectorStore implements VectorStore {
   async deleteByIds(collection: string, ids: string[]): Promise<void> {
     if (ids.length === 0) return;
     const client = await this.client();
-    await client.delete(collection, { wait: true, points: ids });
+    try {
+      await client.delete(collection, { wait: true, points: ids });
+    } catch (err) {
+      if (isCollectionMissingError(err)) return;
+      throw err;
+    }
   }
 
   async deleteByDocIds(collection: string, tenantId: string, docIds: string[]): Promise<void> {
     if (docIds.length === 0) return;
     const client = await this.client();
-    await client.delete(collection, {
-      wait: true,
-      // Both clauses must match — tenant scoping is mandatory (defense
-      // against a docId collision across tenants); docId membership
-      // uses Qdrant's `any` matcher to delete every chunk for any of
-      // the deleted source documents in one call.
-      filter: {
-        must: [
-          { key: "tenantId", match: { value: tenantId } },
-          { key: "docId", match: { any: docIds } }
-        ]
-      }
-    });
+    try {
+      await client.delete(collection, {
+        wait: true,
+        // Both clauses must match — tenant scoping is mandatory (defense
+        // against a docId collision across tenants); docId membership
+        // uses Qdrant's `any` matcher to delete every chunk for any of
+        // the deleted source documents in one call.
+        filter: {
+          must: [
+            { key: "tenantId", match: { value: tenantId } },
+            { key: "docId", match: { any: docIds } }
+          ]
+        }
+      });
+    } catch (err) {
+      if (isCollectionMissingError(err)) return;
+      throw err;
+    }
   }
 
   async deleteByTenant(collection: string, tenantId: string): Promise<void> {
     const client = await this.client();
-    await client.delete(collection, {
-      wait: true,
-      filter: { must: [{ key: "tenantId", match: { value: tenantId } }] }
-    });
+    try {
+      await client.delete(collection, {
+        wait: true,
+        filter: { must: [{ key: "tenantId", match: { value: tenantId } }] }
+      });
+    } catch (err) {
+      if (isCollectionMissingError(err)) return;
+      throw err;
+    }
   }
 
   async deleteCollection(name: string): Promise<void> {
     const client = await this.client();
-    await client.deleteCollection(name);
+    try {
+      await client.deleteCollection(name);
+    } catch (err) {
+      if (isCollectionMissingError(err)) return;
+      throw err;
+    }
   }
+}
+
+/**
+ * True when a Qdrant client error indicates the target collection doesn't
+ * exist. "Delete X from a collection that doesn't exist" is a no-op
+ * semantically — there's nothing to remove — and that's the case the
+ * sample ingest pipelines hit on their first run, BEFORE any upsert
+ * has created the collection. Without this guard the worker raises a
+ * confusing 404 and the run fails for what is actually a clean state.
+ *
+ * The Qdrant js client surfaces server detail on `err.status` (the HTTP
+ * status code) and `err.data.status.error` (the structured server
+ * message). We accept either signal — message-based detection in case
+ * a future client version changes the status surface, and the canonical
+ * 404 + "doesn't exist" / "Not found" wording.
+ *
+ * Exported so the delete plugins + their tests can share one detector
+ * and stay in lockstep when Qdrant tweaks the error envelope.
+ */
+export function isCollectionMissingError(err: unknown): boolean {
+  if (!err || typeof err !== "object") return false;
+  const e = err as {
+    status?: unknown;
+    message?: unknown;
+    data?: { status?: { error?: unknown } | string };
+  };
+  // HTTP 404 is the canonical "collection not found" signal from the
+  // qdrant REST surface. Some 404s come without a body (network proxies),
+  // so the status alone is enough.
+  if (typeof e.status === "number" && e.status === 404) return true;
+  const messages: string[] = [];
+  if (typeof e.message === "string") messages.push(e.message);
+  const data = e.data;
+  if (data) {
+    if (typeof data === "string") messages.push(data);
+    else if (typeof data.status === "object" && data.status && typeof data.status.error === "string") {
+      messages.push(data.status.error);
+    } else if (typeof data.status === "string") {
+      messages.push(data.status);
+    }
+  }
+  const haystack = messages.join(" ").toLowerCase();
+  // "doesn't exist" / "does not exist" / "not found" all show up across
+  // server versions for the same condition; match any.
+  return (
+    haystack.includes("doesn't exist") ||
+    haystack.includes("does not exist") ||
+    haystack.includes("not found")
+  );
 }
 
 let processWideInMemoryStore: InMemoryVectorStore | undefined;

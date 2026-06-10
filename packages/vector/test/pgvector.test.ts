@@ -200,3 +200,58 @@ test("deleteCollection drops the table and clears the cached metadata", async ()
   // A subsequent ensureCollection should treat the collection as new.
   await store.ensureCollection("kb", { dimensions: 1536, distance: "euclidean" });
 });
+
+// ---------------------------------------------------------------------------
+// "Delete X from a table that doesn't exist" must be a no-op, not a throw.
+// The pg path mirrors the Qdrant fix (isCollectionMissingError) — both back
+// the same VectorStore contract and the same ingest path hits both on first
+// run, before any upsert has materialised the collection.
+// ---------------------------------------------------------------------------
+
+test("deleteByDocIds is a no-op when the table doesn't exist", async () => {
+  const rec = recordingPool();
+  const store = new PgVectorStore({ pool: rec.pool });
+  // recordingPool() returns no rows from pg_attribute, so requireMeta()
+  // throws CollectionNotFoundError. The fix should swallow it and skip
+  // the DELETE entirely.
+  await assert.doesNotReject(
+    store.deleteByDocIds("ghost", "tenant-x", ["doc1", "doc2"])
+  );
+  // Critically: NO DELETE issued. Only the pg_attribute probe should have
+  // run; if a DELETE shows up we'd be hitting a non-existent table for
+  // real.
+  assert.ok(
+    rec.calls.every((c) => !c.sql.includes("DELETE FROM")),
+    `expected zero DELETEs, saw: ${rec.calls.map((c) => c.sql.slice(0, 40)).join("|")}`
+  );
+});
+
+test("deleteByIds is a no-op when the table doesn't exist", async () => {
+  const rec = recordingPool();
+  const store = new PgVectorStore({ pool: rec.pool });
+  await assert.doesNotReject(store.deleteByIds("ghost", ["id1"]));
+  assert.ok(rec.calls.every((c) => !c.sql.includes("DELETE FROM")));
+});
+
+test("deleteByTenant is a no-op when the table doesn't exist", async () => {
+  const rec = recordingPool();
+  const store = new PgVectorStore({ pool: rec.pool });
+  await assert.doesNotReject(store.deleteByTenant("ghost", "tenant-x"));
+  assert.ok(rec.calls.every((c) => !c.sql.includes("DELETE FROM")));
+});
+
+test("deleteByDocIds DOES issue a DELETE when the table exists", async () => {
+  const rec = recordingPool();
+  const store = new PgVectorStore({ pool: rec.pool });
+  // Materialise the collection so requireMeta() succeeds.
+  await store.ensureCollection("kb", { dimensions: 3, distance: "cosine" });
+  rec.calls.length = 0;
+  await store.deleteByDocIds("kb", "tenant-1", ["d1", "d2"]);
+  // Exactly one DELETE issued; tenant scope mandatory; docIds bound as
+  // a text[] parameter — same shape the bug fix didn't break.
+  const deletes = rec.calls.filter((c) => c.sql.includes("DELETE FROM"));
+  assert.equal(deletes.length, 1);
+  assert.ok(deletes[0].sql.includes("WHERE tenant_id = $1"));
+  assert.ok(deletes[0].sql.includes("payload->>'docId' = ANY($2::text[])"));
+  assert.deepEqual(deletes[0].params, ["tenant-1", ["d1", "d2"]]);
+});
