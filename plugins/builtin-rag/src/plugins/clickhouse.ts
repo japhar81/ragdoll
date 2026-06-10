@@ -27,7 +27,7 @@
  */
 
 import type { InProcessPlugin } from "../../../../packages/plugin-sdk/src/index.ts";
-import { registerConnectionDriver } from "../../../../packages/external-connections/src/index.ts";
+import { defineConnectionDriverPlugin } from "../../../../packages/external-connections/src/index.ts";
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 type ClickHouseClient = any;
@@ -38,9 +38,9 @@ interface ClickHouseConnectionOptions {
   username?: string;
 }
 
-registerConnectionDriver<ClickHouseClient>(
-  "clickhouse",
-  {
+export const clickhouseConnectionDriver = defineConnectionDriverPlugin<ClickHouseClient>({
+  kind: "clickhouse",
+  driver: {
     async create(conn) {
       const opts = (conn.options ?? {}) as ClickHouseConnectionOptions;
       if (!opts.url) {
@@ -68,7 +68,7 @@ registerConnectionDriver<ClickHouseClient>(
       await client.ping();
     }
   },
-  {
+  manifest: {
     displayName: "ClickHouse",
     description:
       "Analytics database. Used by clickhouse_query / clickhouse_insert / clickhouse_delete.",
@@ -100,7 +100,7 @@ registerConnectionDriver<ClickHouseClient>(
     datasetBindings: [],
     transport: "in_process"
   }
-);
+});
 
 function requireClickHouseConnection(
   input: { connection?: { kind: string } },

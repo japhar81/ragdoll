@@ -2,12 +2,31 @@
 
 ## Status
 
-**Accepted.** Implemented in the MongoDB + ClickHouse families that
-landed alongside this ADR's promotion. The registry is live; back-compat
-with ADR-0020's `postgres-core` is preserved (a node without a
-`connection:` field falls back to the legacy `secrets.dsn` path).
+**Accepted. Superseded by ADR-0023 + ADR-0024.**
 
-Operator documentation: `docs/admin/external-connections.md`.
+This ADR shipped the `external_connections` table and the
+imperative `registerConnectionDriver(kind, factory)` API. Both have
+since been replaced:
+
+- **Registry side.** `external_connections` was folded into the
+  unified `connections` table (ADR-0023 §1). Migration 019 copied
+  every row verbatim; slugs preserved; `external_connection:*`
+  permissions collapsed into `connection:*` (one-release alias kept
+  through migration 019, dropped in a follow-up).
+- **Driver side.** The imperative `registerConnectionDriver` call is
+  replaced by `ConnectionDriverPlugin` manifests with
+  `category: "connection_driver"` (ADR-0024). The platform's plugin-
+  loader discovers them via its standard module scan; new connection
+  kinds (Snowflake, Databricks, …) ship as sidecar plugins without a
+  platform release.
+
+The MongoDB / ClickHouse / Postgres plugin families this ADR
+established are unchanged in their public contract; they consume the
+unified registry through the same `acquireClient(input.connection)`
+path.
+
+Operator documentation: `docs/admin/connections.md` (the
+`external-connections.md` file is deprecated and points readers there).
 
 ## Context
 

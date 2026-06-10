@@ -2,12 +2,19 @@
 
 ## Status
 
-**Accepted.** Supersedes ADR-0021 (External Connections Registry) in
-favour of a single unified registry, and rewrites the binding side of
-ADR-0016 (Datasets) so backends are referenced via plugin-declared
-slots instead of platform-defined modalities.
+**Implemented.** Supersedes ADR-0020 (External-Database Plugins) and
+ADR-0021 (External Connections Registry) by collapsing both into a
+single unified registry; rewrites the binding side of ADR-0016
+(Datasets) so backends are referenced via plugin-declared slots
+instead of platform-defined modalities.
 
 Companion ADR: [0024 — Connection Drivers as Plugins](./0024-connection-drivers-as-plugins.md).
+
+Implemented across migrations 019 (unified `connections` table),
+020 (Dataset `bindings`), and 021 (drop legacy `backends` +
+`modalities`). Runtime + API + UI shipped; legacy `external_connection:*`
+permission aliases dropped; legacy `/api/external-connections` route
+removed. Operator docs live at `docs/admin/connections.md`.
 
 ## Context
 

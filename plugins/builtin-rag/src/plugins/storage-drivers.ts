@@ -1,13 +1,18 @@
 /**
- * Storage-backend driver registrations for the unified Connections registry
+ * Storage-backend connection drivers for the unified Connections registry
  * (ADR-0023 + ADR-0024).
  *
- * The mongo / clickhouse / postgres-core drivers register themselves
- * next to their plugin families. Qdrant / OpenSearch / Dgraph don't
- * have a single co-located plugin family — they're consumed by
- * `retrieval-v2.ts`, the dgraph_* plugins, and dataset bindings — so
- * their driver registrations live here, side-effect-imported by
- * `plugins/builtin-rag/src/index.ts`.
+ * The mongo / clickhouse / postgres-core drivers live next to their plugin
+ * families. Qdrant / OpenSearch / Dgraph don't have a single co-located
+ * plugin family — they're consumed by `retrieval-v2.ts`, the `dgraph_*`
+ * plugins, and dataset bindings — so their driver definitions live here.
+ *
+ * Each driver ships as a {@link ConnectionDriverPlugin} (ADR-0024): the
+ * platform's plugin-loader picks them up through the same module-namespace
+ * scan that finds every other in-process plugin, registers the driver hooks
+ * into the imperative registry via `registerConnectionDriverPlugin`, and
+ * lists them under `/api/plugins` with `category: "connection_driver"` so
+ * operators can see what drivers are loaded.
  *
  * Each driver declares:
  *   - `configSchema` { host, port, scheme } so the Connections form
@@ -23,7 +28,7 @@
  * Connections "test" button work off these registrations.
  */
 
-import { registerConnectionDriver } from "../../../../packages/external-connections/src/index.ts";
+import { defineConnectionDriverPlugin } from "../../../../packages/external-connections/src/index.ts";
 
 interface HttpEndpointOptions {
   host?: string;
@@ -62,9 +67,9 @@ interface QdrantClient {
   apiKey?: string;
 }
 
-registerConnectionDriver<QdrantClient>(
-  "qdrant",
-  {
+export const qdrantConnectionDriver = defineConnectionDriverPlugin<QdrantClient>({
+  kind: "qdrant",
+  driver: {
     async create(conn) {
       const opts = (conn.options ?? {}) as HttpEndpointOptions & { apiKey?: string };
       const url = endpointUrl(opts, 6333);
@@ -82,7 +87,7 @@ registerConnectionDriver<QdrantClient>(
       }
     }
   },
-  {
+  manifest: {
     displayName: "Qdrant",
     description: "Vector database. Consumed by retrieval / ingest plugins via Datasets.",
     configSchema: {
@@ -111,7 +116,7 @@ registerConnectionDriver<QdrantClient>(
     datasetBindings: ["vectors"],
     transport: "in_process"
   }
-);
+});
 
 // ===========================================================================
 // OpenSearch
@@ -123,9 +128,9 @@ interface OpenSearchClientHandle {
   password?: string;
 }
 
-registerConnectionDriver<OpenSearchClientHandle>(
-  "opensearch",
-  {
+export const opensearchConnectionDriver = defineConnectionDriverPlugin<OpenSearchClientHandle>({
+  kind: "opensearch",
+  driver: {
     async create(conn) {
       const opts = (conn.options ?? {}) as HttpEndpointOptions & { username?: string };
       const url = endpointUrl(opts, 9200);
@@ -161,7 +166,7 @@ registerConnectionDriver<OpenSearchClientHandle>(
       }
     }
   },
-  {
+  manifest: {
     displayName: "OpenSearch",
     description:
       "Full-text + vector search. Used by opensearch_* retrievers and dataset keyword bindings.",
@@ -196,7 +201,7 @@ registerConnectionDriver<OpenSearchClientHandle>(
     datasetBindings: ["text", "vectors"],
     transport: "in_process"
   }
-);
+});
 
 // ===========================================================================
 // Dgraph
@@ -207,9 +212,9 @@ interface DgraphClientHandle {
   authToken?: string;
 }
 
-registerConnectionDriver<DgraphClientHandle>(
-  "dgraph",
-  {
+export const dgraphConnectionDriver = defineConnectionDriverPlugin<DgraphClientHandle>({
+  kind: "dgraph",
+  driver: {
     async create(conn) {
       const opts = (conn.options ?? {}) as HttpEndpointOptions;
       const url = endpointUrl(opts, 8080);
@@ -228,7 +233,7 @@ registerConnectionDriver<DgraphClientHandle>(
       }
     }
   },
-  {
+  manifest: {
     displayName: "Dgraph",
     description: "Knowledge graph. Used by dgraph_upsert / dgraph_query / dgraph_delete.",
     configSchema: {
@@ -257,4 +262,4 @@ registerConnectionDriver<DgraphClientHandle>(
     datasetBindings: ["graph"],
     transport: "in_process"
   }
-);
+});

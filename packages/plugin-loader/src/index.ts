@@ -10,6 +10,10 @@ import {
   AnthropicProvider,
   OllamaCompatibleProvider
 } from "../../providers/src/index.ts";
+import {
+  isConnectionDriverPlugin,
+  registerConnectionDriverPlugin
+} from "../../external-connections/src/index.ts";
 import * as builtinRagModule from "../../../plugins/builtin-rag/src/index.ts";
 import * as sampleTextModule from "../../../plugins/sample-text/index.ts";
 
@@ -238,6 +242,17 @@ export function loadPluginRegistry(): PluginRegistry {
   const registry = new PluginRegistry();
   for (const moduleNamespace of PLUGIN_MODULES) {
     for (const exported of Object.values(moduleNamespace)) {
+      // ADR-0024: drivers ship as plugin manifests so the loader's
+      // module scan finds them on the same path that finds DAG plugins.
+      // They route into the imperative driver map (so existing
+      // acquireClient / probeConnection paths keep working unchanged)
+      // and surface via /api/connection-kinds, NOT /api/plugins —
+      // drivers don't appear in the builder palette and have no
+      // execute() to call.
+      if (isConnectionDriverPlugin(exported)) {
+        registerConnectionDriverPlugin(exported);
+        continue;
+      }
       if (!isInProcessPlugin(exported)) continue;
       const plugin = exported;
       const registered: RegisteredPlugin = {

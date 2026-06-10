@@ -7,8 +7,9 @@ config; the platform exposes the executing tenant id as a
 internal ids.
 
 Pairs with `dgraph_upsert` for write-side ingest. Both plugins
-declare `contract: 2` + `datasetModalities: ["graph"]`, so the
-Builder picker only offers graph-enabled datasets.
+declare `contract: 2` + `requires: [{ binding: "graph", kind: "dgraph" }]`
+(ADR-0023 §3), so the Builder picker only offers datasets whose `graph`
+binding points at a Dgraph connection.
 
 ## Inputs
 
@@ -77,4 +78,5 @@ variable.
 
 - Plain semantic search — `dataset_search` (vector mode) is cheaper.
 - Free-text full-document retrieval — Dgraph has `@index(fulltext)`
-  but `text` modality + OpenSearch outperforms it for the common case.
+  but an OpenSearch-backed `text` binding outperforms it for the
+  common case.

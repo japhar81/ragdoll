@@ -27,19 +27,85 @@ the validator:
   `ResolvedDataset` from `node.dataset.slug` (+ optional `alias`)
   using the (tenant, env) the run was bound to. ADR 0019 covers the
   full delta.
-- `datasetModalities?: ("vector" | "text" | "graph" | "image")[]` —
-  declares which backend slots the plugin needs inside the resolved
-  dataset. The Builder's slug picker hides datasets that don't
-  declare every required modality, and the validator emits
-  `dataset_modality_mismatch` if a pinned slug lacks one. Hybrid
-  plugins (e.g. `opensearch_hybrid_retriever`) list `["vector", "text"]`.
-  Plugins that pick modality from config at runtime (e.g.
-  `dataset_search`) leave this undeclared so the picker doesn't
-  pre-filter.
+- `requires?: Array<{ binding?, kind?, kindOneOf? }>` — declares which
+  dataset binding(s) the plugin needs filled and which connection
+  kinds are acceptable for each. Per [ADR 0023](../adr/0023-unified-connections-registry.md)
+  §3, `binding` is a free-text name agreed jointly by the plugin
+  author and the dataset author (`vectors`, `keywords`, `graph`,
+  `rows`, …); `kind` / `kindOneOf` pins the connection kinds whose
+  driver fills that binding. Examples:
+  ```ts
+  // Vector retriever — needs a qdrant connection in the dataset's `vectors` slot.
+  requires: [{ binding: "vectors", kind: "qdrant" }]
+  // Multi-kind retriever that works against either qdrant OR pgvector.
+  requires: [{ binding: "vectors", kindOneOf: ["qdrant", "postgres"] }]
+  // Tool plugin that takes an input.connection directly (no Dataset).
+  requires: [{ kind: "clickhouse" }]
+  ```
+  The Builder's binding picker filters by `kind` / `kindOneOf`; the
+  spec validator emits `dataset_binding_missing` when a bound dataset
+  lacks the requested binding name and `binding_kind_mismatch` when
+  the binding's connection has the wrong kind.
+
+> The pre-ADR-0023 `datasetModalities: ["vector" | "text" | "graph" |
+> "image"]` field is still accepted on legacy v1 plugins and translated
+> to `requires: [{binding: <modality>}]` at load time. New plugins
+> should declare `requires` directly.
 
 The validator also fires `missing_required_dataset` on any v2 storage
-node without a `node.dataset.slug`. Save still works; Publish /
-Deploy / Run are blocked until the badge clears.
+node without a `node.dataset.slug` (or a pipeline-level binding
+reference). Save still works; Publish / Deploy / Run are blocked until
+the badge clears.
+
+### Connection-driver plugins (ADR-0024)
+
+A plugin that adds a new connection **kind** (Snowflake, Databricks,
+Trino, …) ships as a `ConnectionDriverPlugin` instead of a regular
+in-process plugin. The platform's plugin-loader discovers it through
+the same module-namespace scan that finds every other plugin, routes
+the driver hooks into the imperative driver map (so existing
+`acquireClient` / `probeConnection` paths keep working), and surfaces
+the manifest under `GET /api/connection-kinds` so the Connections form
+in the web UI renders a schema-driven config form with zero per-kind
+TSX.
+
+```ts
+import { defineConnectionDriverPlugin } from "@ragdoll/external-connections";
+
+export const snowflakeConnectionDriver = defineConnectionDriverPlugin({
+  kind: "snowflake",
+  driver: {
+    async create(conn) { /* build + pool a real client from conn.options + conn.secret */ },
+    async dispose(client) { /* close the pool when the connection is archived */ },
+    async probe(client)   { /* SELECT 1 — surfaces in the "Test now" button + sweep */ }
+  },
+  manifest: {
+    displayName: "Snowflake",
+    description: "Snowflake cloud data warehouse.",
+    configSchema: {
+      type: "object",
+      properties: {
+        account:   { type: "string", description: "Snowflake account locator." },
+        warehouse: { type: "string", description: "Default warehouse." },
+        database:  { type: "string" },
+        schema:    { type: "string", default: "PUBLIC" }
+      },
+      required: ["account", "warehouse"],
+      additionalProperties: false
+    },
+    secretSchema: {
+      type: "string",
+      description: "Snowflake password or programmatic-access token."
+    },
+    datasetBindings: ["rows"], // empty for tool-only kinds
+    transport: "in_process"    // or "external" for a Connect-RPC sidecar
+  }
+});
+```
+
+Re-export the driver from your plugin module's index (the same place
+you re-export executable plugins). The platform's loader picks it up
+on next start; no platform release required.
 
 ## In-process plugin
 

@@ -198,10 +198,17 @@ export function validatePipelineSpec(
   spec: PipelineSpec,
   registry?: PluginRegistry,
   /**
-   * Accept either the legacy modality-only index or the richer binding
-   * index (modalities + per-modality providers). When given the binding
-   * index, the validator additionally enforces plugin manifests'
-   * `requires: [{modality, provider?}]` against the bound dataset.
+   * Dataset index used to enforce a plugin manifest's `requires:`
+   * declarations against bound datasets:
+   *
+   *  - {@link DatasetBindingIndex} (ADR-0023) maps slug → bindings →
+   *    connection kind, so the validator can satisfy `requires: [{binding,
+   *    kind|kindOneOf}]` precisely.
+   *  - {@link DatasetModalityIndex} (legacy ADR-0019) maps slug → modality
+   *    list; on this shape the validator only enforces that the modality /
+   *    binding NAME is declared, not the connection kind. Plugins
+   *    expressing legacy `requires: [{modality, provider?}]` are translated
+   *    to `{binding: modality, kind: provider}` on the fly.
    */
   datasetIndex?: DatasetModalityIndex | DatasetBindingIndex
 ): PipelineValidationResult {

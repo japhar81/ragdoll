@@ -2,9 +2,10 @@
 
 The v2-native retrieval primitive. Pin the node to a Dataset (via the
 Builder's Inspector → Dataset section) and the runtime dispatches the
-query to the right backend at execute time — Qdrant / pgvector for the
-`vector` modality, OpenSearch for `keyword`. The plugin never names a
-collection itself; that came in over Phase 5's dataset resolver.
+query to the right backend at execute time — Qdrant / pgvector behind
+the `vectors` binding, OpenSearch behind the `keywords` binding (per
+ADR-0023 §2). The plugin never names a collection itself; that came in
+over Phase 5's dataset resolver.
 
 ## Inputs
 
@@ -23,8 +24,10 @@ collection itself; that came in over Phase 5's dataset resolver.
 - `node.dataset` MUST be wired. The plugin throws "dataset_search
   requires node.dataset to be wired" otherwise — there's no legacy
   collection-name fallback (that's `qdrant_retriever`'s job).
-- `config.modality` selects vector vs keyword. Datasets declaring only
-  one modality will throw if you ask for the other.
+- `config.mode` selects `"vector"` vs `"keyword"`. Datasets without
+  the matching binding (`vectors` for vector mode, `keywords` for
+  keyword mode) will throw — the plugin requires a binding it can
+  resolve to a connection.
 - Embedding cost: the on-the-fly embedding path calls the configured
   provider for each invocation. Set `config.provider: "ollama"` for
   local zero-cost embedding; OpenAI / Anthropic for hosted models.
