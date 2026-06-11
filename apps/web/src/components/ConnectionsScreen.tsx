@@ -536,36 +536,55 @@ export function ConnectionsScreen() {
                   <tr
                     key={c.id}
                     className={isOpen ? "row-selected" : undefined}
-                    style={c.archivedAt ? { opacity: 0.55 } : undefined}
                   >
-                    <td>
-                      <code>{c.slug}</code>
-                    </td>
-                    <td>{c.displayName}</td>
-                    <td>
-                      <span title={info?.description ?? c.kind}>
-                        {info?.displayName ?? c.kind}
-                      </span>
-                    </td>
-                    <td>
-                      {c.scope === "global"
-                        ? "global"
-                        : c.scope === "tenant"
-                          ? `tenant`
-                          : `env: ${c.environmentId}`}
-                    </td>
-                    <td>
-                      <ProbeBadge ok={c.lastProbeOk} at={c.lastProbedAt} error={c.lastProbeError} />
-                    </td>
-                    <td title={refs.join(", ")}>
-                      {refs.length === 0 ? (
-                        <span className="muted">—</span>
-                      ) : (
+                    {/* Dim only the metadata cells, NOT the action cell.
+                        The previous full-row opacity made the
+                        unarchive/delete links look disabled even though
+                        they're live. */}
+                    {(() => {
+                      const dim = c.archivedAt ? { opacity: 0.55 } : undefined;
+                      return (
                         <>
-                          {refs.length} dataset{refs.length === 1 ? "" : "s"}
+                          <td style={dim}>
+                            <code>{c.slug}</code>
+                            {c.archivedAt && (
+                              <span
+                                className="muted"
+                                style={{ marginLeft: 6, fontSize: "0.8em" }}
+                                title={`archived ${fmtTimestamp(c.archivedAt)}`}
+                              >
+                                (archived)
+                              </span>
+                            )}
+                          </td>
+                          <td style={dim}>{c.displayName}</td>
+                          <td style={dim}>
+                            <span title={info?.description ?? c.kind}>
+                              {info?.displayName ?? c.kind}
+                            </span>
+                          </td>
+                          <td style={dim}>
+                            {c.scope === "global"
+                              ? "global"
+                              : c.scope === "tenant"
+                                ? `tenant`
+                                : `env: ${c.environmentId}`}
+                          </td>
+                          <td style={dim}>
+                            <ProbeBadge ok={c.lastProbeOk} at={c.lastProbedAt} error={c.lastProbeError} />
+                          </td>
+                          <td style={dim} title={refs.join(", ")}>
+                            {refs.length === 0 ? (
+                              <span className="muted">—</span>
+                            ) : (
+                              <>
+                                {refs.length} dataset{refs.length === 1 ? "" : "s"}
+                              </>
+                            )}
+                          </td>
                         </>
-                      )}
-                    </td>
+                      );
+                    })()}
                     <td style={{ whiteSpace: "nowrap" }}>
                       {canAdmin && !c.archivedAt && (
                         <>
@@ -734,12 +753,21 @@ export function ConnectionsScreen() {
       <CascadeDeleteModal
         open={deleteTarget !== undefined}
         resourceLabel={deleteTarget ? `connection "${deleteTarget.slug}"` : ""}
-        description="Permanently delete this connection row. The server refuses with 409 has_dependents when any dataset binding or pipeline-spec node still references the slug — clean those up first. Cascade-delete here is intentionally NOT supported because a connection ref in a dataset / pipeline is the slug, not the id; deleting the row would leave them dangling either way."
+        description="Permanently delete this connection row. Refuses if any dataset binding or pipeline-spec node still references the slug."
+        // Connections cannot be cascade-deleted: refs are slug strings
+        // inside jsonb blobs (no FK to cascade through), so the server
+        // refuses 409 even with ?force=true. The modal should reflect
+        // that — show the breakdown and ask the operator to clean refs
+        // first instead of dangling a "Force delete" button that would
+        // immediately 409.
+        forceUnsupported
+        forceUnsupportedHelp="Remove these dataset bindings / pipeline references first, then try again. Cascade isn't available here because the refs live in jsonb blobs, not foreign keys — deleting the row would leave them dangling either way."
+        // The first attempt always sends force=true: the row is already
+        // archived, so the operator is here precisely to hard-delete.
+        // If refs exist the server returns 409 and the modal pivots to
+        // its blocked view (no Force button per forceUnsupported).
         doDelete={async () => {
           if (!deleteTarget) return;
-          // force=true is the only path that hard-deletes. Without it,
-          // the server soft-archives — but this row is already archived
-          // so the operator is here precisely to nuke it.
           await api.deleteConnection(deleteTarget.id, { force: true });
         }}
         onDeleted={() => {

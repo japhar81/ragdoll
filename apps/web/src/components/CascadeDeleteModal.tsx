@@ -40,6 +40,16 @@ export interface CascadeDeleteModalProps {
   /** Fired after the delete (forced or not) succeeds; close the modal here. */
   onDeleted: () => void;
   onClose: () => void;
+  /** When true: the resource type does NOT support a server-side cascade
+   *  through the listed dependents (e.g. connections — pipeline + dataset
+   *  refs are by slug inside jsonb blobs, so there's no FK to cascade
+   *  through and the server refuses even with ?force=true). The blocked-
+   *  phase view shows the breakdown + the cleanup-first guidance and
+   *  omits the Force button. */
+  forceUnsupported?: boolean;
+  /** Optional override of the cleanup-first guidance text shown when
+   *  `forceUnsupported` is true. Defaults to a generic message. */
+  forceUnsupportedHelp?: string;
 }
 
 export function CascadeDeleteModal(props: CascadeDeleteModalProps): ReactElement | null {
@@ -136,8 +146,10 @@ export function CascadeDeleteModal(props: CascadeDeleteModalProps): ReactElement
           <>
             <p className="muted">
               <code>{props.resourceLabel}</code> has {cascadeTotal} dependent
-              {cascadeTotal === 1 ? "" : "s"} that would be orphaned. Force-delete
-              cascades through ALL of these in one transaction.
+              {cascadeTotal === 1 ? "" : "s"}
+              {props.forceUnsupported
+                ? " that block deletion:"
+                : " that would be orphaned. Force-delete cascades through ALL of these in one transaction."}
             </p>
             <ul className="cascade-deps">
               {Object.entries(blockedBody.dependents).map(([kind, count]) => (
@@ -146,23 +158,32 @@ export function CascadeDeleteModal(props: CascadeDeleteModalProps): ReactElement
                 </li>
               ))}
             </ul>
-            <p className="error" role="alert" style={{ marginTop: 8 }}>
-              This is permanent. Cascade-deleted resources do not move to a
-              trash — they are removed from the database.
-            </p>
+            {props.forceUnsupported ? (
+              <p className="muted" style={{ marginTop: 8 }}>
+                {props.forceUnsupportedHelp ??
+                  "Cascade-delete isn't available for this resource — the references above must be removed first. Once nothing points at it, the delete will succeed."}
+              </p>
+            ) : (
+              <p className="error" role="alert" style={{ marginTop: 8 }}>
+                This is permanent. Cascade-deleted resources do not move to a
+                trash — they are removed from the database.
+              </p>
+            )}
             <footer className="modal-foot">
               <button className="link-btn" onClick={close} disabled={submitting}>
-                Cancel
+                {props.forceUnsupported ? "Close" : "Cancel"}
               </button>
-              <button
-                className="link-btn danger"
-                onClick={() => void attempt(true)}
-                disabled={submitting}
-              >
-                {submitting
-                  ? "Cascading…"
-                  : `Force delete (nukes ${cascadeTotal} item${cascadeTotal === 1 ? "" : "s"})`}
-              </button>
+              {!props.forceUnsupported && (
+                <button
+                  className="link-btn danger"
+                  onClick={() => void attempt(true)}
+                  disabled={submitting}
+                >
+                  {submitting
+                    ? "Cascading…"
+                    : `Force delete (nukes ${cascadeTotal} item${cascadeTotal === 1 ? "" : "s"})`}
+                </button>
+              )}
             </footer>
           </>
         )}
