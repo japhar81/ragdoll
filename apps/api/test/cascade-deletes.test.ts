@@ -646,6 +646,51 @@ test("DELETE /api/connections/:id?force=true refuses with 409 when a pipeline no
   assert.equal(refusal.body.dependents.pipelineReferences, 1);
 });
 
+test("GET /api/connections hides archived rows by default; ?include_archived=true surfaces them", async () => {
+  // Regression: the UI "show archived" toggle was a no-op because
+  // listVisibleAt (and its global-fallback path listAll) used to
+  // hardcode archived_at IS NULL. The route now plumbs an
+  // include_archived query param through both paths so the admin
+  // screen can find rows it just archived.
+  const harness = buildHarness();
+  const active = await createConnection(harness, "still-active");
+  const willArchive = await createConnection(harness, "soon-archived");
+  // Archive one of them via the same soft-delete path the UI calls.
+  const arch = await harness.request({
+    method: "DELETE",
+    path: `/api/connections/${willArchive.id}`,
+    headers: ADMIN
+  });
+  assert.equal(arch.status, 204);
+
+  // Default LIST: only the active row.
+  const defaultList = await harness.request({
+    method: "GET",
+    path: "/api/connections",
+    headers: ADMIN
+  });
+  assert.equal(defaultList.status, 200);
+  const defaultSlugs = (defaultList.body.connections as Array<{ slug: string }>).map((c) => c.slug);
+  assert.ok(defaultSlugs.includes("still-active"), `default list missing active row: ${defaultSlugs.join(",")}`);
+  assert.ok(!defaultSlugs.includes("soon-archived"), `default list leaked archived row: ${defaultSlugs.join(",")}`);
+
+  // Opt-in LIST: both rows come back.
+  const archivedList = await harness.request({
+    method: "GET",
+    path: "/api/connections",
+    headers: ADMIN,
+    query: { include_archived: "true" }
+  });
+  assert.equal(archivedList.status, 200);
+  const archivedSlugs = (archivedList.body.connections as Array<{ slug: string }>).map((c) => c.slug);
+  assert.ok(
+    archivedSlugs.includes("still-active") && archivedSlugs.includes("soon-archived"),
+    `include_archived list missing one: ${archivedSlugs.join(",")}`
+  );
+  // Sanity: doesn't return phantom row for the active one.
+  assert.equal(active.id, active.id);
+});
+
 test("DELETE /api/connections/:id?force=true also nukes an already-archived row", async () => {
   // The intended UX: operator archives a connection (soft), realises
   // they want it gone for real, opens the archived row's Delete button

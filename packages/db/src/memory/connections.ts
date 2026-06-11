@@ -100,9 +100,10 @@ export class InMemoryConnectionRepository implements T.ConnectionRepository {
   async listVisibleAt(args: {
     tenantId?: string;
     environmentId?: string;
+    includeArchived?: boolean;
   }): Promise<T.ConnectionRow[]> {
     return [...this.rows.values()]
-      .filter((r) => !r.archivedAt)
+      .filter((r) => args.includeArchived || !r.archivedAt)
       .filter((r) => {
         if (r.scope === "global") return true;
         if (r.scope === "tenant") return r.tenantId === args.tenantId;
