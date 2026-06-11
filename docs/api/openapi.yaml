@@ -1290,14 +1290,24 @@ paths:
         "422": { $ref: "#/components/responses/ValidationFailed" }
     delete:
       summary: >-
-        Soft-archive a Connection. Hard-delete is gated on no live
-        references (the "Used by" check) — see ADR-0023 §8.
+        Default: soft-archive the Connection (sets `archivedAt`; row
+        remains so historical execution traces still resolve their
+        connection envelope; UI filters archived from primary listings).
+        With `?force=true`: HARD-delete the row + drop the pooled
+        client. Force-delete refuses with 409 `has_dependents` when
+        any dataset binding or pipeline-spec node still references the
+        slug — `{datasetBindings: N, pipelineReferences: M}` — clean
+        those up first. The typical lifecycle is archive → operator
+        decides nothing breaks → force-delete from the archived state.
+      parameters:
+        - $ref: "#/components/parameters/ForceQuery"
       responses:
-        "204": { description: Archived }
+        "204":
+          description: >-
+            Archived (default) or hard-deleted (`?force=true`).
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
-        "409":
-          description: Connection still referenced by N pipelines / M datasets.
+        "409": { $ref: "#/components/responses/HasDependents" }
   /api/connections/{id}/probe:
     parameters:
       - name: id

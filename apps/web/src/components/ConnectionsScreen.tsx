@@ -34,6 +34,7 @@ import { useTenants } from "./useTenants.tsx";
 import { useEnvironments, EnvironmentSelect } from "./useEnvironments.tsx";
 import { useAuth } from "../auth/AuthContext.tsx";
 import { Screen } from "./Screen.tsx";
+import { CascadeDeleteModal } from "./CascadeDeleteModal.tsx";
 import { ScopeTree } from "./ConfigScreen.tsx";
 
 type Scope = "global" | "tenant" | "environment";
@@ -405,10 +406,21 @@ export function ConnectionsScreen() {
     mutationFn: (id: string) => api.deleteConnection(id),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["connections"] })
   });
+  // PUT archivedAt: null. Active row again, ready to use.
+  const unarchive = useMutation({
+    mutationFn: (id: string) => api.updateConnection(id, { archivedAt: null }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["connections"] })
+  });
   const probe = useMutation({
     mutationFn: (id: string) => api.probeConnection(id),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["connections"] })
   });
+  // Hard-delete (force=true) — wired through CascadeDeleteModal so the
+  // user sees the dataset / pipeline reference counts if the server
+  // refuses with 409 has_dependents.
+  const [deleteTarget, setDeleteTarget] = useState<
+    { id: string; slug: string } | undefined
+  >(undefined);
 
   function submit(): void {
     setFormError(null);
@@ -566,6 +578,26 @@ export function ConnectionsScreen() {
                           </button>
                         </>
                       )}
+                      {canAdmin && c.archivedAt && (
+                        <>
+                          <button
+                            className="link-btn"
+                            onClick={() => unarchive.mutate(c.id)}
+                            disabled={unarchive.isPending}
+                            title="Restore this connection — clears archivedAt so it reappears in pickers."
+                          >
+                            unarchive
+                          </button>
+                          {" · "}
+                          <button
+                            className="link-btn danger"
+                            onClick={() => setDeleteTarget({ id: c.id, slug: c.slug })}
+                            title="Permanently delete this connection row. Refuses if any dataset binding or pipeline spec still references the slug."
+                          >
+                            delete
+                          </button>
+                        </>
+                      )}
                     </td>
                   </tr>
                 );
@@ -689,6 +721,23 @@ export function ConnectionsScreen() {
           )}
         </div>
       </div>
+      <CascadeDeleteModal
+        open={deleteTarget !== undefined}
+        resourceLabel={deleteTarget ? `connection "${deleteTarget.slug}"` : ""}
+        description="Permanently delete this connection row. The server refuses with 409 has_dependents when any dataset binding or pipeline-spec node still references the slug — clean those up first. Cascade-delete here is intentionally NOT supported because a connection ref in a dataset / pipeline is the slug, not the id; deleting the row would leave them dangling either way."
+        doDelete={async () => {
+          if (!deleteTarget) return;
+          // force=true is the only path that hard-deletes. Without it,
+          // the server soft-archives — but this row is already archived
+          // so the operator is here precisely to nuke it.
+          await api.deleteConnection(deleteTarget.id, { force: true });
+        }}
+        onDeleted={() => {
+          setDeleteTarget(undefined);
+          qc.invalidateQueries({ queryKey: ["connections"] });
+        }}
+        onClose={() => setDeleteTarget(undefined)}
+      />
     </Screen>
   );
 }

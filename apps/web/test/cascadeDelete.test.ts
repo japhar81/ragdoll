@@ -155,7 +155,7 @@ test("totalDependents: handles an empty dependents bag gracefully", () => {
 // api: ?force=true is appended only when explicitly requested
 // ---------------------------------------------------------------------------
 
-test("api.deleteFolder/deletePipeline/deleteDataset/deleteTenant/deleteRole append ?force=true only when opts.force=true", async () => {
+test("api.delete<X> helpers append ?force=true only when opts.force=true (folders / pipelines / datasets / tenants / roles / connections)", async () => {
   // Replace global fetch to capture the URLs each helper actually hits.
   const calls: string[] = [];
   const realFetch = globalThis.fetch;
@@ -175,14 +175,17 @@ test("api.deleteFolder/deletePipeline/deleteDataset/deleteTenant/deleteRole appe
     await api.deleteTenant("T2", { force: true });
     await api.deleteRole("R1");
     await api.deleteRole("R2", { force: true });
+    // Connections: default soft-archives; force=true hard-deletes the row.
+    await api.deleteConnection("C1");
+    await api.deleteConnection("C2", { force: true });
   } finally {
     globalThis.fetch = realFetch;
   }
   // Default calls — no query string.
   const defaults = calls.filter((c) => !c.includes("?force="));
   const forced = calls.filter((c) => c.includes("?force=true"));
-  assert.equal(defaults.length, 5, `expected 5 default-DELETE calls, got: ${defaults.join("|")}`);
-  assert.equal(forced.length, 5, `expected 5 force=true calls, got: ${forced.join("|")}`);
+  assert.equal(defaults.length, 6, `expected 6 default-DELETE calls, got: ${defaults.join("|")}`);
+  assert.equal(forced.length, 6, `expected 6 force=true calls, got: ${forced.join("|")}`);
   for (const c of defaults) assert.equal(c.includes("?"), false, `default call must not carry a query string: ${c}`);
   for (const c of forced) assert.match(c, /\?force=true$/);
 });

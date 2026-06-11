@@ -929,8 +929,15 @@ export const api = {
       `/api/connections/${encodeURIComponent(id)}`,
       patch
     ),
-  deleteConnection: (id: string) =>
-    request<void>("DELETE", `/api/connections/${encodeURIComponent(id)}`),
+  /** Default soft-archive (sets archivedAt). Pass `{force: true}` to
+   *  hard-delete the row — the server still refuses with 409
+   *  has_dependents when any dataset binding or pipeline spec
+   *  references the connection's slug. */
+  deleteConnection: (id: string, opts: { force?: boolean } = {}) =>
+    request<void>(
+      "DELETE",
+      `/api/connections/${encodeURIComponent(id)}${opts.force ? "?force=true" : ""}`
+    ),
   probeConnection: (id: string) =>
     request<{ ok: boolean; error: string | null; probedAt: string }>(
       "POST",
