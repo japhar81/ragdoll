@@ -52,6 +52,47 @@ export interface Neo4jHandle {
   /* eslint-disable-next-line @typescript-eslint/no-explicit-any */
   driver: any;
   database: string;
+  /** Connection slug — surfaced in error messages so an auth/connectivity
+   *  failure says WHICH connection failed (vs a bare "auth failure"). */
+  slug: string;
+  /** Whether a non-empty secret was attached when the driver was built.
+   *  Distinguishes "the password is wrong" from "the binding's
+   *  secretRefKey is missing/unresolvable" — both yield the same
+   *  neo4j-driver auth error otherwise. */
+  hasSecret: boolean;
+  /** Username we used to build the driver — useful in the diagnostic
+   *  envelope so the operator can see which account auth was tried as. */
+  username: string;
+}
+
+/**
+ * Wrap a neo4j-driver call so the bare "client unauthorized" error
+ * grows actionable context. Matches the auth-failure shape Bolt emits
+ * (code "Neo.ClientError.Security.Unauthorized" / message starts
+ * with "The client is unauthorized") so we don't accidentally
+ * rewrite unrelated server-side errors.
+ */
+async function withNeo4jDiagnostics<T>(
+  client: Neo4jHandle,
+  op: () => Promise<T>
+): Promise<T> {
+  try {
+    return await op();
+  } catch (err) {
+    const e = err as { code?: string; message?: string };
+    const looksAuth =
+      e?.code === "Neo.ClientError.Security.Unauthorized" ||
+      /unauthor[iz]ed|authentication failure/i.test(e?.message ?? "");
+    if (!looksAuth) throw err;
+    const secretHint = client.hasSecret
+      ? `password resolved through SecretProvider as user="${client.username}" but neo4j rejected it — verify the secret value matches the server's credentials`
+      : `no secret was attached to this connection — set secretRefKey on connection "${client.slug}" to the logical key of a managed secret holding the password (or a {"username","password"} JSON blob)`;
+    const wrapped = new Error(
+      `neo4j auth failed on connection "${client.slug}": ${e.message ?? "unknown"}. ${secretHint}`
+    );
+    (wrapped as { cause?: unknown }).cause = err;
+    throw wrapped;
+  }
 }
 
 interface Neo4jConnectionOptions {
@@ -114,7 +155,17 @@ export const neo4jConnectionDriver = defineConnectionDriverPlugin<Neo4jHandle>({
           ? { encrypted: opts.encrypted ? "ENCRYPTION_ON" : "ENCRYPTION_OFF" }
           : undefined
       );
-      return { driver: driverInstance, database: opts.database ?? "neo4j" };
+      // Tag the handle with what we know about the credential resolution
+      // so the run-time wrapper below can re-throw auth failures with
+      // actionable context ("connection X resolved with no secret —
+      // check secretRefKey" vs "password is wrong").
+      return {
+        driver: driverInstance,
+        database: opts.database ?? "neo4j",
+        slug: conn.slug,
+        hasSecret: typeof conn.secret === "string" && conn.secret.length > 0,
+        username
+      };
     },
     async dispose(client) {
       await client.driver.close().catch(() => undefined);
@@ -332,7 +383,10 @@ export const neo4jQueryPlugin: InProcessPlugin = {
     );
     const session = client.driver.session({ database });
     try {
-      const result = await session.run(cypher, params);
+      const result = (await withNeo4jDiagnostics(
+        client,
+        () => session.run(cypher, params)
+      )) as { records?: unknown };
       const records = (result.records ?? []) as Array<{
         keys: string[];
         get: (key: string) => unknown;
@@ -465,7 +519,7 @@ export const neo4jWritePlugin: InProcessPlugin = {
     const cypher = buildUpsertCypher(label, keyField);
     const session = client.driver.session({ database });
     try {
-      await session.run(cypher, { rows, keyField });
+      await withNeo4jDiagnostics(client, () => session.run(cypher, { rows, keyField }));
       return { outputs: { writtenCount: rows.length } };
     } finally {
       await session.close().catch(() => undefined);

@@ -559,7 +559,20 @@ export function PipelineBuilder(props: {
     next.delete("node");
     setSearchParams(next, { replace: true });
   }, [requestedNodeId, nodes, searchParams, setSearchParams]);
-  const [testInput, setTestInput] = useState('{ "question": "How do I reset my password?" }');
+  // Default the Run pane's input bag. Chat-shaped pipelines (one with a
+  // question-style input) get a sensible "How do I reset my password?"
+  // placeholder so the user can hit Run and see a real query flow. Non-
+  // chat pipelines (ingestion / crawl / batch) get `{}` so the
+  // placeholder doesn't leak into the execution trace as a noise
+  // payload — operators saw "How do I reset my password?" appearing in
+  // a cartography_crawl trace because this default fired regardless of
+  // pipeline shape.
+  // Default Run-pane input is an empty object — operators paste in
+  // whatever shape their pipeline expects. The previous default of
+  // `{ "question": "How do I reset my password?" }` fired regardless
+  // of pipeline shape, leaving a confusing placeholder string in every
+  // ingestion pipeline's execution trace.
+  const [testInput, setTestInput] = useState("{}");
   const [openedViaTree, setOpenedViaTree] = useState(false);
   const clog = useConsoleLog();
   const [inspectorWidth, setInspectorWidth] = useState(360);
