@@ -105,9 +105,9 @@ export const cartographyCrawlManifest: PluginManifest = {
       },
       cartographyBin: {
         type: "string",
-        default: "cartography",
+        default: "/opt/cartography-venv/bin/cartography",
         description:
-          "Cartography CLI binary name on the sidecar PATH. Override only when the operator has a custom build installed in the python-plugins image."
+          "Path to the cartography CLI binary inside the python-plugins sidecar. Defaults to the isolated venv the Dockerfile creates (see ADR-0026 §#2 follow-up — cartography's eager intel imports mean its deps can't share the main poetry env). Override only when the operator installed cartography elsewhere in the image."
       },
       extraArgs: {
         type: "array",

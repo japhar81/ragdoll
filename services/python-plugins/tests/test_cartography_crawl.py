@@ -165,7 +165,10 @@ def test_subprocess_success_passes_modules_to_argv_and_neo4j_env(monkeypatch):
     # argv carries the cartography binary, -m flag per module, and
     # --update-tag (incremental=true). Selectors / extraArgs are tested
     # implicitly — none here, so none in argv.
-    assert captured["argv"][0] == "cartography"
+    # Default points at the isolated venv the Dockerfile builds
+    # (ADR-0026 §#2 follow-up — cartography's eager intel imports mean
+    # its deps can't share the main poetry env).
+    assert captured["argv"][0] == "/opt/cartography-venv/bin/cartography"
     assert "-m" in captured["argv"] and "aws" in captured["argv"]
     assert "--update-tag" in captured["argv"]
     # env carries neo4j creds + the parsed creds-block keys.

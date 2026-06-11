@@ -87,7 +87,12 @@ CARTOGRAPHY_MODULES = (
 )
 
 DEFAULT_TIMEOUT_MS = 1_800_000  # 30 minutes — long crawls are normal
-DEFAULT_BIN = "cartography"
+# Default points at the isolated venv the Dockerfile sets up so
+# cartography's eager-import landmine can't be triggered by other deps
+# in the main poetry env (see ADR-0026 §#2 follow-up). Operators can
+# override with `config.cartographyBin` when they install cartography
+# elsewhere in the image.
+DEFAULT_BIN = "/opt/cartography-venv/bin/cartography"
 
 logger = logging.getLogger("ragdoll.python-plugins.cartography")
 

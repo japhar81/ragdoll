@@ -15,11 +15,15 @@ python = "^3.11"
 hypercorn = "^0.17.0"
 crawl4ai = "^0.4.0"
 scrapy = "^2.11.0"
-# cartography_crawl plugin (ADR-0025): in-container subprocess shells out
-# to the `cartography` entrypoint script pip installs alongside the
-# library. Living here instead of in the worker image keeps the worker
-# lean and matches the python-plugins-sidecar direction (ADR-0024).
-cartography = "^0.96.0"
+# NOTE: cartography is NOT a poetry dep on purpose. cartography's intel
+# package eagerly imports every cloud module at CLI startup, so a single
+# transitive bump (e.g. azure-mgmt-resource>=23 moving SubscriptionClient
+# out of the top-level namespace) bricks the entire CLI — even for
+# AWS-only crawls. We install cartography into its own venv at
+# `/opt/cartography-venv` from the Dockerfile so its dep universe can't
+# collide with crawl4ai / scrapy / sentence-transformers etc. The
+# handler shells out to `/opt/cartography-venv/bin/cartography` — no
+# `import cartography` from inside the main env. See ADR-0026 §#2.
 # pydantic still wraps the handler request shape (crawl4ai/scrapy/rerank_bge
 # all take `ExecuteRequest` from app/models.py); the Connect bridge in
 # app/connect_bridge.py translates from the proto request into this shape.
