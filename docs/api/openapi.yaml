@@ -1,14 +1,36 @@
 openapi: 3.1.0
 info:
   title: RAGdoll Control Plane API
-  version: 0.1.0
+  version: 0.2.0
   description: >-
     Framework-agnostic control plane implemented in apps/api/src/app.ts and
-    served via Fastify in apps/api/src/server.ts. All /api/* routes require
-    authentication (Bearer session token, ApiKey, x-api-key, or — outside
-    production — the insecure DevAuthProvider header fallback). Authorization is
-    enforced per-route with RBAC permissions and tenant scoping. Mutating and
-    execution actions write a redacted audit log entry.
+    served via Fastify in apps/api/src/server.ts. All /api/* routes (except
+    the unauthenticated `/healthz`, `/readyz`, `/api/auth/login`,
+    `/api/auth/signup`, `/api/auth/providers`, `/api/auth/sso/*` start/callback
+    legs, and `/api/triggers/webhook/{token}`) require authentication via
+    either `Authorization: Bearer <session-token>` (minted by
+    `POST /api/auth/login`) or `Authorization: ApiKey <key>` / `x-api-key`
+    (minted by `POST /api/api-keys`, per ADR-0017). The legacy
+    DevAuthProvider header fallback has been removed.
+
+    Authorization is enforced per-route via the Casbin-backed RBAC policy
+    store (ADR-0011) with hierarchical scope (global / tenant / environment /
+    pipeline). Mutating and execution actions write a redacted audit log
+    entry. Tenant context is selected via the `x-tenant-id` header on
+    callers with multi-tenant grants.
+
+    Pipeline-side schema highlights at this spec version:
+      - **Connections** — single unified `connections` table + `/api/connections*`
+        REST surface (ADR-0023). The old `external_connections` table and
+        `/api/external-connections*` surface have been removed; the
+        `external_connection:*` permissions collapsed into `connection:*`.
+      - **Datasets** — `bindings.<name>.{connection, collection?, namespace?}`
+        replaces `backends.<modality>` (ADR-0023 §2). The Dataset's
+        `modalities` field is gone; plugin requirements are stated as
+        `requires: [{binding, kind|kindOneOf}]` on each manifest.
+      - **Connection drivers** — drivers ship as plugin manifests with
+        `category: "connection_driver"` (ADR-0024); enumerated live via
+        `GET /api/connection-kinds`.
 servers:
   - url: http://localhost:3001
 components:
@@ -230,10 +252,17 @@ components:
     Dataset:
       type: object
       description: >-
-        First-class corpus resource (Phase 4). Scope = global | tenant
-        | environment. Resolution at reference time walks
-        env → tenant → global, narrowest match wins.
-      required: [id, scope, slug, displayName, modalities, backends, createdAt, updatedAt]
+        First-class corpus resource (Phase 4, rewritten by ADR-0023).
+        Scope = global | tenant | environment. Resolution at reference
+        time walks env → tenant → global, narrowest match wins.
+
+        Backends are described as named `bindings` (ADR-0023 §2) — the
+        legacy `modalities[]` + `backends.<modality>` shape was removed
+        by migration 021. A retrieval plugin declaring
+        `requires: [{binding: "vectors", kind: "qdrant"}]` matches
+        only datasets that have a `vectors` binding pointing at a
+        qdrant connection.
+      required: [id, scope, slug, displayName, bindings, createdAt, updatedAt]
       properties:
         id: { type: string }
         scope: { type: string, enum: [global, tenant, environment] }
@@ -244,10 +273,29 @@ components:
         description: { type: [string, "null"] }
         embeddingProfile: { type: object }
         chunkSchema: { type: object }
-        modalities:
-          type: array
-          items: { type: string }
-        backends: { type: object }
+        bindings:
+          type: object
+          description: >-
+            Map of binding NAME (free text, plugin-declared) → binding
+            spec. Each binding points at one connection slug; collection
+            and namespace are optional overrides (when omitted the
+            runtime defaults the collection to
+            `${dataset-slug}_${binding}_v${version}`).
+          additionalProperties:
+            type: object
+            required: [connection]
+            properties:
+              connection:
+                type: string
+                description: Connection slug (env → tenant → global cascade).
+              collection:
+                type: [string, "null"]
+                description: Optional collection / index / table name override.
+              namespace:
+                type: [string, "null"]
+                description: >-
+                  Optional namespace policy (e.g. `by-tenant`) for backends
+                  that scope writes by appending a per-tenant suffix.
         currentVersionId: { type: [string, "null"] }
         archivedAt: { type: [string, "null"] }
         createdAt: { type: string }
@@ -261,7 +309,6 @@ components:
         datasetId: { type: string }
         versionLabel: { type: string }
         schemaSpec: { type: object }
-        backendCollections: { type: object, additionalProperties: { type: string } }
         status: { type: string, enum: [building, ready, archived] }
         docCount: { type: [integer, string] }
         sizeBytes: { type: [integer, string] }
@@ -275,6 +322,138 @@ components:
         datasetId: { type: string }
         alias: { type: string, description: "e.g. stable, staging, canary" }
         versionId: { type: string }
+        updatedAt: { type: string }
+        updatedBy: { type: [string, "null"] }
+    DatasetBindingOverride:
+      type: object
+      description: >-
+        Per-(pipeline, tenant, environment) override that pins a
+        pipeline-level dataset binding to a specific dataset slug.
+        Without an override, the pipeline-spec binding defaults stand;
+        with one, the resolver dispatches to the override's
+        `datasetSlug` for runs scoped to that tenant + environment.
+      required: [id, pipelineId, tenantId, environmentId, bindingId, datasetSlug, createdAt, updatedAt]
+      properties:
+        id: { type: string }
+        pipelineId: { type: string }
+        tenantId: { type: string }
+        environmentId: { type: string }
+        bindingId:
+          type: string
+          description: Pipeline-level binding id (`spec.bindings[].id`).
+        datasetSlug: { type: string }
+        datasetAlias: { type: [string, "null"], description: "Optional alias pin." }
+        createdAt: { type: string }
+        updatedAt: { type: string }
+    Connection:
+      type: object
+      description: >-
+        Unified Connections registry row (ADR-0023 §1). Supersedes the
+        ADR-0021 `external_connections` + ADR-0020 `datasource_connections`
+        tables, both of which were dropped by migration 019. One scope
+        cascade (env → tenant → global), one set of permissions
+        (`connection:{read,admin,use}`), one probe job.
+      required: [id, scope, slug, displayName, kind, config, allowedHosts, denyPrivateNetworks, createdAt, updatedAt]
+      properties:
+        id: { type: string }
+        scope: { type: string, enum: [global, tenant, environment] }
+        tenantId: { type: [string, "null"] }
+        environmentId: { type: [string, "null"] }
+        slug:
+          type: string
+          description: Operator-facing handle. Resolved via the env → tenant → global cascade.
+        displayName: { type: string }
+        description: { type: [string, "null"] }
+        kind:
+          type: string
+          description: >-
+            Driver kind string. Open-ended; the driver-plugin registry
+            (ADR-0024) declares which kinds are loaded and what their
+            config / secret schemas look like. Use `GET /api/connection-kinds`
+            for the live catalog.
+        config:
+          type: object
+          description: Non-secret per-kind config (host, port, database, …). Schema lives on the driver manifest.
+        secretRefId:
+          type: [string, "null"]
+          description: Pointer to a managed secret (the credential / DSN). Plaintext never leaves the server.
+        allowedHosts:
+          type: array
+          items: { type: string }
+          description: SSRF allowlist. Empty array = no restriction.
+        denyPrivateNetworks:
+          type: boolean
+          description: When true, RFC-1918 / link-local addresses are refused regardless of `allowedHosts`.
+        lastProbedAt: { type: [string, "null"] }
+        lastProbeOk: { type: [boolean, "null"] }
+        lastProbeError: { type: [string, "null"] }
+        archivedAt: { type: [string, "null"] }
+        createdAt: { type: string }
+        updatedAt: { type: string }
+    ConnectionKind:
+      type: object
+      description: >-
+        Entry in the live driver-plugin catalog (ADR-0024). The
+        Connections UI renders the per-kind config form from
+        `configSchema`; the dataset binding picker filters by
+        `datasetBindings` to surface only kinds that can fill the
+        plugin's requested binding.
+      required: [kind, displayName, configSchema, transport]
+      properties:
+        kind: { type: string, description: "Globally unique kind string (e.g. qdrant, postgres, snowflake)." }
+        displayName: { type: string }
+        description: { type: [string, "null"] }
+        configSchema: { $ref: "#/components/schemas/JsonSchemaLike" }
+        secretSchema:
+          oneOf:
+            - { $ref: "#/components/schemas/JsonSchemaLike" }
+            - { type: "null" }
+        datasetBindings:
+          type: array
+          items: { type: string }
+          description: Binding names this kind can fill (empty array = tool-only).
+        transport:
+          type: string
+          enum: [in_process, external]
+          description: In-process driver (bundled) vs. Connect-RPC sidecar (ADR-0022).
+    ApiKey:
+      type: object
+      description: >-
+        Personal API key minted via `POST /api/api-keys` (ADR-0017).
+        The plaintext (`rgd_<prefix>_<secret>`) is returned only at
+        creation time; subsequent reads expose `prefix` only.
+      required: [id, prefix, displayName, createdAt]
+      properties:
+        id: { type: string }
+        prefix:
+          type: string
+          description: Public prefix shown next to the key in the UI (matches the first segment of the plaintext).
+        displayName: { type: string }
+        createdAt: { type: string }
+        lastUsedAt: { type: [string, "null"] }
+        revokedAt: { type: [string, "null"] }
+        scope:
+          type: [string, "null"]
+          description: Optional tenant scope when minted by a tenant-scoped principal.
+    Environment:
+      type: object
+      description: Named environment under a tenant (e.g. dev, staging, prod).
+      required: [id, tenantId, name, createdAt]
+      properties:
+        id: { type: string }
+        tenantId: { type: string }
+        name: { type: string, description: "Environment label (alphanumeric + hyphens)." }
+        description: { type: [string, "null"] }
+        createdAt: { type: string }
+    RetentionSetting:
+      type: object
+      description: Per-resource retention policy. `resource` is `executions` / `audit_logs` / `usage_records`.
+      required: [resource, retentionDays, updatedAt]
+      properties:
+        resource: { type: string, enum: [executions, audit_logs, usage_records] }
+        retentionDays:
+          type: [integer, "null"]
+          description: Null = keep forever; integer = age in days at which a janitor sweep deletes rows.
         updatedAt: { type: string }
         updatedBy: { type: [string, "null"] }
   securitySchemes:
@@ -822,7 +1001,7 @@ paths:
     patch:
       summary: >-
         Update Dataset metadata (displayName / description / schema /
-        backends) or toggle archived. Caller needs `dataset:admin` at
+        bindings) or toggle archived. Caller needs `dataset:admin` at
         the dataset's scope.
       responses:
         "200": { description: Updated }
@@ -884,6 +1063,219 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
         "422": { $ref: "#/components/responses/ValidationFailed" }
+  /api/datasets/{id}/used-by:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
+    get:
+      summary: >-
+        Back-references for a dataset — every pipeline whose spec or
+        binding override targets this dataset slug. Used by the Archive
+        flow's "what just broke?" guard.
+      responses:
+        "200":
+          description: List of pipelines + version refs.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  pipelines:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        pipelineId: { type: string }
+                        pipelineSlug: { type: string }
+                        bindingIds:
+                          type: array
+                          items: { type: string }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  # --- Unified Connections registry (ADR-0023 + ADR-0024) ---
+  /api/connection-kinds:
+    get:
+      summary: >-
+        Live catalog of loaded driver plugins (ADR-0024). One entry per
+        registered kind, each carrying the `configSchema` the Connections
+        UI renders the per-kind form from and the `datasetBindings` the
+        binding picker filters on.
+      responses:
+        "200":
+          description: Loaded driver-plugin catalog.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  kinds:
+                    type: array
+                    items: { $ref: "#/components/schemas/ConnectionKind" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /api/connections:
+    get:
+      summary: >-
+        List Connections visible at the request scope (`x-tenant-id` +
+        `x-environment` headers). Returns the union of globals,
+        tenant-scoped (for the given tenant), and env-scoped (for the
+        tenant + env). Archived rows are excluded by default.
+      responses:
+        "200":
+          description: List of connections.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  connections:
+                    type: array
+                    items: { $ref: "#/components/schemas/Connection" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      summary: >-
+        Create a Connection at one of three scopes (global / tenant /
+        environment). Caller needs `connection:admin` at the target scope.
+        The optional `secretRefId` must point at a managed secret the
+        caller can read.
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  connection: { $ref: "#/components/schemas/Connection" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+  /api/connections/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
+    get:
+      summary: Fetch a single Connection.
+      responses:
+        "200":
+          description: Connection
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  connection: { $ref: "#/components/schemas/Connection" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    put:
+      summary: >-
+        Update a Connection's metadata / config / secret pointer /
+        SSRF allowlist. Caller needs `connection:admin` at the row's scope.
+      responses:
+        "200": { description: Updated }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+    delete:
+      summary: >-
+        Soft-archive a Connection. Hard-delete is gated on no live
+        references (the "Used by" check) — see ADR-0023 §8.
+      responses:
+        "204": { description: Archived }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: Connection still referenced by N pipelines / M datasets.
+  /api/connections/{id}/probe:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
+    post:
+      summary: >-
+        One-shot health probe against the row's driver. The result is
+        cached on the row (`lastProbedAt` / `lastProbeOk` /
+        `lastProbeError`) and broadcast over the change WebSocket so
+        the Connections grid badge updates live. The periodic
+        `connection_probe_sweep` worker job runs the same logic every
+        10 minutes.
+      responses:
+        "200":
+          description: Probe result.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, probedAt]
+                properties:
+                  ok: { type: boolean }
+                  error: { type: [string, "null"] }
+                  probedAt: { type: string }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  # --- Dataset-binding overrides (per-tenant, per-env) ---
+  /api/pipelines/{pipeline_id}/dataset-bindings:
+    parameters:
+      - $ref: "#/components/parameters/PipelineRef"
+    get:
+      summary: >-
+        List override entries for a pipeline's dataset bindings.
+        Returns one row per (tenant, env, bindingId) tuple that has an
+        override. Without overrides, the pipeline-spec defaults stand.
+      responses:
+        "200":
+          description: Override list.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  overrides:
+                    type: array
+                    items: { $ref: "#/components/schemas/DatasetBindingOverride" }
+        "404": { $ref: "#/components/responses/PipelineNotFound" }
+    post:
+      summary: >-
+        Create a binding override that pins one of the pipeline's
+        bindings to a specific dataset slug for a (tenant, env). Caller
+        needs `pipeline:write` at the target scope.
+      responses:
+        "201":
+          description: Override created.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  override: { $ref: "#/components/schemas/DatasetBindingOverride" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+  /api/dataset-bindings/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
+    patch:
+      summary: Update an override's `datasetSlug` / `datasetAlias`.
+      responses:
+        "200": { description: Updated }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+    delete:
+      summary: Remove a binding override (reverts to the pipeline-spec default).
+      responses:
+        "204": { description: Removed }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
 
   /api/tenants/{id}/pipelines:
     parameters:
@@ -1337,6 +1729,177 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
 
+  # --- Tenant environments (per-tenant scoping for config / deployments / connections) ---
+  /api/tenants/{id}/environments:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
+    get:
+      summary: List environments declared on a tenant. Default seeds include `dev`, `staging`, `prod`.
+      responses:
+        "200":
+          description: Environment list.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  environments:
+                    type: array
+                    items: { $ref: "#/components/schemas/Environment" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    post:
+      summary: >-
+        Add an environment to a tenant. Caller needs `config:edit_tenant`
+        for the tenant. Environment names are unique per tenant.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string }
+                description: { type: [string, "null"] }
+      responses:
+        "201":
+          description: Environment created.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  environment: { $ref: "#/components/schemas/Environment" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+  /api/tenants/{id}/environments/{envId}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
+      - name: envId
+        in: path
+        required: true
+        schema: { type: string }
+    delete:
+      summary: >-
+        Remove an environment. Refuses when active deployments still
+        target it (operator must redeploy or archive those first).
+      responses:
+        "204": { description: Removed }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { description: Active deployments still reference this environment. }
+
+  # --- Tenant storage (git-backed tenant config) ---
+  /api/tenants/{id}/storage:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
+    get:
+      summary: >-
+        Fetch the tenant's git storage config (URL, branch, secret
+        reference, sync status). The wrapped data-encryption key is
+        never returned. See `docs/admin/git-backed-tenants.md`.
+      responses:
+        "200":
+          description: Storage config (or `null` when unset).
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  config:
+                    type: [object, "null"]
+                    properties:
+                      repoUrl: { type: string }
+                      branch: { type: string }
+                      lastSyncedAt: { type: [string, "null"] }
+                      lastSyncError: { type: [string, "null"] }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      summary: Disconnect the tenant from its git storage. Local cache stays.
+      responses:
+        "204": { description: Disconnected }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /api/tenants/{id}/storage/sync:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
+    post:
+      summary: >-
+        Trigger an on-demand pull from the tenant's configured git
+        storage. The periodic sweep runs every 5 minutes; this is the
+        manual fire-it-now button.
+      responses:
+        "202":
+          description: Sync enqueued.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  syncedAt: { type: string }
+                  pulled: { type: integer, description: "Number of objects materialised this run." }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  # --- Retention (platform-wide janitor policies) ---
+  /api/retention:
+    get:
+      summary: >-
+        List per-resource retention policies. Caller needs
+        `config:edit_global`. The worker runs a nightly janitor sweep
+        that deletes rows older than the configured age.
+      responses:
+        "200":
+          description: Retention settings.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  settings:
+                    type: array
+                    items: { $ref: "#/components/schemas/RetentionSetting" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /api/retention/{resource}:
+    parameters:
+      - name: resource
+        in: path
+        required: true
+        schema:
+          type: string
+          enum: [executions, usage, audit]
+    patch:
+      summary: Update the retention window for one resource. `null` disables expiry.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [retentionDays]
+              properties:
+                retentionDays: { type: [integer, "null"], minimum: 1 }
+      responses:
+        "200": { description: Updated }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+
   /api/audit:
     get:
       summary: List audit logs (tenant-scoped for non platform_admin)
@@ -1405,6 +1968,31 @@ paths:
                 properties:
                   plugin: { $ref: "#/components/schemas/Plugin" }
         "404": { $ref: "#/components/responses/NotFound" }
+  /api/plugins/{id}/docs:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        description: Plugin id (the manifest's `id` — e.g. `transform`, `dataset_search`).
+        schema: { type: string }
+    get:
+      summary: >-
+        Long-form markdown reference for a plugin (the file under
+        `docs/plugins/<id>.md`). Surfaced by the Builder's node
+        inspector and the in-app help dialog (ADR-0013).
+      responses:
+        "200":
+          description: Plugin documentation.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [id, markdown]
+                properties:
+                  id: { type: string }
+                  markdown: { type: string }
+        "404":
+          description: Plugin exists but no docs file is shipped for it.
   /api/providers:
     get:
       summary: List providers from the loaded provider registry
@@ -1421,6 +2009,71 @@ paths:
       responses:
         "200": { description: Model catalog }
         "404": { $ref: "#/components/responses/NotFound" }
+
+  # --- Personal API keys (ADR-0017) ---
+  /api/api-keys:
+    get:
+      summary: >-
+        List API keys for the signed-in user (never their plaintext).
+        Only user principals can manage their own keys.
+      responses:
+        "200":
+          description: Caller's API keys.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  apiKeys:
+                    type: array
+                    items: { $ref: "#/components/schemas/ApiKey" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      summary: >-
+        Mint a new API key for the signed-in user. The plaintext
+        `rgd_<prefix>_<secret>` is returned exactly once in this
+        response; subsequent reads expose only the prefix.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string, description: "Operator-facing display name." }
+                scope:
+                  type: [string, "null"]
+                  description: Optional tenant scope (`t/<uuid>`).
+      responses:
+        "201":
+          description: API key minted. `plaintext` is shown only here.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [apiKey, plaintext]
+                properties:
+                  apiKey: { $ref: "#/components/schemas/ApiKey" }
+                  plaintext: { type: string }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+  /api/api-keys/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
+    delete:
+      summary: Revoke an API key. Idempotent — revoking an already-revoked key is a 204.
+      responses:
+        "204": { description: Revoked }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
   /api/auth/login:
     post:
       summary: Local password login (public). Returns a session token.
@@ -1472,6 +2125,45 @@ paths:
       responses:
         "200": { description: "{ principal, user, grants, permissions }" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+    patch:
+      summary: >-
+        Self-service profile edit for the signed-in user. Any user can
+        edit their OWN display name / preferences without a grant
+        (the principal IS the resource). API-key principals are refused.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                displayName: { type: string }
+                preferences: { type: object }
+      responses:
+        "200": { description: Updated }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { description: "API-key principals have no editable profile" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+  /api/auth/password:
+    post:
+      summary: >-
+        Change the signed-in user's local password. Caller proves
+        knowledge of the current password before the new hash is
+        written.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [currentPassword, newPassword]
+              properties:
+                currentPassword: { type: string }
+                newPassword: { type: string }
+      responses:
+        "204": { description: Password updated }
+        "401": { description: Current password incorrect }
+        "422": { description: New password fails strength policy }
   /api/auth/providers:
     get:
       summary: Enabled SSO providers for the login page (public).
