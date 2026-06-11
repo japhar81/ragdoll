@@ -478,10 +478,10 @@ export function createApp(deps: AppDeps): App {
 
   registerHealthRoutes({ route }, { pool: deps.pool, queue: deps.queue });
 
-  registerTenantsRoutes({ route }, { deps, audit, environments });
+  registerTenantsRoutes({ route }, { deps, audit, environments, rbacPolicies });
 
   registerPipelinesRoutes({ route }, { deps, audit, pipelineFolders });
-  registerFoldersRoutes({ route }, { pipelineFolders, audit });
+  registerFoldersRoutes({ route }, { pipelineFolders, pipelines: deps.pipelines, audit });
 
 
   registerTenantPipelinesRoutes({ route }, { deps, audit, tenantPipelines, pipelineActivations });

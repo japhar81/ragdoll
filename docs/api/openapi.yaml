@@ -45,7 +45,49 @@ components:
         resolved as a UUID first (then by slug); a non-UUID is never passed
         into a uuid query. Unknown -> 404 pipeline_not_found.
       schema: { type: string }
+    ForceQuery:
+      name: force
+      in: query
+      required: false
+      description: >-
+        Cascade-delete opt-in. Default is the cascade-safe posture:
+        DELETE refuses with 409 `has_dependents` whenever deleting the
+        resource would orphan referencing rows; the response body
+        carries `{dependents: {<kind>: <count>, ...}}` so the operator
+        sees what's blocking. Re-call with `?force=true` to cascade
+        the delete (the route knows its dependents — pipelines under a
+        folder, versions under a pipeline, grants holding a role, etc.
+        — and cleans them up explicitly before deleting the parent).
+      schema:
+        type: string
+        enum: ["true", "1"]
   responses:
+    HasDependents:
+      description: >-
+        Default DELETE refusal for cascade-aware routes (folders,
+        pipelines, datasets, tenants, roles). The route counted
+        dependent resources that would be orphaned and refused.
+        Caller can retry with `?force=true` to cascade.
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [error, dependents]
+            properties:
+              error: { type: string, const: has_dependents }
+              message: { type: string }
+              dependents:
+                type: object
+                description: >-
+                  Per-kind dependent counts. Keys vary by resource —
+                  folders return `{pipelines, subfolders}`; pipelines
+                  return `{versions, deployments, activations, schedules,
+                  bindings}`; datasets return `{versions, aliases,
+                  pipelineReferences}`; tenants return `{pipelineAssociations,
+                  datasets, connections, environments, grants}`; roles
+                  return `{grants}`. Only non-zero entries are surfaced.
+                additionalProperties: { type: integer }
+              hint: { type: string, const: "?force=true to cascade" }
     Unauthorized:
       description: Missing or invalid credentials
       content:
@@ -515,10 +557,20 @@ paths:
         "404": { $ref: "#/components/responses/NotFound" }
         "422": { $ref: "#/components/responses/ValidationFailed" }
     delete:
-      summary: Delete tenant
+      summary: >-
+        Delete tenant. Default: refuses with 409 `has_dependents` when
+        the tenant still owns pipeline associations, datasets, connections,
+        environments, or RBAC grants scoping users into it. `?force=true`
+        explicitly removes the tenant-scoped grants, then deletes the
+        tenant (the rest of the FK chain — audit_logs / usage / executions /
+        secrets / schedules / git config / environments / tenant_pipelines /
+        connections — cascades automatically per migrations 001-019).
+      parameters:
+        - $ref: "#/components/parameters/ForceQuery"
       responses:
         "204": { description: Deleted }
         "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/HasDependents" }
 
   /api/pipelines:
     get:
@@ -574,11 +626,19 @@ paths:
         "400": { $ref: "#/components/responses/InvalidIdentifier" }
         "404": { $ref: "#/components/responses/PipelineNotFound" }
     delete:
-      summary: Delete pipeline (by id or slug)
+      summary: >-
+        Delete pipeline (by id or slug). Cascade-aware: refuses with
+        409 `has_dependents` when versions / deployments / activations /
+        schedules / bindings reference it; `?force=true` cascades the
+        delete via the FK chain (versions → deployments → activations →
+        schedules → triggers → bindings).
+      parameters:
+        - $ref: "#/components/parameters/ForceQuery"
       responses:
         "204": { description: Deleted }
         "400": { $ref: "#/components/responses/InvalidIdentifier" }
         "404": { $ref: "#/components/responses/PipelineNotFound" }
+        "409": { $ref: "#/components/responses/HasDependents" }
   /api/folders:
     get:
       summary: Nested pipeline-folder tree (root nodes with children[])
@@ -648,10 +708,17 @@ paths:
         "409": { $ref: "#/components/responses/Conflict" }
         "422": { $ref: "#/components/responses/ValidationFailed" }
     delete:
-      summary: Delete a folder (409 conflict if it still has child folders or pipelines)
+      summary: >-
+        Delete a folder. Default: refuses with 409 `has_dependents` when
+        the folder contains pipelines or sub-folders, listing the
+        counts. `?force=true` recursively nukes every pipeline + folder
+        in the sub-tree (bottom-up).
+      parameters:
+        - $ref: "#/components/parameters/ForceQuery"
       responses:
         "204": { description: Deleted }
         "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/HasDependents" }
         "409": { $ref: "#/components/responses/Conflict" }
   /api/pipelines/{pipeline_id}/folder:
     parameters:
@@ -1040,11 +1107,21 @@ paths:
         "404": { $ref: "#/components/responses/NotFound" }
         "422": { $ref: "#/components/responses/ValidationFailed" }
     delete:
-      summary: Remove a Dataset (refuses if non-archived pipelines reference it — a future tightening).
+      summary: >-
+        Remove a Dataset. Default: refuses with 409 `has_dependents`
+        when versions, aliases, or pipeline specs reference the
+        dataset's slug (the route walks pipeline specs the same way
+        `GET /:id/used-by` does, so the count matches). `?force=true`
+        deletes anyway — versions + aliases cascade via FK, but
+        pipeline specs that embed `node.dataset.slug` become dangling
+        references and fail at execute time (operator opt-in).
+      parameters:
+        - $ref: "#/components/parameters/ForceQuery"
       responses:
         "204": { description: Removed }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/HasDependents" }
   /api/datasets/{id}/versions:
     parameters:
       - name: id
@@ -2364,13 +2441,25 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
   /api/roles/{name}:
     delete:
-      summary: Delete a custom role (role:manage). Built-in roles cannot be deleted.
+      summary: >-
+        Delete a custom role (`role:manage`). Built-in roles always
+        refuse. Default: refuses with 409 `has_dependents` when grants
+        hold the role (rbac_grants.role is text with no FK, so dangling
+        grants would silently break future permission checks).
+        `?force=true` drops the held grants first, then deletes the role
+        catalog row.
       parameters:
         - { name: name, in: path, required: true, schema: { type: string } }
+        - $ref: "#/components/parameters/ForceQuery"
       responses:
         "204": { description: Deleted }
-        "409": { description: Built-in role }
         "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { description: Role not found }
+        "409":
+          description: >-
+            Either a built-in role (cannot be deleted) OR a custom role
+            that still has grants and `?force=true` was not supplied
+            (`has_dependents` envelope).
   /api/identity-providers:
     get:
       summary: List SSO connections; secrets redacted (permission idp:manage).
