@@ -123,8 +123,11 @@ export const api = {
     request<{ tenant: TenantRow }>("POST", "/api/tenants", input),
   updateTenant: (id: string, patch: Record<string, unknown>) =>
     request<{ tenant: TenantRow }>("PUT", `/api/tenants/${encodeURIComponent(id)}`, patch),
-  deleteTenant: (id: string) =>
-    request<void>("DELETE", `/api/tenants/${encodeURIComponent(id)}`),
+  deleteTenant: (id: string, opts: { force?: boolean } = {}) =>
+    request<void>(
+      "DELETE",
+      `/api/tenants/${encodeURIComponent(id)}${opts.force ? "?force=true" : ""}`
+    ),
 
   // ---- per-tenant environments -----------------------------------------
   listEnvironments: (tenantId: string) =>
@@ -233,8 +236,16 @@ export const api = {
       `/api/folders/${encodeURIComponent(id)}`,
       patch
     ),
-  deleteFolder: (id: string) =>
-    request<void>("DELETE", `/api/folders/${encodeURIComponent(id)}`),
+  deleteFolder: (id: string, opts: { force?: boolean } = {}) =>
+    request<void>(
+      "DELETE",
+      `/api/folders/${encodeURIComponent(id)}${opts.force ? "?force=true" : ""}`
+    ),
+  deletePipeline: (id: string, opts: { force?: boolean } = {}) =>
+    request<void>(
+      "DELETE",
+      `/api/pipelines/${encodeURIComponent(id)}${opts.force ? "?force=true" : ""}`
+    ),
   movePipelineToFolder: (pipelineId: string, folderId: string | null) =>
     request<{ pipeline: PipelineRow }>(
       "PUT",
@@ -689,8 +700,11 @@ export const api = {
       `/api/roles/${encodeURIComponent(name)}/permissions`,
       { permissions }
     ),
-  deleteRole: (name: string) =>
-    request<void>("DELETE", `/api/roles/${encodeURIComponent(name)}`),
+  deleteRole: (name: string, opts: { force?: boolean } = {}) =>
+    request<void>(
+      "DELETE",
+      `/api/roles/${encodeURIComponent(name)}${opts.force ? "?force=true" : ""}`
+    ),
 
   // ---- identity providers ----------------------------------------------
   listIdentityProviders: () =>
@@ -807,8 +821,11 @@ export const api = {
       `/api/datasets/${encodeURIComponent(id)}`,
       patch
     ),
-  deleteDataset: (id: string) =>
-    request<void>("DELETE", `/api/datasets/${encodeURIComponent(id)}`),
+  deleteDataset: (id: string, opts: { force?: boolean } = {}) =>
+    request<void>(
+      "DELETE",
+      `/api/datasets/${encodeURIComponent(id)}${opts.force ? "?force=true" : ""}`
+    ),
   /** ADR-0023: server-side cross-ref. Returns the pipelines + nodes
    *  that wire this dataset, plus per-binding slot usage. Replaces
    *  the client-side fan-out across /api/pipelines + /api/pipelines/
