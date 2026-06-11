@@ -88,7 +88,13 @@ test("DELETE folder with a pipeline inside -> 409 conflict", async () => {
     headers: ADMIN
   });
   assert.equal(blocked.status, 409);
-  assert.equal(blocked.body.error, "conflict");
+  // Cascade-aware delete envelope (post the cascade-deletes refactor):
+  // `has_dependents` + a `dependents` count + a `?force=true` hint. The
+  // older `error: conflict` is no longer the shape since the route
+  // counts what's blocking the delete rather than letting the repo
+  // throw a generic conflict.
+  assert.equal(blocked.body.error, "has_dependents");
+  assert.equal(blocked.body.dependents.pipelines, 1);
 
   // Detach the pipeline, then the delete succeeds.
   const detach = await request({

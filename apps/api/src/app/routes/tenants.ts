@@ -11,9 +11,11 @@ import { enforce } from "../../../../../packages/auth/src/index.ts";
 import type {
   TenantRow,
   EnvironmentRow,
-  EnvironmentRepository
+  EnvironmentRepository,
+  RbacPolicyRepository
 } from "../../../../../packages/db/src/index.ts";
 import { ok, error, isObject, nowIso } from "../http-utils.ts";
+import { parseForce, hasDependents } from "../cascade-utils.ts";
 import type { AppDeps } from "../types.ts";
 import type { RouteRegistry, AuditWriter } from "./types.ts";
 
@@ -21,13 +23,19 @@ interface TenantsServices {
   deps: AppDeps;
   audit: AuditWriter;
   environments: EnvironmentRepository;
+  /** rbacPolicies is wired through here (rather than read from deps)
+   *  because the user/role routes share the same repo via this service
+   *  arg, and app.ts may have constructed an InMemory fallback when
+   *  deps.rbacPolicies was undefined — using deps directly would point
+   *  at a separate instance and miss grants the user route just wrote. */
+  rbacPolicies: RbacPolicyRepository;
 }
 
 export function registerTenantsRoutes(
   api: RouteRegistry,
   svc: TenantsServices
 ): void {
-  const { deps, audit, environments } = svc;
+  const { deps, audit, environments, rbacPolicies } = svc;
 
   api.route("GET", "/api/tenants", async (ctx) => {
     enforce(ctx.principal, "audit:view");
@@ -237,8 +245,70 @@ export function registerTenantsRoutes(
     enforce(ctx.principal, "config:edit_global");
     const before = await deps.tenants.get(ctx.params.id);
     if (!before) return error(404, "not_found");
-    await deps.tenants.delete(ctx.params.id);
-    await audit(ctx, "tenant.delete", "tenant", ctx.params.id, before, undefined);
+    const force = parseForce(ctx.request);
+    // What cascades automatically (via FK ON DELETE CASCADE per migrations
+    // 001 / 003 / 004 / 007 / 013 / 019): audit_logs, usage_records,
+    // executions, secrets, schedules, tenant_git_configs, environments,
+    // tenant_pipelines, connections-scoped-to-this-tenant, pipelines'
+    // own children chain. What does NOT cascade by FK:
+    //  - rbac_grants where scope starts with `t/<tenantId>` (scope is text,
+    //    no FK reference). Those grants would otherwise dangle, granting
+    //    a role on a tenant that no longer exists.
+    // Counts shown below are pre-delete; the force path drops them all.
+    const tenantId = ctx.params.id;
+    const tenantScopePrefixes = [`t/${tenantId}`];
+    const [
+      tenantPipelines,
+      tenantDatasets,
+      tenantConns,
+      envs,
+      allGrants
+    ] = await Promise.all([
+      deps.tenantPipelines?.listByTenant
+        ? deps.tenantPipelines.listByTenant(tenantId)
+        : Promise.resolve([] as Array<unknown>),
+      deps.datasets?.listAll
+        ? deps.datasets.listAll({ tenantId })
+        : Promise.resolve([] as Array<unknown>),
+      deps.connections.listAll(),
+      deps.environments?.listByTenant
+        ? deps.environments.listByTenant(tenantId)
+        : Promise.resolve([] as Array<unknown>),
+      rbacPolicies.listGrants()
+    ]);
+    const tenantConnsCount = tenantConns.filter(
+      (c) => c.tenantId === tenantId
+    ).length;
+    const grantsInTenant = allGrants.filter((g) =>
+      tenantScopePrefixes.some((prefix) => g.scope === prefix || g.scope.startsWith(`${prefix}/`))
+    );
+    const depCounts = {
+      pipelineAssociations: tenantPipelines.length,
+      datasets: tenantDatasets.length,
+      connections: tenantConnsCount,
+      environments: envs.length,
+      grants: grantsInTenant.length
+    };
+    const anyDeps = Object.values(depCounts).some((n) => n > 0);
+    if (!force && anyDeps) {
+      return hasDependents(`tenant "${before.slug ?? before.id}"`, depCounts);
+    }
+    // Force path: explicitly remove the tenant-scoped grants so user
+    // accounts don't end up with dangling tenant-scoped roles. The
+    // user account itself survives — they just lose the role grant
+    // that pointed at this tenant.
+    for (const g of grantsInTenant) {
+      await rbacPolicies.removeGrant(g.id);
+    }
+    await deps.tenants.delete(tenantId);
+    await audit(
+      ctx,
+      "tenant.delete",
+      "tenant",
+      tenantId,
+      { ...before, cascaded: depCounts },
+      undefined
+    );
     return { status: 204, body: undefined, headers: {} };
   });
 

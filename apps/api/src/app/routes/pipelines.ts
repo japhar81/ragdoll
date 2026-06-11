@@ -30,6 +30,7 @@ import type {
   PipelineFolderRepository
 } from "../../../../../packages/db/src/index.ts";
 import { ok, error, isObject, nowIso } from "../http-utils.ts";
+import { parseForce, hasDependents } from "../cascade-utils.ts";
 import { parseSpec } from "../spec-helpers.ts";
 import {
   resolvePipelineRef,
@@ -116,8 +117,34 @@ export function registerPipelinesRoutes(
     enforce(ctx.principal, "pipeline:delete");
     const before = await resolvePipelineRef(deps.pipelines, ctx.params.id);
     if (isAppResponse(before)) return before;
+    const force = parseForce(ctx.request);
+    // Count what the cascade will take with it. The DB FKs already
+    // ON DELETE CASCADE versions / deployments / activations /
+    // schedules / webhook_triggers / dataset_bindings (per migrations
+    // 001 + 003 + 006 + 013 + 016), so a forced delete is a single
+    // DELETE that fans out. Default posture: refuse + enumerate so
+    // the operator sees what they're about to nuke.
+    const [versions, deployments, activations, allSchedules, bindings] = await Promise.all([
+      deps.pipelineVersions.listByPipeline(before.id),
+      deps.deployments.listByPipeline(before.id),
+      deps.pipelineActivations?.listByPipeline(before.id) ?? [],
+      deps.schedules?.list() ?? [],
+      deps.pipelineDatasetBindings?.listByPipeline(before.id) ?? []
+    ]);
+    const scheduleCount = allSchedules.filter((s) => s.pipelineId === before.id).length;
+    const depCounts = {
+      versions: versions.length,
+      deployments: deployments.length,
+      activations: activations.length,
+      schedules: scheduleCount,
+      bindings: bindings.length
+    };
+    const anyDeps = Object.values(depCounts).some((n) => n > 0);
+    if (!force && anyDeps) {
+      return hasDependents(`pipeline "${before.slug ?? before.id}"`, depCounts);
+    }
     await deps.pipelines.delete(before.id);
-    await audit(ctx, "pipeline.delete", "pipeline", before.id, before, undefined);
+    await audit(ctx, "pipeline.delete", "pipeline", before.id, { ...before, cascaded: depCounts }, undefined);
     return { status: 204, body: undefined, headers: {} };
   });
 

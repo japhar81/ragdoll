@@ -17,6 +17,7 @@ import type {
   RoleRepository
 } from "../../../../../packages/db/src/index.ts";
 import { ok, error, isObject } from "../http-utils.ts";
+import { parseForce, hasDependents } from "../cascade-utils.ts";
 import { defaultPermsFor } from "../rbac-helpers.ts";
 import type { RouteRegistry, AuditWriter } from "./types.ts";
 
@@ -93,11 +94,34 @@ export function registerRolesRoutes(
     if ((ALL_ROLES as string[]).includes(ctx.params.name)) {
       return error(409, "conflict", { message: "cannot delete a built-in role" });
     }
-    await rbacPolicies.setRolePermissions(ctx.params.name, []);
     const existing = await roleCatalog.findByName(ctx.params.name);
-    if (existing) await roleCatalog.delete(existing.id);
+    if (!existing) {
+      return error(404, "not_found", { message: `role "${ctx.params.name}" not found` });
+    }
+    const force = parseForce(ctx.request);
+    // rbac_grants.role is a text column (no FK), so deleting the role
+    // catalog row would silently leave dangling grants whose
+    // authorize() checks then fail. Count + refuse by default; with
+    // force=true, drop every grant holding this role first.
+    const allGrants = await rbacPolicies.listGrants();
+    const heldBy = allGrants.filter((g) => g.role === ctx.params.name);
+    if (!force && heldBy.length > 0) {
+      return hasDependents(`role "${ctx.params.name}"`, { grants: heldBy.length });
+    }
+    for (const g of heldBy) {
+      await rbacPolicies.removeGrant(g.id);
+    }
+    await rbacPolicies.setRolePermissions(ctx.params.name, []);
+    await roleCatalog.delete(existing.id);
     if (authorizer) authorizer.invalidate();
-    await audit(ctx, "role.delete", "role", ctx.params.name, undefined, undefined);
+    await audit(
+      ctx,
+      "role.delete",
+      "role",
+      ctx.params.name,
+      heldBy.length > 0 ? { cascaded: { grants: heldBy.length } } : undefined,
+      undefined
+    );
     return { status: 204, body: undefined, headers: {} };
   });
 }

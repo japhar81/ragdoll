@@ -26,6 +26,7 @@ import type {
   PipelineVersionRepository
 } from "../../../../../packages/db/src/index.ts";
 import { ok, error, isObject, nowIso, headerValue } from "../http-utils.ts";
+import { parseForce, hasDependents } from "../cascade-utils.ts";
 import type { AppDeps } from "../types.ts";
 import type { RouteContext, RouteRegistry, AuditWriter } from "./types.ts";
 import { validateNamespacePolicyForScope } from "../../../../../packages/runtime/src/index.ts";
@@ -394,8 +395,69 @@ export function registerDatasetsRoutes(
     const before = await datasets.get(ctx.params.id);
     if (!before) return error(404, "not_found", { message: "dataset not found" });
     enforce(ctx.principal, "dataset:admin", datasetScopeResource(before));
+    const force = parseForce(ctx.request);
+    // Count what would be cascaded / orphaned. Versions + aliases
+    // cascade via FK (migration 010 ON DELETE CASCADE). Pipeline
+    // dataset_bindings cascade too (migration 016). What does NOT
+    // cascade: pipeline specs that embed `node.dataset.slug` inline
+    // OR pipeline-level `bindings:` referencing this slug — those
+    // are JSON blobs in pipeline_versions.spec and become dangling
+    // references after delete (the runtime will fail to resolve the
+    // slug at execute time). The default-deny posture surfaces this
+    // count so the operator chooses explicitly. Reuses the same
+    // walk the GET /:id/used-by endpoint exposes.
+    const [versionRows, aliasRows, allPipelines] = await Promise.all([
+      datasetVersions.listByDataset(before.id),
+      datasetAliases.listByDataset(before.id),
+      pipelines.list()
+    ]);
+    // Binding-override rows reference the dataset by ID and CASCADE
+    // via FK (migration 016), so a hard delete cleans them up; we
+    // don't surface them in the dep counts. What DOES need surfacing:
+    // pipeline specs that embed `node.dataset.slug` (inline) OR
+    // pipeline-level `bindings:` pointing at this slug — those are
+    // immutable JSON in pipeline_versions.spec and become dangling
+    // references after delete (the runtime will fail to resolve at
+    // execute time). This is the same walk GET /:id/used-by does.
+    let pipelineRefCount = 0;
+    for (const p of allPipelines) {
+      const vers = await pipelineVersions.listByPipeline(p.id);
+      if (vers.length === 0) continue;
+      const latest = vers[vers.length - 1];
+      const spec = (latest.spec ?? {}) as {
+        spec?: {
+          nodes?: Array<{ dataset?: { slug?: string }; binding?: string }>;
+          bindings?: Array<{ id: string; dataset?: string }>;
+        };
+      };
+      const pipelineBindings = spec.spec?.bindings ?? [];
+      const datasetBindingIds = new Set(
+        pipelineBindings.filter((b) => b.dataset === before.slug).map((b) => b.id)
+      );
+      const nodes = spec.spec?.nodes ?? [];
+      const refs = nodes.some(
+        (n) => n.dataset?.slug === before.slug || (n.binding && datasetBindingIds.has(n.binding))
+      );
+      if (refs) pipelineRefCount += 1;
+    }
+    const depCounts = {
+      versions: versionRows.length,
+      aliases: aliasRows.length,
+      pipelineReferences: pipelineRefCount
+    };
+    const anyDeps = Object.values(depCounts).some((n) => n > 0);
+    if (!force && anyDeps) {
+      return hasDependents(`dataset "${before.slug}"`, depCounts);
+    }
     await datasets.delete(before.id);
-    await audit(ctx, "dataset.delete", "dataset", before.id, publicDataset(before), undefined);
+    await audit(
+      ctx,
+      "dataset.delete",
+      "dataset",
+      before.id,
+      { ...publicDataset(before), cascaded: depCounts },
+      undefined
+    );
     return { status: 204, body: undefined, headers: {} };
   });
 
