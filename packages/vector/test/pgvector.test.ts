@@ -255,3 +255,34 @@ test("deleteByDocIds DOES issue a DELETE when the table exists", async () => {
   assert.ok(deletes[0].sql.includes("payload->>'docId' = ANY($2::text[])"));
   assert.deepEqual(deletes[0].params, ["tenant-1", ["d1", "d2"]]);
 });
+
+// ---------------------------------------------------------------------------
+// query() must mirror the delete posture: a missing table returns zero
+// hits, not CollectionNotFoundError. Symmetric with QdrantVectorStore.query
+// + InMemoryVectorStore.query.
+// ---------------------------------------------------------------------------
+
+test("query returns [] when the table doesn't exist", async () => {
+  const rec = recordingPool();
+  const store = new PgVectorStore({ pool: rec.pool });
+  // recordingPool() returns no rows from pg_attribute → requireMeta()
+  // throws CollectionNotFoundError → query swallows and returns [].
+  const out = await store.query("ghost", { vector: [1, 2, 3], topK: 5, tenantId: "t1" });
+  assert.deepEqual(out, []);
+  // Sanity: no SELECT-from-ghost issued; only the pg_attribute probe.
+  assert.ok(
+    rec.calls.every((c) => !c.sql.includes("FROM vec_ghost")),
+    `expected no SELECT against vec_ghost; saw: ${rec.calls.map((c) => c.sql.slice(0, 40)).join("|")}`
+  );
+});
+
+test("query DOES issue a SELECT when the table exists", async () => {
+  const rec = recordingPool();
+  const store = new PgVectorStore({ pool: rec.pool });
+  await store.ensureCollection("kb", { dimensions: 3, distance: "cosine" });
+  rec.calls.length = 0;
+  await store.query("kb", { vector: [1, 2, 3], topK: 5, tenantId: "t1" });
+  const selects = rec.calls.filter((c) => c.sql.includes("FROM vec_kb"));
+  assert.equal(selects.length, 1);
+  assert.ok(selects[0].sql.includes("WHERE tenant_id = $2"));
+});

@@ -167,7 +167,15 @@ export class InMemoryVectorStore implements VectorStore {
   }
 
   async query(collection: string, query: VectorQuery): Promise<VectorQueryResult[]> {
-    const stored = this.requireCollection(collection);
+    // "Query a collection that doesn't exist" returns empty results — same
+    // posture every other VectorStore impl (Qdrant: 404 swallow, pgvector:
+    // CollectionNotFoundError swallow). Retrieval on a fresh stack BEFORE
+    // any upsert has materialised the collection is a legitimate state
+    // (no documents to find), not a regression. upsert() still throws
+    // CollectionNotFoundError because the collection's dimension/distance
+    // must be known to insert vectors.
+    const stored = this.collections.get(collection);
+    if (!stored) return [];
     const ranked: VectorQueryResult[] = [];
     for (const point of stored.points.values()) {
       if (point.tenantId !== query.tenantId) continue;
@@ -304,12 +312,21 @@ export class QdrantVectorStore implements VectorStore {
         );
       }
     }
-    const response = await client.search(collection, {
-      vector: query.vector,
-      limit: Math.max(1, query.topK),
-      filter: { must },
-      with_payload: true
-    });
+    let response: unknown;
+    try {
+      response = await client.search(collection, {
+        vector: query.vector,
+        limit: Math.max(1, query.topK),
+        filter: { must },
+        with_payload: true
+      });
+    } catch (err) {
+      // "Query a collection that doesn't exist" is semantically zero hits,
+      // not a fatal — symmetric with the delete paths. Retrieval-only
+      // pipelines pointed at a fresh dataset (before any ingest) hit this.
+      if (isCollectionMissingError(err)) return [];
+      throw err;
+    }
     return (response as Array<{ id: string | number; score: number; payload?: Record<string, unknown> }>).map((hit) => ({
       id: String(hit.id),
       score: hit.score,

@@ -182,7 +182,18 @@ export class PgVectorStore implements VectorStore {
 
   async query(collection: string, query: VectorQuery): Promise<VectorQueryResult[]> {
     const table = sanitizeCollection(collection);
-    const meta = await this.requireMeta(table);
+    // "Query a table that doesn't exist" returns empty results, NOT a
+    // CollectionNotFoundError — matches the QdrantVectorStore +
+    // InMemoryVectorStore posture. A retrieval-only pipeline pointed at
+    // a fresh dataset (before any ingest) is a legitimate zero-hit
+    // state, not a regression.
+    let meta: PgCollectionMeta;
+    try {
+      meta = await this.requireMeta(table);
+    } catch (err) {
+      if (err instanceof CollectionNotFoundError) return [];
+      throw err;
+    }
     if (query.vector.length !== meta.dimensions) {
       throw new DimensionMismatchError(meta.dimensions, query.vector.length);
     }

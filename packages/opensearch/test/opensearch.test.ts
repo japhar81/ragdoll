@@ -241,3 +241,55 @@ test("OpenSearchVectorStore round-trips with tenant isolation in the query body"
   assert.ok(calls.some((c) => c.url.includes("_delete_by_query")));
   assert.ok(calls.some((c) => c.method === "DELETE"));
 });
+
+// ---------------------------------------------------------------------------
+// "Search an index that doesn't exist" must return zero hits — symmetric
+// with the delete-side `tolerate: [404]`. Without this, the first retrieval
+// query against a fresh dataset (before any ingest has created the index)
+// fails with an `index_not_found_exception` 404 and the whole retrieval
+// pipeline crashes for what is actually a clean "no documents yet" state.
+// ---------------------------------------------------------------------------
+
+test("search returns { total: 0, hits: [] } when the index doesn't exist (404)", async () => {
+  // OpenSearch's stock 404 body for a missing index. The client should
+  // recognise the status (not the body shape) and return empty.
+  const { fetchImpl, calls } = fakeFetch((method, path) => {
+    if (path.includes("/_search")) {
+      return {
+        status: 404,
+        json: {
+          error: {
+            type: "index_not_found_exception",
+            reason: "no such index [ghost]",
+            "index": "ghost"
+          },
+          status: 404
+        }
+      };
+    }
+    return { status: 200, json: {} };
+  });
+  const client = new OpenSearchClient({ endpoint: ENDPOINT, fetchImpl });
+  const result = await client.search("ghost", { query: { match_all: {} } });
+  assert.deepEqual(result, { total: 0, hits: [] });
+  // Sanity: we DID call /_search (fix doesn't short-circuit upstream).
+  assert.ok(calls.some((c) => c.url.includes("/ghost/_search")));
+});
+
+test("search PROPAGATES non-404 errors (e.g. 500 server error)", async () => {
+  const { fetchImpl } = fakeFetch((method, path) => {
+    if (path.includes("/_search")) {
+      return {
+        status: 500,
+        json: { error: "internal" }
+      };
+    }
+    return { status: 200, json: {} };
+  });
+  const client = new OpenSearchClient({ endpoint: ENDPOINT, fetchImpl });
+  // Fix is scoped to "index missing" — real backend errors still bubble.
+  await assert.rejects(
+    client.search("docs", { query: { match_all: {} } }),
+    (err: unknown) => err instanceof OpenSearchError && err.status === 500
+  );
+});

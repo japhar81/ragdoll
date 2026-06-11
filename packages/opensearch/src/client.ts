@@ -276,12 +276,18 @@ export class OpenSearchClient {
     index: string,
     query: Record<string, unknown>
   ): Promise<{ total: number; hits: SearchHit[] }> {
-    const { body } = await this.request<{
+    // "Search an index that doesn't exist" returns zero hits — symmetric
+    // with deleteByQuery's tolerate posture. Retrieval pipelines pointed
+    // at a fresh dataset (before any ingest has created the index) hit
+    // this. A real 5xx still throws; only the 404 "index_not_found_exception"
+    // is treated as an empty result.
+    const { status, body } = await this.request<{
       hits?: {
         total?: { value?: number } | number;
         hits?: Array<{ _id: string; _score: number | null; _source?: Record<string, unknown> }>;
       };
-    }>("POST", `/${encodeURIComponent(index)}/_search`, query);
+    }>("POST", `/${encodeURIComponent(index)}/_search`, query, { tolerate: [404] });
+    if (status === 404) return { total: 0, hits: [] };
     const rawTotal = body?.hits?.total;
     const total =
       typeof rawTotal === "number" ? rawTotal : (rawTotal?.value ?? body?.hits?.hits?.length ?? 0);

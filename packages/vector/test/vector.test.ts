@@ -291,3 +291,50 @@ test("QdrantVectorStore.deleteByDocIds still PROPAGATES non-missing errors", asy
     (err: unknown) => (err as { status?: number }).status === 500
   );
 });
+
+// ---------------------------------------------------------------------------
+// Same posture as delete: "query a collection that doesn't exist" returns
+// empty results, not a 404. Catches the retrieval-side first-run regression:
+// a retrieval-only pipeline (e.g. ad-hoc Q&A) pointed at a fresh dataset
+// before any ingest has created the collection used to fail with the same
+// "Collection X doesn't exist" error qdrant_delete hit.
+// ---------------------------------------------------------------------------
+
+test("InMemoryVectorStore.query returns [] when the collection doesn't exist", async () => {
+  const store = new InMemoryVectorStore();
+  // NOTE: no ensureCollection() — the collection genuinely doesn't exist.
+  const results = await store.query("ghost", { vector: [1, 0], topK: 5, tenantId: "t1" });
+  assert.deepEqual(results, []);
+});
+
+test("QdrantVectorStore.query returns [] when the collection doesn't exist", async () => {
+  const store = new QdrantVectorStore({ url: "http://qdrant.invalid" });
+  stubQdrant(store, [
+    {
+      method: "search",
+      args: [],
+      throws: {
+        status: 404,
+        message: "Not Found",
+        data: { status: { error: "Not found: Collection `ghost` doesn't exist!" } }
+      }
+    }
+  ]);
+  const results = await store.query("ghost", { vector: [1, 0], topK: 5, tenantId: "t1" });
+  assert.deepEqual(results, []);
+});
+
+test("QdrantVectorStore.query still PROPAGATES non-missing errors (e.g. 500)", async () => {
+  const store = new QdrantVectorStore({ url: "http://qdrant.invalid" });
+  stubQdrant(store, [
+    {
+      method: "search",
+      args: [],
+      throws: { status: 500, message: "Internal Server Error" }
+    }
+  ]);
+  await assert.rejects(
+    store.query("docs", { vector: [1, 0], topK: 5, tenantId: "t1" }),
+    (err: unknown) => (err as { status?: number }).status === 500
+  );
+});
