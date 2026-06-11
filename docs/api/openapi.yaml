@@ -679,6 +679,37 @@ paths:
       responses:
         "200": { description: PipelineValidationResult }
         "422": { $ref: "#/components/responses/ValidationFailed" }
+  /api/pipelines/{pipeline_id}/validation:
+    parameters:
+      - $ref: "#/components/parameters/PipelineRef"
+    get:
+      summary: >-
+        Per-pipeline validator. Returns the same PipelineValidationResult
+        envelope `POST /api/pipelines/validate` produces, but fetches the
+        spec server-side so a provisioning script can detect issues on an
+        already-provisioned pipeline without resending its spec. Defaults
+        to the pipeline's latest version; pin to a specific one via
+        `?version=X.Y.Z`. This is the API surface for the same diagnostics
+        the Builder uses to light canvas badges.
+      parameters:
+        - name: version
+          in: query
+          required: false
+          description: Pin validation to a specific pipeline version. Defaults to the latest.
+          schema: { type: string }
+      responses:
+        "200":
+          description: >-
+            { pipelineId, pipelineSlug, version, versionId, valid, errors,
+            warnings, requiredSecrets, requiredConfig, missingPlugins,
+            datasetSlots }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404":
+          description: >-
+            Pipeline (or specified version) not found. The latter case
+            includes pipelines that have no saved versions yet — the
+            response message distinguishes which case applies.
   /api/pipelines/{pipeline_id}/versions:
     parameters:
       - $ref: "#/components/parameters/PipelineRef"
