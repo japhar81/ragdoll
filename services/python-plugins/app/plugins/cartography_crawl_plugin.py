@@ -190,14 +190,16 @@ def _resolve_config(config: Dict[str, Any]) -> Dict[str, Any]:
 def _build_args(modules: List[str], cfg: Dict[str, Any]) -> List[str]:
     """Translate the resolved config into a cartography CLI argv tail.
 
-    Mirrors `buildCartographyArgs` in the TS plugin — same flag shapes
-    so a pipeline that worked on the old in-process subprocess path
-    works here unchanged. ``--update-tag`` only when ``incremental`` is
-    true (matches the TS behaviour exactly).
+    Cartography takes a single ``--selected-modules`` flag with a
+    comma-separated list of module names (NOT ``-m <module>`` per
+    module — that's a build-system convention that doesn't apply here
+    and previously caused a runtime ``unrecognized arguments: -m aws``
+    failure for every cloud).
+
+    ``--update-tag`` only when ``incremental`` is true. Per-module
+    selectors and ``extraArgs`` are appended verbatim.
     """
-    args: List[str] = []
-    for m in modules:
-        args.extend(("-m", m))
+    args: List[str] = ["--selected-modules", ",".join(modules)]
     if cfg["_incremental"]:
         args.extend(("--update-tag", str(int(time.time()))))
     selectors = cfg["_selectors"]
