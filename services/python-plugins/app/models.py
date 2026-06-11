@@ -56,6 +56,12 @@ class ExecuteRequest(BaseModel):
     inputs: Dict[str, Any] = Field(default_factory=dict)
     config: Dict[str, Any] = Field(default_factory=dict)
     secrets: Dict[str, Any] = Field(default_factory=dict)
+    # Resolved dataset envelope (ADR-0023). When the calling pipeline
+    # node has `dataset.slug` set, the runtime's DatasetResolver
+    # serializes the resolved view here so handlers can reach the
+    # bound connection (kind / host / port / resolved secret) without
+    # a second round-trip. Empty dict when the node has no dataset.
+    dataset: Dict[str, Any] = Field(default_factory=dict)
     context: ExecutionContext = Field(default_factory=ExecutionContext)
 
     def effective_config(self) -> Dict[str, Any]:

@@ -80,9 +80,16 @@ export function registerResources(program: Command, ctx: Ctx): void {
   connections
     .command("list")
     .description("List connections visible at the current scope.")
-    .action(async () => {
+    .option(
+      "--archived",
+      "Include archived rows alongside active ones (same flag the UI's 'show archived' toggle sets via ?include_archived=true)."
+    )
+    .action(async (o: { archived?: boolean }) => {
       try {
-        emit(ctx, await api(ctx, "GET", "/api/connections"));
+        const path = o.archived
+          ? "/api/connections?include_archived=true"
+          : "/api/connections";
+        emit(ctx, await api(ctx, "GET", path));
       } catch (e) {
         fail(e, "connections list");
       }

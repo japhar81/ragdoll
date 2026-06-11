@@ -150,7 +150,7 @@ DELETE /api/dataset-bindings/:id
 | ------ | ----------------------------------- | ------------------------------------------------------- |
 | GET    | `/api/connections`                  | with `x-tenant-id`: tenant + inherited globals; without: globals only (admin) |
 | GET    | `/api/connections/:id`              | single row                                              |
-| POST   | `/api/connections`                  | `{ scope, tenantId?, environmentId?, slug, displayName, kind, config, secretRefId? }` |
+| POST   | `/api/connections`                  | `{ scope, tenantId?, environmentId?, slug, displayName, kind, config, secretRefKey? }` |
 | PUT    | `/api/connections/:id`              | replace                                                 |
 | DELETE | `/api/connections/:id`              | soft archive                                            |
 | POST   | `/api/connections/:id/probe`        | synchronous probe via the driver's `probe()` hook       |

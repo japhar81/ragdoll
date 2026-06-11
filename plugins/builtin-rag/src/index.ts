@@ -64,10 +64,12 @@ export {
   neo4jWritePlugin
 } from "./neo4j.ts";
 // cartography_crawl (ADR-0025) — third crawler block beside crawl4ai +
-// scrapy. Launches Cartography against the `target` binding (a neo4j
-// connection bulwark-or-equivalent provides per-run); never bundles
-// Cartography itself.
-export { cartographyCrawlPlugin } from "./cartography.ts";
+// scrapy. The handler runs in the python-plugins sidecar (where the
+// `cartography` Python dep is installed); this file only exports the
+// manifest so the plugin-loader's registerExternalPlugins() pass can
+// wire it to `process.env.PYTHON_PLUGIN_URL`.
+export { cartographyCrawlManifest, CARTOGRAPHY_MODULES } from "./cartography.ts";
+export type { CartographyModule } from "./cartography.ts";
 // Data-shaping plugins (JSONata/JMESPath transform + XML codec) live in their
 // own module; re-exported so the plugin-loader's namespace scan registers
 // them alongside the rest.

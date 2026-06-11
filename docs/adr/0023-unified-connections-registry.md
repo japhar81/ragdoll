@@ -64,7 +64,7 @@ CREATE TABLE connections (
   description     text,
   kind            text NOT NULL,             -- 'qdrant' | 'opensearch' | 'neo4j' | 'postgres' | …
   config          jsonb NOT NULL DEFAULT '{}',  -- per-kind, schema lives on the driver plugin
-  secret_ref_id   uuid,                       -- pointer into managed secrets
+  secret_ref_key  text,                       -- logical key into managed secrets (matches secret_refs.logical_key — migration 022)
   last_probed_at  timestamptz,
   last_probe_ok   boolean,
   last_probe_error text,
@@ -256,8 +256,10 @@ backfill script:
    already match modulo renames).
 3. **Copy `datasource_connections` rows** — translate the
    `datasourceType` field to `kind`, `config` jsonb to `config` jsonb,
-   `secretRefId` to `secret_ref_id`. Slugs preserved exactly so
-   existing dataset specs keep resolving.
+   `secretRefId` to `secret_ref_key` (migration 022 renamed the column
+   and changed it from `uuid` to `text` so the value can be any
+   `secret_refs.logical_key`). Slugs preserved exactly so existing
+   dataset specs keep resolving.
 4. **Backfill the `bindings:` shape** on existing datasets:
    `backends.vector.{collection, connectionName}` →
    `bindings.vector.{connection, collection}`. Binding name defaults to

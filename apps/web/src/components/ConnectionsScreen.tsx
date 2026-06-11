@@ -47,7 +47,7 @@ interface Draft {
   kind: string;
   tenantId: string;
   environmentId: string;
-  secretRefId: string;
+  secretRefKey: string;
   config: Record<string, unknown>;
 }
 
@@ -60,7 +60,7 @@ function emptyDraft(): Draft {
     kind: "",
     tenantId: "",
     environmentId: "",
-    secretRefId: "",
+    secretRefKey: "",
     config: {}
   };
 }
@@ -74,7 +74,7 @@ function fromConnection(c: ConnectionView): Draft {
     kind: c.kind,
     tenantId: c.tenantId ?? "",
     environmentId: c.environmentId ?? "",
-    secretRefId: c.secretRefId ?? "",
+    secretRefKey: c.secretRefKey ?? "",
     config: c.config ?? {}
   };
 }
@@ -386,7 +386,7 @@ export function ConnectionsScreen() {
         tenantId: draft.scope === "global" ? undefined : draft.tenantId,
         environmentId:
           draft.scope === "environment" ? draft.environmentId : undefined,
-        secretRefId: draft.secretRefId || undefined,
+        secretRefKey: draft.secretRefKey || undefined,
         config: draft.config
       }),
     onSuccess: () => {
@@ -402,7 +402,7 @@ export function ConnectionsScreen() {
         displayName: draft.displayName,
         description: draft.description || null,
         kind: draft.kind,
-        secretRefId: draft.secretRefId || null,
+        secretRefKey: draft.secretRefKey || null,
         config: draft.config
       }),
     onSuccess: () => {
@@ -713,11 +713,11 @@ export function ConnectionsScreen() {
                   </label>
                 )}
                 <label>
-                  <div className="muted">Secret ref id</div>
+                  <div className="muted">Secret ref key</div>
                   <input
-                    value={draft.secretRefId}
-                    onChange={(e) => setDraft({ ...draft, secretRefId: e.target.value })}
-                    placeholder="(uuid of a row in the secrets table)"
+                    value={draft.secretRefKey}
+                    onChange={(e) => setDraft({ ...draft, secretRefKey: e.target.value })}
+                    placeholder="logical_key from /api/secrets (e.g. NEO4J_CREDS)"
                   />
                 </label>
                 <label style={{ gridColumn: "1 / -1" }}>

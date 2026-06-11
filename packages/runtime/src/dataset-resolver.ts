@@ -32,6 +32,7 @@ import type {
   TenantRepository,
   EnvironmentRepository
 } from "../../db/src/index.ts";
+import type { SecretProvider } from "../../secrets/src/index.ts";
 import { applyNamespacePolicy } from "./dataset-namespace.ts";
 
 export interface DatasetResolverDeps {
@@ -42,6 +43,14 @@ export interface DatasetResolverDeps {
    *  resolves through the unified registry to a real connection row,
    *  injected onto the binding so plugins see kind / host / port. */
   connections?: ConnectionRepository;
+  /** Optional. When set + a binding's connection row has a
+   *  `secretRefKey`, the resolver looks up the credential through this
+   *  provider and attaches it to the binding's resolved connection so
+   *  drivers (neo4j, postgres, mongo, …) receive an authenticated
+   *  client at acquireClient time. Without it, the binding still
+   *  resolves but `connection.secret` stays undefined and any driver
+   *  that requires creds will fail loudly at execute. */
+  secrets?: SecretProvider;
   /** Optional. When set + pipelineId passed to resolve(), the binding
    *  cascade beats the default slug resolution. */
   pipelineDatasetBindings?: PipelineDatasetBindingRepository;
@@ -179,11 +188,35 @@ export function buildDatasetResolver(deps: DatasetResolverDeps): DatasetResolver
                 : conn.scope === "tenant"
                   ? "tenant"
                   : "global";
+            // Resolve the connection's secret HERE — the equivalent of
+            // what the probe sweep does (apps/worker handlers.ts) — so
+            // drivers receive an authenticated client at execute time.
+            // Without this hop, `secret` stayed undefined and every
+            // credentialed driver (neo4j, postgres, mongo, …) failed
+            // auth even when the same connection's /probe succeeded.
+            // Resolution is best-effort: a missing/unresolvable secret
+            // leaves the binding usable for no-auth drivers and lets
+            // credentialed drivers surface a clear error themselves.
+            let resolvedSecret: string | undefined;
+            if (deps.secrets && conn.secretRefKey) {
+              try {
+                resolvedSecret = await deps.secrets.get(
+                  {
+                    scope: conn.tenantId ? "tenant" : "global",
+                    tenantId: conn.tenantId ?? undefined,
+                    key: conn.secretRefKey
+                  },
+                  conn.tenantId ?? args.tenantId ?? ""
+                );
+              } catch {
+                /* leave undefined; driver may not need it */
+              }
+            }
             connection = {
               id: conn.id,
               slug: conn.slug,
               kind: conn.kind,
-              secret: undefined, // resolved at acquireClient time, not here
+              secret: resolvedSecret,
               options: conn.config ?? {},
               cascadeReason
             };

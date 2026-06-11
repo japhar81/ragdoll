@@ -192,6 +192,11 @@ export function createWorker(deps: WorkerDeps): Worker {
           datasetVersions: deps.repositories.datasetVersions,
           datasetAliases: deps.repositories.datasetAliases,
           connections: deps.repositories.connections,
+          // Same rationale as the API: the resolver attaches resolved
+          // credentials to each binding's connection so drivers see an
+          // authenticated client. Probe + execute now use the SAME
+          // secret-resolution path.
+          secrets: deps.secretProvider,
           pipelineDatasetBindings: deps.repositories.pipelineDatasetBindings,
           tenants: deps.repositories.tenants,
           environments: deps.repositories.environments
@@ -1121,13 +1126,13 @@ export function createWorker(deps: WorkerDeps): Worker {
         // probing) but go through SecretProvider so the credential
         // resolution path matches execution time.
         let secret: string | undefined;
-        if (row.secretRefId) {
+        if (row.secretRefKey) {
           try {
             secret = await deps.secretProvider.get(
               {
                 scope: row.tenantId ? "tenant" : "global",
                 tenantId: row.tenantId ?? undefined,
-                key: row.secretRefId
+                key: row.secretRefKey
               },
               row.tenantId ?? ""
             );

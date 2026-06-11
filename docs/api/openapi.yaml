@@ -416,9 +416,15 @@ components:
         config:
           type: object
           description: Non-secret per-kind config (host, port, database, …). Schema lives on the driver manifest.
-        secretRefId:
+        secretRefKey:
           type: [string, "null"]
-          description: Pointer to a managed secret (the credential / DSN). Plaintext never leaves the server.
+          description: >-
+            Logical key into the managed-secrets registry — resolved at
+            execute time against `secret_refs.logical_key` via the
+            SecretProvider. Plaintext never leaves the server. The
+            column is `text` (any handle the secrets backend accepts is
+            valid; not constrained to UUID). Null when the connection
+            has no credential (no-auth backends).
         allowedHosts:
           type: array
           items: { type: string }
@@ -743,6 +749,14 @@ paths:
   /api/pipelines/validate:
     post:
       summary: Validate a pipeline spec (JSON object or JSON/YAML string)
+      description: >-
+        Returns the PipelineValidationResult envelope (same shape the
+        Builder uses to light canvas badges). Pass `x-tenant-id` so the
+        validator can build a binding index from the caller's visible
+        datasets + connections — that catches `dataset_binding_kind_mismatch`
+        (a node requires `kindOneOf: [neo4j]` on its binding but the bound
+        dataset's connection is a different kind) at validate time
+        instead of at run time.
       responses:
         "200": { description: PipelineValidationResult }
         "422": { $ref: "#/components/responses/ValidationFailed" }
@@ -1228,7 +1242,18 @@ paths:
         List Connections visible at the request scope (`x-tenant-id` +
         `x-environment` headers). Returns the union of globals,
         tenant-scoped (for the given tenant), and env-scoped (for the
-        tenant + env). Archived rows are excluded by default.
+        tenant + env). Archived rows are excluded by default — pass
+        `?include_archived=true` to include them (the admin
+        "show archived" toggle in the UI does this).
+      parameters:
+        - name: include_archived
+          in: query
+          required: false
+          schema: { type: boolean }
+          description: >-
+            When `true` (also accepts `1` / `yes`), archived rows are
+            included alongside active ones. Cascade-resolve paths
+            (datasets / pipeline-binding lookup) never set this.
       responses:
         "200":
           description: List of connections.
@@ -1246,8 +1271,9 @@ paths:
       summary: >-
         Create a Connection at one of three scopes (global / tenant /
         environment). Caller needs `connection:admin` at the target scope.
-        The optional `secretRefId` must point at a managed secret the
-        caller can read.
+        The optional `secretRefKey` is a logical key into the managed-
+        secrets registry; the caller must have read access to the
+        underlying secret.
       responses:
         "201":
           description: Created

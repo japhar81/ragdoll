@@ -75,11 +75,11 @@ def _proto_to_pydantic(req: ProtoExecuteRequest) -> ExecuteRequest:
       proto.config                   -> pydantic.config (Struct -> dict)
       proto.inputs                   -> pydantic.inputs
       proto.secrets                  -> pydantic.secrets
+      proto.dataset                  -> pydantic.dataset (ADR-0023 resolved
+                                        envelope; cartography_crawl pulls
+                                        the bound neo4j connection out of
+                                        `dataset.bindings.target.connection`).
       proto.tenant_id / .environment / .request_id -> pydantic.context.*
-
-    Dataset is dropped on the floor for these three plugins (none of them
-    bind a dataset slot). When the proto carries a dataset for a future
-    plugin, extend this translator.
     """
     return ExecuteRequest(
         plugin=PluginRef(id=req.plugin, version=req.version or None),
@@ -87,6 +87,7 @@ def _proto_to_pydantic(req: ProtoExecuteRequest) -> ExecuteRequest:
         inputs=_struct_to_dict(req.inputs) if req.HasField("inputs") else {},
         config=_struct_to_dict(req.config) if req.HasField("config") else {},
         secrets=_struct_to_dict(req.secrets) if req.HasField("secrets") else {},
+        dataset=_struct_to_dict(req.dataset) if req.HasField("dataset") else {},
         context=ExecutionContext(
             requestId=req.request_id or None,
             tenantId=req.tenant_id or None,

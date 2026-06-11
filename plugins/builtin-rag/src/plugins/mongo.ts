@@ -58,7 +58,7 @@ export const mongodbConnectionDriver = defineConnectionDriverPlugin<MongoClient>
     async create(conn) {
       if (!conn.secret) {
         throw new Error(
-          `mongodb connection "${conn.slug}" has no secret — set a secretRefId pointing at the URI`
+          `mongodb connection "${conn.slug}" has no secret — set a secretRefKey pointing at the URI`
         );
       }
       const opts = (conn.options ?? {}) as MongoConnectionOptions;

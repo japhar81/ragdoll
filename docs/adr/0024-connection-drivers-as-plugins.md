@@ -58,7 +58,7 @@ interface ConnectionDriverManifest extends PluginManifest {
    *  JsonSchemaLike — same shape every other plugin manifest uses for
    *  its configSchema. The schema describes ONLY non-secret config
    *  (host, port, database, TLS verify, …); credentials live in
-   *  managed secrets and are referenced separately via `secretRefId`. */
+   *  managed secrets and are referenced separately via `secretRefKey`. */
   configSchema: JsonSchemaLike;
   /** Optional schema describing the expected shape of the resolved
    *  secret (e.g. {"type":"string"} for a DSN, {"type":"object",

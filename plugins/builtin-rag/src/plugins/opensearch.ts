@@ -52,7 +52,7 @@ const OPENSEARCH_SECRETS_SCHEMA = {
  * Credentials still arrive via the plugin's `secrets:` block — connection
  * holds the host so the same pipeline runs against tenant A's cluster
  * in dev and tenant B's different cluster in prod with no spec changes.
- * (`connection.secretRefId` integration is a follow-up; today the spec's
+ * (`connection.secretRefKey` integration is a follow-up; today the spec's
  * secrets block is still where auth lives.)
  */
 function openSearchClientFrom(

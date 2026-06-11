@@ -15,7 +15,7 @@
  * `connection:use` is enforced separately by the runtime at executor
  * entry — see ADR-0023 §6.
  *
- * Secrets are never returned. `secretRefId` is an opaque pointer the
+ * Secrets are never returned. `secretRefKey` is an opaque pointer the
  * operator resolves out-of-band.
  */
 import { randomUUID } from "node:crypto";
@@ -72,7 +72,7 @@ function publicConnection(row: ConnectionRow): Record<string, unknown> {
     description: row.description ?? null,
     kind: row.kind,
     config: row.config ?? {},
-    secretRefId: row.secretRefId ?? null,
+    secretRefKey: row.secretRefKey ?? null,
     allowedHosts: row.allowedHosts ?? [],
     denyPrivateNetworks: !!row.denyPrivateNetworks,
     lastProbedAt: row.lastProbedAt ?? null,
@@ -201,8 +201,8 @@ export function registerConnectionsRoutes(
         typeof body.description === "string" ? body.description : null,
       kind: body.kind as string,
       config: isObject(body.config) ? body.config : {},
-      secretRefId:
-        typeof body.secretRefId === "string" ? body.secretRefId : null,
+      secretRefKey:
+        typeof body.secretRefKey === "string" ? body.secretRefKey : null,
       allowedHosts: Array.isArray(body.allowedHosts)
         ? (body.allowedHosts as string[])
         : [],
@@ -233,9 +233,9 @@ export function registerConnectionsRoutes(
       patch.description =
         typeof body.description === "string" ? body.description : null;
     if (typeof body.kind === "string") patch.kind = body.kind;
-    if ("secretRefId" in body)
-      patch.secretRefId =
-        typeof body.secretRefId === "string" ? body.secretRefId : null;
+    if ("secretRefKey" in body)
+      patch.secretRefKey =
+        typeof body.secretRefKey === "string" ? body.secretRefKey : null;
     if (isObject(body.config)) patch.config = body.config;
     if (Array.isArray(body.allowedHosts))
       patch.allowedHosts = body.allowedHosts as string[];

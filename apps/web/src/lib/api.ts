@@ -910,7 +910,7 @@ export const api = {
     kind: string;
     tenantId?: string | null;
     environmentId?: string | null;
-    secretRefId?: string | null;
+    secretRefKey?: string | null;
     config?: Record<string, unknown>;
     allowedHosts?: string[];
     denyPrivateNetworks?: boolean;
@@ -926,7 +926,7 @@ export const api = {
       displayName?: string;
       description?: string | null;
       kind?: string;
-      secretRefId?: string | null;
+      secretRefKey?: string | null;
       config?: Record<string, unknown>;
       allowedHosts?: string[];
       denyPrivateNetworks?: boolean;
@@ -1039,7 +1039,7 @@ export interface ConnectionView {
   description: string | null;
   kind: string;
   config: Record<string, unknown>;
-  secretRefId: string | null;
+  secretRefKey: string | null;
   allowedHosts: string[];
   denyPrivateNetworks: boolean;
   lastProbedAt: string | null;
