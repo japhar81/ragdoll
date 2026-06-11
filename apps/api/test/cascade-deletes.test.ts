@@ -511,3 +511,163 @@ test("DELETE on unknown id stays 404 — force does not mask not_found", async (
     assert.equal(out.status, 404, `expected 404 for ${path}, got ${out.status}`);
   }
 });
+
+// ---------------------------------------------------------------------------
+// Connections — soft-archive by default, force=true hard-deletes
+// ---------------------------------------------------------------------------
+
+async function createConnection(harness: ReturnType<typeof buildHarness>, slug: string) {
+  const out = await harness.request({
+    method: "POST",
+    path: "/api/connections",
+    headers: ADMIN,
+    body: {
+      scope: "global",
+      slug,
+      displayName: slug,
+      kind: "qdrant",
+      config: { host: "stub" }
+    }
+  });
+  assert.equal(out.status, 201, `connection POST: ${JSON.stringify(out.body)}`);
+  return out.body.connection as { id: string; slug: string; archivedAt: string | null };
+}
+
+test("DELETE /api/connections/:id without ?force soft-archives (legacy behaviour preserved)", async () => {
+  const harness = buildHarness();
+  const conn = await createConnection(harness, "soft-arch");
+  const archive = await harness.request({
+    method: "DELETE",
+    path: `/api/connections/${conn.id}`,
+    headers: ADMIN
+  });
+  assert.equal(archive.status, 204);
+  // Row still exists; archivedAt is set.
+  const after = await harness.request({
+    method: "GET",
+    path: `/api/connections/${conn.id}`,
+    headers: ADMIN
+  });
+  assert.equal(after.status, 200);
+  assert.ok(after.body.connection.archivedAt, "archivedAt set");
+});
+
+test("DELETE /api/connections/:id?force=true hard-deletes when no datasets / pipelines reference the slug", async () => {
+  const harness = buildHarness();
+  const conn = await createConnection(harness, "force-clean");
+  const del = await harness.request({
+    method: "DELETE",
+    path: `/api/connections/${conn.id}`,
+    headers: ADMIN,
+    query: { force: "true" }
+  });
+  assert.equal(del.status, 204);
+  // Row gone — GET → 404.
+  const after = await harness.request({
+    method: "GET",
+    path: `/api/connections/${conn.id}`,
+    headers: ADMIN
+  });
+  assert.equal(after.status, 404);
+});
+
+test("DELETE /api/connections/:id?force=true refuses with 409 when a dataset binding references the slug", async () => {
+  const harness = buildHarness();
+  const conn = await createConnection(harness, "force-ref-dataset");
+  // Dataset whose `vectors` binding points at this connection slug.
+  const ds = await harness.request({
+    method: "POST",
+    path: "/api/datasets",
+    headers: ADMIN,
+    body: {
+      scope: "global",
+      slug: "ref-ds-via-conn",
+      displayName: "Refs The Connection",
+      bindings: { vectors: { connection: "force-ref-dataset" } }
+    }
+  });
+  assert.equal(ds.status, 201, `dataset POST: ${JSON.stringify(ds.body)}`);
+  const refusal = await harness.request({
+    method: "DELETE",
+    path: `/api/connections/${conn.id}`,
+    headers: ADMIN,
+    query: { force: "true" }
+  });
+  assert.equal(refusal.status, 409);
+  assert.equal(refusal.body.error, "has_dependents");
+  assert.equal(refusal.body.dependents.datasetBindings, 1);
+});
+
+test("DELETE /api/connections/:id?force=true refuses with 409 when a pipeline node references the slug", async () => {
+  const harness = buildHarness();
+  const conn = await createConnection(harness, "force-ref-pipeline");
+  const pipe = await harness.request({
+    method: "POST",
+    path: "/api/pipelines",
+    headers: ADMIN,
+    body: { slug: "pipe-conn-ref", name: "pipe-conn-ref" }
+  });
+  const spec = {
+    apiVersion: "rag-platform/v1",
+    kind: "Pipeline",
+    metadata: { name: "pipe-conn-ref" },
+    spec: {
+      nodes: [
+        { id: "in", type: "input" },
+        {
+          id: "echo",
+          plugin: { category: "transformer", id: "fake_echo", version: "1.0.0" },
+          connection: { slug: "force-ref-pipeline" }
+        },
+        { id: "out", type: "output" }
+      ],
+      edges: [
+        { from: "in", to: "echo" },
+        { from: "echo", to: "out" }
+      ]
+    }
+  };
+  const ver = await harness.request({
+    method: "POST",
+    path: `/api/pipelines/${pipe.body.pipeline.id}/versions`,
+    headers: ADMIN,
+    body: { version: "1.0.0", publish: true, spec }
+  });
+  assert.equal(ver.status, 201, `version POST: ${JSON.stringify(ver.body)}`);
+
+  const refusal = await harness.request({
+    method: "DELETE",
+    path: `/api/connections/${conn.id}`,
+    headers: ADMIN,
+    query: { force: "true" }
+  });
+  assert.equal(refusal.status, 409);
+  assert.equal(refusal.body.error, "has_dependents");
+  assert.equal(refusal.body.dependents.pipelineReferences, 1);
+});
+
+test("DELETE /api/connections/:id?force=true also nukes an already-archived row", async () => {
+  // The intended UX: operator archives a connection (soft), realises
+  // they want it gone for real, opens the archived row's Delete button
+  // (force=true) and the row is hard-deleted. Tests this round-trip.
+  const harness = buildHarness();
+  const conn = await createConnection(harness, "archive-then-delete");
+  await harness.request({
+    method: "DELETE",
+    path: `/api/connections/${conn.id}`,
+    headers: ADMIN
+  }); // soft-archive
+  const force = await harness.request({
+    method: "DELETE",
+    path: `/api/connections/${conn.id}`,
+    headers: ADMIN,
+    query: { force: "true" }
+  });
+  assert.equal(force.status, 204);
+  const after = await harness.request({
+    method: "GET",
+    path: `/api/connections/${conn.id}`,
+    headers: ADMIN
+  });
+  assert.equal(after.status, 404);
+});

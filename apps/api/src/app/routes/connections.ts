@@ -29,9 +29,11 @@ import type {
 import {
   ExternalConnectionResolver,
   probeConnection,
-  listConnectionKinds
+  listConnectionKinds,
+  closeClient
 } from "../../../../../packages/external-connections/src/index.ts";
 import { ok, error, isObject, nowIso } from "../http-utils.ts";
+import { parseForce, hasDependents } from "../cascade-utils.ts";
 import type { AppDeps } from "../types.ts";
 import type { RouteContext, RouteRegistry, AuditWriter } from "./types.ts";
 
@@ -247,13 +249,78 @@ export function registerConnectionsRoutes(
     const before = await connections.get(ctx.params.id);
     if (!before) return error(404, "not_found");
     enforce(ctx.principal, "connection:admin", rowResource(before));
-    await connections.update(ctx.params.id, { archivedAt: nowIso() });
+    const force = parseForce(ctx.request);
+    if (!force) {
+      // Default posture: soft-archive (sets archivedAt). Rows stay in
+      // the DB so historical execution traces still resolve their
+      // connection envelope; the UI filters archived rows out of the
+      // primary listing. This is intentionally NON-destructive — the
+      // operator opts into hard delete via ?force=true.
+      await connections.update(ctx.params.id, { archivedAt: nowIso() });
+      await audit(
+        ctx,
+        "connection.archive",
+        "connection",
+        ctx.params.id,
+        publicConnection(before),
+        undefined
+      );
+      return { status: 204, body: undefined, headers: {} };
+    }
+    // Force path: hard delete the row. Count dataset bindings + pipeline
+    // spec node.connection.slug references first — neither has an FK
+    // CASCADE (both are jsonb blobs), so without this count the
+    // operator could blow away a connection out from under live
+    // pipelines without warning. With dependents and force=true, we
+    // STILL refuse — force here means "yes, even though it's archived
+    // / has been around a while, drop the row" but doesn't blanket-
+    // override the dependent safety. Operator must clean refs first.
+    const [allDatasets, allPipelines] = await Promise.all([
+      deps.datasets?.listAll ? deps.datasets.listAll() : Promise.resolve([]),
+      deps.pipelines.list()
+    ]);
+    let datasetBindingCount = 0;
+    for (const ds of allDatasets) {
+      const bindings = (ds.bindings ?? {}) as Record<
+        string,
+        { connection?: string }
+      >;
+      const hit = Object.values(bindings).some(
+        (b) => b?.connection === before.slug
+      );
+      if (hit) datasetBindingCount += 1;
+    }
+    let pipelineNodeCount = 0;
+    for (const p of allPipelines) {
+      const vers = await deps.pipelineVersions.listByPipeline(p.id);
+      if (vers.length === 0) continue;
+      const latest = vers[vers.length - 1];
+      const spec = (latest.spec ?? {}) as {
+        spec?: { nodes?: Array<{ connection?: { slug?: string } }> };
+      };
+      const nodes = spec.spec?.nodes ?? [];
+      if (nodes.some((n) => n.connection?.slug === before.slug)) {
+        pipelineNodeCount += 1;
+      }
+    }
+    const depCounts = {
+      datasetBindings: datasetBindingCount,
+      pipelineReferences: pipelineNodeCount
+    };
+    if (datasetBindingCount > 0 || pipelineNodeCount > 0) {
+      return hasDependents(`connection "${before.slug}"`, depCounts);
+    }
+    await connections.delete(ctx.params.id);
+    // Drop any pooled client keyed to this connection's id so a
+    // future row that happens to recycle the id (unlikely with UUIDs
+    // but possible in tests) doesn't see a stale client.
+    await closeClient(ctx.params.id).catch(() => undefined);
     await audit(
       ctx,
-      "connection.archive",
+      "connection.delete",
       "connection",
       ctx.params.id,
-      publicConnection(before),
+      { ...publicConnection(before), cascaded: depCounts },
       undefined
     );
     return { status: 204, body: undefined, headers: {} };
