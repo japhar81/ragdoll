@@ -19,6 +19,7 @@ import { registerExecutions } from "./commands/executions.ts";
 import { registerAccess } from "./commands/access.ts";
 import { registerObservability } from "./commands/observability.ts";
 import { registerKeys } from "./commands/keys.ts";
+import { registerResources } from "./commands/resources.ts";
 
 async function main(): Promise<void> {
   const config = await loadConfig();
@@ -46,6 +47,7 @@ async function main(): Promise<void> {
   registerAccess(program, ctx);
   registerKeys(program, ctx);
   registerObservability(program, ctx);
+  registerResources(program, ctx);
 
   await program.parseAsync(process.argv);
 }

@@ -6,6 +6,7 @@
 import type { Command } from "commander";
 import { patchConfig } from "../config.ts";
 import { api, emit, fail, type Ctx } from "../ctx.ts";
+import { runDelete } from "../cascade.ts";
 
 export function registerTenants(program: Command, ctx: Ctx): void {
   const tenants = program.command("tenants").description("Manage tenants");
@@ -50,13 +51,10 @@ export function registerTenants(program: Command, ctx: Ctx): void {
 
   tenants
     .command("delete <id>")
-    .action(async (id: string) => {
-      try {
-        await api(ctx, "DELETE", `/api/tenants/${id}`);
-        emit(ctx, { ok: true });
-      } catch (e) {
-        fail(e, "tenants delete");
-      }
+    .option("--force", "Cascade-delete: drop tenant-scoped RBAC grants then nuke the tenant (every other dependent — audit / usage / executions / secrets / schedules / environments / connections — cascades via FK).")
+    .action(async (id: string, o: { force?: boolean }) => {
+      await runDelete(ctx, "tenants delete", `/api/tenants/${id}`, { force: o.force });
+      emit(ctx, { ok: true });
     });
 
   tenants
