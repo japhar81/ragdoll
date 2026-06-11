@@ -222,11 +222,22 @@ def _build_env(
     provided a `creds` secret — typically an AWS credentials block or
     Azure SP JSON; cartography's per-module loaders pick the env vars
     they need (AWS_PROFILE / AWS_ACCESS_KEY_ID / etc.).
+
+    When no neo4j password is set we DO NOT export NEO4J_PASSWORD at
+    all (rather than exporting an empty string). Cartography treats
+    unset as "no creds, use Bolt's no-auth handshake," which matches
+    a neo4j-community instance launched with NEO4J_AUTH=none.
+    Exporting an empty value would make some configs send a basic
+    auth token with an empty credential — neither the no-auth server
+    nor the auth-enabled server accepts that.
     """
     env = dict(os.environ)
     env["NEO4J_URI"] = neo4j_uri
     env["NEO4J_USER"] = neo4j_user
-    env["NEO4J_PASSWORD"] = neo4j_pass
+    if neo4j_pass:
+        env["NEO4J_PASSWORD"] = neo4j_pass
+    else:
+        env.pop("NEO4J_PASSWORD", None)
     if creds_secret:
         # If it's a multi-line .env-style block, fold every line into the
         # environment so cartography's per-cloud loaders can see them.

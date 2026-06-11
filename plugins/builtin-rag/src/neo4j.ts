@@ -86,7 +86,7 @@ async function withNeo4jDiagnostics<T>(
     if (!looksAuth) throw err;
     const secretHint = client.hasSecret
       ? `password resolved through SecretProvider as user="${client.username}" but neo4j rejected it — verify the secret value matches the server's credentials`
-      : `no secret was attached to this connection — set secretRefKey on connection "${client.slug}" to the logical key of a managed secret holding the password (or a {"username","password"} JSON blob)`;
+      : `no secret was attached, so we tried Bolt's no-auth handshake — the server is refusing it, which means it requires authentication. Set secretRefKey on connection "${client.slug}" to the logical key of a managed secret holding the password (or a {"username","password"} JSON blob), or relaunch neo4j with NEO4J_AUTH=none for an anonymous install`;
     const wrapped = new Error(
       `neo4j auth failed on connection "${client.slug}": ${e.message ?? "unknown"}. ${secretHint}`
     );
@@ -139,31 +139,60 @@ export const neo4jConnectionDriver = defineConnectionDriverPlugin<Neo4jHandle>({
         );
       }
       const defaultUsername = opts.username ?? "neo4j";
-      const { username, password } = parseNeo4jCredentials(conn.secret, defaultUsername);
+      const hasSecret =
+        typeof conn.secret === "string" && conn.secret.trim().length > 0;
+      const { username, password } = hasSecret
+        ? parseNeo4jCredentials(conn.secret, defaultUsername)
+        : { username: defaultUsername, password: "" };
       const mod = (await import("neo4j-driver")) as {
         driver: (
           uri: string,
           authToken: unknown,
           config?: Record<string, unknown>
         ) => unknown;
-        auth: { basic: (u: string, p: string) => unknown };
+        auth: {
+          basic: (u: string, p: string) => unknown;
+          // neo4j-driver doesn't expose a dedicated `none()` factory —
+          // the canonical NoAuthToken is built via custom() with
+          // scheme="none" (matches what the server expects for
+          // anonymous Bolt handshakes against an auth-disabled
+          // community instance).
+          custom: (
+            principal: string,
+            credentials: string,
+            realm: string,
+            scheme: string
+          ) => unknown;
+        };
       };
+      // No secret on the connection row → use Bolt's NoAuthToken.
+      // This is the correct handshake for a neo4j-community instance
+      // launched with `NEO4J_AUTH=none`. The previous behaviour sent
+      // `auth.basic("neo4j", "")` which neither a no-auth server nor
+      // an auth-enabled server accepts cleanly (auth-enabled rejects
+      // empty password; some no-auth configs reject the basic scheme
+      // outright). When the operator HAS set secretRefKey, we still
+      // use basic auth — auth-enabled servers require it; no-auth
+      // servers ignore it.
+      const authToken = hasSecret
+        ? mod.auth.basic(username, password)
+        : mod.auth.custom("", "", "", "none");
       const driverInstance = mod.driver(
         opts.uri,
-        mod.auth.basic(username, password),
+        authToken,
         opts.encrypted !== undefined
           ? { encrypted: opts.encrypted ? "ENCRYPTION_ON" : "ENCRYPTION_OFF" }
           : undefined
       );
-      // Tag the handle with what we know about the credential resolution
-      // so the run-time wrapper below can re-throw auth failures with
-      // actionable context ("connection X resolved with no secret —
-      // check secretRefKey" vs "password is wrong").
+      // Tag the handle with what we know about the credential
+      // resolution so the run-time wrapper can re-throw auth failures
+      // with actionable context ("server requires auth but no secret
+      // was attached" vs "password is wrong").
       return {
         driver: driverInstance,
         database: opts.database ?? "neo4j",
         slug: conn.slug,
-        hasSecret: typeof conn.secret === "string" && conn.secret.length > 0,
+        hasSecret,
         username
       };
     },

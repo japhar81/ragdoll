@@ -495,6 +495,49 @@ test("neo4jConnectionDriver: probe routes through verifyConnectivity (driver-sha
   assert.equal(driver.verifyCalls, 1);
 });
 
+test("neo4jConnectionDriver: secret-present → basic auth, secret-absent → Bolt no-auth (community + NEO4J_AUTH=none)", async () => {
+  // The bug bulwark hit: connection rows with no secretRefKey produced
+  // `auth.basic("neo4j", "")`, which neither an auth-enabled server
+  // nor a no-auth community server accepts cleanly. The fix routes
+  // through `auth.custom("","","" ,"none")` (the canonical no-auth
+  // handshake) when the connection has no resolved secret.
+  //
+  // We exercise the REAL driver factory (not the FakeDriver stub) by
+  // calling its `create()` and inspecting the constructed handle's
+  // `hasSecret` flag — same flag the diagnostic wrapper branches on.
+  const { neo4jConnectionDriver } = await import("../src/neo4j.ts");
+  const withSecret = await neo4jConnectionDriver.driver.create({
+    id: "c-1",
+    slug: "with-secret",
+    kind: "neo4j",
+    secret: "hunter2",
+    options: { uri: "bolt://stub:7687" },
+    cascadeReason: "tenant"
+  });
+  assert.equal((withSecret as { hasSecret: boolean }).hasSecret, true);
+  const withoutSecret = await neo4jConnectionDriver.driver.create({
+    id: "c-2",
+    slug: "no-secret",
+    kind: "neo4j",
+    // no `secret` — neo4j-community with NEO4J_AUTH=none scenario
+    options: { uri: "bolt://stub:7687" },
+    cascadeReason: "tenant"
+  });
+  assert.equal((withoutSecret as { hasSecret: boolean }).hasSecret, false);
+  // Sanity-check the auth shape we picked is the one neo4j-driver
+  // recognises as NoAuth. Done once via the real package, not via the
+  // dynamic import in the driver factory.
+  const neo4j = (await import("neo4j-driver")) as {
+    auth: { custom: (p: string, c: string, r: string, s: string) => unknown };
+  };
+  const token = neo4j.auth.custom("", "", "", "none");
+  assert.deepEqual(
+    token,
+    { scheme: "none", principal: "" },
+    "auth.custom('','','' ,'none') must produce the canonical Bolt NoAuthToken"
+  );
+});
+
 test("neo4jConnectionDriver: dispose closes the underlying driver", async () => {
   resetConnectionRegistry();
   const driver = new FakeDriver();
