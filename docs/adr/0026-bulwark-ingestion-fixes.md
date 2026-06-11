@@ -74,11 +74,23 @@ instead of growing the worker image.
 - Handler raises `ValueError` on any failure (binary missing,
   non-zero exit, timeout) so the runtime surfaces the failure on the
   execution trace instead of reporting succeeded-with-failed-modules.
-- `cartography` added to `services/python-plugins/pyproject.toml`;
-  `poetry.lock` regenerated.
+- `cartography` is NOT a poetry dep of the python-plugins service. It
+  lives in `/opt/cartography-venv` built in the Dockerfile, and the
+  handler shells out to the venv's `cartography` binary. Rationale:
+  cartography's `cartography.sync` eagerly imports every cloud's intel
+  module at CLI startup. A single transitive bump (e.g.
+  `azure-mgmt-resource>=23` dropping `SubscriptionClient` from the
+  top-level namespace) bricks the entire CLI — even AWS-only crawls
+  exit 1 with an Azure ImportError. The isolated venv freezes
+  cartography's dep graph against crawl4ai / scrapy / sentence-
+  transformers and any future tool added to this image. Adding a new
+  Python-tool plugin? It gets its own `/opt/<tool>-venv`. The main
+  poetry env stays light.
 
 ADR-0022 (plugin-as-service) already pointed this direction; this is
-the first heavy tool that follows it instead of bundling.
+the first heavy tool that follows it instead of bundling, and the
+isolated-venv pattern is the load-bearing piece that lets us add more
+without dep-collision pain.
 
 ### #3 — `connections.secret_ref_id` (uuid) → `secret_ref_key` (text)
 

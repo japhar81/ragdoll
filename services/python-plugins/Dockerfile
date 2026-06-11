@@ -68,6 +68,36 @@ RUN poetry install ${POETRY_INSTALL_ARGS}
 RUN poetry run playwright install --with-deps chromium \
     && chmod -R a+rX "${PLAYWRIGHT_BROWSERS_PATH}"
 
+# --- cartography: isolated venv (ADR-0026 #2 follow-up) -------------------
+# cartography's intel package eagerly imports every cloud module
+# (azure, gcp, etc.) at CLI startup, so a single transitive bump on
+# one cloud SDK can brick the entire CLI for unrelated cloud crawls
+# (e.g. azure-mgmt-resource>=23 dropping SubscriptionClient from the
+# top-level namespace broke even AWS-only `cartography sync` runs).
+# Keeping cartography in its own venv freezes its dep graph against
+# crawl4ai / scrapy / sentence-transformers and any future tool we
+# add to this image. The handler shells out to the venv's CLI —
+# no `import cartography` from the main env.
+#
+# Pin to a release stable against the rest of the matrix; bump
+# intentionally + verify `cartography --help` in the new image before
+# merging the bump.
+ARG CARTOGRAPHY_VERSION=0.96.2
+# Pin azure-mgmt-resource alongside cartography. cartography itself
+# declares the dep loosely; the resolver picks up the latest, and
+# azure-mgmt-resource>=23 moved SubscriptionClient out of the top-
+# level namespace so cartography.intel.azure.subscription fails at
+# import — bricking the entire CLI even for AWS-only crawls. Pinning
+# to 22.x keeps the import surface stable. Re-evaluate when bumping
+# CARTOGRAPHY_VERSION (newer releases may move to the new namespace).
+ARG AZURE_MGMT_RESOURCE_PIN=22.*
+RUN python -m venv /opt/cartography-venv \
+    && /opt/cartography-venv/bin/pip install --no-cache-dir \
+         "cartography==${CARTOGRAPHY_VERSION}" \
+         "azure-mgmt-resource==${AZURE_MGMT_RESOURCE_PIN}" \
+    && /opt/cartography-venv/bin/cartography --help >/dev/null \
+    && chmod -R a+rX /opt/cartography-venv
+
 # Source last so edits only rebuild this cheap layer.
 COPY services/python-plugins/app ./app
 
