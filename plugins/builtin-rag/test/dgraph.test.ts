@@ -309,6 +309,40 @@ test("DgraphStore: query body includes $tenant_id variable + surfaces errors", a
   );
 });
 
+test("DgraphStore: query against an empty graph returns the empty data block (no throw)", async () => {
+  // First-run contract: a tenant that has NEVER ingested anything queries
+  // the graph; Dgraph returns `{data: {q: []}}` natively (predicates may
+  // exist but no nodes match — or, on a fresh schema, the predicate has
+  // never been set). The store must surface that as an empty result, not
+  // mistake it for an error. This locks in the parallel of the vector
+  // + opensearch first-run-returns-empty contract.
+  const store = new DgraphStore({
+    url: "http://test:8080",
+    fetchImpl: (async () =>
+      new Response(JSON.stringify({ data: { q: [] } }), { status: 200 })) as unknown as typeof fetch
+  });
+  const result = await store.query({
+    tenantId: "fresh-tenant",
+    query: "{ q(func: eq(doc_id, \"never-ingested\")) { uid } }"
+  });
+  assert.deepEqual(result, { q: [] });
+});
+
+test("DgraphStore: query against a tenant with no nodes returns empty (no errors block)", async () => {
+  // Even if the schema declares a predicate (so the query parses), a
+  // tenant that hasn't ingested any nodes still gets back an empty
+  // array — NOT an error. The store passes that through unchanged.
+  const store = new DgraphStore({
+    url: "http://test:8080",
+    fetchImpl: (async () =>
+      new Response(JSON.stringify({ data: {} }), { status: 200 })) as unknown as typeof fetch
+  });
+  // No matching node-set => Dgraph may return `{data: {}}` (the named
+  // query block was empty). Our store returns the empty data object.
+  const result = await store.query({ tenantId: "t-x", query: "{ q { uid } }" });
+  assert.deepEqual(result, {});
+});
+
 test("DgraphStore: deleteByTenant issues an upsert mutation scoped to tenant_id", async () => {
   let bodySeen: unknown;
   const store = new DgraphStore({

@@ -165,6 +165,24 @@ test("dataset_search: refuses to run without a dataset", async () => {
   );
 });
 
+test("dataset_search: returns empty documents on a fresh dataset (no upsert has happened)", async () => {
+  // First-run contract: a retrieval-only pipeline pointed at a dataset
+  // BEFORE any ingest has populated the backing store must return an
+  // empty document list — NOT throw "collection doesn't exist". This is
+  // the retrieval-side parallel of the qdrant_delete fix; the same
+  // semantic ("first run is a clean state") must hold for queries too.
+  resetInMemoryVectorStore();
+  // NOTE: no datasetUpsertPlugin pre-seed — the collection genuinely
+  // does not exist in the in-memory store.
+  const result = await runPlugin({
+    plugin: datasetSearchPlugin,
+    inputs: { queryVector: [1, 0, 0] },
+    config: { topK: 5, modality: "vector" },
+    dataset: fakeDataset()
+  });
+  assert.deepEqual(result.outputs.documents, []);
+});
+
 test("dataset_upsert: refuses to run without a dataset", async () => {
   await assert.rejects(
     () =>
