@@ -149,6 +149,55 @@ export function registerPipelinesRoutes(
     return ok(validatePipelineSpec(spec, deps.pluginRegistry));
   });
 
+  // ---- per-pipeline validation (server-fetched spec) --------------------
+  // Same envelope POST /api/pipelines/validate returns, but for an
+  // already-provisioned pipeline — no need to resend the spec. Picks the
+  // latest version by default; ?version=X.Y.Z pins to a specific one.
+  // Surfaces the SAME validation issues the Builder lights badges from
+  // (errors, warnings, missingPlugins, requiredSecrets/Config, datasetSlots)
+  // so a provisioning script can detect problems without round-tripping
+  // through the builder UI.
+  api.route("GET", "/api/pipelines/:id/validation", async (ctx) => {
+    enforce(ctx.principal, "execution:view_logs");
+    const pipeline = await resolvePipelineRef(deps.pipelines, ctx.params.id);
+    if (isAppResponse(pipeline)) return pipeline;
+    const versionParam = ctx.request.query.version;
+    let row: PipelineVersionRow | undefined;
+    if (typeof versionParam === "string" && versionParam.length > 0) {
+      row = await deps.pipelineVersions.findByVersion(pipeline.id, versionParam);
+      if (!row) {
+        return error(404, "not_found", {
+          message: `version "${versionParam}" not found on pipeline ${pipeline.slug}`
+        });
+      }
+    } else {
+      // Latest version. Prefer the pipeline's pinned `latestVersionId` when
+      // set; fall back to the most-recently-created row so a brand-new
+      // pipeline that hasn't had its pointer backfilled yet still validates.
+      const rows = await deps.pipelineVersions.listByPipeline(pipeline.id);
+      if (rows.length === 0) {
+        return error(404, "not_found", {
+          message: `pipeline ${pipeline.slug} has no saved versions to validate`
+        });
+      }
+      row =
+        (pipeline.latestVersionId
+          ? rows.find((r) => r.id === pipeline.latestVersionId)
+          : undefined) ?? rows[rows.length - 1];
+    }
+    const validation = validatePipelineSpec(
+      row.spec as PipelineSpec,
+      deps.pluginRegistry
+    );
+    return ok({
+      pipelineId: pipeline.id,
+      pipelineSlug: pipeline.slug,
+      version: row.version,
+      versionId: row.id,
+      ...validation
+    });
+  });
+
   // ---- pipeline versions --------------------------------------------------
   api.route("GET", "/api/pipelines/:id/versions", async (ctx) => {
     enforce(ctx.principal, "execution:view_logs");
