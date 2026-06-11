@@ -106,10 +106,11 @@ export class PostgresConnectionRepository
   async listVisibleAt(args: {
     tenantId?: string;
     environmentId?: string;
+    includeArchived?: boolean;
   }): Promise<T.ConnectionRow[]> {
     return this.queryRows(
       `SELECT * FROM connections
-       WHERE archived_at IS NULL
+       WHERE (${args.includeArchived ? "TRUE" : "archived_at IS NULL"})
          AND (
            scope = 'global'
            OR (scope = 'tenant' AND tenant_id = $1)

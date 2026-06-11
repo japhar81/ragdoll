@@ -136,9 +136,20 @@ export function registerConnectionsRoutes(
     const tenantId = tenantScope(ctx);
     const envHeader = ctx.request.headers["x-ragdoll-env"];
     const envId = typeof envHeader === "string" ? envHeader : undefined;
+    // Default still hides archived (so legacy callers / cascade-resolve
+    // paths keep clean lists); the admin screen opts in with
+    // ?include_archived=true so its "show archived" toggle has rows to
+    // reveal. Loose truthy parse — "1" / "true" / "yes" all count.
+    const raw = ctx.request.query.include_archived;
+    const includeArchived =
+      typeof raw === "string" && /^(1|true|yes)$/i.test(raw);
     const rows = tenantId
-      ? await connections.listVisibleAt({ tenantId, environmentId: envId })
-      : await connections.listAll({ scope: "global" });
+      ? await connections.listVisibleAt({
+          tenantId,
+          environmentId: envId,
+          includeArchived
+        })
+      : await connections.listAll({ scope: "global", includeArchived });
     return ok({ connections: rows.map(publicConnection) });
   });
 

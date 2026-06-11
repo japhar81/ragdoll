@@ -878,10 +878,19 @@ export const api = {
   // the old per-tenant `datasource_connections` surface AND the
   // ADR-0021 `external_connections` surface — both folded into this
   // unified shape.
-  listConnections: (filter: { tenantId?: string; environmentId?: string } = {}) =>
+  listConnections: (
+    filter: {
+      tenantId?: string;
+      environmentId?: string;
+      // Opt-in for the admin screen. Default false matches the cascade-
+      // resolve callers (datasets / pipeline binding lookup) which must
+      // never see archived rows.
+      includeArchived?: boolean;
+    } = {}
+  ) =>
     request<{ connections: ConnectionView[] }>(
       "GET",
-      "/api/connections",
+      `/api/connections${filter.includeArchived ? "?include_archived=true" : ""}`,
       undefined,
       {
         ...(filter.tenantId ? { "x-tenant-id": filter.tenantId } : {}),

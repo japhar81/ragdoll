@@ -286,11 +286,21 @@ export function ConnectionsScreen() {
   // Connections visible at this scope (cascade: globals + tenant +
   // env-scoped per the API's listVisibleAt rule).
   const connections = useQuery({
-    queryKey: ["connections", ctx.tenantId ?? "global", ctx.envId ?? ""],
+    // showArchived in the key so toggling re-fetches — the server hides
+    // archived rows by default and only includes them when the screen
+    // opts in. Without this key segment, react-query would serve the
+    // cached archived-less list when the user flips the toggle on.
+    queryKey: [
+      "connections",
+      ctx.tenantId ?? "global",
+      ctx.envId ?? "",
+      showArchived ? "with-archived" : "active-only"
+    ],
     queryFn: () =>
       api.listConnections({
         tenantId: ctx.tenantId,
-        environmentId: ctx.envId
+        environmentId: ctx.envId,
+        includeArchived: showArchived
       })
   });
   const kinds = useQuery({

@@ -442,10 +442,15 @@ export interface ConnectionRepository {
     tenantId?: string;
     environmentId?: string;
   }): Promise<ConnectionRow | undefined>;
-  /** Connections visible at a scope after the cascade. */
+  /** Connections visible at a scope after the cascade.
+   *  `includeArchived` defaults false — the cascade-resolve path
+   *  (datasets / pipeline binding lookup) must never surface
+   *  archived rows. The admin Connections screen opts in by
+   *  passing true so operators can find rows to unarchive / nuke. */
   listVisibleAt(args: {
     tenantId?: string;
     environmentId?: string;
+    includeArchived?: boolean;
   }): Promise<ConnectionRow[]>;
   /** Admin filter — used by the listing screen. */
   listAll(filter?: {
