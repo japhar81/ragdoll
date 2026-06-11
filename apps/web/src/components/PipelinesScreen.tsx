@@ -10,6 +10,7 @@ import {
   type TenantPipelinesResult
 } from "../lib/orgtree.ts";
 import { Screen } from "./Screen.tsx";
+import { CascadeDeleteModal } from "./CascadeDeleteModal.tsx";
 import type { EditingPipeline } from "../App.tsx";
 import type { PipelineVersionRow } from "../lib/api.ts";
 import type { DatasetSlotRef, PipelineSpec } from "../lib/types.ts";
@@ -180,6 +181,14 @@ export function PipelinesScreen(props: {
   const qc = useQueryClient();
   const [revisionsFor, setRevisionsFor] = useState<PipelineLike | undefined>();
   const [banner, setBanner] = useState<string | undefined>();
+  // Cascade-delete modal targets — set to a {kind, id, label} when the
+  // user clicks a delete affordance. The modal owns the 409-rehydrate
+  // round-trip; we just call api.delete<X> with `{force}` on demand.
+  const [deleteTarget, setDeleteTarget] = useState<
+    | { kind: "folder"; id: string; label: string }
+    | { kind: "pipeline"; id: string; label: string }
+    | undefined
+  >(undefined);
 
   // Run target — shared by the per-row "Run" button and (later) the Run-All
   // flow. Tenant + env default to the demo wiring so the bundled pipelines
@@ -412,19 +421,11 @@ export function PipelinesScreen(props: {
     },
     onError: (e) => setBanner(errText(e))
   });
-  const deleteFolder = useMutation({
-    mutationFn: (id: string) => api.deleteFolder(id),
-    onSuccess: () => {
-      setBanner(undefined);
-      invalidate();
-    },
-    onError: (e) =>
-      setBanner(
-        e instanceof ApiError && e.status === 409
-          ? "Folder not empty — move or delete its pipelines/sub-folders first."
-          : errText(e)
-      )
-  });
+  // Folder + pipeline delete is now routed through CascadeDeleteModal,
+  // which handles the cascade-confirm UX. The mutation here is kept
+  // only for the success/invalidate side; the actual delete call goes
+  // through `doDelete` in the modal so the 409 envelope flows back
+  // into the dependents prompt.
   const createPipeline = useMutation({
     mutationFn: (input: { name: string; slug: string; folderId: string | null }) =>
       api.createPipeline(input),
@@ -452,9 +453,14 @@ export function PipelinesScreen(props: {
     }
   }
   function onDeleteFolder(node: FolderTreeNode) {
-    if (window.confirm(`Delete folder "${node.name}"?`)) {
-      deleteFolder.mutate(node.id);
-    }
+    setDeleteTarget({ kind: "folder", id: node.id, label: `folder "${node.name}"` });
+  }
+  function onDeletePipeline(p: PipelineLike) {
+    setDeleteTarget({
+      kind: "pipeline",
+      id: p.id,
+      label: `pipeline "${p.name}"`
+    });
   }
 
   function PipelineRow(props2: { p: PipelineLike }) {
@@ -486,6 +492,13 @@ export function PipelinesScreen(props: {
           </button>
           <button className="link-btn" onClick={() => setRevisionsFor(p)}>
             Revisions
+          </button>
+          <button
+            className="link-btn danger"
+            onClick={() => onDeletePipeline(p)}
+            title="Delete this pipeline. Refuses if anything points at it; you'll get the option to cascade."
+          >
+            Delete
           </button>
         </span>
       </li>
@@ -658,6 +671,31 @@ export function PipelinesScreen(props: {
           onConfirm={doRunAll}
         />
       )}
+      <CascadeDeleteModal
+        open={deleteTarget !== undefined}
+        resourceLabel={deleteTarget?.label ?? ""}
+        description={
+          deleteTarget?.kind === "folder"
+            ? "Deleting a folder with pipelines or sub-folders inside is rejected by default; force-delete cascades through the entire sub-tree."
+            : deleteTarget?.kind === "pipeline"
+              ? "Deleting a pipeline with deployments / activations / schedules is rejected by default; force-delete cascades through them via the FK chain."
+              : undefined
+        }
+        doDelete={async ({ force }) => {
+          if (!deleteTarget) return;
+          if (deleteTarget.kind === "folder") {
+            await api.deleteFolder(deleteTarget.id, { force });
+          } else {
+            await api.deletePipeline(deleteTarget.id, { force });
+          }
+        }}
+        onDeleted={() => {
+          setBanner(undefined);
+          setDeleteTarget(undefined);
+          invalidate();
+        }}
+        onClose={() => setDeleteTarget(undefined)}
+      />
     </Screen>
   );
 }

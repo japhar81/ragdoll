@@ -39,6 +39,7 @@ import { useTenants } from "./useTenants.tsx";
 import { useEnvironments } from "./useEnvironments.tsx";
 import { useAuth } from "../auth/AuthContext.tsx";
 import { Screen } from "./Screen.tsx";
+import { CascadeDeleteModal } from "./CascadeDeleteModal.tsx";
 import { ScopeTree } from "./ConfigScreen.tsx";
 
 type Scope = "global" | "tenant" | "environment";
@@ -646,6 +647,11 @@ function DatasetDetail(props: {
   });
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [showVersions, setShowVersions] = useState(false);
+  // Hard delete is separate from archive — archive flips a flag, delete
+  // removes the row + cascades versions/aliases. The modal handles
+  // refuse-on-used-by with the pipelineReferences count from the same
+  // walk GET /:id/used-by uses.
+  const [deleteOpen, setDeleteOpen] = useState(false);
   return (
     <section className="settings-card" style={{ marginTop: 16, padding: 16 }}>
       <header
@@ -667,15 +673,35 @@ function DatasetDetail(props: {
           )}
         </div>
         {props.canAdmin && (
-          <button
-            className="link-btn"
-            onClick={() => archive.mutate()}
-            disabled={archive.isPending}
-          >
-            {props.dataset.archivedAt ? "Unarchive" : "Archive"}
-          </button>
+          <div style={{ display: "flex", gap: 12 }}>
+            <button
+              className="link-btn"
+              onClick={() => archive.mutate()}
+              disabled={archive.isPending}
+            >
+              {props.dataset.archivedAt ? "Unarchive" : "Archive"}
+            </button>
+            <button
+              className="link-btn danger"
+              onClick={() => setDeleteOpen(true)}
+              title="Delete this dataset. Refuses if any pipeline spec references the slug; force-delete cascades versions/aliases (pipeline references become dangling, operator opt-in)."
+            >
+              Delete
+            </button>
+          </div>
         )}
       </header>
+      <CascadeDeleteModal
+        open={deleteOpen}
+        resourceLabel={`dataset "${props.dataset.slug}"`}
+        description="Deleting a dataset is rejected by default when any pipeline references its slug. Force-delete cascades versions and aliases; pipeline specs that embed the slug become dangling references and fail at execute time (operator opt-in)."
+        doDelete={({ force }) => api.deleteDataset(props.dataset.id, { force })}
+        onDeleted={() => {
+          setDeleteOpen(false);
+          qc.invalidateQueries({ queryKey: ["datasets-all"] });
+        }}
+        onClose={() => setDeleteOpen(false)}
+      />
 
       <BindingsSection
         dataset={props.dataset}

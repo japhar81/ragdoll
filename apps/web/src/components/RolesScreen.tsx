@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, ApiError } from "../lib/api.ts";
 import type { RoleView } from "../lib/api.ts";
 import { Screen } from "./Screen.tsx";
+import { CascadeDeleteModal } from "./CascadeDeleteModal.tsx";
 
 function errText(e: unknown): string {
   if (e instanceof ApiError) {
@@ -27,10 +28,9 @@ function RoleCard(props: { role: RoleView; allPermissions: string[] }) {
     mutationFn: () => api.setRolePermissions(props.role.name, [...sel]),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["roles"] })
   });
-  const del = useMutation({
-    mutationFn: () => api.deleteRole(props.role.name),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["roles"] })
-  });
+  // Cascade-aware delete: the modal handles the 409 → dependents → force
+  // round-trip. We just pass `doDelete` and refresh on success.
+  const [deleteOpen, setDeleteOpen] = useState(false);
 
   function toggle(p: string) {
     const next = new Set(sel);
@@ -64,8 +64,7 @@ function RoleCard(props: { role: RoleView; allPermissions: string[] }) {
           {!props.role.builtin && (
             <button
               className="link-btn danger"
-              onClick={() => del.mutate()}
-              disabled={del.isPending}
+              onClick={() => setDeleteOpen(true)}
             >
               delete
             </button>
@@ -85,6 +84,17 @@ function RoleCard(props: { role: RoleView; allPermissions: string[] }) {
         ))}
       </div>
       {save.isError && <div className="error">{errText(save.error)}</div>}
+      <CascadeDeleteModal
+        open={deleteOpen}
+        resourceLabel={`role "${props.role.name}"`}
+        description="Deleting a role with active grants is rejected by default; force-delete revokes every grant holding the role first."
+        doDelete={({ force }) => api.deleteRole(props.role.name, { force })}
+        onDeleted={() => {
+          setDeleteOpen(false);
+          qc.invalidateQueries({ queryKey: ["roles"] });
+        }}
+        onClose={() => setDeleteOpen(false)}
+      />
     </div>
   );
 }

@@ -8,6 +8,7 @@ import {
 import { useTenants } from "./useTenants.tsx";
 import { useEnvironments, EnvironmentSelect } from "./useEnvironments.tsx";
 import { Screen } from "./Screen.tsx";
+import { CascadeDeleteModal } from "./CascadeDeleteModal.tsx";
 import type { ActivationRow, PipelineVersionRow } from "../lib/api.ts";
 
 function errText(e: unknown): string {
@@ -29,6 +30,12 @@ export function TenantsScreen() {
   const [slug, setSlug] = useState("");
   const [name, setName] = useState("");
   const [selected, setSelected] = useState<string | undefined>();
+  // Cascade-delete target. Set when the operator clicks Delete on a
+  // tenant card; the modal does the 409/force round-trip and the
+  // success callback clears selection + invalidates the cache.
+  const [deleteTenant, setDeleteTenant] = useState<
+    { id: string; name: string; slug: string } | undefined
+  >(undefined);
 
   const tenants = useTenants();
 
@@ -149,6 +156,15 @@ export function TenantsScreen() {
                       >
                         {isActive ? "Hide details" : "Manage"}
                       </button>
+                      <button
+                        className="link-btn danger"
+                        onClick={() =>
+                          setDeleteTenant({ id: t.id, name: t.name, slug: t.slug })
+                        }
+                        title="Delete this tenant. Refuses if pipelines / datasets / connections / envs / grants reference it; force-delete cascades all of them."
+                      >
+                        Delete
+                      </button>
                     </div>
                   </div>
                 );
@@ -205,6 +221,28 @@ export function TenantsScreen() {
           </section>
         </>
       )}
+      <CascadeDeleteModal
+        open={deleteTenant !== undefined}
+        resourceLabel={
+          deleteTenant ? `tenant "${deleteTenant.name}" (${deleteTenant.slug})` : ""
+        }
+        description="Deleting a tenant with pipelines, datasets, connections, environments, or tenant-scoped RBAC grants is rejected by default. Force-delete removes the tenant-scoped grants explicitly and lets the FK chain cascade audit_logs / usage / executions / secrets / schedules / environments / connections."
+        doDelete={({ force }) =>
+          deleteTenant ? api.deleteTenant(deleteTenant.id, { force }) : Promise.resolve()
+        }
+        onDeleted={() => {
+          // If we were viewing this tenant's details, drop the selection
+          // so the per-tenant panels disappear instead of pointing at a
+          // 404'd id.
+          if (deleteTenant && selected === deleteTenant.id) {
+            setSelected(undefined);
+            api.setTenant(undefined);
+          }
+          setDeleteTenant(undefined);
+          qc.invalidateQueries({ queryKey: ["tenants"] });
+        }}
+        onClose={() => setDeleteTenant(undefined)}
+      />
     </Screen>
   );
 }
