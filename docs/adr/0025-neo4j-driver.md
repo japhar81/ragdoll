@@ -122,16 +122,21 @@ against the bound Neo4j connection. The plugin owns:
   `SIGTERM` on timeout).
 
 Two runners:
-- `subprocess` (default) — spawns `cartography` on the worker PATH.
+- `subprocess` (default) — spawns `cartography` inside the
+  python-plugins sidecar (ADR-0026), where cartography is installed as
+  a Python dep. The Node plugin is now a thin manifest + external
+  registration; the actual handler lives in
+  `services/python-plugins/app/plugins/cartography_crawl_plugin.py`.
 - `dry-run` — returns synthetic metadata for each requested module;
   doesn't touch Neo4j or invoke the binary. Used by the offline e2e
   test and by the Builder's preview affordance.
 
-The plugin **never bundles Cartography itself**: the binary is
-installed on the worker (via `pip install cartography` or the worker
-container image). When `cartography` isn't on PATH, the subprocess
-path fails per-module with the spawn error tail surfaced in the
-metadata envelope.
+The Node side **never bundles Cartography**: the binary lives in the
+python-plugins image (declared in
+`services/python-plugins/pyproject.toml`). If the sidecar isn't
+reachable or the binary is missing, the handler raises an actionable
+error and the node fails loudly — see ADR-0026 §#2 for the rationale
+(previous behaviour silently swallowed the spawn failure).
 
 ### 5. Destructive-sync posture
 

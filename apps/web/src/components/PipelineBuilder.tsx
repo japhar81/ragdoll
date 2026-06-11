@@ -1057,6 +1057,15 @@ export function PipelineBuilder(props: {
     queryKey: ["datasets-slugs"],
     queryFn: () => api.listDatasets({})
   });
+  // Pulled alongside datasets so the validator's binding-kind check
+  // resolves a connection slug → its actual kind (not the slug-as-kind
+  // heuristic this used to apply). Without it, human-named slugs like
+  // "bulwark-wg" registered false-positive `dataset_binding_kind_mismatch`
+  // errors on pipelines whose connection was actually neo4j.
+  const connectionsForValidation = useQuery({
+    queryKey: ["connections-for-validation"],
+    queryFn: () => api.listConnections({})
+  });
   // ADR-0023: per-slug binding index for the spec validator. Walks
   // every (tenant, env) variant of the slug and merges declared
   // bindings — gives the validator the union view, so e.g. a global
@@ -1064,6 +1073,14 @@ export function PipelineBuilder(props: {
   // "vectors" even when only an env override declares "text" too.
   const datasetModalityIndex = useMemo(() => {
     if (!datasetsForValidation.data) return undefined;
+    // connection slug → kind from the loaded connection catalog. If
+    // the catalog hasn't loaded yet, the lookup returns undefined and
+    // the validator's kind check skips (degrades to "kind unknown"),
+    // matching the server's behaviour when no caller scope is set.
+    const kindBySlug = new Map<string, string>();
+    for (const c of connectionsForValidation.data?.connections ?? []) {
+      if (!kindBySlug.has(c.slug)) kindBySlug.set(c.slug, c.kind);
+    }
     const bySlug = new Map<
       string,
       Map<string, { connectionKind?: string }>
@@ -1071,18 +1088,10 @@ export function PipelineBuilder(props: {
     for (const d of datasetsForValidation.data.datasets) {
       const slugMap = bySlug.get(d.slug) ?? new Map();
       for (const [name, b] of Object.entries(d.bindings ?? {})) {
-        // The DatasetView's bindings carry the connection SLUG, not the
-        // resolved kind — the validator's kind check kicks in only when
-        // the Builder also has the connection catalog loaded. Pass
-        // through what we have; mismatch checks degrade gracefully when
-        // connectionKind is undefined (the worker re-validates).
         if (!slugMap.has(name)) slugMap.set(name, {});
         const existing = slugMap.get(name)!;
         if (!existing.connectionKind && b.connection) {
-          // Heuristic: the connection slug often matches the kind for
-          // bundled connections (qdrant slug → qdrant kind). When it
-          // doesn't, the worker still catches the mismatch at execute.
-          existing.connectionKind = b.connection;
+          existing.connectionKind = kindBySlug.get(b.connection);
         }
       }
       bySlug.set(d.slug, slugMap);
@@ -1094,7 +1103,7 @@ export function PipelineBuilder(props: {
       for (const [name, info] of slugMap.entries()) bindings[name] = info;
       return { bindings };
     };
-  }, [datasetsForValidation.data]);
+  }, [datasetsForValidation.data, connectionsForValidation.data]);
 
   const validation = useMemo(() => {
     // Skip validation while the plugin list is still loading — otherwise

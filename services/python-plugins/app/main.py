@@ -28,10 +28,16 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 
 from app.connect_bridge import build_connect_app
 from app.models import ExecuteRequest
-from app.plugins import crawl4ai_plugin, rerank_bge_plugin, scrapy_plugin
+from app.plugins import (
+    cartography_crawl_plugin,
+    crawl4ai_plugin,
+    rerank_bge_plugin,
+    scrapy_plugin,
+)
 
 # plugin.id -> handler(ExecuteRequest) -> dict with outputs/usage/metadata
 HANDLERS: Dict[str, Callable[[ExecuteRequest], Dict[str, Any]]] = {
+    cartography_crawl_plugin.PLUGIN_ID: cartography_crawl_plugin.handle,
     crawl4ai_plugin.PLUGIN_ID: crawl4ai_plugin.handle,
     rerank_bge_plugin.PLUGIN_ID: rerank_bge_plugin.handle,
     scrapy_plugin.PLUGIN_ID: scrapy_plugin.handle,

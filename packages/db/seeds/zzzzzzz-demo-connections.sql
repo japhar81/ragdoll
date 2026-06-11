@@ -32,7 +32,7 @@
 
 INSERT INTO connections
   (id, scope, tenant_id, environment_id, slug, display_name,
-   kind, secret_ref_id, config, allowed_hosts, deny_private_networks)
+   kind, secret_ref_key, config, allowed_hosts, deny_private_networks)
 VALUES
   (
     '00000000-0000-0000-0000-0000000c0001'::uuid,

@@ -25,6 +25,11 @@ export class InMemoryConnectionRepository implements T.ConnectionRepository {
     }
     for (const existing of this.rows.values()) {
       if (existing.slug !== row.slug || existing.scope !== row.scope) continue;
+      // Mirror migration 022 partial-unique change: archived rows do
+      // NOT reserve the slug. Re-creating with the same slug after a
+      // soft-archive must succeed (operator's normal "I deleted it,
+      // now I want to re-create it" flow).
+      if (existing.archivedAt) continue;
       const sameTenant = (existing.tenantId ?? null) === (row.tenantId ?? null);
       const sameEnv =
         (existing.environmentId ?? null) === (row.environmentId ?? null);

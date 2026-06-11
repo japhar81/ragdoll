@@ -35,7 +35,7 @@ export interface ResolvedExternalConnection {
   slug: string;
   kind: string;
   /** Resolved credential payload (DSN, mongo URI, ClickHouse password, …).
-   *  `undefined` when the connection row has no `secretRefId` — the
+   *  `undefined` when the connection row has no `secretRefKey` — the
    *  driver may still construct a client from `options` alone for
    *  no-auth or env-defaulting backends. */
   secret?: string;
@@ -65,15 +65,15 @@ export class ExternalConnectionResolver {
     const row = await this.repo.resolveSlug(args);
     if (!row) return undefined;
     let secret: string | undefined;
-    if (row.secretRefId) {
+    if (row.secretRefKey) {
       try {
         secret = await this.secrets.get(
           // SecretRef shape expected by SecretProvider. The connection's
-          // secretRefId is a key into the tenant's secret store.
+          // secretRefKey is a key into the tenant's secret store.
           {
             scope: row.tenantId ? "tenant" : "global",
             tenantId: row.tenantId ?? undefined,
-            key: row.secretRefId
+            key: row.secretRefKey
           },
           row.tenantId ?? args.tenantId ?? ""
         );
@@ -159,7 +159,7 @@ export interface ConnectionDriverManifest {
   description?: string;
   /** JSON-schema-like shape for the per-kind config form (host, port,
    *  database, TLS verify, etc.). Secrets DO NOT appear here — they're
-   *  referenced via `secretRefId` on the connection row. */
+   *  referenced via `secretRefKey` on the connection row. */
   configSchema: ConnectionConfigSchema;
   /** Optional schema describing the expected resolved-secret shape
    *  (string DSN vs split-creds object). UI hint only. */

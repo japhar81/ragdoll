@@ -239,6 +239,11 @@ export function buildApiDatasetResolver(
     datasetVersions: deps.datasetVersions,
     datasetAliases: deps.datasetAliases,
     connections: deps.connections,
+    // Resolver needs the SecretProvider to attach binding-connection
+    // credentials at resolve time. Without this, neo4j/postgres/mongo
+    // drivers see `secret: undefined` and auth fails even though
+    // /probe on the same connection succeeds.
+    secrets: deps.secretProvider,
     pipelineDatasetBindings: deps.pipelineDatasetBindings,
     tenants: deps.tenants,
     environments: deps.environments

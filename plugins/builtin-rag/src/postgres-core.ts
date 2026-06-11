@@ -207,7 +207,7 @@ export async function getPoolForConnection(
   }
   if (!connection.secret) {
     throw new Error(
-      `postgres-core: connection "${connection.slug}" has no resolved secret (set the connection's secretRefId to a managed DSN).`
+      `postgres-core: connection "${connection.slug}" has no resolved secret (set the connection's secretRefKey to a managed DSN).`
     );
   }
   ensureShutdownHook();

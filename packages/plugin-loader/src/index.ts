@@ -16,6 +16,7 @@ import {
 } from "../../external-connections/src/index.ts";
 import * as builtinRagModule from "../../../plugins/builtin-rag/src/index.ts";
 import * as sampleTextModule from "../../../plugins/sample-text/index.ts";
+import { cartographyCrawlManifest } from "../../../plugins/builtin-rag/src/cartography.ts";
 
 /**
  * The set of plugin module namespaces we scan for `InProcessPlugin` exports.
@@ -209,18 +210,30 @@ function registerExternalPlugins(registry: PluginRegistry): void {
   const baseUrl = process.env.PYTHON_PLUGIN_URL;
   if (!baseUrl) return;
   const timeoutMs = Number(process.env.PYTHON_PLUGIN_TIMEOUT_MS ?? 300000);
-  for (const manifest of [CRAWL4AI_MANIFEST, SCRAPY_MANIFEST]) {
+  // cartography_crawl gets a longer timeout because real cloud crawls
+  // routinely run for tens of minutes (default 30 from the manifest);
+  // the per-invocation Connect call needs to outlive the cartography
+  // CLI itself. The handler still enforces its own `config.timeoutMs`
+  // server-side — this is just the wire deadline.
+  const cartographyTimeoutMs = Number(
+    process.env.PYTHON_PLUGIN_CARTOGRAPHY_TIMEOUT_MS ?? 1_800_000
+  );
+  const externalRegistrations: Array<{ manifest: PluginManifest; timeoutMs: number }> = [
+    { manifest: CRAWL4AI_MANIFEST, timeoutMs },
+    { manifest: SCRAPY_MANIFEST, timeoutMs },
+    { manifest: cartographyCrawlManifest, timeoutMs: cartographyTimeoutMs }
+  ];
+  for (const { manifest, timeoutMs: perPluginTimeout } of externalRegistrations) {
     const registered: RegisteredPlugin = {
       mode: "external",
       manifest,
       external: {
-        // Connect transport (default). The crawl4ai sidecar will dual-host
-        // Connect endpoints alongside its legacy FastAPI routes in Phase B;
-        // until then the runtime still talks JSON-over-HTTP, just through the
-        // PluginRuntime service contract. `protocol: "connect"` is the default
-        // and is omitted; httpVersion stays at 1.1 for compatibility.
+        // Connect transport (default). httpVersion stays at 1.1 for
+        // compatibility with the python-plugins sidecar's hypercorn
+        // setup; bump to "2" once we standardise on h2 across the
+        // python service.
         baseUrl,
-        timeoutMs
+        timeoutMs: perPluginTimeout
       }
     };
     registry.register(registered);

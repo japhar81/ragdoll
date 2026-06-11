@@ -21,9 +21,12 @@ export class InMemoryDatasetRepository implements T.DatasetRepository {
       throw new ConflictError("dataset", `id already exists: ${row.id}`);
     }
     // Enforce slug uniqueness within scope — same invariant the SQL
-    // migration installs as three partial unique indexes.
+    // migration installs as three partial unique indexes (migration 022
+    // makes those archive-aware, and this in-memory check mirrors it).
     for (const existing of this.rows.values()) {
       if (existing.slug !== row.slug || existing.scope !== row.scope) continue;
+      // Archived rows don't reserve the slug — operator can re-create.
+      if (existing.archivedAt) continue;
       const sameTenant = (existing.tenantId ?? null) === (row.tenantId ?? null);
       const sameEnv =
         (existing.environmentId ?? null) === (row.environmentId ?? null);

@@ -38,19 +38,86 @@ import {
   trackFolder
 } from "../pipeline-resolution.ts";
 import type { AppDeps } from "../types.ts";
-import type { RouteRegistry, AuditWriter } from "./types.ts";
+import type { RouteRegistry, AuditWriter, RouteContext } from "./types.ts";
+import type {
+  DatasetRow,
+  ConnectionRow
+} from "../../../../../packages/db/src/index.ts";
+import type { DatasetBindingIndex } from "../../../../../packages/pipeline-spec/src/index.ts";
 
 interface PipelinesServices {
   deps: AppDeps;
   audit: AuditWriter;
   pipelineFolders: PipelineFolderRepository;
+  /** Same helper every other route uses to extract the caller's
+   *  tenant from `x-tenant-id`. Passed in so the validate routes can
+   *  build a binding index against the datasets / connections visible
+   *  to the caller (the index drives the kind-mismatch check). */
+  tenantScope: (ctx: RouteContext) => string | undefined;
+}
+
+/**
+ * Build the {@link DatasetBindingIndex} the spec validator wants:
+ * slug → bindings → (correctly resolved) connection kind.
+ *
+ * The kind comes from the unified Connections registry — looking up
+ * each binding's connection SLUG against the loaded connection rows.
+ * The Builder used to put the slug into `connectionKind` (heuristic
+ * that worked for bundled kinds like "qdrant" but fired false-positive
+ * mismatches for human-named slugs like "bulwark-wg"). Doing this on
+ * the server is straightforward — we have the DB.
+ *
+ * `tenantId` / `environmentId` scope the visibility — same cascade the
+ * runtime walks at execute time.
+ */
+async function buildBindingIndex(
+  deps: AppDeps,
+  scope: { tenantId?: string; environmentId?: string }
+): Promise<DatasetBindingIndex | undefined> {
+  if (!deps.datasets || !deps.connections) return undefined;
+  const datasets: DatasetRow[] = scope.tenantId
+    ? await deps.datasets.listVisibleAt(scope)
+    : await deps.datasets.listAll({ scope: "global" });
+  const connections: ConnectionRow[] = scope.tenantId
+    ? await deps.connections.listVisibleAt({
+        tenantId: scope.tenantId,
+        environmentId: scope.environmentId
+      })
+    : await deps.connections.listAll({ scope: "global" });
+  // slug → kind lookup once. Cascade collisions (global vs tenant)
+  // are tolerated — we keep the first hit and the runtime cascade
+  // walks the same order at execute time.
+  const kindBySlug = new Map<string, string>();
+  for (const c of connections) {
+    if (!kindBySlug.has(c.slug)) kindBySlug.set(c.slug, c.kind);
+  }
+  const bySlug = new Map<string, Record<string, { connectionKind?: string }>>();
+  for (const d of datasets) {
+    const declared = (d.bindings ?? {}) as Record<
+      string,
+      { connection?: string } | undefined
+    >;
+    const merged = bySlug.get(d.slug) ?? {};
+    for (const [name, b] of Object.entries(declared)) {
+      if (!b) continue;
+      if (!merged[name]) merged[name] = {};
+      if (!merged[name].connectionKind && typeof b.connection === "string") {
+        merged[name].connectionKind = kindBySlug.get(b.connection);
+      }
+    }
+    bySlug.set(d.slug, merged);
+  }
+  return (slug: string) => {
+    const bindings = bySlug.get(slug);
+    return bindings ? { bindings } : undefined;
+  };
 }
 
 export function registerPipelinesRoutes(
   api: RouteRegistry,
   svc: PipelinesServices
 ): void {
-  const { deps, audit, pipelineFolders } = svc;
+  const { deps, audit, pipelineFolders, tenantScope } = svc;
 
   // ---- pipelines ----------------------------------------------------------
   api.route("GET", "/api/pipelines", async (ctx) => {
@@ -173,7 +240,16 @@ export function registerPipelinesRoutes(
     enforce(ctx.principal, "pipeline:create");
     const spec = parseSpec(ctx.request.body);
     if (!spec) return error(422, "validation_failed", { issues: [{ message: "invalid spec" }] });
-    return ok(validatePipelineSpec(spec, deps.pluginRegistry));
+    // Build the dataset/connection binding index from the caller's
+    // tenant view so the validator catches dataset_binding_kind_mismatch
+    // (was previously skipped server-side because no index was passed —
+    // a bulwark pipeline binding a neo4j-needing node to a non-neo4j
+    // connection validated clean, then failed at execute).
+    const tenantId = tenantScope(ctx);
+    const envHeader = ctx.request.headers["x-ragdoll-env"];
+    const environmentId = typeof envHeader === "string" ? envHeader : undefined;
+    const datasetIndex = await buildBindingIndex(deps, { tenantId, environmentId });
+    return ok(validatePipelineSpec(spec, deps.pluginRegistry, datasetIndex));
   });
 
   // ---- per-pipeline validation (server-fetched spec) --------------------
@@ -212,9 +288,18 @@ export function registerPipelinesRoutes(
           ? rows.find((r) => r.id === pipeline.latestVersionId)
           : undefined) ?? rows[rows.length - 1];
     }
+    // Use the caller's tenant scope (already enforced above) to build
+    // the same binding index POST /validate uses, so a provisioning
+    // script polling this endpoint sees the dataset_binding_kind_mismatch
+    // error as soon as it appears — not at run time.
+    const tenantId = tenantScope(ctx);
+    const envHeader = ctx.request.headers["x-ragdoll-env"];
+    const environmentId = typeof envHeader === "string" ? envHeader : undefined;
+    const datasetIndex = await buildBindingIndex(deps, { tenantId, environmentId });
     const validation = validatePipelineSpec(
       row.spec as PipelineSpec,
-      deps.pluginRegistry
+      deps.pluginRegistry,
+      datasetIndex
     );
     return ok({
       pipelineId: pipeline.id,

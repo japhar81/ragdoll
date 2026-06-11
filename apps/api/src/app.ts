@@ -480,7 +480,7 @@ export function createApp(deps: AppDeps): App {
 
   registerTenantsRoutes({ route }, { deps, audit, environments, rbacPolicies });
 
-  registerPipelinesRoutes({ route }, { deps, audit, pipelineFolders });
+  registerPipelinesRoutes({ route }, { deps, audit, pipelineFolders, tenantScope });
   registerFoldersRoutes({ route }, { pipelineFolders, pipelines: deps.pipelines, audit });
 
 

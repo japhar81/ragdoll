@@ -397,8 +397,10 @@ export interface ProviderModelRow {
  *  - `kind` is the open-ended driver identifier (was `datasourceType`).
  *    See ADR-0024 — kinds are themselves plugins.
  *  - `config` is per-kind non-secret config (was `configRedacted`).
- *  - `secretRefId` points into managed secrets — value never travels
- *    on the connection row.
+ *  - `secretRefKey` is the LOGICAL key the runtime resolves through
+ *    the SecretProvider (matches `secret_refs.logical_key`). The
+ *    column is plain `text` so operators can use any handle the
+ *    secrets backend accepts (no longer forced to be a UUID).
  */
 export interface ConnectionRow {
   id: UUID;
@@ -415,7 +417,10 @@ export interface ConnectionRow {
    *  declares which kinds are known + their config schemas. */
   kind: string;
   config: Record<string, unknown>;
-  secretRefId?: UUID | null;
+  /** Logical key into the SecretProvider (matches
+   *  `secret_refs.logical_key`). Null when the connection has no
+   *  credential (no-auth backends). */
+  secretRefKey?: string | null;
   /** SSRF guardrail — empty array means "no restriction." */
   allowedHosts: string[];
   /** SSRF guardrail — when true, requests to RFC-1918 / link-local
