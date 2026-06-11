@@ -54,6 +54,20 @@ export { githubSourcePlugin } from "./github.ts";
 // contract: 2 and declare datasetModalities: ["graph"] so the
 // Builder picker filters to graph-enabled datasets.
 export { dgraphUpsertPlugin, dgraphQueryPlugin, dgraphDeletePlugin } from "./dgraph.ts";
+// Neo4j family (ADR-0025) — sibling to dgraph, fills the "graph" binding
+// for property-graph use cases. `neo4jConnectionDriver` is the ADR-0024
+// connection-driver plugin the loader scan picks up; `neo4j_query` +
+// `neo4j_write` consume it via the dataset's `graph` binding.
+export {
+  neo4jConnectionDriver,
+  neo4jQueryPlugin,
+  neo4jWritePlugin
+} from "./neo4j.ts";
+// cartography_crawl (ADR-0025) — third crawler block beside crawl4ai +
+// scrapy. Launches Cartography against the `target` binding (a neo4j
+// connection bulwark-or-equivalent provides per-run); never bundles
+// Cartography itself.
+export { cartographyCrawlPlugin } from "./cartography.ts";
 // Data-shaping plugins (JSONata/JMESPath transform + XML codec) live in their
 // own module; re-exported so the plugin-loader's namespace scan registers
 // them alongside the rest.
