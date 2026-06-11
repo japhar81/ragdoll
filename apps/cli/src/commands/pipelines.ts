@@ -9,6 +9,7 @@
 import type { Command } from "commander";
 import { readFile } from "node:fs/promises";
 import { api, emit, fail, type Ctx } from "../ctx.ts";
+import { runDelete } from "../cascade.ts";
 
 async function readJsonArg(arg: string): Promise<unknown> {
   if (!arg) return undefined;
@@ -54,14 +55,12 @@ export function registerPipelines(program: Command, ctx: Ctx): void {
       }
     });
 
-  p.command("delete <id>").action(async (id: string) => {
-    try {
-      await api(ctx, "DELETE", `/api/pipelines/${id}`);
+  p.command("delete <id>")
+    .option("--force", "Cascade-delete: every version / deployment / activation / schedule / binding override referencing this pipeline goes too (FK chain handles it). Default refuses with the dependent counts.")
+    .action(async (id: string, o: { force?: boolean }) => {
+      await runDelete(ctx, "pipelines delete", `/api/pipelines/${id}`, { force: o.force });
       emit(ctx, { ok: true });
-    } catch (e) {
-      fail(e, "pipelines delete");
-    }
-  });
+    });
 
   // ---- versions ---------------------------------------------------------
   p.command("versions <id>").action(async (id: string) => {

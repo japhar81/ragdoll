@@ -1,6 +1,7 @@
 /** `ragdoll users / roles / identity-providers ...` — access-control surface. */
 import type { Command } from "commander";
 import { api, emit, fail, type Ctx } from "../ctx.ts";
+import { runDelete } from "../cascade.ts";
 
 export function registerAccess(program: Command, ctx: Ctx): void {
   // ---- users ------------------------------------------------------------
@@ -174,13 +175,15 @@ export function registerAccess(program: Command, ctx: Ctx): void {
     });
   roles
     .command("delete <name>")
-    .action(async (name: string) => {
-      try {
-        await api(ctx, "DELETE", `/api/roles/${encodeURIComponent(name)}`);
-        emit(ctx, { ok: true });
-      } catch (e) {
-        fail(e, "roles delete");
-      }
+    .option("--force", "Cascade-delete: drop every grant holding the role first, then delete the role catalog row. Default refuses with the grant count.")
+    .action(async (name: string, o: { force?: boolean }) => {
+      await runDelete(
+        ctx,
+        "roles delete",
+        `/api/roles/${encodeURIComponent(name)}`,
+        { force: o.force }
+      );
+      emit(ctx, { ok: true });
     });
 
   // ---- identity providers ----------------------------------------------
