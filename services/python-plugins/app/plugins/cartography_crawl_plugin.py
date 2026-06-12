@@ -298,6 +298,23 @@ def handle(request) -> Dict[str, Any]:
         if isinstance(creds_secret_ref, str)
         else secrets.get("creds")
     )
+    # Surface "configured a credsSecretRef but the runtime didn't
+    # resolve it" loudly. Without this, cartography quietly runs with
+    # no AWS creds, the AWS SDK's default credential chain finds
+    # nothing in the sidecar's env, cartography exits 0 having done
+    # zero work — and the operator sees `status: "succeeded"` for a
+    # crawl that produced an empty graph. This is the most common
+    # cause of "creds are known-good but I get no data back."
+    creds_warning: Optional[str] = None
+    if isinstance(creds_secret_ref, str) and not creds_secret:
+        creds_warning = (
+            f"credsSecretRef={creds_secret_ref!r} is set in config but no "
+            f"matching entry was found in input.secrets — the spec node must "
+            f"also declare `secrets: {{ {creds_secret_ref!s}: <secret-ref> }}` "
+            f"so the runtime resolves it through the SecretProvider. "
+            f"cartography ran without cloud creds and likely scanned nothing."
+        )
+        logger.warning("cartography_crawl: %s", creds_warning)
 
     args = [cfg["_bin"], *_build_args(cfg["_modules"], cfg)]
     env = _build_env(
@@ -342,21 +359,58 @@ def handle(request) -> Dict[str, Any]:
             f"stderr tail:\n{err_tail or '<empty>'}"
         )
 
-    metadata = {
+    # Surface what cartography actually said. The CLI logs progress to
+    # stderr (boto3 calls, "Syncing X for account Y", etc.) AND a
+    # summary count when work runs. On a misconfigured run (no AWS
+    # creds → boto3 default chain finds nothing → cartography exits 0
+    # silently) the tail will explicitly show no sync activity, which
+    # is far more useful than a bare `status: "succeeded"`.
+    stdout_tail = (result.stdout or "")[-2048:]
+    stderr_tail = (result.stderr or "")[-2048:]
+    # Heuristic flag for "ran but did nothing useful." If the combined
+    # output doesn't mention any sync activity, mark each module with
+    # status "no_data" so downstream nodes and the trace UI can
+    # distinguish a genuine success from a silent no-op.
+    combined = (stdout_tail + "\n" + stderr_tail).lower()
+    looks_empty = not any(
+        marker in combined
+        for marker in ("syncing", "sync stage", "loaded", "synced", "writing")
+    )
+    module_status = "no_data" if looks_empty else "succeeded"
+
+    metadata: Dict[str, Any] = {
         "crawlId": crawl_id,
         "startedAt": started_at,
         "completedAt": completed_at,
         "mode": "subprocess",
         "target": {"connectionSlug": target_slug, "database": target_db},
         "modules": [
-            {"module": m, "status": "succeeded"} for m in cfg["_modules"]
+            {"module": m, "status": module_status} for m in cfg["_modules"]
         ],
         "exitCode": result.returncode,
+        # Tails of cartography's own logging — both stdout and stderr,
+        # capped at 2KB each so the trace stays readable. This is what
+        # the operator was reaching for when our envelope just said
+        # `status: "succeeded"` for a clearly-empty crawl.
+        "cartographyStdoutTail": stdout_tail,
+        "cartographyStderrTail": stderr_tail,
     }
+    if creds_warning:
+        metadata["credsWarning"] = creds_warning
+    if looks_empty:
+        metadata["warning"] = (
+            "cartography ran cleanly but its output shows no sync activity — "
+            "either AWS credentials didn't reach the sidecar (see "
+            "cartographyStderrTail + credsWarning if set), the account "
+            "actually has no resources, or the module selectors filtered "
+            "everything out. Real syncs typically log 'Syncing <resource> "
+            "for account <id>' lines."
+        )
     logger.info(
-        "cartography_crawl completed crawl=%s target=%s modules=%s",
+        "cartography_crawl completed crawl=%s target=%s modules=%s status=%s",
         crawl_id,
         target_slug,
         ",".join(cfg["_modules"]),
+        module_status,
     )
     return {"outputs": {"metadata": metadata}}

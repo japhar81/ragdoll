@@ -143,7 +143,14 @@ def test_subprocess_success_passes_modules_to_argv_and_neo4j_env(monkeypatch):
     def fake_run(argv: List[str], env=None, timeout=None, capture_output=False, text=False, check=False):
         captured["argv"] = argv
         captured["env"] = env
-        return _FakeCompleted(returncode=0, stdout="ok\n", stderr="")
+        # Mimic cartography's "real work" log so the empty-run heuristic
+        # marks this module as succeeded (not no_data). Real cartography
+        # writes lines like "Syncing EC2 for account 123..." to stderr.
+        return _FakeCompleted(
+            returncode=0,
+            stdout="ok\n",
+            stderr="Syncing EC2 for account 123456789012\n",
+        )
 
     monkeypatch.setattr(subprocess, "run", fake_run)
     req = _build_request(
@@ -226,6 +233,95 @@ def test_subprocess_timeout_throws(monkeypatch):
     )
     with pytest.raises(ValueError, match="timed out"):
         plugin.handle(req)
+
+
+# ---------------------------------------------------------------------------
+# diagnostic envelope: empty-run detection + creds-warning
+# ---------------------------------------------------------------------------
+
+
+def test_exit_zero_with_no_sync_output_marks_module_no_data(monkeypatch):
+    # The "creds are known-good but no data" scenario: cartography
+    # exits 0 silently because the AWS SDK default chain found nothing
+    # in the sidecar's env, so no boto3 calls happened, so no
+    # "Syncing X for account Y" lines were logged. We mark the module
+    # as no_data + attach a warning so the operator sees the cause
+    # instead of a confusing `status: "succeeded"`.
+    def fake_run(*args, **kwargs):
+        return _FakeCompleted(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    req = _build_request(
+        config={"modules": ["aws"]},
+        connection={
+            "kind": "neo4j",
+            "slug": "n",
+            "options": {"uri": "bolt://x"},
+            "secret": "neo4j:pw",
+        },
+    )
+    out = plugin.handle(req)
+    meta = out["outputs"]["metadata"]
+    assert all(m["status"] == "no_data" for m in meta["modules"])
+    assert "warning" in meta
+    assert "no sync activity" in meta["warning"]
+
+
+def test_credssecretref_set_but_missing_secret_attaches_creds_warning(monkeypatch):
+    # Bulwark's most likely real failure mode: spec sets
+    # `config.credsSecretRef` but the spec node didn't ALSO declare
+    # `secrets: { <key>: <ref> }` so the runtime never resolved the
+    # secret into input.secrets. cartography then runs with no AWS
+    # creds. Plugin attaches a credsWarning so the operator sees the
+    # provisioning gap directly on the trace.
+    def fake_run(*args, **kwargs):
+        return _FakeCompleted(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    req = _build_request(
+        config={"modules": ["aws"], "credsSecretRef": "aws-prod"},
+        connection={
+            "kind": "neo4j",
+            "slug": "n",
+            "options": {"uri": "bolt://x"},
+            "secret": "neo4j:pw",
+        },
+        # No `aws-prod` key in secrets — that's the gap.
+        secrets={},
+    )
+    out = plugin.handle(req)
+    meta = out["outputs"]["metadata"]
+    assert "credsWarning" in meta
+    assert "credsSecretRef" in meta["credsWarning"]
+    assert "aws-prod" in meta["credsWarning"]
+
+
+def test_metadata_always_carries_cartography_output_tails(monkeypatch):
+    # Even on a happy run we surface a tail of cartography's logging
+    # so the operator can correlate. Tails are capped at 2KB each.
+    def fake_run(*args, **kwargs):
+        return _FakeCompleted(
+            returncode=0,
+            stdout="hello stdout\n",
+            stderr="Syncing EC2 for account 12345\n",
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    req = _build_request(
+        config={"modules": ["aws"]},
+        connection={
+            "kind": "neo4j",
+            "slug": "n",
+            "options": {"uri": "bolt://x"},
+            "secret": "neo4j:pw",
+        },
+    )
+    out = plugin.handle(req)
+    meta = out["outputs"]["metadata"]
+    assert "cartographyStdoutTail" in meta
+    assert "cartographyStderrTail" in meta
+    assert "hello stdout" in meta["cartographyStdoutTail"]
+    assert "Syncing EC2" in meta["cartographyStderrTail"]
 
 
 # ---------------------------------------------------------------------------
