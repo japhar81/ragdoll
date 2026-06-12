@@ -677,6 +677,15 @@ export function PipelinesScreen(props: {
           environment={environment}
           targets={runAll.targets}
           busy={runBusy}
+          // In-modal tenant + env pickers, same wiring as the single-
+          // run DeployModal. Operators were missing the screen-level
+          // "Run target:" row at the bottom of the Pipelines view.
+          tenants={tenantCtx.tenants}
+          tenantsLoading={tenantCtx.isLoading}
+          onTenantChange={(id) => tenantCtx.setTenantId(id ?? "")}
+          environments={envs.data?.environments ?? []}
+          environmentsLoading={envs.isLoading}
+          onEnvironmentChange={setEnvironment}
           onClose={() => setRunAll(undefined)}
           onConfirm={doRunAll}
         />

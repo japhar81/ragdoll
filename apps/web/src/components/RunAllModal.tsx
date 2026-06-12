@@ -13,9 +13,11 @@
 import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../lib/api.ts";
-import type { DatasetView } from "../lib/api.ts";
+import type { DatasetView, TenantRow, EnvironmentRow } from "../lib/api.ts";
 import type { DatasetSlotRef } from "../lib/types.ts";
 import type { PipelineLike } from "../lib/orgtree.ts";
+import { TenantSelect } from "./useTenants.tsx";
+import { EnvironmentSelect } from "./useEnvironments.tsx";
 
 /** env > tenant > global walk — matches the runtime resolver. */
 function pickResolved(
@@ -61,6 +63,18 @@ export interface RunAllModalProps {
   onConfirm: (overrides: Map<string, Record<string, string>>) => void;
   /** Disables the confirm button while the parent is firing runs. */
   busy?: boolean;
+  /** Optional catalogs for in-modal tenant + env switching. Same
+   *  contract as DeployModal — when set, the modal renders a Target
+   *  row that lets the operator change either at the moment of Run
+   *  without closing it. The slot-resolution table re-renders against
+   *  the new target as soon as either changes. Omit either to lock
+   *  that dimension to read-only. */
+  tenants?: TenantRow[];
+  tenantsLoading?: boolean;
+  onTenantChange?: (id: string | undefined) => void;
+  environments?: EnvironmentRow[];
+  environmentsLoading?: boolean;
+  onEnvironmentChange?: (name: string) => void;
 }
 
 export function RunAllModal(props: RunAllModalProps) {
@@ -137,11 +151,63 @@ export function RunAllModal(props: RunAllModalProps) {
             close
           </button>
         </header>
+        {/* Mirror of DeployModal's in-modal picker so the operator can
+            adjust target right at the Run-all decision point. Same
+            setters the screen-level "Run target:" row drives; the slot
+            resolution table below re-renders when either changes. */}
+        {props.tenants || props.environments ? (
+          <div
+            className="inline-form"
+            style={{
+              gap: 12,
+              alignItems: "center",
+              marginTop: 4,
+              marginBottom: 8
+            }}
+          >
+            <span className="muted">Target:</span>
+            {props.tenants && props.onTenantChange ? (
+              <label style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                <span className="muted">tenant</span>
+                <TenantSelect
+                  tenants={props.tenants}
+                  value={props.tenantId ?? ""}
+                  onChange={(id) => props.onTenantChange!(id || undefined)}
+                  isLoading={props.tenantsLoading}
+                />
+              </label>
+            ) : (
+              <span>
+                tenant <code>{props.tenantSlug ?? props.tenantId ?? "—"}</code>
+              </span>
+            )}
+            {props.environments && props.onEnvironmentChange ? (
+              <label style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                <span className="muted">env</span>
+                <EnvironmentSelect
+                  environments={props.environments}
+                  value={props.environment}
+                  onChange={props.onEnvironmentChange}
+                  isLoading={props.environmentsLoading}
+                />
+              </label>
+            ) : (
+              <span>
+                env <code>{props.environment}</code>
+              </span>
+            )}
+          </div>
+        ) : (
+          <p className="muted">
+            Target: tenant{" "}
+            <code>{props.tenantSlug ?? props.tenantId ?? "—"}</code>
+            {" · "}env <code>{props.environment}</code>.
+          </p>
+        )}
         <p className="muted">
-          Target: tenant <code>{props.tenantSlug ?? props.tenantId ?? "—"}</code>
-          {" · "}env <code>{props.environment}</code>. Each pipeline's
-          dataset slugs resolve via env › tenant › global (same as the
-          runtime). Override a slot only when the default isn't right.
+          Each pipeline's dataset slugs resolve via env › tenant › global
+          (same as the runtime). Override a slot only when the default
+          isn't right.
         </p>
 
         {props.targets.length === 0 ? (
