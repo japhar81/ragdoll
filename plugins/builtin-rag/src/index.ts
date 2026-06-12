@@ -70,6 +70,15 @@ export {
 // wire it to `process.env.PYTHON_PLUGIN_URL`.
 export { cartographyCrawlManifest, CARTOGRAPHY_MODULES } from "./cartography.ts";
 export type { CartographyModule } from "./cartography.ts";
+// Wazuh (Phase 2b) — connection driver + host/agent layer pull blocks.
+// Driver owns JWT auth + refresh + verifyTls; the two pull plugins
+// (registry + per-agent syscollector) are leaf record-sources bulwark
+// composes around. NO mapping / observation / OCSF concepts here.
+export {
+  wazuhConnectionDriver,
+  wazuhAgentsPullPlugin,
+  wazuhSyscollectorPullPlugin
+} from "./wazuh.ts";
 // Data-shaping plugins (JSONata/JMESPath transform + XML codec) live in their
 // own module; re-exported so the plugin-loader's namespace scan registers
 // them alongside the rest.
