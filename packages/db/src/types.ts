@@ -783,6 +783,16 @@ export interface PipelineDeploymentRepository extends CrudRepository<PipelineDep
   ): Promise<PipelineDeploymentRow | undefined>;
   listByPipeline(pipelineId: UUID): Promise<PipelineDeploymentRow[]>;
   /**
+   * Drop every deployment row matching `(tenantId, environment)`. Used
+   * by the env-delete cascade so removing an environment doesn't leave
+   * orphan deployments referencing a missing FK target. Returns the
+   * number of rows removed. Safe to call when there are none.
+   */
+  deleteByEnvironment(
+    environment: string,
+    tenantId?: UUID | null
+  ): Promise<number>;
+  /**
    * Atomically promote `row` to be the active deployment for its
    * `(pipelineId, environment, tenantId)` triple. Re-deploying to the same
    * triple swaps the active row in place — without it, the unique constraint

@@ -51,6 +51,13 @@ ragdoll pipelines get <id-or-slug>
 ragdoll pipelines versions <id>
 ragdoll pipelines save <id> --version 1.0.0 --spec @./spec.json --publish
 ragdoll pipelines deploy <id> --version 1.0.0 --environment prod
+# Save AND deploy in one round-trip — provisioning shortcut so a clean
+# instance doesn't 409 `no_active_deployment` when the second hop is
+# missed.
+ragdoll pipelines save-and-deploy <id> --spec @./spec.json --environment prod
+# Drop a deployment by env name OR by row UUID. Required because
+# environments come and go.
+ragdoll pipelines deployment-delete <id> dev
 
 # Run a pipeline (auth'd, with input)
 ragdoll pipelines run <id> --environment prod --input '{"question":"hi"}'

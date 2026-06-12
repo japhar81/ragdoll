@@ -865,6 +865,9 @@ paths:
                 type: object
                 properties:
                   version: { $ref: "#/components/schemas/PipelineVersion" }
+                  versionLabel:
+                    type: string
+                    description: Convenience copy of version.version (the semver). Saves callers a `.version.version` dereference.
                   created: { type: boolean, const: false }
         "201":
           description: New version created (created:true), latest pointer advanced
@@ -874,8 +877,58 @@ paths:
                 type: object
                 properties:
                   version: { $ref: "#/components/schemas/PipelineVersion" }
+                  versionLabel:
+                    type: string
+                    description: Convenience copy of version.version (the semver). Saves callers a `.version.version` dereference.
                   created: { type: boolean, const: true }
         "400": { $ref: "#/components/responses/InvalidIdentifier" }
+        "404": { $ref: "#/components/responses/PipelineNotFound" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+  /api/pipelines/{pipeline_id}/save-and-deploy:
+    parameters:
+      - $ref: "#/components/parameters/PipelineRef"
+    post:
+      summary: >-
+        Atomic publish + activate. Same auto-versioned save as `/save`,
+        immediately followed by an `upsertActive` deployment row for the
+        given (environment, tenantId). Use this from provisioning
+        scripts so a clean instance can go from "I have a spec" to
+        "live in env X" in one round-trip — the two-call dance through
+        `/save` then `/deployments` was the source of a class of
+        `no_active_deployment` 409s on the second hop.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [spec, environment]
+              properties:
+                spec:
+                  description: PipelineSpec object, or a JSON/YAML spec string.
+                  oneOf:
+                    - type: object
+                    - type: string
+                level:
+                  type: string
+                  enum: [patch, minor, major]
+                  default: patch
+                environment: { type: string }
+                tenantId:
+                  type: [string, "null"]
+                  description: Tenant scope for the deployment. Null = global deployment.
+      responses:
+        "201":
+          description: Saved + deployed.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  version: { $ref: "#/components/schemas/PipelineVersion" }
+                  versionLabel: { type: string }
+                  created: { type: boolean }
+                  deployment: { type: object }
         "404": { $ref: "#/components/responses/PipelineNotFound" }
         "422": { $ref: "#/components/responses/ValidationFailed" }
   /api/pipelines/{pipeline_id}/rollback:
@@ -953,6 +1006,47 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/PipelineNotFound" }
         "422": { $ref: "#/components/responses/ValidationFailed" }
+  /api/pipelines/{pipeline_id}/deployments/{envOrId}:
+    parameters:
+      - $ref: "#/components/parameters/PipelineRef"
+      - name: envOrId
+        in: path
+        required: true
+        schema: { type: string }
+        description: >-
+          Either an environment NAME (drops every deployment of this
+          pipeline in that env — matches "stop running in dev" mental
+          model) OR a deployment row UUID (drops that single row).
+          Detected by canonical UUID shape; everything else is treated
+          as an environment name.
+      - name: tenantId
+        in: query
+        required: false
+        schema: { type: string, format: uuid }
+        description: >-
+          When `envOrId` is an environment name, narrows the delete to
+          a single tenant's deployment. Omit for the NULL-tenant /
+          global deployment row.
+    delete:
+      summary: >-
+        Delete a deployment. Required because environments come and
+        go (when a tenant removes its `dev` env, the matching
+        deployment rows would otherwise linger with no live target).
+        DELETE on the environment itself cascades through this same
+        path automatically.
+      responses:
+        "200":
+          description: Number of rows removed (and the removed row for the UUID form).
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  deleted: { type: integer }
+                  deployment: { type: object }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404":
+          description: No deployment matched the env-or-id path.
   /api/pipelines/{pipeline_id}/run:
     parameters:
       - $ref: "#/components/parameters/PipelineRef"

@@ -158,6 +158,22 @@ export class PostgresPipelineDeploymentRepository
     );
     return rowFromDb<T.PipelineDeploymentRow>(result.rows[0]);
   }
+  async deleteByEnvironment(
+    environment: string,
+    tenantId?: UUID | null
+  ): Promise<number> {
+    // NULL-safe match — a global deployment (tenant_id IS NULL) vs a
+    // per-tenant deployment for the same env name are distinct rows;
+    // we only drop the ones that share BOTH dimensions with the
+    // environment being removed.
+    const result = await this.pool.query<Record<string, unknown>>(
+      `DELETE FROM pipeline_deployments
+       WHERE environment = $1
+         AND tenant_id IS NOT DISTINCT FROM $2`,
+      [environment, tenantId ?? null]
+    );
+    return result.rowCount ?? 0;
+  }
 }
 
 /**

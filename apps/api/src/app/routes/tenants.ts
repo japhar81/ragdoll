@@ -393,6 +393,17 @@ export function registerTenantsRoutes(
     if (!before || before.tenantId !== ctx.params.id) {
       return error(404, "not_found");
     }
+    // Drop deployments referencing this environment FIRST — the
+    // pipeline_deployments.environment column FKs to environments.name,
+    // so deleting the env row would otherwise leave orphan deployment
+    // rows pointing at a missing target (or, depending on the SQL
+    // dialect, refuse the env delete entirely). Mirrors the same
+    // cascade the unified DELETE on folders / pipelines / datasets
+    // already does for their dependents.
+    const dropped = await deps.deployments.deleteByEnvironment(
+      before.name,
+      before.tenantId
+    );
     await environments.delete(ctx.params.envId);
     await audit(
       ctx,
@@ -402,6 +413,16 @@ export function registerTenantsRoutes(
       before,
       undefined
     );
+    if (dropped > 0) {
+      await audit(
+        ctx,
+        "environment.delete_cascade",
+        "pipeline_deployment",
+        ctx.params.envId,
+        { droppedDeployments: dropped, environment: before.name },
+        undefined
+      );
+    }
     return { status: 204, body: undefined, headers: {} };
   });
 }
