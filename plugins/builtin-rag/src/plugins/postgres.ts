@@ -192,7 +192,6 @@ export const postgresQueryPlugin: InProcessPlugin = {
     ui: {
       icon: "database",
       color: "#336791",
-      paletteGroup: "External data",
       formHints: {
         sql: { widget: "textarea", rows: 4 },
         maxRows: { widget: "number", min: 1, step: 100 }
@@ -335,7 +334,6 @@ export const postgresUpsertPlugin: InProcessPlugin = {
     ui: {
       icon: "database",
       color: "#336791",
-      paletteGroup: "External data",
       formHints: {
         columns: { widget: "tags" },
         conflictTarget: { widget: "tags" },
@@ -554,7 +552,6 @@ export const postgresDeletePlugin: InProcessPlugin = {
     ui: {
       icon: "trash",
       color: "#dc2626",
-      paletteGroup: "External data",
       formHints: {
         where: { widget: "tags" },
         batchSize: { widget: "number", min: 1, step: 50 }
@@ -730,7 +727,6 @@ export const postgresExecPlugin: InProcessPlugin = {
     ui: {
       icon: "database",
       color: "#9333ea",
-      paletteGroup: "External data",
       formHints: {
         statements: { widget: "textarea", rows: 6 },
         allowDDL: { widget: "checkbox" }

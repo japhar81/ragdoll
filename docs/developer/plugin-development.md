@@ -14,6 +14,73 @@ runtime.
 - optional config, secrets, input, and output schemas
 - optional capabilities and UI metadata
 
+### Palette grouping (where your plugin shows up in the Builder)
+
+The Builder's Node Palette groups plugins under one of a fixed,
+operator-facing set of buckets. Authors have two knobs:
+
+- **Implicit (default)** — set just `category` on the manifest. The
+  palette maps every category to a canonical group via
+  `CATEGORY_GROUP` in `apps/web/src/lib/palette.ts`:
+
+  | category | palette group |
+  | --- | --- |
+  | `datasource` | Sources |
+  | `loader`, `chunker` | Ingestion |
+  | `parser`, `output_parser` | Parsing |
+  | `embedder` | Embeddings |
+  | `vector_store`, `sink` | Storage |
+  | `retriever`, `reranker` | Retrieval |
+  | `llm` | Models |
+  | `prompt_template` | Prompting |
+  | `tool` | Tools |
+  | `guardrail` | Guardrails |
+  | `evaluator` | Evaluation |
+  | `transformer` | Transform |
+  | `router` | Routing |
+  | `control` | Control |
+  | `memory` | Memory |
+
+  Picking the right `category` is enough for most plugins.
+
+- **Explicit (override)** — set `ui.paletteGroup` when the category
+  default doesn't land in the most-findable bucket. The classic case
+  is a graph-shaped DB: `neo4j_query` is `category: retriever`, but it
+  ships with `ui.paletteGroup: "Graph"` so it lands next to
+  `neo4j_write` (which is a sink that ALSO sets
+  `ui.paletteGroup: "Graph"`). Operators looking for "neo4j stuff"
+  find both in one place.
+
+**The canonical group set is closed.** `ui.paletteGroup` MUST be one
+of the strings in `PALETTE_GROUP_ORDER`
+(`apps/web/src/lib/palette.ts`):
+
+```
+Sources, Ingestion, Parsing, Embeddings, Storage, Graph, Retrieval,
+Prompting, Models, Transform, Routing, Control, Guardrails,
+Evaluation, Memory, Tools, Other
+```
+
+Anything else falls into "Other" and operators stop finding it. The
+regression test `apps/web/test/palette-coverage.test.ts` fails CI when
+any registered plugin lands in "Other" — it names the offender and the
+bad group string.
+
+**Adding a new group.** When a cluster of new plugins genuinely
+deserves its own bucket (e.g. ADR-0025 added "Graph" for the neo4j +
+dgraph family), append it to `PALETTE_GROUP_ORDER` AND update the
+table above. The order matters — groups render in the Builder palette
+top-to-bottom in this order. Don't add a cute group name to your
+manifest and skip the order update; the palette won't render it where
+you expect, and the coverage test will fail.
+
+**Don't sub-categorize.** Resist the temptation to invent groups like
+"Email-handling transforms" or "LLM-using transforms" — they have
+existed in the past and silently demoted every using plugin into the
+"Other" bucket. If a category groups too many things, that's a real
+problem worth a real fix (split the category, add a subgroup feature,
+…), not a per-plugin paletteGroup override.
+
 ### Storage-touching plugins (Builder picker + validation)
 
 Plugins whose category is in `STORAGE_CATEGORIES`

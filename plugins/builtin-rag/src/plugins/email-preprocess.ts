@@ -233,7 +233,6 @@ export const emailPreprocessPlugin: InProcessPlugin = {
     ui: {
       icon: "mail",
       color: "#0ea5e9",
-      paletteGroup: "Email",
       formHints: {
         stripQuotes: { widget: "checkbox" },
         stripSignatures: { widget: "checkbox" },
@@ -432,7 +431,6 @@ export const threadAggregatePlugin: InProcessPlugin = {
     ui: {
       icon: "list",
       color: "#0ea5e9",
-      paletteGroup: "Email",
       formHints: {
         threadJoiner: { widget: "textarea", rows: 2 },
         emitThreads: { widget: "checkbox" },
