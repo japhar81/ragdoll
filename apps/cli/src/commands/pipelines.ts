@@ -130,6 +130,63 @@ export function registerPipelines(program: Command, ctx: Ctx): void {
       }
     );
 
+  // Atomic publish + deploy. Same body as `save` + an environment so a
+  // provisioning script can go from spec to live in one round-trip
+  // (the two-call dance through /save then /deployments was the source
+  // of `no_active_deployment` 409s when the second hop got skipped).
+  p.command("save-and-deploy <id>")
+    .description("Save a new version AND activate it in one call")
+    .requiredOption("--spec <json|@file>", "spec JSON; prefix with @ to read from file")
+    .requiredOption("--environment <env>")
+    .option("--level <patch|minor|major>", "version bump level", "patch")
+    .option("--tenant <uuid>", "override the active tenant for this deploy")
+    .action(
+      async (
+        id: string,
+        o: { spec: string; environment: string; level: string; tenant?: string }
+      ) => {
+        try {
+          const spec = await readJsonArg(o.spec);
+          emit(
+            ctx,
+            await api(ctx, "POST", `/api/pipelines/${id}/save-and-deploy`, {
+              body: {
+                spec,
+                environment: o.environment,
+                level: o.level,
+                tenantId: o.tenant ?? ctx.config.tenantId
+              }
+            })
+          );
+        } catch (e) {
+          fail(e, "pipelines save-and-deploy");
+        }
+      }
+    );
+
+  // Delete a deployment. <envOrId> accepts an environment name (drops
+  // every deployment in that env) or a deployment row UUID (drops that
+  // single row). Matches the same `?force=true` ergonomics other
+  // delete commands use for the no-question-asked branch.
+  p.command("deployment-delete <id> <envOrId>")
+    .description("Delete pipeline deployment(s) by environment name or row UUID")
+    .option("--tenant <uuid>", "narrow env-name delete to a single tenant's deployment")
+    .action(async (id: string, envOrId: string, o: { tenant?: string }) => {
+      try {
+        const query = o.tenant ? `?tenantId=${encodeURIComponent(o.tenant)}` : "";
+        emit(
+          ctx,
+          await api(
+            ctx,
+            "DELETE",
+            `/api/pipelines/${id}/deployments/${encodeURIComponent(envOrId)}${query}`
+          )
+        );
+      } catch (e) {
+        fail(e, "pipelines deployment-delete");
+      }
+    });
+
   p.command("run <id>")
     .description("Enqueue a pipeline run with the given input")
     .option("--input <json|@file>", "input JSON; prefix with @ to read from file")

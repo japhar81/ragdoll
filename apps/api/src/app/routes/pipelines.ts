@@ -487,7 +487,16 @@ export function registerPipelinesRoutes(
 
     if (result.kind === "idempotent") {
       const unchanged = rows.find((row) => row.id === result.version.id);
-      return ok({ version: unchanged, created: false });
+      // versionLabel mirrors `version.version` so callers can read the
+      // semver at the top level (the row shape buries it as
+      // `version.version`, which awkward-stutter `.version.version`
+      // tripped a class of "deploy what I just saved" provisioning
+      // scripts).
+      return ok({
+        version: unchanged,
+        versionLabel: unchanged?.version,
+        created: false
+      });
     }
 
     const versionRow: PipelineVersionRow = {
@@ -513,7 +522,139 @@ export function registerPipelinesRoutes(
       parentVersionId: created.parentVersionId,
       latestVersionId: updatedPipeline.latestVersionId
     });
-    return ok({ version: created, created: true }, 201);
+    return ok(
+      { version: created, versionLabel: created.version, created: true },
+      201
+    );
+  });
+
+  // ---- one-shot publish + deploy ----------------------------------------
+  // POST /:id/save-and-deploy {spec, level?, environment, tenantId?} →
+  // saves a new published version AND activates it in one transaction's
+  // worth of round-trips. Removes the
+  //   POST /save → response.version.version → POST /deployments
+  // dance provisioners had to do, which was awkward both because
+  // `response.version.version` is easy to misread and because a clean
+  // instance could 409 `no_active_deployment` if the operator forgot
+  // the second hop.
+  api.route("POST", "/api/pipelines/:id/save-and-deploy", async (ctx) => {
+    enforce(ctx.principal, "pipeline:deploy");
+    const pipeline = await resolvePipelineRef(deps.pipelines, ctx.params.id);
+    if (isAppResponse(pipeline)) return pipeline;
+    const pipelineId = pipeline.id;
+    const body = ctx.request.body;
+    if (
+      !isObject(body) ||
+      typeof body.environment !== "string" ||
+      body.environment.length === 0
+    ) {
+      return error(422, "validation_failed", {
+        issues: [{ path: "environment", message: "environment is required" }]
+      });
+    }
+    const spec = parseSpec(body.spec);
+    if (!spec) {
+      return error(422, "validation_failed", {
+        issues: [{ path: "spec", message: "spec is missing or invalid" }]
+      });
+    }
+    const validation = validatePipelineSpec(spec, deps.pluginRegistry);
+    if (!validation.valid) {
+      return error(422, "validation_failed", { issues: validation.errors });
+    }
+    const laidOut = autoLayoutSpec(spec);
+    const level =
+      body.level === "minor" || body.level === "major" || body.level === "patch"
+        ? (body.level as "patch" | "minor" | "major")
+        : "patch";
+
+    // --- save (same flow as POST /:id/save above) ---
+    const rows = await deps.pipelineVersions.listByPipeline(pipelineId);
+    const toRecord = (row: PipelineVersionRow): PipelineVersionRecord => ({
+      id: row.id,
+      pipelineId: row.pipelineId,
+      version: row.version,
+      status: row.status,
+      spec: row.spec as PipelineSpec,
+      checksum: row.checksum,
+      parentVersionId: row.parentVersionId ?? null,
+      createdAt: row.createdAt,
+      publishedAt: row.publishedAt ?? undefined
+    });
+    const existingVersions = rows.map(toRecord);
+    const latestRow = pipeline.latestVersionId
+      ? rows.find((row) => row.id === pipeline.latestVersionId)
+      : undefined;
+    const saveResult = nextVersionOnSave({
+      existingVersions,
+      latest: latestRow ? toRecord(latestRow) : undefined,
+      spec: laidOut,
+      level,
+      pipelineId
+    });
+    let versionRow: PipelineVersionRow;
+    let createdNew = false;
+    if (saveResult.kind === "idempotent") {
+      const existing = rows.find((row) => row.id === saveResult.version.id);
+      if (!existing) {
+        return error(500, "internal", {
+          message: "idempotent save resolved to a version that vanished"
+        });
+      }
+      versionRow = existing;
+    } else {
+      const built: PipelineVersionRow = {
+        id: randomUUID(),
+        pipelineId,
+        version: saveResult.record.version,
+        status: "published",
+        spec: saveResult.record.spec,
+        checksum: saveResult.record.checksum,
+        parentVersionId: saveResult.record.parentVersionId ?? null,
+        createdBy: ctx.principal.id,
+        createdAt: saveResult.record.createdAt,
+        publishedAt: saveResult.record.publishedAt ?? nowIso()
+      };
+      versionRow = await deps.pipelineVersions.create(built);
+      await deps.pipelines.setLatestVersion(pipelineId, versionRow.id);
+      createdNew = true;
+      await audit(ctx, "pipeline_version.save", "pipeline_version", versionRow.id, undefined, {
+        version: versionRow.version,
+        checksum: versionRow.checksum,
+        parentVersionId: versionRow.parentVersionId
+      });
+    }
+
+    // --- deploy ---
+    const deploymentRow: PipelineDeploymentRow = {
+      id: randomUUID(),
+      pipelineId,
+      pipelineVersionId: versionRow.id,
+      environment: body.environment,
+      tenantId: typeof body.tenantId === "string" ? body.tenantId : null,
+      status: "active",
+      deployedBy: ctx.principal.id,
+      deployedAt: nowIso()
+    };
+    const deployment = await deps.deployments.upsertActive(deploymentRow);
+    await audit(
+      ctx,
+      "pipeline.deploy",
+      "pipeline_deployment",
+      deployment.id,
+      undefined,
+      deployment
+    );
+
+    return ok(
+      {
+        version: versionRow,
+        versionLabel: versionRow.version,
+        created: createdNew,
+        deployment
+      },
+      201
+    );
   });
 
   api.route("POST", "/api/pipelines/:id/rollback", async (ctx) => {
@@ -633,5 +774,69 @@ export function registerPipelinesRoutes(
     const saved = await deps.deployments.upsertActive(deploymentRow);
     await audit(ctx, "pipeline.deploy", "pipeline_deployment", saved.id, undefined, saved);
     return ok({ deployment: saved }, 201);
+  });
+
+  // ---- delete a deployment ---------------------------------------------
+  // Two address forms because callers naturally have one or the other:
+  //  - UUID         → exact row (matches whatever's in the audit log)
+  //  - environment  → drop every deployment of this pipeline in that env
+  //                   (matches the operator mental model of "stop running
+  //                   this pipeline in dev")
+  // Returns the number of rows deleted in the envelope so a "deleted
+  // nothing" caller can spot a typo without going through the listing.
+  api.route("DELETE", "/api/pipelines/:id/deployments/:envOrId", async (ctx) => {
+    enforce(ctx.principal, "pipeline:deploy");
+    const pipeline = await resolvePipelineRef(deps.pipelines, ctx.params.id);
+    if (isAppResponse(pipeline)) return pipeline;
+    const envOrId = ctx.params.envOrId;
+    // UUID = exact row. The path-param shape is canonical lower-case
+    // hex 8-4-4-4-12 — anything else falls through to environment-name.
+    const isUuid =
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(envOrId);
+    if (isUuid) {
+      const existing = await deps.deployments.get(envOrId);
+      if (!existing || existing.pipelineId !== pipeline.id) {
+        return error(404, "not_found", {
+          message: `deployment ${envOrId} not found on pipeline ${pipeline.slug}`
+        });
+      }
+      await deps.deployments.delete(envOrId);
+      await audit(
+        ctx,
+        "pipeline.deployment_delete",
+        "pipeline_deployment",
+        envOrId,
+        existing,
+        undefined
+      );
+      return ok({ deleted: 1, deployment: existing });
+    }
+    // Environment-name path. Optional ?tenantId scopes the delete to a
+    // single tenant's deployment (otherwise NULL = global row).
+    const tenantId =
+      typeof ctx.request.query.tenantId === "string" ? ctx.request.query.tenantId : null;
+    const rows = (await deps.deployments.listByPipeline(pipeline.id)).filter(
+      (row) =>
+        row.environment === envOrId && (row.tenantId ?? null) === (tenantId ?? null)
+    );
+    if (rows.length === 0) {
+      return error(404, "not_found", {
+        message: `no deployment of pipeline ${pipeline.slug} in environment "${envOrId}"${
+          tenantId ? ` for tenant ${tenantId}` : ""
+        }`
+      });
+    }
+    for (const row of rows) {
+      await deps.deployments.delete(row.id);
+      await audit(
+        ctx,
+        "pipeline.deployment_delete",
+        "pipeline_deployment",
+        row.id,
+        row,
+        undefined
+      );
+    }
+    return ok({ deleted: rows.length });
   });
 }
