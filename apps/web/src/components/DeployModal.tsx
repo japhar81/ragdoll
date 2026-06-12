@@ -1,8 +1,10 @@
 import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../lib/api.ts";
-import type { DatasetView } from "../lib/api.ts";
+import type { DatasetView, TenantRow, EnvironmentRow } from "../lib/api.ts";
 import type { DatasetSlotRef } from "../lib/types.ts";
+import { TenantSelect } from "./useTenants.tsx";
+import { EnvironmentSelect } from "./useEnvironments.tsx";
 
 /**
  * Deploy / Run prerequisite modal. The builder operates on dataset slugs
@@ -31,6 +33,17 @@ export interface DeployModalProps {
   slots: DatasetSlotRef[];
   onClose: () => void;
   onConfirm: () => void;
+  /** Optional catalogs for in-modal tenant + env switching. When set
+   *  the modal renders a row that lets the operator change either at
+   *  the moment of Run/Deploy without closing it. Caller threads the
+   *  same setters its own top-bar picker uses so the choice survives
+   *  the modal close. Omit either to lock that dimension. */
+  tenants?: TenantRow[];
+  tenantsLoading?: boolean;
+  onTenantChange?: (id: string | undefined) => void;
+  environments?: EnvironmentRow[];
+  environmentsLoading?: boolean;
+  onEnvironmentChange?: (name: string) => void;
 }
 
 type Scope = "global" | "tenant" | "environment";
@@ -288,11 +301,64 @@ export function DeployModal(props: DeployModalProps) {
             close
           </button>
         </header>
+        {/* When the caller passed catalogs + setters, render an
+            in-modal picker so the operator can change tenant/env right
+            here. The slot resolution below re-renders against the new
+            target as soon as either changes. Locked-down variant (no
+            setters): keep the old read-only display. */}
+        {props.tenants || props.environments ? (
+          <div
+            className="inline-form"
+            style={{
+              gap: 12,
+              alignItems: "center",
+              marginTop: 4,
+              marginBottom: 8
+            }}
+          >
+            <span className="muted">Target:</span>
+            {props.tenants && props.onTenantChange ? (
+              <label style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                <span className="muted">tenant</span>
+                <TenantSelect
+                  tenants={props.tenants}
+                  value={props.tenantId ?? ""}
+                  onChange={(id) => props.onTenantChange!(id || undefined)}
+                  isLoading={props.tenantsLoading}
+                />
+              </label>
+            ) : (
+              <span>
+                tenant <code>{props.tenantSlug ?? props.tenantId ?? "—"}</code>
+              </span>
+            )}
+            {props.environments && props.onEnvironmentChange ? (
+              <label style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                <span className="muted">env</span>
+                <EnvironmentSelect
+                  environments={props.environments}
+                  value={props.environment}
+                  onChange={props.onEnvironmentChange}
+                  isLoading={props.environmentsLoading}
+                />
+              </label>
+            ) : (
+              <span>
+                env <code>{props.environment}</code>
+              </span>
+            )}
+          </div>
+        ) : (
+          <p className="muted">
+            Target: tenant{" "}
+            <code>{props.tenantSlug ?? props.tenantId ?? "—"}</code>
+            {" · "}env <code>{props.environment}</code>.
+          </p>
+        )}
         <p className="muted">
-          Target: tenant <code>{props.tenantSlug ?? props.tenantId ?? "—"}</code>
-          {" · "}env <code>{props.environment}</code>. Each referenced dataset
-          slug resolves to the closest variant for that target (env › tenant ›
-          global). Pick a different variant or create one to fill any gap.
+          Each referenced dataset slug resolves to the closest variant for
+          that target (env › tenant › global). Pick a different variant or
+          create one to fill any gap.
         </p>
 
         {props.slots.length === 0 ? (

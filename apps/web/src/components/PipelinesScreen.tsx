@@ -654,6 +654,16 @@ export function PipelinesScreen(props: {
           environment={environment}
           pipelineSlug={runTarget.pipeline.slug ?? runTarget.pipeline.name}
           slots={runTarget.slots}
+          // In-modal pickers — let the operator adjust target right
+          // before confirming Run. Same setters the screen-level "Run
+          // target:" row drives, so the choice persists after the
+          // modal closes.
+          tenants={tenantCtx.tenants}
+          tenantsLoading={tenantCtx.isLoading}
+          onTenantChange={(id) => tenantCtx.setTenantId(id ?? "")}
+          environments={envs.data?.environments ?? []}
+          environmentsLoading={envs.isLoading}
+          onEnvironmentChange={setEnvironment}
           onClose={() => setRunTarget(undefined)}
           onConfirm={doRun}
         />

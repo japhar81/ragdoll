@@ -2845,6 +2845,17 @@ export function PipelineBuilder(props: {
         environment={environment}
         pipelineSlug={pipelineSlug || pipelineId}
         slots={validation.datasetSlots}
+        // In-modal pickers — same setters the top-bar Tenant +
+        // Deploy-menu Env selectors drive, so the operator can adjust
+        // the target right where they're about to Run without
+        // closing/re-opening (was buried in the Deploy menu, easy to
+        // miss).
+        tenants={tenants}
+        tenantsLoading={tenantsLoading}
+        onTenantChange={(id) => setTenantId(id ?? "")}
+        environments={envs.environments}
+        environmentsLoading={envs.isLoading}
+        onEnvironmentChange={setEnvironment}
         onClose={() => setDeployModal(null)}
         onConfirm={() => {
           const mode = deployModal?.mode;
