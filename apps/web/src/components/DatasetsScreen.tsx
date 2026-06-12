@@ -904,11 +904,22 @@ export function DatasetsScreen() {
   }, [selectedKey]);
 
   const datasets = useQuery({
-    queryKey: ["datasets-all", ctx.tenantId ?? "global", ctx.envId ?? ""],
+    // showArchived in the key so toggling re-fetches — the server hides
+    // archived rows by default and only includes them when the screen
+    // opts in. Without this segment, react-query would serve the
+    // cached active-only list when the user flips the toggle on
+    // (same trap the Connections screen fix solved).
+    queryKey: [
+      "datasets-all",
+      ctx.tenantId ?? "global",
+      ctx.envId ?? "",
+      showArchived ? "with-archived" : "active-only"
+    ],
     queryFn: () =>
       api.listDatasets({
         tenantId: ctx.tenantId,
-        environmentId: ctx.envId
+        environmentId: ctx.envId,
+        includeArchived: showArchived
       })
   });
   // The detail panel needs connections + kinds to render the bindings

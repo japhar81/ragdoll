@@ -45,9 +45,16 @@ export function registerResources(program: Command, ctx: Ctx): void {
   datasets
     .command("list")
     .description("List datasets visible at the current scope.")
-    .action(async () => {
+    .option(
+      "--archived",
+      "Include archived rows (?include_archived=true). Same opt-in the UI's 'show archived' toggle sends."
+    )
+    .action(async (o: { archived?: boolean }) => {
       try {
-        emit(ctx, await api(ctx, "GET", "/api/datasets"));
+        const path = o.archived
+          ? "/api/datasets?include_archived=true"
+          : "/api/datasets";
+        emit(ctx, await api(ctx, "GET", path));
       } catch (e) {
         fail(e, "datasets list");
       }

@@ -75,14 +75,17 @@ export class PostgresDatasetRepository
   async listVisibleAt(args: {
     tenantId?: string;
     environmentId?: string;
+    includeArchived?: boolean;
   }): Promise<T.DatasetRow[]> {
     // Return globals + tenant-scoped (for the given tenant) + env-scoped
     // (for the given env). The caller's tenant/env are NULL-safe so a
     // platform user looking at the all-tenants view sees globals only
-    // and (separately) every tenant's datasets via listAll.
+    // and (separately) every tenant's datasets via listAll. Default
+    // hides archived rows; the admin screen passes includeArchived=true
+    // so its "show archived" toggle has rows to reveal.
     return this.queryRows(
       `SELECT * FROM datasets
-       WHERE archived_at IS NULL
+       WHERE (${args.includeArchived ? "TRUE" : "archived_at IS NULL"})
          AND (
            scope = 'global'
            OR (scope = 'tenant' AND tenant_id = $1)

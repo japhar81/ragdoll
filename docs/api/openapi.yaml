@@ -1071,7 +1071,19 @@ paths:
         List Datasets visible at the request scope (`x-tenant-id` +
         `x-environment` headers). Returns the union of: globals,
         tenant-scoped (for the given tenant), env-scoped (for the
-        given tenant + env).
+        given tenant + env). Archived rows excluded by default — pass
+        `?include_archived=true` to include them (powers the admin
+        screen's "show archived" toggle).
+      parameters:
+        - name: include_archived
+          in: query
+          required: false
+          schema: { type: boolean }
+          description: >-
+            When `true` (also accepts `1` / `yes`), archived datasets
+            are included. Runtime callers (pipeline dataset resolution)
+            never set this — archived rows must never surface to a
+            live pipeline.
       responses:
         "200":
           description: List of datasets.
