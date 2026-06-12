@@ -774,13 +774,25 @@ export const api = {
     request<void>("DELETE", `/api/api-keys/${encodeURIComponent(id)}`),
 
   // ---- datasets (Phase 4) ----------------------------------------------
-  listDatasets: (filter?: { tenantId?: string; environmentId?: string }) =>
-    request<{ datasets: DatasetView[] }>("GET", "/api/datasets", undefined, {
-      ...(filter?.tenantId ? { "x-tenant-id": filter.tenantId } : {}),
-      ...(filter?.environmentId
-        ? { "x-environment": filter.environmentId }
-        : {})
-    }),
+  listDatasets: (filter?: {
+    tenantId?: string;
+    environmentId?: string;
+    /** Admin opt-in. Cascade-resolve callers (the runtime dataset
+     *  resolution path) must leave this off so archived rows never
+     *  surface to a live pipeline. */
+    includeArchived?: boolean;
+  }) =>
+    request<{ datasets: DatasetView[] }>(
+      "GET",
+      `/api/datasets${filter?.includeArchived ? "?include_archived=true" : ""}`,
+      undefined,
+      {
+        ...(filter?.tenantId ? { "x-tenant-id": filter.tenantId } : {}),
+        ...(filter?.environmentId
+          ? { "x-environment": filter.environmentId }
+          : {})
+      }
+    ),
   getDataset: (id: string) =>
     request<{ dataset: DatasetView }>(
       "GET",

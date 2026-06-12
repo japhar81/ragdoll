@@ -637,10 +637,15 @@ export interface DatasetRepository {
     tenantId?: string;
     environmentId?: string;
   }): Promise<DatasetRow | undefined>;
-  /** Every dataset visible at a scope, after env -> tenant -> global resolution. */
+  /** Every dataset visible at a scope, after env -> tenant -> global
+   *  resolution. `includeArchived` defaults false — runtime callers
+   *  (pipeline-execution dataset resolution) must never surface
+   *  archived rows. The admin Datasets screen opts in to populate
+   *  its "show archived" toggle. */
   listVisibleAt(args: {
     tenantId?: string;
     environmentId?: string;
+    includeArchived?: boolean;
   }): Promise<DatasetRow[]>;
   /** Raw filter — admin use. */
   listAll(filter?: { scope?: DatasetRow["scope"]; tenantId?: string; environmentId?: string; includeArchived?: boolean }): Promise<DatasetRow[]>;

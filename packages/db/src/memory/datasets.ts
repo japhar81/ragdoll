@@ -100,8 +100,11 @@ export class InMemoryDatasetRepository implements T.DatasetRepository {
   async listVisibleAt(args: {
     tenantId?: string;
     environmentId?: string;
+    includeArchived?: boolean;
   }): Promise<T.DatasetRow[]> {
-    const all = [...this.rows.values()].filter((r) => !r.archivedAt);
+    const all = [...this.rows.values()].filter(
+      (r) => args.includeArchived || !r.archivedAt
+    );
     // Surface every dataset reachable from the (tenant, env) the caller
     // is acting in: globals plus tenant-scoped plus matching-env-scoped.
     return all

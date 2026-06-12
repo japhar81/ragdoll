@@ -691,6 +691,76 @@ test("GET /api/connections hides archived rows by default; ?include_archived=tru
   assert.equal(active.id, active.id);
 });
 
+test("GET /api/datasets hides archived rows by default; ?include_archived=true surfaces them", async () => {
+  // Mirror of the connections regression — same shape, same gotcha:
+  // listVisibleAt used to hardcode `archived_at IS NULL` deep in the
+  // repo, so the Datasets screen's "show archived" toggle filtered an
+  // empty set client-side. Plumbed includeArchived through types /
+  // postgres / memory / route / api / screen.
+  const harness = buildHarness();
+  const ADMIN_HEADERS = { ...ADMIN };
+  // Two global datasets, archive one.
+  const a = await harness.request({
+    method: "POST",
+    path: "/api/datasets",
+    headers: ADMIN_HEADERS,
+    body: {
+      scope: "global",
+      slug: "ds-active",
+      displayName: "ds-active",
+      embeddingProfile: {},
+      chunkSchema: {}
+    }
+  });
+  assert.equal(a.status, 201);
+  const b = await harness.request({
+    method: "POST",
+    path: "/api/datasets",
+    headers: ADMIN_HEADERS,
+    body: {
+      scope: "global",
+      slug: "ds-archived",
+      displayName: "ds-archived",
+      embeddingProfile: {},
+      chunkSchema: {}
+    }
+  });
+  assert.equal(b.status, 201);
+  // Soft-archive via PATCH (the same path the UI's Archive button hits).
+  const arch = await harness.request({
+    method: "PATCH",
+    path: `/api/datasets/${b.body.dataset.id}`,
+    headers: ADMIN_HEADERS,
+    body: { archived: true }
+  });
+  assert.equal(arch.status, 200);
+  // Default LIST: only the active row.
+  const def = await harness.request({
+    method: "GET",
+    path: "/api/datasets",
+    headers: ADMIN_HEADERS
+  });
+  assert.equal(def.status, 200);
+  const defaultSlugs = (def.body.datasets as Array<{ slug: string }>).map((d) => d.slug);
+  assert.ok(defaultSlugs.includes("ds-active"));
+  assert.ok(!defaultSlugs.includes("ds-archived"), `default leaked archived row: ${defaultSlugs.join(",")}`);
+  // Opt-in LIST: both rows.
+  const includeArchivedList = await harness.request({
+    method: "GET",
+    path: "/api/datasets",
+    headers: ADMIN_HEADERS,
+    query: { include_archived: "true" }
+  });
+  assert.equal(includeArchivedList.status, 200);
+  const archivedSlugs = (includeArchivedList.body.datasets as Array<{ slug: string }>).map(
+    (d) => d.slug
+  );
+  assert.ok(
+    archivedSlugs.includes("ds-active") && archivedSlugs.includes("ds-archived"),
+    `include_archived missing one: ${archivedSlugs.join(",")}`
+  );
+});
+
 test("DELETE /api/connections/:id?force=true also nukes an already-archived row", async () => {
   // The intended UX: operator archives a connection (soft), realises
   // they want it gone for real, opens the archived row's Delete button

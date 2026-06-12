@@ -184,9 +184,17 @@ export function registerDatasetsRoutes(
     enforce(ctx.principal, "dataset:read");
     const headerTenant = tenantScope(ctx);
     const headerEnv = headerValue(ctx.request.headers, "x-environment");
+    // Default hides archived rows; admin UI opts in via
+    // ?include_archived=true so its "show archived" toggle has rows to
+    // surface. Loose truthy parse — "1" / "true" / "yes" all count
+    // (same shape /api/connections accepts).
+    const raw = ctx.request.query.include_archived;
+    const includeArchived =
+      typeof raw === "string" && /^(1|true|yes)$/i.test(raw);
     const rows = await datasets.listVisibleAt({
       tenantId: headerTenant ?? undefined,
-      environmentId: headerEnv ?? undefined
+      environmentId: headerEnv ?? undefined,
+      includeArchived
     });
     return ok({ datasets: rows.map(publicDataset) });
   });
