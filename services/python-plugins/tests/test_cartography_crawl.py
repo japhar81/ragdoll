@@ -329,6 +329,54 @@ def test_metadata_always_carries_cartography_output_tails(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
+def test_env_user_and_password_are_set_together_or_unset_together(monkeypatch):
+    # Cartography uses the Python neo4j-driver, which builds an auth
+    # token from whichever of NEO4J_USER / NEO4J_PASSWORD it finds.
+    # If only NEO4J_USER is exported the token is malformed and the
+    # server rejects with "Unsupported authentication token, missing
+    # key `scheme`" — the regression bulwark hit when their secret
+    # resolved to an empty password.
+    captured: Dict[str, Any] = {}
+
+    def fake_run(argv, env=None, **_kwargs):
+        captured["env"] = env
+        return _FakeCompleted(returncode=0, stdout="", stderr="Syncing X\n")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    # Empty-password connection: both vars must be unset.
+    plugin.handle(
+        _build_request(
+            config={"modules": ["aws"]},
+            connection={
+                "kind": "neo4j",
+                "slug": "n",
+                "options": {"uri": "bolt://x"},
+                "secret": "",  # parses to user="neo4j", password=""
+            },
+        )
+    )
+    assert "NEO4J_USER" not in captured["env"], (
+        "NEO4J_USER must NOT be set when there's no password — "
+        "leaves cartography's neo4j-driver building a malformed auth token"
+    )
+    assert "NEO4J_PASSWORD" not in captured["env"]
+
+    # Real-password connection: both vars set.
+    plugin.handle(
+        _build_request(
+            config={"modules": ["aws"]},
+            connection={
+                "kind": "neo4j",
+                "slug": "n",
+                "options": {"uri": "bolt://x"},
+                "secret": "neo4j:hunter2",
+            },
+        )
+    )
+    assert captured["env"]["NEO4J_USER"] == "neo4j"
+    assert captured["env"]["NEO4J_PASSWORD"] == "hunter2"
+
+
 def test_parse_neo4j_credentials_handles_json_shape():
     user, pw = plugin._parse_neo4j_credentials('{"username":"u","password":"p"}')
     assert (user, pw) == ("u", "p")
