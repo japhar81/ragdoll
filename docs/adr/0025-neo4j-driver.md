@@ -138,6 +138,52 @@ reachable or the binary is missing, the handler raises an actionable
 error and the node fails loudly — see ADR-0026 §#2 for the rationale
 (previous behaviour silently swallowed the spawn failure).
 
+**Wiring cloud credentials (operators read this).** Cloud credentials
+need TWO things on the spec node — `config.credsSecretRef` alone is
+not enough:
+
+```jsonc
+{
+  "id": "crawl",
+  "plugin": { "category": "datasource", "id": "cartography_crawl", "version": "1.0.0" },
+  "dataset": { "slug": "<a dataset with a neo4j binding on `target`>" },
+  "config": {
+    "modules": ["aws"],
+    "credsSecretRef": "aws-prod"   // logical name the plugin reads from input.secrets
+  },
+  "secrets": {                      // THIS is what makes the runtime resolve it
+    "aws-prod": { "scope": "tenant", "key": "AWS_PROD_CREDS" }
+  }
+}
+```
+
+Without the `node.secrets` block, the runtime's SecretProvider never
+resolves anything for this node, `input.secrets` arrives empty, the
+plugin can't find the entry named by `credsSecretRef`, cartography
+runs with no cloud env vars, boto3's default credential chain finds
+nothing, and cartography exits 0 silently having done zero work.
+
+The plugin surfaces this gap on the execution trace as
+`metadata.credsWarning`, alongside a generic
+`metadata.warning` whenever the cartography stdout/stderr shows no
+sync activity (no `Syncing X for account Y` lines). The full output
+tails come back as `metadata.cartographyStdoutTail` and
+`metadata.cartographyStderrTail` (capped at 2KB each) so the operator
+can confirm what cartography itself reported.
+
+The secret value is a `.env`-style block (one `KEY=VALUE` per line);
+the plugin parses each line and exports it into cartography's
+subprocess environment. For AWS:
+
+```
+AWS_ACCESS_KEY_ID=AKIA...
+AWS_SECRET_ACCESS_KEY=...
+AWS_DEFAULT_REGION=us-east-1
+```
+
+A real cartography sync of a populated account takes minutes — a 7s
+"success" is the canonical "no creds reached the subprocess" signal.
+
 ### 5. Destructive-sync posture
 
 Cartography sets a sync tag and deletes nodes that weren't seen on the

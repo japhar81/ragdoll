@@ -63,6 +63,27 @@ test("cartography_crawl manifest: outputs a single `metadata` port", () => {
   assert.equal(out[0].name, "metadata");
 });
 
+test("cartography_crawl manifest: credsSecretRef description spells out the dual-declaration requirement", () => {
+  // Locks in the operator-facing wiring guidance (the 7-second
+  // "succeeded but no data" symptom). Don't strip this without
+  // sourcing the docs somewhere equally discoverable.
+  const schema = cartographyCrawlManifest.configSchema as {
+    properties?: Record<string, { description?: string }>;
+  };
+  const desc = schema.properties?.credsSecretRef?.description ?? "";
+  assert.match(desc, /node\.secrets/);
+  assert.match(desc, /not enough/i);
+});
+
+test("cartography_crawl manifest: plugin description carries the in-Builder spec example", () => {
+  // The Builder's Docs tab pulls this string. Keep the example +
+  // the explanation of WHY the dual-declaration matters.
+  const d = cartographyCrawlManifest.description ?? "";
+  assert.match(d, /Wiring cloud credentials/);
+  assert.match(d, /node\.secrets/);
+  assert.match(d, /credsSecretRef/);
+});
+
 // ---------------------------------------------------------------------------
 // Loader registration
 // ---------------------------------------------------------------------------
