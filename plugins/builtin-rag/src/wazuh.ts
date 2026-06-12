@@ -1,0 +1,876 @@
+/**
+ * Wazuh — connection driver (ADR-0024) + host/agent layer pull plugins.
+ *
+ * Wazuh is a record-source we pull from on a cadence (the opposite shape
+ * of Cartography, which is a batch orchestrator) — exactly what the
+ * connection-driver + binding + delta-filter machinery exists for. We
+ * ship:
+ *
+ *   - `wazuh` connection driver (this file). Owns the Wazuh server-API
+ *     base URL, the JWT lifecycle (obtain on first use, refresh on
+ *     401 / expiry), and the optional TLS-verify toggle for self-signed
+ *     test instances. Cached per `connection.id` like every other
+ *     driver. Surfaced in the Builder's Type dropdown via ADR-0024.
+ *
+ *   - `wazuh_agents_pull` (this file). Pulls the agent registry off
+ *     `GET /agents`. Supports `select` / `q` / pagination so a
+ *     bulwark-shaped pipeline can fetch just the dimensions it needs.
+ *
+ *   - `wazuh_syscollector_pull` (this file). Per-agent enrichment off
+ *     `GET /syscollector/<agentId>/{hardware|os|netiface|netaddr}`.
+ *     Tolerates empty / missing per-agent inventory: a 404 / empty
+ *     `affected_items` for an agent doesn't fail the batch — the row
+ *     is skipped and surfaced in the node's `metadata.missingAgents`.
+ *
+ * What this module deliberately does NOT do:
+ *
+ *   - No transform/map of Wazuh shapes into observation shapes.
+ *     That's bulwark's pipeline-config concern.
+ *   - No findings / vulns / packages / logs / compliance / processes
+ *     pulls. Host/agent layer ONLY in this pass (the OCSF-findings
+ *     pass is deferred).
+ *   - No delta-filter, no neo4j_write, no transform plugin. Those
+ *     already exist (Cartography pass) and bulwark composes them.
+ *
+ * Wazuh API facts the implementation depends on:
+ *   - `POST /security/user/authenticate` (basic creds → bearer token,
+ *     TTL ~15 min). Refresh on 401.
+ *   - `GET /agents` returns `{data:{affected_items: [...], total_affected_items}}`.
+ *     `select`, `offset`, `limit`, `sort`, `q` are supported query params.
+ *   - `GET /syscollector/{agent_id}/{table}` returns the same envelope.
+ *     `affected_items` is `[]` (or 404) when the agent DB isn't filled
+ *     out yet — the registry POST/probe path may still report the agent.
+ *
+ * Test-only override seams kept tiny: `__setWazuhFetchForTests` replaces
+ * the fetch function, mirroring `__setCartographySpawnerForTests`.
+ */
+
+import type {
+  InProcessPlugin,
+  PluginExecutionInput,
+  PluginManifest
+} from "../../../packages/plugin-sdk/src/index.ts";
+import {
+  defineConnectionDriverPlugin,
+  acquireClient
+} from "../../../packages/external-connections/src/index.ts";
+import type { ResolvedExternalConnection } from "../../../packages/external-connections/src/index.ts";
+
+// ---------------------------------------------------------------------------
+// Test seam — fetch override
+// ---------------------------------------------------------------------------
+
+/** Same fetch signature node's global uses; lets the driver-and-plugin
+ *  tests intercept HTTP without spawning a real Wazuh. */
+export type WazuhFetch = (
+  url: string,
+  init?: {
+    method?: string;
+    headers?: Record<string, string>;
+    body?: string;
+    // node-fetch / undici-style toggle for self-signed certs. Driver
+    // sets this when verifyTls is false.
+    rejectUnauthorized?: boolean;
+  }
+) => Promise<{
+  status: number;
+  ok: boolean;
+  json: () => Promise<unknown>;
+  text: () => Promise<string>;
+}>;
+
+let activeFetch: WazuhFetch | null = null;
+
+/** Test hook — swap the fetch implementation. Pass `null` to restore. */
+export function __setWazuhFetchForTests(f: WazuhFetch | null): void {
+  activeFetch = f;
+}
+
+/** The actual fetch we use at run-time. Falls back to the global node
+ *  fetch; tests override via `__setWazuhFetchForTests`.
+ *
+ *  Self-signed Wazuh installs (the common dev case) require us to
+ *  honour `verifyTls=false`. Node's fetch reads
+ *  `NODE_TLS_REJECT_UNAUTHORIZED`, but that flips it process-wide and
+ *  bleeds across other drivers. We use undici's `Agent` per-request via
+ *  the `dispatcher` field — kept inside the driver and never exposed
+ *  to callers.
+ */
+async function defaultFetch(
+  url: string,
+  init: Parameters<WazuhFetch>[1] = {}
+): Promise<Awaited<ReturnType<WazuhFetch>>> {
+  const opts: Record<string, unknown> = {
+    method: init.method,
+    headers: init.headers,
+    body: init.body
+  };
+  if (init.rejectUnauthorized === false) {
+    // undici Agent with tls.rejectUnauthorized=false isolates the
+    // self-signed-cert allowance to THIS request. Imported lazily so
+    // the import cost only lands when an operator opts in.
+    const undici = (await import("undici")) as {
+      Agent: new (opts: { connect: { rejectUnauthorized: boolean } }) => unknown;
+    };
+    const agent = new undici.Agent({ connect: { rejectUnauthorized: false } });
+    (opts as { dispatcher?: unknown }).dispatcher = agent;
+  }
+  const res = await fetch(url, opts as Parameters<typeof fetch>[1]);
+  return {
+    status: res.status,
+    ok: res.ok,
+    json: () => res.json(),
+    text: () => res.text()
+  };
+}
+
+function getFetch(): WazuhFetch {
+  return activeFetch ?? defaultFetch;
+}
+
+// ---------------------------------------------------------------------------
+// Driver
+// ---------------------------------------------------------------------------
+
+interface WazuhConnectionOptions {
+  /** Hostname or full base URL. We accept either; build the canonical
+   *  URL inside `urlFor`. */
+  baseUrl?: string;
+  /** Server API port. Wazuh's default is 55000; some installs proxy. */
+  port?: number;
+  /** When false, accept self-signed TLS. Default true. */
+  verifyTls?: boolean;
+}
+
+/** What `_parseWazuhSecret` returns — either a long-lived bearer token
+ *  (operator-supplied) or username+password we use to call
+ *  `/security/user/authenticate`. */
+type WazuhCredentials =
+  | { kind: "token"; token: string }
+  | { kind: "basic"; username: string; password: string };
+
+/**
+ * Parse the resolved secret into either a static bearer or basic creds.
+ * Accepts (in priority order):
+ *   - JSON `{"token":"..."}` → kind=token
+ *   - JSON `{"username":"...","password":"..."}` → kind=basic
+ *   - `username:password` → kind=basic
+ *   - any other non-empty string → kind=token (treats the raw value as
+ *     a bearer; rare but supported for operator convenience)
+ */
+export function parseWazuhSecret(secret: string | undefined): WazuhCredentials {
+  if (!secret) {
+    throw new Error(
+      "wazuh: connection has no secret — set secretRefKey on the connection to a managed secret holding either `{\"username\":\"...\",\"password\":\"...\"}` or `{\"token\":\"...\"}`"
+    );
+  }
+  const trimmed = secret.trim();
+  if (trimmed.startsWith("{")) {
+    try {
+      const parsed = JSON.parse(trimmed) as {
+        token?: string;
+        username?: string;
+        password?: string;
+      };
+      if (parsed.token) return { kind: "token", token: parsed.token };
+      if (parsed.username && parsed.password) {
+        return { kind: "basic", username: parsed.username, password: parsed.password };
+      }
+      throw new Error(
+        "wazuh: JSON secret must contain either `token` OR both `username` and `password`"
+      );
+    } catch (e) {
+      if (e instanceof SyntaxError) {
+        // Fall through to user:pass parse below.
+      } else {
+        throw e;
+      }
+    }
+  }
+  if (trimmed.includes(":") && !trimmed.startsWith("http")) {
+    const idx = trimmed.indexOf(":");
+    return {
+      kind: "basic",
+      username: trimmed.slice(0, idx),
+      password: trimmed.slice(idx + 1)
+    };
+  }
+  // Last-resort: treat as raw token.
+  return { kind: "token", token: trimmed };
+}
+
+/**
+ * Build the canonical server-API base URL. The operator can supply:
+ *   - a full URL ("https://wazuh.acme.com:55000") — used verbatim
+ *   - a hostname ("wazuh.acme.com") — combined with `port` (default
+ *     55000) under https
+ * We always force https for production hygiene; an operator hitting
+ * an http-only test rig can supply the full URL.
+ */
+export function buildWazuhBaseUrl(opts: WazuhConnectionOptions): string {
+  const raw = (opts.baseUrl ?? "").trim();
+  if (!raw) throw new Error("wazuh: connection options.baseUrl is required");
+  const port = typeof opts.port === "number" && opts.port > 0 ? opts.port : 55000;
+  if (raw.startsWith("http://") || raw.startsWith("https://")) {
+    // Strip any trailing slash so urlFor can splice cleanly.
+    return raw.replace(/\/+$/, "");
+  }
+  return `https://${raw}:${port}`;
+}
+
+export interface WazuhHandle {
+  /** Canonical base URL — `https://host:port`, no trailing slash. */
+  baseUrl: string;
+  slug: string;
+  /** Whether the server's certificate is verified. Surfaced in diagnostics. */
+  verifyTls: boolean;
+  /** Current bearer token. Set lazily by `ensureToken`; refreshed on 401. */
+  token: string | null;
+  /** Token expiry timestamp (epoch ms). Refresh proactively just before
+   *  this fires so an in-flight request doesn't 401 mid-pull. */
+  tokenExpiresAt: number | null;
+  credentials: WazuhCredentials;
+  /** Exposed for tests to read; production callers use `request()`. */
+  authenticate: () => Promise<void>;
+  request: <T = unknown>(path: string) => Promise<T>;
+}
+
+/** Default token lifetime when the server doesn't report `exp`. Wazuh
+ *  defaults to 900s (15 min) — we refresh a minute early. */
+const TOKEN_DEFAULT_TTL_MS = 14 * 60 * 1000;
+
+interface AuthenticateResponse {
+  data?: { token?: string };
+}
+
+async function authenticateOnce(handle: WazuhHandle): Promise<void> {
+  const fetcher = getFetch();
+  const url = `${handle.baseUrl}/security/user/authenticate`;
+  const headers: Record<string, string> = { accept: "application/json" };
+  if (handle.credentials.kind === "basic") {
+    const b64 = Buffer.from(
+      `${handle.credentials.username}:${handle.credentials.password}`,
+      "utf8"
+    ).toString("base64");
+    headers.authorization = `Basic ${b64}`;
+  } else {
+    // Static token — skip the authenticate hop entirely.
+    handle.token = handle.credentials.token;
+    handle.tokenExpiresAt = null; // operator owns rotation
+    return;
+  }
+  const res = await fetcher(url, {
+    method: "POST",
+    headers,
+    rejectUnauthorized: handle.verifyTls
+  });
+  if (!res.ok) {
+    // Pull a short error body for the trace — never log creds.
+    const body = await safeReadShortBody(res);
+    throw new Error(
+      `wazuh: authenticate ${res.status} on connection "${handle.slug}": ${body}`
+    );
+  }
+  const json = (await res.json()) as AuthenticateResponse;
+  const token = json.data?.token;
+  if (!token) {
+    throw new Error(
+      `wazuh: authenticate succeeded but no token in response.data.token`
+    );
+  }
+  handle.token = token;
+  handle.tokenExpiresAt = Date.now() + TOKEN_DEFAULT_TTL_MS;
+}
+
+async function safeReadShortBody(res: {
+  text: () => Promise<string>;
+}): Promise<string> {
+  try {
+    const body = await res.text();
+    return body.length > 256 ? body.slice(0, 256) + "…" : body;
+  } catch {
+    return "<unreadable>";
+  }
+}
+
+async function ensureToken(handle: WazuhHandle): Promise<void> {
+  const now = Date.now();
+  if (
+    handle.token &&
+    (handle.tokenExpiresAt === null || handle.tokenExpiresAt > now)
+  ) {
+    return;
+  }
+  await handle.authenticate();
+}
+
+/**
+ * Authenticated GET against the server API. Refreshes on 401 ONCE,
+ * then re-tries (covers the "token expired while we held it" race).
+ * Returns the parsed JSON body; throws on non-2xx (with a short
+ * snippet of the body for the trace).
+ */
+async function authedRequest<T>(handle: WazuhHandle, path: string): Promise<T> {
+  await ensureToken(handle);
+  const fetcher = getFetch();
+  const url = `${handle.baseUrl}${path.startsWith("/") ? path : `/${path}`}`;
+  const headers: Record<string, string> = {
+    accept: "application/json",
+    authorization: `Bearer ${handle.token}`
+  };
+  let res = await fetcher(url, {
+    method: "GET",
+    headers,
+    rejectUnauthorized: handle.verifyTls
+  });
+  if (res.status === 401) {
+    // Token expired between our local check and the server's check.
+    // Re-authenticate ONCE and retry; if it 401s again, bubble up.
+    handle.token = null;
+    await handle.authenticate();
+    headers.authorization = `Bearer ${handle.token}`;
+    res = await fetcher(url, {
+      method: "GET",
+      headers,
+      rejectUnauthorized: handle.verifyTls
+    });
+  }
+  if (!res.ok) {
+    const body = await safeReadShortBody(res);
+    const err = new Error(
+      `wazuh: GET ${path} -> ${res.status} on connection "${handle.slug}": ${body}`
+    );
+    (err as { status?: number }).status = res.status;
+    throw err;
+  }
+  return (await res.json()) as T;
+}
+
+export const wazuhConnectionDriver = defineConnectionDriverPlugin<WazuhHandle>({
+  kind: "wazuh",
+  driver: {
+    async create(conn) {
+      const opts = (conn.options ?? {}) as WazuhConnectionOptions;
+      const credentials = parseWazuhSecret(conn.secret);
+      const baseUrl = buildWazuhBaseUrl(opts);
+      const verifyTls = opts.verifyTls !== false; // default true
+      const handle: WazuhHandle = {
+        baseUrl,
+        slug: conn.slug,
+        verifyTls,
+        token: null,
+        tokenExpiresAt: null,
+        credentials,
+        // Bound back to the handle so the test harness can call
+        // handle.authenticate() directly to exercise the JWT flow.
+        authenticate: async () => {
+          // Re-bind `handle` inside the closure so `this` isn't needed.
+          await authenticateOnce(handle);
+        },
+        request: async <T,>(p: string) => authedRequest<T>(handle, p)
+      };
+      return handle;
+    },
+    async dispose(client) {
+      // Drop the token — there's no server-side logout endpoint that
+      // helps here (Wazuh tokens expire on their own); we just clear
+      // local state so a stale token from a previous client never
+      // shows up in a new request.
+      client.token = null;
+      client.tokenExpiresAt = null;
+    },
+    async probe(client) {
+      // The cheapest call that exercises both auth + reachability:
+      // /agents?limit=1. If basic-auth or TLS-verify is wrong it 401s
+      // / TLS-errors; if the server is reachable but empty it still
+      // returns `{data:{affected_items: [], total_affected_items: 0}}`.
+      await client.request<{ data?: { affected_items?: unknown[] } }>(
+        "/agents?limit=1"
+      );
+    }
+  },
+  manifest: {
+    displayName: "Wazuh",
+    description:
+      "Wazuh server API (https://documentation.wazuh.com/current/_static/server-api-spec/). Used as a leaf record-source — bulwark composes pipelines around `wazuh_agents_pull` / `wazuh_syscollector_pull`. The driver owns JWT auth + refresh; the per-request `verifyTls` toggle lets a self-signed dev install through without flipping global Node TLS.",
+    configSchema: {
+      type: "object",
+      required: ["baseUrl"],
+      properties: {
+        baseUrl: {
+          type: "string",
+          description:
+            "Hostname or full server-API URL (e.g. `wazuh.acme.com` or `https://wazuh.acme.com:55000`). Hostnames get https:// + the configured port; full URLs are used verbatim."
+        },
+        port: {
+          type: "integer",
+          default: 55000,
+          description:
+            "Server API port. Default 55000 matches the upstream install — override only when running behind a proxy."
+        },
+        verifyTls: {
+          type: "boolean",
+          default: true,
+          description:
+            "When false, the driver accepts self-signed certificates (per-request, NOT process-wide). Default true — flip only for test installs."
+        }
+      },
+      additionalProperties: false
+    },
+    secretSchema: {
+      type: "string",
+      description:
+        "Either `{\"username\":\"...\",\"password\":\"...\"}` for the basic-auth + JWT flow (recommended), or `{\"token\":\"...\"}` for a long-lived operator-supplied bearer (the driver skips authenticate() entirely). Plain `user:pass` is also accepted."
+    },
+    // Wazuh is a tool source, not a dataset backend — operators bind
+    // it via the new "wazuh" binding name on a Dataset, and the pull
+    // plugins ask for `kind: wazuh` on that binding. Surface it in the
+    // dataset binding picker.
+    datasetBindings: ["wazuh"],
+    transport: "in_process"
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Shared binding helper (mirrors requireNeo4jConnection)
+// ---------------------------------------------------------------------------
+
+/** Resolve the named binding's connection. Same shape neo4j_query uses —
+ *  throws an actionable error when the binding isn't wired or its kind
+ *  isn't `wazuh`. */
+export function requireWazuhConnection(
+  input: PluginExecutionInput,
+  binding: string,
+  pluginId: string
+): ResolvedExternalConnection {
+  const b = input.dataset?.bindings?.[binding];
+  if (!b?.connection) {
+    const slug = input.dataset?.slug ?? "(no dataset bound)";
+    throw new Error(
+      `${pluginId} requires a "${binding}" binding on dataset "${slug}". Add a binding named "${binding}" on the Datasets screen pointing at a wazuh connection.`
+    );
+  }
+  if (b.connection.kind !== "wazuh") {
+    throw new Error(
+      `${pluginId}: binding "${binding}" resolves to connection kind "${b.connection.kind}", expected "wazuh".`
+    );
+  }
+  return b.connection;
+}
+
+// ---------------------------------------------------------------------------
+// wazuh_agents_pull — paginated registry read
+// ---------------------------------------------------------------------------
+
+interface AgentsResponse {
+  data?: {
+    affected_items?: Array<Record<string, unknown>>;
+    total_affected_items?: number;
+  };
+  message?: string;
+}
+
+/** Default page size. Wazuh caps `limit` at 500 server-side; 500 is
+ *  the sweet spot for fewest round-trips on a large fleet. */
+const DEFAULT_LIMIT = 500;
+
+/** Maximum pages we'll fetch in one execute() to prevent a runaway pull
+ *  against a misconfigured `q` filter. Operator can lift via `maxPages`. */
+const DEFAULT_MAX_PAGES = 200;
+
+export const wazuhAgentsPullPlugin: InProcessPlugin = {
+  manifest: {
+    id: "wazuh_agents_pull",
+    name: "Wazuh Agents Pull",
+    version: "1.0.0",
+    category: "datasource",
+    contract: 2,
+    // Cast through unknown — PluginManifest.requires still types the
+    // legacy `{modality, provider}` shape even though the validator
+    // already accepts the ADR-0023 `{binding, kind}` form. Same trick
+    // every other binding-shaped plugin uses.
+    requires: [{ binding: "wazuh", kind: "wazuh" }] as unknown as PluginManifest["requires"],
+    description:
+      "Pulls the Wazuh agent registry via `GET /agents`. Each page is at most 500 rows; the plugin walks pagination until exhausted (or `maxPages` is hit). Emits the raw agent rows as `agents` so downstream nodes can map fields independently — RAGdoll's responsibility ends at the row; the Wazuh→observation mapping is the pipeline author's.",
+    configSchema: {
+      type: "object",
+      properties: {
+        select: {
+          type: "array",
+          items: { type: "string" },
+          description:
+            "Optional list of Wazuh agent fields to return (passed as `?select=` on the request). Reduces row size on a large fleet."
+        },
+        q: {
+          type: "string",
+          description:
+            "Optional Wazuh filter expression (e.g. `status=active`, `dateAdd>2024-01-01`). Passed through verbatim — operator owns the syntax."
+        },
+        sort: {
+          type: "string",
+          description:
+            "Optional sort spec (`+field` ascending, `-field` descending). Default: server default (typically by id)."
+        },
+        limit: {
+          type: "integer",
+          default: 500,
+          description:
+            "Page size. Wazuh caps at 500; values above that are clamped server-side."
+        },
+        maxPages: {
+          type: "integer",
+          default: 200,
+          description:
+            "Hard ceiling on pages walked in one execute() — runaway guard against a misconfigured `q`. Default 200 (= 100k agents). Lift only for genuine megafleets."
+        }
+      },
+      additionalProperties: false
+    },
+    inputPorts: [],
+    outputPorts: [
+      {
+        name: "agents",
+        description:
+          "Array of agent rows. Each row is whatever Wazuh's `/agents` endpoint returned for the configured `select` (e.g. id, name, ip, os, status, lastKeepAlive, dateAdd, node_name)."
+      },
+      {
+        name: "metadata",
+        description:
+          "Diagnostic envelope: { pages, total, fetched, truncated }. `truncated:true` when we hit `maxPages` before draining."
+      }
+    ],
+    capabilities: ["query"],
+    ui: {
+      icon: "shield",
+      color: "#1f6feb",
+      paletteGroup: "Sources",
+      formHints: {
+        select: { widget: "tags" },
+        q: { widget: "text" },
+        sort: { widget: "text" }
+      }
+    }
+  },
+  async execute(input) {
+    const conn = requireWazuhConnection(input, "wazuh", "wazuh_agents_pull");
+    const client = await acquireClient<WazuhHandle>(conn);
+    const cfg = input.config as {
+      select?: unknown;
+      q?: unknown;
+      sort?: unknown;
+      limit?: unknown;
+      maxPages?: unknown;
+    };
+    const limit = clampLimit(cfg.limit, DEFAULT_LIMIT);
+    const maxPages = clampMaxPages(cfg.maxPages, DEFAULT_MAX_PAGES);
+    const select = Array.isArray(cfg.select)
+      ? (cfg.select as unknown[]).map((v) => String(v)).join(",")
+      : undefined;
+    const q = typeof cfg.q === "string" ? cfg.q : undefined;
+    const sort = typeof cfg.sort === "string" ? cfg.sort : undefined;
+
+    const agents: Array<Record<string, unknown>> = [];
+    let pages = 0;
+    let offset = 0;
+    let total = 0;
+    let truncated = false;
+
+    while (pages < maxPages) {
+      const params = new URLSearchParams();
+      params.set("offset", String(offset));
+      params.set("limit", String(limit));
+      if (select) params.set("select", select);
+      if (q) params.set("q", q);
+      if (sort) params.set("sort", sort);
+      const path = `/agents?${params.toString()}`;
+      const json = await client.request<AgentsResponse>(path);
+      pages += 1;
+      const items = json.data?.affected_items ?? [];
+      total = json.data?.total_affected_items ?? total;
+      for (const row of items) agents.push(row);
+      offset += items.length;
+      // Stop conditions: server gave us fewer than we asked for, OR we've
+      // drained the reported total. Either signals end-of-stream.
+      if (items.length < limit) break;
+      if (total > 0 && agents.length >= total) break;
+    }
+    if (pages >= maxPages && total > agents.length) truncated = true;
+
+    return {
+      outputs: {
+        agents,
+        metadata: {
+          pages,
+          total,
+          fetched: agents.length,
+          truncated
+        }
+      }
+    };
+  }
+};
+
+// ---------------------------------------------------------------------------
+// wazuh_syscollector_pull — per-agent enrichment
+// ---------------------------------------------------------------------------
+
+/** Inventory items we know how to pull. Keep small — host/agent layer
+ *  only this pass. Packages / processes / etc. land in the OCSF pass. */
+const SYSCOLLECTOR_ITEMS = ["hardware", "os", "netiface", "netaddr"] as const;
+type SyscollectorItem = (typeof SYSCOLLECTOR_ITEMS)[number];
+
+interface SyscollectorResponse {
+  data?: {
+    affected_items?: Array<Record<string, unknown>>;
+  };
+  // Wazuh returns a 1760 "agent_id_not_found" via `error` on the envelope
+  // for some installs; we treat that as "no inventory for this agent."
+  error?: number;
+  message?: string;
+}
+
+interface EnrichmentRow {
+  agentId: string;
+  /** Map of item → its `affected_items` (usually 0 or 1 entries). */
+  inventory: Partial<Record<SyscollectorItem, Array<Record<string, unknown>>>>;
+  /** When the server returned `scan_time` for any item, the latest one
+   *  surfaces here as the delta watermark for downstream filters. */
+  scanTime?: string;
+}
+
+function pickScanTime(
+  inventory: EnrichmentRow["inventory"]
+): string | undefined {
+  let latest: string | undefined;
+  for (const items of Object.values(inventory)) {
+    for (const row of items ?? []) {
+      const s = (row as { scan_time?: unknown }).scan_time;
+      if (typeof s === "string" && (!latest || s > latest)) latest = s;
+    }
+  }
+  return latest;
+}
+
+export const wazuhSyscollectorPullPlugin: InProcessPlugin = {
+  manifest: {
+    id: "wazuh_syscollector_pull",
+    name: "Wazuh Syscollector Pull",
+    version: "1.0.0",
+    category: "datasource",
+    contract: 2,
+    requires: [{ binding: "wazuh", kind: "wazuh" }] as unknown as PluginManifest["requires"],
+    description:
+      "For each agent id in `inputs.agentIds`, fetches the per-agent inventory items configured under `items` (host/agent layer: hardware / os / netiface / netaddr). Tolerates an empty / missing inventory per agent — skip-and-continue, with the gap surfaced in `metadata.missingAgents`. Carries `scan_time` from the inventory rows so downstream delta filters have a watermark.",
+    configSchema: {
+      type: "object",
+      properties: {
+        items: {
+          type: "array",
+          default: ["hardware", "os", "netiface", "netaddr"],
+          items: { type: "string", enum: [...SYSCOLLECTOR_ITEMS] },
+          description:
+            "Which inventory items to pull per agent. Host/agent layer only — packages / processes / etc. land in the OCSF pass."
+        },
+        agentIdField: {
+          type: "string",
+          default: "id",
+          description:
+            "When `inputs.agents` is supplied (the natural chain from wazuh_agents_pull), pull each agent's id from this field. Defaults to `id` (matches Wazuh's `/agents` response shape)."
+        },
+        maxAgents: {
+          type: "integer",
+          default: 10000,
+          description:
+            "Hard ceiling on agents enriched in one execute(). Guard against a runaway upstream — operator can lift for megafleets."
+        }
+      },
+      additionalProperties: false
+    },
+    inputPorts: [
+      {
+        name: "agentIds",
+        description:
+          "Array of agent id strings. Optional — when omitted, the plugin reads `inputs.agents` and pulls ids from `config.agentIdField` (defaults to chain directly off wazuh_agents_pull)."
+      },
+      {
+        name: "agents",
+        description:
+          "Optional fallback when agentIds isn't piped: array of agent rows. The plugin reads each row's `config.agentIdField` field for the id."
+      }
+    ],
+    outputPorts: [
+      {
+        name: "enrichment",
+        description:
+          "Array of `{ agentId, inventory: {hardware,os,netiface,netaddr?}, scanTime? }` rows. Agents whose inventory was empty / missing entirely DO NOT appear here — they're surfaced in `metadata.missingAgents` instead."
+      },
+      {
+        name: "metadata",
+        description:
+          "Diagnostic envelope: { fetched, missingAgents: string[], items, perItemErrors }. perItemErrors carries non-fatal per-(agent,item) failures (e.g. one item 404s while others succeed)."
+      }
+    ],
+    capabilities: ["query"],
+    ui: {
+      icon: "info",
+      color: "#1f6feb",
+      paletteGroup: "Sources",
+      formHints: {
+        items: { widget: "tags" }
+      }
+    }
+  },
+  async execute(input) {
+    const conn = requireWazuhConnection(
+      input,
+      "wazuh",
+      "wazuh_syscollector_pull"
+    );
+    const client = await acquireClient<WazuhHandle>(conn);
+    const cfg = input.config as {
+      items?: unknown;
+      agentIdField?: unknown;
+      maxAgents?: unknown;
+    };
+    const items: SyscollectorItem[] = Array.isArray(cfg.items)
+      ? (cfg.items as unknown[]).flatMap((v) =>
+          (SYSCOLLECTOR_ITEMS as readonly string[]).includes(String(v))
+            ? [String(v) as SyscollectorItem]
+            : []
+        )
+      : [...SYSCOLLECTOR_ITEMS];
+    if (items.length === 0) {
+      throw new Error(
+        "wazuh_syscollector_pull: at least one inventory item must be configured (hardware / os / netiface / netaddr)"
+      );
+    }
+    const idField =
+      typeof cfg.agentIdField === "string" ? cfg.agentIdField : "id";
+    const maxAgents =
+      typeof cfg.maxAgents === "number" && cfg.maxAgents > 0
+        ? Math.floor(cfg.maxAgents)
+        : 10_000;
+
+    const agentIds = pickAgentIds(input.inputs, idField);
+    if (agentIds.length === 0) {
+      return {
+        outputs: {
+          enrichment: [],
+          metadata: { fetched: 0, missingAgents: [], items, perItemErrors: [] }
+        }
+      };
+    }
+    const trimmed = agentIds.slice(0, maxAgents);
+
+    const enrichment: EnrichmentRow[] = [];
+    const missingAgents: string[] = [];
+    const perItemErrors: Array<{
+      agentId: string;
+      item: SyscollectorItem;
+      status?: number;
+      message: string;
+    }> = [];
+
+    for (const agentId of trimmed) {
+      const inventory: EnrichmentRow["inventory"] = {};
+      let anyData = false;
+      for (const item of items) {
+        try {
+          const path = `/syscollector/${encodeURIComponent(agentId)}/${item}`;
+          const json = await client.request<SyscollectorResponse>(path);
+          const rows = json.data?.affected_items ?? [];
+          if (rows.length > 0) {
+            inventory[item] = rows;
+            anyData = true;
+          }
+        } catch (e) {
+          const err = e as { status?: number; message?: string };
+          // 404 = agent has no entries for this item. That's the
+          // "empty inventory" scenario the scope brief explicitly
+          // calls out — skip-and-continue, surface the gap.
+          if (err.status === 404) {
+            continue;
+          }
+          perItemErrors.push({
+            agentId,
+            item,
+            status: err.status,
+            message: err.message ?? String(e)
+          });
+        }
+      }
+      if (anyData) {
+        const scanTime = pickScanTime(inventory);
+        enrichment.push({
+          agentId,
+          inventory,
+          ...(scanTime ? { scanTime } : {})
+        });
+      } else {
+        missingAgents.push(agentId);
+      }
+    }
+
+    return {
+      outputs: {
+        enrichment,
+        metadata: {
+          fetched: enrichment.length,
+          missingAgents,
+          items,
+          perItemErrors,
+          // When the upstream provided more ids than we'd enrich, flag
+          // it so the trace UI surfaces "we capped at maxAgents."
+          truncated: agentIds.length > trimmed.length
+        }
+      }
+    };
+  }
+};
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+function clampLimit(value: unknown, fallback: number): number {
+  const n = typeof value === "number" ? Math.floor(value) : fallback;
+  if (!Number.isFinite(n) || n <= 0) return fallback;
+  // Wazuh caps server-side at 500 anyway; we mirror it so a misconfig
+  // doesn't waste round-trips with a clamped response.
+  return Math.min(n, 500);
+}
+
+function clampMaxPages(value: unknown, fallback: number): number {
+  const n = typeof value === "number" ? Math.floor(value) : fallback;
+  if (!Number.isFinite(n) || n <= 0) return fallback;
+  return Math.min(n, 10_000);
+}
+
+function pickAgentIds(
+  inputs: Record<string, unknown>,
+  idField: string
+): string[] {
+  const direct = inputs.agentIds;
+  if (Array.isArray(direct)) {
+    return direct
+      .map((v) =>
+        typeof v === "string"
+          ? v
+          : typeof v === "number"
+            ? String(v)
+            : null
+      )
+      .filter((v): v is string => typeof v === "string" && v.length > 0);
+  }
+  const agents = inputs.agents;
+  if (Array.isArray(agents)) {
+    return agents.flatMap((row) => {
+      if (!row || typeof row !== "object") return [];
+      const v = (row as Record<string, unknown>)[idField];
+      if (typeof v === "string" && v.length > 0) return [v];
+      if (typeof v === "number") return [String(v)];
+      return [];
+    });
+  }
+  return [];
+}
