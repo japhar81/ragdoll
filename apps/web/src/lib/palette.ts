@@ -108,12 +108,26 @@ export function defaultDatasetForNewNode(
  * falls into the trailing "Other" bucket so the layout is deterministic
  * regardless of registry order.
  */
+/**
+ * Canonical palette group order. THIS is the closed set — a plugin's
+ * `ui.paletteGroup` MUST be one of these strings, or it falls into the
+ * trailing "Other" bucket (a smell — see the regression test in
+ * apps/web/test/palette-coverage.test.ts which fails CI if any
+ * registered plugin lands there).
+ *
+ * To add a new group: append it here, then update the per-group blurb
+ * in docs/developer/plugin-development.md so plugin authors know what
+ * belongs where. Don't sprinkle new groups in `ui.paletteGroup`
+ * without updating the order — the palette will silently bucket them
+ * into "Other" and operators will stop finding them.
+ */
 export const PALETTE_GROUP_ORDER = [
   "Sources",
   "Ingestion",
   "Parsing",
   "Embeddings",
   "Storage",
+  "Graph",
   "Retrieval",
   "Prompting",
   "Models",

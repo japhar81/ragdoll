@@ -149,7 +149,6 @@ export const chunkContextualPlugin: InProcessPlugin = {
     ui: {
       icon: "scissors",
       color: "#16a34a",
-      paletteGroup: "Chunking",
       formHints: {
         provider: { widget: "select" },
         contextPromptTemplate: { widget: "textarea", rows: 6 },

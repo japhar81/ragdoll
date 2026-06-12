@@ -111,7 +111,6 @@ export const extractEntitiesPlugin: InProcessPlugin = {
     ui: {
       icon: "tag",
       color: "#a855f7",
-      paletteGroup: "LLM",
       formHints: {
         provider: { widget: "select" },
         systemPrompt: { widget: "textarea", rows: 4 },
@@ -336,7 +335,6 @@ export const entityResolvePlugin: InProcessPlugin = {
     ui: {
       icon: "link",
       color: "#a855f7",
-      paletteGroup: "LLM",
       formHints: {
         provider: { widget: "select" },
         canonical: { widget: "json" },

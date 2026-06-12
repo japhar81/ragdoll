@@ -134,7 +134,6 @@ export const toneProfileBuildPlugin: InProcessPlugin = {
     ui: {
       icon: "user",
       color: "#db2777",
-      paletteGroup: "Tone",
       formHints: {
         provider: { widget: "select" },
         systemPrompt: { widget: "textarea", rows: 4 },
@@ -263,7 +262,6 @@ export const composeWithStylePlugin: InProcessPlugin = {
     ui: {
       icon: "edit",
       color: "#db2777",
-      paletteGroup: "Tone",
       formHints: {
         provider: { widget: "select" },
         systemPromptPrefix: { widget: "textarea", rows: 4 },

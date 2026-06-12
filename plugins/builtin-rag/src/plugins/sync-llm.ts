@@ -113,7 +113,6 @@ export const queryClassifyPlugin: InProcessPlugin = {
     ui: {
       icon: "compass",
       color: "#f97316",
-      paletteGroup: "LLM",
       formHints: {
         provider: { widget: "select" },
         systemPrompt: { widget: "textarea", rows: 4 },
@@ -236,7 +235,6 @@ export const summarizeEventPlugin: InProcessPlugin = {
     ui: {
       icon: "file-text",
       color: "#f97316",
-      paletteGroup: "LLM",
       formHints: {
         provider: { widget: "select" },
         systemPrompt: { widget: "textarea", rows: 4 },
@@ -370,7 +368,6 @@ export const actionStatusRefreshPlugin: InProcessPlugin = {
     ui: {
       icon: "check-circle",
       color: "#f97316",
-      paletteGroup: "LLM",
       formHints: {
         provider: { widget: "select" },
         systemPrompt: { widget: "textarea", rows: 4 },
