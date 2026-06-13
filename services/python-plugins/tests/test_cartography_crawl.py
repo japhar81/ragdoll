@@ -26,6 +26,7 @@ def _build_request(
     config: Dict[str, Any],
     connection: Dict[str, Any] | None = None,
     secrets: Dict[str, Any] | None = None,
+    request_id: str | None = "req-1",
 ):
     """Construct an ExecuteRequest the handler accepts.
 
@@ -33,9 +34,21 @@ def _build_request(
     `request.dataset.bindings.target.connection`, mirroring the
     serialized ADR-0023 resolved-dataset envelope the Node runtime
     sends over the Connect wire.
+
+    `request_id` defaults to ``"req-1"`` so existing tests are
+    unaffected; pass ``None`` to omit it (exercising the provenance
+    fall-back to a fresh UUID) or any string to assert it ends up on
+    `metadata.crawlId` (the provenance contract — ADR-0030).
     """
     from app.models import ExecuteRequest
 
+    context: Dict[str, Any] = {
+        "tenantId": "tenant-1",
+        "environment": "test",
+        "resolvedConfig": {"values": {}},
+    }
+    if request_id is not None:
+        context["requestId"] = request_id
     body = {
         "plugin": {"category": "datasource", "id": "cartography_crawl", "version": "1.0.0"},
         "node": {"id": "n1", "config": {}, "secrets": {}},
@@ -47,12 +60,7 @@ def _build_request(
             if connection is not None
             else {}
         ),
-        "context": {
-            "requestId": "req-1",
-            "tenantId": "tenant-1",
-            "environment": "test",
-            "resolvedConfig": {"values": {}},
-        },
+        "context": context,
     }
     return ExecuteRequest.model_validate(body)
 
@@ -494,6 +502,193 @@ def test_metadata_always_carries_cartography_output_tails(monkeypatch):
     assert "cartographyStderrTail" in meta
     assert "hello stdout" in meta["cartographyStdoutTail"]
     assert "Syncing EC2" in meta["cartographyStderrTail"]
+
+
+# ---------------------------------------------------------------------------
+# provenance contract (ADR-0030) — crawlId + crawledAt
+# ---------------------------------------------------------------------------
+
+
+def test_metadata_crawlid_derives_from_runtime_request_id(monkeypatch):
+    # ADR-0030 §1: `metadata.crawlId` is the runtime `requestId`
+    # (already on the wire from buildExecuteRequest → bridge →
+    # request.context.requestId). bulwark stamps this same id onto
+    # every observation row via `inputs.metadata.crawlId` so the
+    # per-module status envelope and the written observations
+    # correlate — that's what lets bulwark's gated windowed close-
+    # by-absence pair "modules complete in crawl N" with
+    # "observations stamped crawlId N."
+    def fake_run(*_args, **_kwargs):
+        return _FakeCompleted(returncode=0, stdout="ok\n", stderr="Syncing X\n")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    req = _build_request(
+        config={"modules": ["aws"]},
+        connection={
+            "kind": "neo4j",
+            "slug": "n",
+            "options": {"uri": "bolt://x"},
+            "secret": "neo4j:pw",
+        },
+        request_id="exec-run-20260613-abc",
+    )
+    out = plugin.handle(req)
+    meta = out["outputs"]["metadata"]
+    assert meta["crawlId"] == "exec-run-20260613-abc"
+
+
+def test_metadata_carries_crawled_at_iso_timestamp(monkeypatch):
+    # ADR-0030 §1: `crawledAt` is the run-anchor timestamp. bulwark
+    # uses it as the window-age anchor. ISO-8601 with the trailing 'Z'
+    # for UTC, matching `startedAt` for now (we don't need sub-second
+    # precision; the per-run identifier is the load-bearing field).
+    def fake_run(*_args, **_kwargs):
+        return _FakeCompleted(returncode=0, stdout="ok\n", stderr="Syncing X\n")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    req = _build_request(
+        config={"modules": ["aws"]},
+        connection={
+            "kind": "neo4j",
+            "slug": "n",
+            "options": {"uri": "bolt://x"},
+            "secret": "neo4j:pw",
+        },
+    )
+    out = plugin.handle(req)
+    meta = out["outputs"]["metadata"]
+    assert "crawledAt" in meta
+    # ISO timestamp ending in Z (UTC).
+    import re
+    assert re.match(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$", meta["crawledAt"])
+    # Aliased to startedAt this revision (same anchor moment).
+    assert meta["crawledAt"] == meta["startedAt"]
+
+
+def test_two_runs_have_distinct_crawlids_so_restamping_is_observable(monkeypatch):
+    # The contract bulwark gates close-by-absence on requires that
+    # successive runs produce DIFFERENT crawlIds — that's how
+    # bulwark distinguishes "this observation was re-stamped this
+    # crawl" (last_seen.crawlId == current.crawlId) from "this
+    # observation was NOT re-stamped this crawl" (absent → close).
+    # If two runs emitted the same crawlId, bulwark couldn't tell.
+    # We pass distinct requestIds to simulate two pipeline runs.
+    def fake_run(*_args, **_kwargs):
+        return _FakeCompleted(returncode=0, stdout="ok\n", stderr="Syncing X\n")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    out_a = plugin.handle(
+        _build_request(
+            config={"modules": ["aws"]},
+            connection={
+                "kind": "neo4j",
+                "slug": "n",
+                "options": {"uri": "bolt://x"},
+                "secret": "neo4j:pw",
+            },
+            request_id="run-A",
+        )
+    )
+    out_b = plugin.handle(
+        _build_request(
+            config={"modules": ["aws"]},
+            connection={
+                "kind": "neo4j",
+                "slug": "n",
+                "options": {"uri": "bolt://x"},
+                "secret": "neo4j:pw",
+            },
+            request_id="run-B",
+        )
+    )
+    assert out_a["outputs"]["metadata"]["crawlId"] == "run-A"
+    assert out_b["outputs"]["metadata"]["crawlId"] == "run-B"
+
+
+def test_crawlid_falls_back_to_uuid_when_runtime_omits_request_id(monkeypatch):
+    # Defensive: a dev/test harness might omit the requestId entirely.
+    # The handler MUST still produce SOME identifier (so the per-
+    # module envelope and any downstream observations can correlate
+    # within that run) — it just won't tie back to a RAGdoll
+    # execution row. Documented as the "loses correlation"
+    # fall-back; production callers must not rely on it.
+    def fake_run(*_args, **_kwargs):
+        return _FakeCompleted(returncode=0, stdout="ok\n", stderr="Syncing X\n")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    req = _build_request(
+        config={"modules": ["aws"]},
+        connection={
+            "kind": "neo4j",
+            "slug": "n",
+            "options": {"uri": "bolt://x"},
+            "secret": "neo4j:pw",
+        },
+        request_id=None,
+    )
+    out = plugin.handle(req)
+    crawl_id = out["outputs"]["metadata"]["crawlId"]
+    assert crawl_id
+    # UUID4 shape — 36 chars with dashes at the canonical positions.
+    import re
+    assert re.match(
+        r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+        crawl_id,
+    )
+
+
+def test_dry_run_also_emits_crawlid_and_crawledat(monkeypatch):
+    # The dry-run path predates the provenance contract; check it
+    # carries the same fields so a Builder preview against an
+    # unbound cartography node looks identical to the real path
+    # (minus the cartography invocation). Otherwise the operator
+    # would see a different envelope shape in dev vs prod.
+    req = _build_request(
+        config={"modules": ["aws"], "runner": "dry-run"},
+        connection={
+            "kind": "neo4j",
+            "slug": "n",
+            "options": {"uri": "bolt://x"},
+            "secret": "neo4j:pw",
+        },
+        request_id="dry-run-abc",
+    )
+    out = plugin.handle(req)
+    meta = out["outputs"]["metadata"]
+    assert meta["crawlId"] == "dry-run-abc"
+    assert meta["crawledAt"] == meta["startedAt"]
+
+
+def test_failed_path_exception_metadata_still_carries_provenance(monkeypatch):
+    # The `failed`-path exception attaches the full envelope to
+    # err.metadata (see #229). That envelope MUST also carry the
+    # provenance fields — bulwark may want to record what crawlId
+    # was attempted even on the fatal-failure path so the next
+    # successful crawl with the SAME data shape can be compared.
+    def fake_run(*_args, **_kwargs):
+        return _FakeCompleted(
+            returncode=1,
+            stdout="",
+            stderr="google.api_core.exceptions.ServiceUnavailable: 503\n",
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    req = _build_request(
+        config={"modules": ["gcp"]},
+        connection={
+            "kind": "neo4j",
+            "slug": "n",
+            "options": {"uri": "bolt://x"},
+            "secret": "neo4j:pw",
+        },
+        request_id="failed-run-XYZ",
+    )
+    with pytest.raises(ValueError) as exc_info:
+        plugin.handle(req)
+    meta = getattr(exc_info.value, "metadata", None)
+    assert meta is not None
+    assert meta["crawlId"] == "failed-run-XYZ"
+    assert "crawledAt" in meta
 
 
 # ---------------------------------------------------------------------------

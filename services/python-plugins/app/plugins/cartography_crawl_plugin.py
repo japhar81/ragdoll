@@ -72,6 +72,16 @@ silently rots and how the tombstoning safety problem creeps back in.
 
 ConnectError(INVALID_ARGUMENT|INTERNAL) flows through the bridge and the
 runtime surfaces the failure on the execution trace where it belongs.
+
+Provenance contract (ADR-0030)
+------------------------------
+Each run emits `metadata.crawlId` + `metadata.crawledAt` derived from the
+runtime context (`request.context.requestId` — already on the wire). The
+per-module status envelope and any observations a downstream transform
+stamps via `inputs.metadata.crawlId` carry the SAME identifier, which is
+how bulwark's gated windowed close-by-absence correlates "modules complete
+in crawl N" with "observations stamped crawlId N." See ADR-0030 for the
+full contract.
 """
 
 from __future__ import annotations
@@ -488,14 +498,36 @@ def handle(request) -> Dict[str, Any]:
     options: Dict[str, Any] = conn.get("options") or {}
     target_db = options.get("database")
     neo4j_uri = str(options.get("uri") or "")
-    crawl_id = str(uuid.uuid4())
+    # Provenance — the contract bulwark's gated windowed close-by-absence
+    # consumes (ADR-0030):
+    #   * `crawlId` is the run-scoped identifier the operator can correlate
+    #     against /api/executions/<id> in RAGdoll. We derive it from
+    #     `request.context.requestId` (already on the wire — TS-side
+    #     `ctx.requestId` is set per pipeline execution and threaded
+    #     through buildExecuteRequest). Falls back to a fresh UUID when
+    #     absent so tests / dry-runs without a real runtime context keep
+    #     working — but the fall-back loses correlation with RAGdoll's
+    #     execution row and should NOT be relied on for production
+    #     reconciliation.
+    #   * `crawledAt` is the ISO-8601 timestamp at the moment this run
+    #     started; it's what bulwark uses as the window-age anchor (i.e.
+    #     "this observation was re-stamped at T; window-age = now - T").
+    # The same `crawlId` is emitted at the top of `metadata` and is what
+    # bulwark's transform stamps onto every observation row via
+    # `inputs.metadata.crawlId` so the per-module status envelope and the
+    # written observations correlate. See ADR-0030 for the full contract.
+    crawl_id = (
+        getattr(request.context, "requestId", None) or str(uuid.uuid4())
+    )
     started_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    crawled_at = started_at  # alias surfaced under the provenance contract name
 
     if cfg["_runner"] == "dry-run":
         return {
             "outputs": {
                 "metadata": {
                     "crawlId": crawl_id,
+                    "crawledAt": crawled_at,
                     "startedAt": started_at,
                     "completedAt": started_at,
                     "mode": "dry-run",
@@ -678,7 +710,16 @@ def handle(request) -> Dict[str, Any]:
     ]
 
     metadata: Dict[str, Any] = {
+        # Provenance contract (ADR-0030) — bulwark's transform stamps
+        # `crawlId` + `crawledAt` onto every observation row via
+        # `inputs.metadata.crawlId` / `inputs.metadata.crawledAt`, so the
+        # per-module status envelope below and the written observations
+        # correlate. The SAME crawlId appears on both sides of the
+        # contract, which is how bulwark's gated windowed close-by-
+        # absence pairs "modules complete in crawl N" with "observations
+        # stamped crawlId N."
         "crawlId": crawl_id,
+        "crawledAt": crawled_at,
         "startedAt": started_at,
         "completedAt": completed_at,
         "mode": "subprocess",
