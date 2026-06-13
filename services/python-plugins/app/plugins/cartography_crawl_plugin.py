@@ -35,18 +35,40 @@ The output envelope mirrors the Node plugin's contract verbatim (the same
 ``metadata.modules[*]`` shape downstream nodes branch on) so swapping the
 implementation is transparent.
 
-Failure behaviour
------------------
-The Node implementation USED to catch every spawn error and return success
-with ``status: "failed"`` per module. That hid binary-not-found and
-connectivity failures — the run trace reported the node succeeded and the
-downstream graph reads ran against an unpopulated DB. This handler raises
-ValueError when:
+Module outcome classification (the load-bearing safety rule)
+------------------------------------------------------------
+Each requested module is invoked in its OWN cartography process so one
+module's failure can't blow away another's data. After the invocation
+we classify the outcome into one of three values — the contract
+bulwark's Cartography projection gates close-by-absence on:
 
-  * configuration is invalid (no modules, unknown module name),
-  * the bound target binding isn't present / isn't neo4j,
-  * cartography is missing from the sidecar image (``FileNotFoundError``),
-  * any module exits non-zero.
+  * ``complete``  — cartography exited 0. The module fully collected
+                    its entity types. Safe for close-by-absence
+                    reconciliation downstream.
+  * ``excluded``  — cartography failed BUT the error matches a
+                    *structurally permanent* pattern (e.g.
+                    ``ValidationException: not supported for account
+                    instances of IAM Identity Center``). The module
+                    can never succeed on this account/config; its
+                    entity types simply aren't collected from this
+                    source. **The crawl is STILL COMPLETE for every
+                    other module** — bulwark will skip those entity
+                    types in close-by-absence, but the rest reconcile
+                    normally. Exit 0.
+  * ``failed``    — cartography failed for any other reason
+                    (throttling, transient auth, network, timeout,
+                    generic). The module *might* have produced data;
+                    absence is NOT informative. This makes the crawl
+                    **partial**, which would tombstone live assets if
+                    a downstream projection close-by-absences against
+                    it. **The handler raises** (fatal) so the trace is
+                    loud and the prior good inventory stays intact.
+                    This will be relaxed to non-fatal once bulwark
+                    gates close-by-absence on per-module completeness.
+
+When unsure: default to ``failed``/fatal. **Never silently downgrade a
+real failure to ``excluded`` / skip** — that's how stale inventory
+silently rots and how the tombstoning safety problem creeps back in.
 
 ConnectError(INVALID_ARGUMENT|INTERNAL) flows through the bridge and the
 runtime surfaces the failure on the execution trace where it belongs.
@@ -93,6 +115,134 @@ CARTOGRAPHY_MODULES = (
 )
 
 DEFAULT_TIMEOUT_MS = 1_800_000  # 30 minutes — long crawls are normal
+
+# Entity types each cartography module collects, surfaced per-module on
+# the output envelope so bulwark's projection knows WHICH types this
+# module owns. Bulwark gates close-by-absence per-entity-type using this
+# list — an `excluded` / `failed` module never closes-by-absence the
+# types it would have collected. NOT EXHAUSTIVE; covers the modules in
+# the allowlist and the entities cartography's own schema docs list as
+# their headline outputs. Operators with custom schemas can override
+# via `entityTypeOverrides` on the node config (future enhancement).
+MODULE_ENTITY_TYPES: Dict[str, Tuple[str, ...]] = {
+    "aws": (
+        "AWSAccount", "AWSRegion", "EC2Instance", "EC2SecurityGroup",
+        "EC2Subnet", "EBSVolume", "VPC", "RDSInstance", "RDSCluster",
+        "S3Bucket", "LoadBalancer", "LoadBalancerV2", "AWSPolicy",
+        "AWSRole", "AWSUser", "AWSGroup", "AutoScalingGroup",
+        "LaunchConfiguration", "ECSCluster", "ECSService", "ECSTask",
+        "EKSCluster", "ElasticIPAddress", "DNSZone", "DNSRecord",
+        "CloudTrailTrail", "CloudWatchLogGroup",
+    ),
+    "azure": (
+        "AzureTenant", "AzureSubscription", "AzureVirtualMachine",
+        "AzureVirtualNetwork", "AzureSubnet", "AzureStorageAccount",
+        "AzureSQLServer", "AzureKeyVault",
+    ),
+    "gcp": (
+        "GCPOrganization", "GCPFolder", "GCPProject", "GCPInstance",
+        "GCPNetwork", "GCPSubnet", "GCPBucket", "GCPRole",
+        "GKECluster",
+    ),
+    "oci": ("OCITenancy", "OCICompartment", "OCIUser", "OCIGroup"),
+    "github": (
+        "GitHubOrganization", "GitHubUser", "GitHubRepository",
+        "GitHubTeam", "GitHubBranch",
+    ),
+    "gsuite": ("GSuiteUser", "GSuiteGroup"),
+    "okta": (
+        "OktaOrganization", "OktaUser", "OktaGroup", "OktaApplication",
+        "OktaRole",
+    ),
+    "identitycenter": (
+        "AWSIdentityCenter", "AWSIdentityCenterUser",
+        "AWSIdentityCenterGroup", "AWSPermissionSet",
+        "AWSAccountAssignment",
+    ),
+    "kubernetes": (
+        "KubernetesCluster", "KubernetesNamespace", "KubernetesNode",
+        "KubernetesPod", "KubernetesContainer", "KubernetesService",
+    ),
+    "crowdstrike": ("CrowdstrikeHost", "CrowdstrikeVulnerability"),
+    "duo": ("DuoUser", "DuoGroup", "DuoEndpoint"),
+    "jamf": ("JamfComputer", "JamfMobileDevice"),
+    "kandji": ("KandjiDevice",),
+    "lastpass": ("LastPassUser",),
+    "pagerduty": ("PagerDutyUser", "PagerDutyTeam", "PagerDutyService"),
+    "semgrep": ("SemgrepDeployment", "SemgrepFinding"),
+    "snipeit": ("SnipeITAsset", "SnipeITUser"),
+    "tailscale": ("TailscaleTailnet", "TailscaleDevice", "TailscaleUser"),
+}
+
+
+# Substrings that mean "this module is structurally incompatible with
+# this account/config" — i.e. it can NEVER succeed here. Matched
+# case-insensitively against the module's stderr. Keep the list TIGHT;
+# every entry added here makes a class of failures non-fatal so the
+# trace's burden of catching the operator's attention shifts to the
+# `excluded` reason. Conservative-by-default — when in doubt, leave a
+# pattern OUT and let the failure stay fatal.
+#
+# Sources for the canonical phrases:
+#   - AWS ValidationException for IAM Identity Center on a non-org-root
+#     account: ``not supported for account instances of IAM Identity
+#     Center``.
+#   - AWS OptInRequired for services that need an explicit enable per
+#     region/account.
+#   - GCP "API has not been used in project X before or it is disabled"
+#     when the operator hasn't enabled the relevant API.
+#   - Azure "subscription doesn't contain a Microsoft.<provider>"
+#     resource-provider-not-registered errors.
+_EXCLUDED_SUBSTRINGS: Tuple[str, ...] = (
+    "not supported for account instances",  # IAM Identity Center
+    "is not supported for this account",
+    "is not supported in this region",
+    "operation is not supported in this region",
+    # OptInRequired — service available globally but the account has
+    # not opted in. The operator could enable it, but for this run it's
+    # structurally unavailable.
+    "the subscription is not registered",
+    "service is not supported in this region",
+    "this api method only works on iam identity center instances of type",
+    # GCP — API has not been enabled. Structurally absent until the
+    # operator enables it; close-by-absence on its types would tombstone
+    # things that are simply not visible here.
+    "has not been used in project",
+    "api has not been enabled",
+    "consumer has been disabled",
+)
+
+
+def classify_module_outcome(
+    returncode: int, stderr_tail: str
+) -> Tuple[str, Optional[str]]:
+    """Classify a single module's invocation into one of three buckets.
+
+    Returns ``(status, reason)`` where status is one of
+    ``"complete"`` / ``"excluded"`` / ``"failed"`` and ``reason`` is a
+    short human-readable phrase (the matched substring + a snippet of
+    the surrounding stderr line) when status is ``excluded`` or
+    ``failed``. The reason field on `excluded` is the operator-facing
+    "why this module didn't run" — kept short so it fits on the trace
+    UI without an expand-collapse.
+    """
+    if returncode == 0:
+        return ("complete", None)
+    # Match the FIRST excluded substring that appears anywhere in the
+    # stderr tail. We don't try to match per-line — cartography
+    # sometimes spreads the relevant exception across a multi-line
+    # traceback and the canonical phrase is what matters.
+    lower = stderr_tail.lower()
+    for pattern in _EXCLUDED_SUBSTRINGS:
+        if pattern in lower:
+            # Snip the line containing the match so the reason field
+            # is the actual operator-facing sentence, not 2KB of
+            # traceback.
+            for line in stderr_tail.splitlines():
+                if pattern in line.lower():
+                    return ("excluded", line.strip()[:200])
+            return ("excluded", pattern)
+    return ("failed", None)
 # Default points at the isolated venv the Dockerfile sets up so
 # cartography's eager-import landmine can't be triggered by other deps
 # in the main poetry env (see ADR-0026 §#2 follow-up). Operators can
@@ -374,14 +524,23 @@ def handle(request) -> Dict[str, Any]:
     aggregate_stdout_parts: List[str] = []
     aggregate_stderr_parts: List[str] = []
     module_entries: List[Dict[str, Any]] = []
-    # Top-level exitCode reflects the FIRST failing module's code (or
-    # 0 if every module succeeded). It's a coarse signal; the per-
-    # module statuses below are the load-bearing detail.
+    # Top-level exitCode reflects the FIRST module that failed (or
+    # 0 if every module is complete OR excluded — excluded means
+    # "structurally absent here, the OTHER modules' crawl is still
+    # whole"). The handler raises when any module is failed, so a
+    # non-fatal exitCode != 0 only happens when at least one module
+    # was excluded (which is intentional — the operator may want to
+    # spot partial coverage at a glance).
     aggregate_exit_code: int = 0
 
+    # First pass: invoke every module, classify each outcome. We loop
+    # to completion before raising on any `failed` so the metadata
+    # envelope (and the trace) shows the full per-module picture, not
+    # just the first failure.
     for module in cfg["_modules"]:
         argv = [cfg["_bin"], *_build_args_for_module(module, cfg)]
         module_started = time.time()
+        entity_types = list(MODULE_ENTITY_TYPES.get(module, ()))
         try:
             result = subprocess.run(  # noqa: S603 — argv from validated config
                 argv,
@@ -401,19 +560,24 @@ def handle(request) -> Dict[str, Any]:
                 "Python entrypoint when you `pip install cartography`)."
             ) from exc
         except subprocess.TimeoutExpired:
+            # Timeout is a TRANSIENT failure — could be a slow account,
+            # could be cartography hitting throttling. Classify as
+            # `failed`; the handler raises after the loop. The reason
+            # field carries enough detail to act on.
             module_entries.append({
                 "module": module,
                 "status": "failed",
-                "error": (
+                "reason": (
                     f"timed out after {per_module_timeout_s}s (per-module budget "
                     f"derived from config.timeoutMs ÷ N modules)"
                 ),
+                "entityTypes": entity_types,
                 "durationMs": int((time.time() - module_started) * 1000),
             })
             if aggregate_exit_code == 0:
                 aggregate_exit_code = -1
             logger.warning(
-                "cartography_crawl module %s timed out after %ss — continuing with the next module",
+                "cartography_crawl module %s timed out after %ss",
                 module,
                 per_module_timeout_s,
             )
@@ -422,43 +586,59 @@ def handle(request) -> Dict[str, Any]:
         stderr_tail = (result.stderr or "")[-2048:]
         aggregate_stdout_parts.append(f"[{module}]\n{stdout_tail}")
         aggregate_stderr_parts.append(f"[{module}]\n{stderr_tail}")
-        if result.returncode != 0:
-            # Module failure is NON-FATAL: log + continue. The
-            # historical posture was to raise; that threw away every
-            # other module's data when one sub-sync hit
-            # `ValidationException: not supported for account
-            # instances of IAM Identity Center` (or any analogous
-            # permission/scope error). The user's posture now: log a
-            # warning, skip that module, continue the rest, exit 0
-            # with the partial inventory.
-            module_entries.append({
-                "module": module,
-                "status": "failed",
-                "exitCode": result.returncode,
-                "stderrTail": stderr_tail,
-                "durationMs": int((time.time() - module_started) * 1000),
-            })
+
+        status, reason = classify_module_outcome(result.returncode, stderr_tail)
+        # `no_data` heuristic only applies to a clean exit — when
+        # cartography exited 0 but its log shows no sync activity, the
+        # account is either genuinely empty or the creds didn't reach
+        # the SDK chain. We surface that via a top-level warning, NOT
+        # by demoting the per-module status — `complete` means
+        # "cartography said it finished," which is what bulwark needs
+        # to gate close-by-absence on.
+        entry: Dict[str, Any] = {
+            "module": module,
+            "status": status,
+            "entityTypes": entity_types,
+            "durationMs": int((time.time() - module_started) * 1000),
+        }
+        if status == "complete":
+            pass  # nothing else to add
+        else:
+            # excluded OR failed — both carry diagnostic detail.
+            entry["exitCode"] = result.returncode
+            entry["stderrTail"] = stderr_tail
+            if reason:
+                entry["reason"] = reason
+            if status == "excluded":
+                logger.info(
+                    "cartography_crawl module %s excluded (structurally incompatible): %s",
+                    module,
+                    reason or "<unknown>",
+                )
+            else:
+                logger.warning(
+                    "cartography_crawl module %s failed (transient): exit=%s stderr=%s",
+                    module,
+                    result.returncode,
+                    stderr_tail or "<empty>",
+                )
             if aggregate_exit_code == 0:
                 aggregate_exit_code = result.returncode
-            logger.warning(
-                "cartography_crawl module %s exited %s — continuing with the next module. stderr tail: %s",
-                module,
-                result.returncode,
-                stderr_tail or "<empty>",
-            )
-            continue
-        # Exit 0 — distinguish "ran and wrote things" from "ran but
-        # boto3 found no creds and silently did nothing."
-        module_status = "no_data" if _looks_empty(stdout_tail, stderr_tail) else "succeeded"
-        module_entries.append({
-            "module": module,
-            "status": module_status,
-            "durationMs": int((time.time() - module_started) * 1000),
-        })
+
+        module_entries.append(entry)
 
     completed_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     aggregate_stdout = "\n".join(aggregate_stdout_parts)[-4096:]
     aggregate_stderr = "\n".join(aggregate_stderr_parts)[-4096:]
+
+    complete_modules = [m for m in module_entries if m["status"] == "complete"]
+    excluded_modules = [m for m in module_entries if m["status"] == "excluded"]
+    failed_modules = [m for m in module_entries if m["status"] == "failed"]
+    no_data_modules = [
+        m for m in module_entries
+        if m["status"] == "complete"
+        and _looks_empty_from_aggregate(aggregate_stdout, aggregate_stderr, m["module"])
+    ]
 
     metadata: Dict[str, Any] = {
         "crawlId": crawl_id,
@@ -468,32 +648,21 @@ def handle(request) -> Dict[str, Any]:
         "target": {"connectionSlug": target_slug, "database": target_db},
         "modules": module_entries,
         "exitCode": aggregate_exit_code,
-        # Aggregate tails — concatenation of per-module output (capped
-        # at 4KB to keep the trace readable). Per-module stderr tails
-        # for failed modules live on the module entry itself for
-        # finer-grained diagnostics.
         "cartographyStdoutTail": aggregate_stdout,
         "cartographyStderrTail": aggregate_stderr,
     }
     if creds_warning:
         metadata["credsWarning"] = creds_warning
-
-    failed = [m for m in module_entries if m["status"] == "failed"]
-    no_data = [m for m in module_entries if m["status"] == "no_data"]
-    if failed:
-        # Loud (but non-fatal) summary so the trace surfaces which
-        # modules dropped without an operator having to grep stderr.
-        metadata["warning"] = (
-            f"{len(failed)} of {len(module_entries)} module(s) failed but the crawl "
-            f"continued with the rest (partial inventory). Failed modules: "
-            f"{', '.join(m['module'] for m in failed)}. Inspect the per-module "
-            f"entries' stderrTail for cause."
+    if excluded_modules:
+        metadata["excludedSummary"] = (
+            f"{len(excluded_modules)} of {len(module_entries)} module(s) "
+            f"are structurally absent from this account/config — "
+            f"{', '.join(m['module'] for m in excluded_modules)}. The crawl is "
+            f"COMPLETE for every other module; bulwark's projection will skip "
+            f"close-by-absence on the entity types these modules would have "
+            f"collected (see each entry's `entityTypes`)."
         )
-    elif no_data:
-        # All modules ran cleanly but none did sync work — usually
-        # a creds-misconfig (see credsWarning) or a genuinely empty
-        # account. Same warning the single-invocation path used to
-        # emit; recast to the per-module shape.
+    if no_data_modules and not failed_modules:
         metadata["warning"] = (
             "cartography ran cleanly but no module shows sync activity — "
             "either cloud credentials didn't reach the sidecar (see "
@@ -503,12 +672,79 @@ def handle(request) -> Dict[str, Any]:
             "for account <id>' lines."
         )
 
+    # TRANSIENT failure → fatal. This stays until bulwark's projection
+    # gates close-by-absence on per-module completeness — once it does,
+    # a failed module can downgrade to non-fatal because bulwark will
+    # refuse to tombstone its entity types. Until then, a silent partial
+    # is more dangerous than a loud failure, so we raise.
+    if failed_modules:
+        summary_lines = [
+            f"cartography_crawl: {len(failed_modules)} of "
+            f"{len(module_entries)} module(s) failed (TRANSIENT). The other "
+            f"modules' inventory may be valid but a partial crawl risks "
+            f"tombstoning live assets — see ADR-0029. Per-module:"
+        ]
+        for m in module_entries:
+            status = m["status"]
+            if status == "complete":
+                summary_lines.append(f"  {m['module']}: complete")
+            elif status == "excluded":
+                summary_lines.append(
+                    f"  {m['module']}: excluded ({m.get('reason', 'structurally absent')})"
+                )
+            else:
+                tail = (m.get("stderrTail") or m.get("reason") or "")[-400:]
+                summary_lines.append(
+                    f"  {m['module']}: FAILED exit={m.get('exitCode')} — {tail}"
+                )
+        # Stash the full envelope on the exception so a debugging caller
+        # can pluck it off the trace if they go looking.
+        err = ValueError("\n".join(summary_lines))
+        setattr(err, "metadata", metadata)
+        raise err
+
     logger.info(
-        "cartography_crawl completed crawl=%s target=%s succeeded=%s failed=%s no_data=%s",
+        "cartography_crawl completed crawl=%s target=%s complete=%s excluded=%s",
         crawl_id,
         target_slug,
-        sum(1 for m in module_entries if m["status"] == "succeeded"),
-        len(failed),
-        len(no_data),
+        len(complete_modules),
+        len(excluded_modules),
     )
     return {"outputs": {"metadata": metadata}}
+
+
+def _looks_empty_from_aggregate(
+    stdout: str, stderr: str, module: str
+) -> bool:
+    """Module-scoped variant of `_looks_empty`: did the section labelled
+    ``[module]`` in the aggregate tails show any sync activity? We slice
+    out the per-module section by header so a noisy module doesn't mask
+    a silent one (or vice versa).
+    """
+    sections = _split_module_sections(stdout) + _split_module_sections(stderr)
+    for section_module, section_body in sections:
+        if section_module == module and _looks_empty(section_body, ""):
+            continue  # this section had no markers — check next
+        if section_module == module:
+            return False
+    return True
+
+
+def _split_module_sections(text: str) -> List[Tuple[str, str]]:
+    """Split an aggregate tail (`[module]\\n<body>\\n[module2]\\n...`) into
+    `(module, body)` pairs. Best-effort — the format is just human-
+    readable concatenation, not a strict protocol."""
+    out: List[Tuple[str, str]] = []
+    current_module: Optional[str] = None
+    current_body: List[str] = []
+    for line in text.splitlines():
+        if line.startswith("[") and line.endswith("]") and " " not in line:
+            if current_module is not None:
+                out.append((current_module, "\n".join(current_body)))
+            current_module = line[1:-1]
+            current_body = []
+        else:
+            current_body.append(line)
+    if current_module is not None:
+        out.append((current_module, "\n".join(current_body)))
+    return out

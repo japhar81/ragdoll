@@ -180,10 +180,12 @@ def test_subprocess_invokes_cartography_once_per_module_with_neo4j_env(monkeypat
         modules_seen.append(argv[argv.index("--selected-modules") + 1])
         assert "--update-tag" in argv  # incremental=true propagates
     assert modules_seen == ["aws", "gcp"]
-    # Per-module entries in metadata.modules — both succeeded, each
-    # carries a durationMs.
-    assert [m["status"] for m in meta["modules"]] == ["succeeded", "succeeded"]
+    # Per-module entries in metadata.modules — both `complete`, each
+    # carries a durationMs and an entityTypes list (the contract
+    # bulwark gates close-by-absence on).
+    assert [m["status"] for m in meta["modules"]] == ["complete", "complete"]
     assert all("durationMs" in m for m in meta["modules"])
+    assert all(m["entityTypes"] for m in meta["modules"])
     # env identical across invocations and carries neo4j creds + the
     # parsed AWS creds-block keys.
     for inv in invocations:
@@ -195,12 +197,16 @@ def test_subprocess_invokes_cartography_once_per_module_with_neo4j_env(monkeypat
         assert env["AWS_SECRET_ACCESS_KEY"] == "secret"
 
 
-def test_one_module_failure_does_not_abort_the_rest(monkeypatch):
-    # The bulwark report's exact pattern: identitycenter throws
-    # ValidationException for a non-org account, exits 1; the historical
-    # plugin would treat that as a fatal error and discard AWS / GCP
-    # output too. The new posture: log a warning, keep going, exit 0
-    # with the partial inventory and a per-module breakdown.
+def test_structurally_incompatible_module_is_excluded_crawl_completes(monkeypatch):
+    # bulwark's exact pattern: identitycenter throws ValidationException
+    # for a non-org account. That's STRUCTURAL — the module can never
+    # succeed on this account/config. We classify it as `excluded`,
+    # log it, and the rest of the crawl proceeds AS COMPLETE.
+    #
+    # This is the safe behaviour: excluded modules' entity types simply
+    # aren't collected from this source. bulwark's projection will skip
+    # close-by-absence on those types but reconcile every other module
+    # normally. No tombstoning.
     calls: List[str] = []
 
     def fake_run(argv: List[str], **_kwargs):
@@ -232,53 +238,106 @@ def test_one_module_failure_does_not_abort_the_rest(monkeypatch):
             "secret": "neo4j:pw",
         },
     )
-    out = plugin.handle(req)  # no exception — the historical posture
+    out = plugin.handle(req)  # no raise — the excluded module is safe
     meta = out["outputs"]["metadata"]
-    # Every module was attempted (no early bail on the failing one).
     assert calls == ["aws", "identitycenter", "gcp"]
     statuses = {m["module"]: m["status"] for m in meta["modules"]}
     assert statuses == {
-        "aws": "succeeded",
-        "identitycenter": "failed",
-        "gcp": "succeeded",
+        "aws": "complete",
+        "identitycenter": "excluded",
+        "gcp": "complete",
     }
-    # The failing module's entry carries enough diagnostics to act on.
-    failed_entry = next(m for m in meta["modules"] if m["module"] == "identitycenter")
-    assert failed_entry["exitCode"] == 1
-    assert "ValidationException" in failed_entry["stderrTail"]
-    # Aggregate exitCode reflects the first failure (1 here), not 0,
-    # so a caller scripting on top can spot the partial state.
-    assert meta["exitCode"] == 1
-    # Top-level warning surfaces the per-module summary without the
-    # operator grepping for it.
-    assert "warning" in meta
-    assert "identitycenter" in meta["warning"]
-    assert "partial inventory" in meta["warning"]
+    # Every module entry carries entityTypes — the contract bulwark
+    # gates close-by-absence on.
+    by_module = {m["module"]: m for m in meta["modules"]}
+    assert "EC2Instance" in by_module["aws"]["entityTypes"]
+    assert "AWSPermissionSet" in by_module["identitycenter"]["entityTypes"]
+    assert "GCPProject" in by_module["gcp"]["entityTypes"]
+    # The excluded entry carries the actual matched line as `reason`
+    # so the operator sees the structural cause without digging.
+    assert "IAM Identity Center" in by_module["identitycenter"]["reason"]
+    # Top-level summary so the operator spots partial coverage at a
+    # glance without scanning the per-module list.
+    assert "excludedSummary" in meta
+    assert "identitycenter" in meta["excludedSummary"]
+    # No `warning` field for failed modules — there ARE no failed
+    # modules, just an excluded one.
 
 
-def test_every_module_failing_still_returns_normally(monkeypatch):
-    # Pathological case: all modules fail. We still don't raise —
-    # bulwark gets the per-module breakdown and decides what to do.
+def test_excluded_recognises_each_canonical_pattern(monkeypatch):
+    # Spot-check that the classifier matches the canonical phrases we
+    # documented in _EXCLUDED_SUBSTRINGS — not exhaustive, but covers
+    # the AWS / GCP / regional / API-not-enabled flavours.
+    cases = [
+        ("not supported for account instances of IAM Identity Center", True),
+        ("This API method only works on IAM Identity Center instances of type", True),
+        ("OptInRequired: This service is not supported in this region.", True),
+        ("API has not been enabled for project 'foo'", True),
+        ("Cloud Resource Manager API has not been used in project 12345", True),
+        # Genuine transient errors stay FAILED.
+        ("ThrottlingException: Rate exceeded", False),
+        ("AccessDenied: User isn't authorized", False),
+        ("ConnectionTimeoutError", False),
+    ]
+    from app.plugins import cartography_crawl_plugin as p
+    for stderr_text, should_exclude in cases:
+        status, reason = p.classify_module_outcome(1, stderr_text)
+        if should_exclude:
+            assert status == "excluded", f"expected excluded for: {stderr_text!r}"
+        else:
+            assert status == "failed", f"expected failed for: {stderr_text!r}"
+
+
+def test_transient_module_failure_is_fatal_loud(monkeypatch):
+    # Throttling / generic API error / network glitch ≠ structural. The
+    # module *might* have produced data; absence is uninformative; close-
+    # by-absence downstream would tombstone live assets. So the handler
+    # RAISES — loud failure is safer than silent partial.
     def fake_run(argv: List[str], **_kwargs):
-        return _FakeCompleted(returncode=1, stdout="", stderr="boom\n")
+        module = argv[argv.index("--selected-modules") + 1]
+        if module == "gcp":
+            return _FakeCompleted(
+                returncode=1,
+                stdout="",
+                stderr=(
+                    "google.api_core.exceptions.ServiceUnavailable: 503 Backend Error\n"
+                ),
+            )
+        return _FakeCompleted(
+            returncode=0, stdout="ok\n", stderr=f"Syncing for {module}\n"
+        )
 
     monkeypatch.setattr(subprocess, "run", fake_run)
     req = _build_request(
         config={"modules": ["aws", "gcp"]},
-        connection={"kind": "neo4j", "slug": "n", "options": {"uri": "bolt://x"}, "secret": "neo4j:pw"},
+        connection={
+            "kind": "neo4j",
+            "slug": "n",
+            "options": {"uri": "bolt://x"},
+            "secret": "neo4j:pw",
+        },
     )
-    out = plugin.handle(req)
-    meta = out["outputs"]["metadata"]
-    assert all(m["status"] == "failed" for m in meta["modules"])
-    assert meta["exitCode"] == 1
-    # Single warning, mentioning both modules.
-    assert "2 of 2" in meta["warning"]
-    assert "aws" in meta["warning"] and "gcp" in meta["warning"]
+    with pytest.raises(ValueError) as exc_info:
+        plugin.handle(req)
+    # Error message carries the full per-module breakdown so the trace
+    # shows what completed before the failure.
+    msg = str(exc_info.value)
+    assert "FAILED" in msg
+    assert "gcp" in msg
+    assert "Backend Error" in msg
+    # The full metadata envelope is preserved on the exception so a
+    # debugger can reach the entityTypes / per-module statuses without
+    # re-running.
+    meta = getattr(exc_info.value, "metadata", None)
+    assert meta is not None
+    statuses = {m["module"]: m["status"] for m in meta["modules"]}
+    assert statuses == {"aws": "complete", "gcp": "failed"}
 
 
-def test_per_module_timeout_marks_only_that_module_failed(monkeypatch):
-    # Slow module shouldn't poison the fast one. We test by raising
-    # TimeoutExpired for `aws` and a clean run for `gcp`.
+def test_timeout_is_transient_and_therefore_fatal(monkeypatch):
+    # Timeout could be a slow account or a network problem. Either way
+    # we can't tell if the module would have completed, so it's a
+    # `failed` (not `excluded`) — and the handler raises.
     def fake_run(argv: List[str], **_kwargs):
         module = argv[argv.index("--selected-modules") + 1]
         if module == "aws":
@@ -290,11 +349,39 @@ def test_per_module_timeout_marks_only_that_module_failed(monkeypatch):
         config={"modules": ["aws", "gcp"], "timeoutMs": 120_000},
         connection={"kind": "neo4j", "slug": "n", "options": {"uri": "bolt://x"}, "secret": "neo4j:pw"},
     )
+    with pytest.raises(ValueError) as exc_info:
+        plugin.handle(req)
+    meta = getattr(exc_info.value, "metadata", None)
+    assert meta is not None
+    aws_entry = next(m for m in meta["modules"] if m["module"] == "aws")
+    assert aws_entry["status"] == "failed"
+    assert "timed out" in aws_entry["reason"]
+
+
+def test_all_modules_complete_returns_normally_with_per_module_status(monkeypatch):
+    # Happy path: every module exit 0. Per-module status of `complete`,
+    # entityTypes attached, no excludedSummary / warning.
+    def fake_run(argv: List[str], **_kwargs):
+        module = argv[argv.index("--selected-modules") + 1]
+        return _FakeCompleted(
+            returncode=0, stdout="ok\n", stderr=f"Syncing for {module}\n"
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    req = _build_request(
+        config={"modules": ["aws", "gcp"]},
+        connection={"kind": "neo4j", "slug": "n", "options": {"uri": "bolt://x"}, "secret": "neo4j:pw"},
+    )
     out = plugin.handle(req)
-    statuses = {m["module"]: m["status"] for m in out["outputs"]["metadata"]["modules"]}
-    assert statuses == {"aws": "failed", "gcp": "succeeded"}
-    aws_entry = next(m for m in out["outputs"]["metadata"]["modules"] if m["module"] == "aws")
-    assert "timed out" in aws_entry["error"]
+    meta = out["outputs"]["metadata"]
+    assert all(m["status"] == "complete" for m in meta["modules"])
+    assert "excludedSummary" not in meta
+    assert "warning" not in meta
+    assert meta["exitCode"] == 0
+    # Every module carries its entityTypes list.
+    by_module = {m["module"]: m for m in meta["modules"]}
+    assert by_module["aws"]["entityTypes"], "aws must publish entityTypes"
+    assert by_module["gcp"]["entityTypes"], "gcp must publish entityTypes"
 
 
 def test_subprocess_binary_missing_throws_actionable_error(monkeypatch):
@@ -319,13 +406,19 @@ def test_subprocess_binary_missing_throws_actionable_error(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_exit_zero_with_no_sync_output_marks_module_no_data(monkeypatch):
+def test_exit_zero_with_no_sync_output_keeps_status_complete_but_warns(monkeypatch):
     # The "creds are known-good but no data" scenario: cartography
     # exits 0 silently because the AWS SDK default chain found nothing
     # in the sidecar's env, so no boto3 calls happened, so no
-    # "Syncing X for account Y" lines were logged. We mark the module
-    # as no_data + attach a warning so the operator sees the cause
-    # instead of a confusing `status: "succeeded"`.
+    # "Syncing X for account Y" lines were logged.
+    #
+    # Per the three-way contract (complete / excluded / failed) the
+    # status stays `complete` — cartography said it finished. We do
+    # NOT silently demote a clean exit to a non-complete bucket; that
+    # would risk bulwark gating close-by-absence on the wrong signal.
+    # Instead we attach a top-level `warning` that the heuristic spotted
+    # no sync activity, so the operator can investigate without the
+    # module's outcome being misclassified.
     def fake_run(*args, **kwargs):
         return _FakeCompleted(returncode=0, stdout="", stderr="")
 
@@ -341,11 +434,8 @@ def test_exit_zero_with_no_sync_output_marks_module_no_data(monkeypatch):
     )
     out = plugin.handle(req)
     meta = out["outputs"]["metadata"]
-    assert all(m["status"] == "no_data" for m in meta["modules"])
+    assert all(m["status"] == "complete" for m in meta["modules"])
     assert "warning" in meta
-    # The per-module wording was tightened with the isolation refactor
-    # to make it clear no module did any work (vs the old global-level
-    # heuristic).
     assert "no module shows sync activity" in meta["warning"]
 
 
