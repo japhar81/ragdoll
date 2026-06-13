@@ -74,6 +74,12 @@ CARTOGRAPHY_MODULES = (
     "gcp",
     "github",
     "gsuite",
+    # IAM Identity Center is its own top-level module in cartography
+    # 0.96+. It commonly fails on AWS accounts that aren't the IAM
+    # Identity Center organisation root (ValidationException on
+    # ListPermissionSets); the per-module isolation in `handle` keeps
+    # that failure from killing every other module's data.
+    "identitycenter",
     "jamf",
     "kandji",
     "kubernetes",
@@ -187,29 +193,56 @@ def _resolve_config(config: Dict[str, Any]) -> Dict[str, Any]:
     return cfg
 
 
-def _build_args(modules: List[str], cfg: Dict[str, Any]) -> List[str]:
-    """Translate the resolved config into a cartography CLI argv tail.
+def _build_args_for_module(module: str, cfg: Dict[str, Any]) -> List[str]:
+    """Translate the resolved config into a cartography CLI argv tail
+    for a SINGLE module.
 
-    Cartography takes a single ``--selected-modules`` flag with a
-    comma-separated list of module names (NOT ``-m <module>`` per
-    module — that's a build-system convention that doesn't apply here
-    and previously caused a runtime ``unrecognized arguments: -m aws``
-    failure for every cloud).
+    We invoke cartography once per module rather than once with a
+    comma-separated list (which used to be `--selected-modules
+    aws,gcp,...`). The reason is per-module isolation: cartography
+    exits 1 on the first module that fails, throwing away every
+    other module's data, and historically a single unsupported
+    sub-sync (e.g. `identitycenter` calling ListPermissionSets on an
+    account that isn't an IAM Identity Center org instance — fires
+    ValidationException) shredded otherwise-successful AWS / GCP
+    runs. Looping per module turns each module into its own
+    success/fail observation; the plugin aggregates them into the
+    metadata envelope and never lets one module's failure cascade.
 
-    ``--update-tag`` only when ``incremental`` is true. Per-module
-    selectors and ``extraArgs`` are appended verbatim.
+    Cartography's `--selected-modules` flag still wants a comma list
+    even for a single entry, so we pass `--selected-modules <m>`.
+
+    `--update-tag` only when `incremental` is true. Per-module
+    selectors apply only to the matching module. `extraArgs` are
+    appended verbatim to every invocation.
     """
-    args: List[str] = ["--selected-modules", ",".join(modules)]
+    args: List[str] = ["--selected-modules", module]
     if cfg["_incremental"]:
         args.extend(("--update-tag", str(int(time.time()))))
-    selectors = cfg["_selectors"]
-    for module, flags in (selectors or {}).items():
-        if not isinstance(flags, dict):
-            continue
-        for flag, value in flags.items():
+    # Per-module selectors gate themselves on `module`, so only the
+    # entries targeting this module's CLI flags reach argv.
+    module_selectors = (cfg["_selectors"] or {}).get(module)
+    if isinstance(module_selectors, dict):
+        for flag, value in module_selectors.items():
             args.extend((f"--{module}-{flag}", str(value)))
     args.extend(cfg["_extra_args"])
     return args
+
+
+def _looks_empty(stdout_tail: str, stderr_tail: str) -> bool:
+    """Heuristic: did cartography do any real work on this invocation?
+
+    Real syncs log lines like ``Syncing EC2 for account 123...`` to
+    stderr. A misconfigured run (no creds, default boto3 chain finds
+    nothing) exits 0 silently. We use a small marker set to flip the
+    per-module status from `succeeded` → `no_data` when nothing
+    sync-shaped appears.
+    """
+    combined = (stdout_tail + "\n" + stderr_tail).lower()
+    return not any(
+        marker in combined
+        for marker in ("syncing", "sync stage", "loaded", "synced", "writing")
+    )
 
 
 def _build_env(
@@ -320,67 +353,112 @@ def handle(request) -> Dict[str, Any]:
         )
         logger.warning("cartography_crawl: %s", creds_warning)
 
-    args = [cfg["_bin"], *_build_args(cfg["_modules"], cfg)]
     env = _build_env(
         neo4j_uri=neo4j_uri,
         neo4j_user=user,
         neo4j_pass=password,
         creds_secret=creds_secret if isinstance(creds_secret, str) else None,
     )
-    timeout_s = max(1, cfg["_timeout_ms"] // 1000)
+    # Per-module timeout, with the configured total spread across all
+    # requested modules. We don't want one slow module to starve the
+    # rest, but we also don't want to allow N × the full budget. Floor
+    # at 60s so a degenerate config (3600ms / 30 modules) doesn't
+    # produce a 120ms ceiling that no module could ever meet.
+    per_module_timeout_s = max(
+        60, (cfg["_timeout_ms"] // 1000) // max(1, len(cfg["_modules"]))
+    )
 
-    try:
-        result = subprocess.run(  # noqa: S603 — argv is constructed from the validated config
-            args,
-            env=env,
-            timeout=timeout_s,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-    except FileNotFoundError as exc:
-        # Loud failure — operators should see "cartography missing" on
-        # the trace, not a per-module status that the UI lies about.
-        raise ValueError(
-            "cartography_crawl: cartography binary not found in the python-plugins "
-            "sidecar — rebuild the image with cartography installed (it ships as a "
-            "Python entrypoint when you `pip install cartography`)."
-        ) from exc
-    except subprocess.TimeoutExpired as exc:
-        raise ValueError(
-            f"cartography_crawl: timed out after {timeout_s}s. Increase "
-            "`config.timeoutMs` or split the modules list."
-        ) from exc
+    # Aggregated stdout/stderr tails across every module, for the
+    # top-level envelope. Per-module tails live on each module entry
+    # so the operator can see exactly which module said what.
+    aggregate_stdout_parts: List[str] = []
+    aggregate_stderr_parts: List[str] = []
+    module_entries: List[Dict[str, Any]] = []
+    # Top-level exitCode reflects the FIRST failing module's code (or
+    # 0 if every module succeeded). It's a coarse signal; the per-
+    # module statuses below are the load-bearing detail.
+    aggregate_exit_code: int = 0
+
+    for module in cfg["_modules"]:
+        argv = [cfg["_bin"], *_build_args_for_module(module, cfg)]
+        module_started = time.time()
+        try:
+            result = subprocess.run(  # noqa: S603 — argv from validated config
+                argv,
+                env=env,
+                timeout=per_module_timeout_s,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        except FileNotFoundError as exc:
+            # Binary missing is a sidecar-image bug, not a per-module
+            # failure — bubble it. Without this, the operator would see
+            # every module fail with the same opaque error.
+            raise ValueError(
+                "cartography_crawl: cartography binary not found in the python-plugins "
+                "sidecar — rebuild the image with cartography installed (it ships as a "
+                "Python entrypoint when you `pip install cartography`)."
+            ) from exc
+        except subprocess.TimeoutExpired:
+            module_entries.append({
+                "module": module,
+                "status": "failed",
+                "error": (
+                    f"timed out after {per_module_timeout_s}s (per-module budget "
+                    f"derived from config.timeoutMs ÷ N modules)"
+                ),
+                "durationMs": int((time.time() - module_started) * 1000),
+            })
+            if aggregate_exit_code == 0:
+                aggregate_exit_code = -1
+            logger.warning(
+                "cartography_crawl module %s timed out after %ss — continuing with the next module",
+                module,
+                per_module_timeout_s,
+            )
+            continue
+        stdout_tail = (result.stdout or "")[-2048:]
+        stderr_tail = (result.stderr or "")[-2048:]
+        aggregate_stdout_parts.append(f"[{module}]\n{stdout_tail}")
+        aggregate_stderr_parts.append(f"[{module}]\n{stderr_tail}")
+        if result.returncode != 0:
+            # Module failure is NON-FATAL: log + continue. The
+            # historical posture was to raise; that threw away every
+            # other module's data when one sub-sync hit
+            # `ValidationException: not supported for account
+            # instances of IAM Identity Center` (or any analogous
+            # permission/scope error). The user's posture now: log a
+            # warning, skip that module, continue the rest, exit 0
+            # with the partial inventory.
+            module_entries.append({
+                "module": module,
+                "status": "failed",
+                "exitCode": result.returncode,
+                "stderrTail": stderr_tail,
+                "durationMs": int((time.time() - module_started) * 1000),
+            })
+            if aggregate_exit_code == 0:
+                aggregate_exit_code = result.returncode
+            logger.warning(
+                "cartography_crawl module %s exited %s — continuing with the next module. stderr tail: %s",
+                module,
+                result.returncode,
+                stderr_tail or "<empty>",
+            )
+            continue
+        # Exit 0 — distinguish "ran and wrote things" from "ran but
+        # boto3 found no creds and silently did nothing."
+        module_status = "no_data" if _looks_empty(stdout_tail, stderr_tail) else "succeeded"
+        module_entries.append({
+            "module": module,
+            "status": module_status,
+            "durationMs": int((time.time() - module_started) * 1000),
+        })
 
     completed_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-    if result.returncode != 0:
-        # Tail the stderr for the operator. We don't pretend per-module
-        # success/failure — cartography's CLI doesn't surface that — but
-        # we DO fail the node so the run is unambiguously bad.
-        err_tail = (result.stderr or "")[-1024:]
-        raise ValueError(
-            f"cartography_crawl: cartography exited {result.returncode}. "
-            f"stderr tail:\n{err_tail or '<empty>'}"
-        )
-
-    # Surface what cartography actually said. The CLI logs progress to
-    # stderr (boto3 calls, "Syncing X for account Y", etc.) AND a
-    # summary count when work runs. On a misconfigured run (no AWS
-    # creds → boto3 default chain finds nothing → cartography exits 0
-    # silently) the tail will explicitly show no sync activity, which
-    # is far more useful than a bare `status: "succeeded"`.
-    stdout_tail = (result.stdout or "")[-2048:]
-    stderr_tail = (result.stderr or "")[-2048:]
-    # Heuristic flag for "ran but did nothing useful." If the combined
-    # output doesn't mention any sync activity, mark each module with
-    # status "no_data" so downstream nodes and the trace UI can
-    # distinguish a genuine success from a silent no-op.
-    combined = (stdout_tail + "\n" + stderr_tail).lower()
-    looks_empty = not any(
-        marker in combined
-        for marker in ("syncing", "sync stage", "loaded", "synced", "writing")
-    )
-    module_status = "no_data" if looks_empty else "succeeded"
+    aggregate_stdout = "\n".join(aggregate_stdout_parts)[-4096:]
+    aggregate_stderr = "\n".join(aggregate_stderr_parts)[-4096:]
 
     metadata: Dict[str, Any] = {
         "crawlId": crawl_id,
@@ -388,33 +466,49 @@ def handle(request) -> Dict[str, Any]:
         "completedAt": completed_at,
         "mode": "subprocess",
         "target": {"connectionSlug": target_slug, "database": target_db},
-        "modules": [
-            {"module": m, "status": module_status} for m in cfg["_modules"]
-        ],
-        "exitCode": result.returncode,
-        # Tails of cartography's own logging — both stdout and stderr,
-        # capped at 2KB each so the trace stays readable. This is what
-        # the operator was reaching for when our envelope just said
-        # `status: "succeeded"` for a clearly-empty crawl.
-        "cartographyStdoutTail": stdout_tail,
-        "cartographyStderrTail": stderr_tail,
+        "modules": module_entries,
+        "exitCode": aggregate_exit_code,
+        # Aggregate tails — concatenation of per-module output (capped
+        # at 4KB to keep the trace readable). Per-module stderr tails
+        # for failed modules live on the module entry itself for
+        # finer-grained diagnostics.
+        "cartographyStdoutTail": aggregate_stdout,
+        "cartographyStderrTail": aggregate_stderr,
     }
     if creds_warning:
         metadata["credsWarning"] = creds_warning
-    if looks_empty:
+
+    failed = [m for m in module_entries if m["status"] == "failed"]
+    no_data = [m for m in module_entries if m["status"] == "no_data"]
+    if failed:
+        # Loud (but non-fatal) summary so the trace surfaces which
+        # modules dropped without an operator having to grep stderr.
         metadata["warning"] = (
-            "cartography ran cleanly but its output shows no sync activity — "
-            "either AWS credentials didn't reach the sidecar (see "
+            f"{len(failed)} of {len(module_entries)} module(s) failed but the crawl "
+            f"continued with the rest (partial inventory). Failed modules: "
+            f"{', '.join(m['module'] for m in failed)}. Inspect the per-module "
+            f"entries' stderrTail for cause."
+        )
+    elif no_data:
+        # All modules ran cleanly but none did sync work — usually
+        # a creds-misconfig (see credsWarning) or a genuinely empty
+        # account. Same warning the single-invocation path used to
+        # emit; recast to the per-module shape.
+        metadata["warning"] = (
+            "cartography ran cleanly but no module shows sync activity — "
+            "either cloud credentials didn't reach the sidecar (see "
             "cartographyStderrTail + credsWarning if set), the account "
             "actually has no resources, or the module selectors filtered "
             "everything out. Real syncs typically log 'Syncing <resource> "
             "for account <id>' lines."
         )
+
     logger.info(
-        "cartography_crawl completed crawl=%s target=%s modules=%s status=%s",
+        "cartography_crawl completed crawl=%s target=%s succeeded=%s failed=%s no_data=%s",
         crawl_id,
         target_slug,
-        ",".join(cfg["_modules"]),
-        module_status,
+        sum(1 for m in module_entries if m["status"] == "succeeded"),
+        len(failed),
+        len(no_data),
     )
     return {"outputs": {"metadata": metadata}}

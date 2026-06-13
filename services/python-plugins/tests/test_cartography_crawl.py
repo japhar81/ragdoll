@@ -137,24 +137,25 @@ class _FakeCompleted:
         self.stderr = stderr
 
 
-def test_subprocess_success_passes_modules_to_argv_and_neo4j_env(monkeypatch):
-    captured: Dict[str, Any] = {}
+def test_subprocess_invokes_cartography_once_per_module_with_neo4j_env(monkeypatch):
+    # ADR-0026 §#3 / "per-module isolation": cartography is invoked
+    # ONCE per requested module (not once with a comma-separated list).
+    # One module's failure can't blow away the rest.
+    invocations: List[Dict[str, Any]] = []
 
     def fake_run(argv: List[str], env=None, timeout=None, capture_output=False, text=False, check=False):
-        captured["argv"] = argv
-        captured["env"] = env
+        invocations.append({"argv": argv, "env": env, "timeout": timeout})
         # Mimic cartography's "real work" log so the empty-run heuristic
-        # marks this module as succeeded (not no_data). Real cartography
-        # writes lines like "Syncing EC2 for account 123..." to stderr.
+        # marks each module as succeeded (not no_data).
         return _FakeCompleted(
             returncode=0,
             stdout="ok\n",
-            stderr="Syncing EC2 for account 123456789012\n",
+            stderr=f"Syncing for account 123 ({argv[-1]})\n",
         )
 
     monkeypatch.setattr(subprocess, "run", fake_run)
     req = _build_request(
-        config={"modules": ["aws"], "incremental": True},
+        config={"modules": ["aws", "gcp"], "incremental": True},
         connection={
             "kind": "neo4j",
             "slug": "prod",
@@ -168,48 +169,139 @@ def test_subprocess_success_passes_modules_to_argv_and_neo4j_env(monkeypatch):
     assert meta["mode"] == "subprocess"
     assert meta["target"] == {"connectionSlug": "prod", "database": "graph1"}
     assert meta["exitCode"] == 0
-    assert all(m["status"] == "succeeded" for m in meta["modules"])
-    # Default points at the isolated venv the Dockerfile builds
-    # (ADR-0026 §#2 follow-up — cartography's eager intel imports mean
-    # its deps can't share the main poetry env). argv carries the
-    # binary, --selected-modules <csv> (cartography's real module
-    # flag — NOT `-m` per module, which the CLI rejects), and
-    # --update-tag (incremental=true).
-    assert captured["argv"][0] == "/opt/cartography-venv/bin/cartography"
-    assert "--selected-modules" in captured["argv"]
-    csv_idx = captured["argv"].index("--selected-modules") + 1
-    assert captured["argv"][csv_idx] == "aws"
-    assert "--update-tag" in captured["argv"]
-    # env carries neo4j creds + the parsed creds-block keys.
-    env = captured["env"]
-    assert env["NEO4J_URI"] == "bolt://neo4j:7687"
-    assert env["NEO4J_USER"] == "neo4j"
-    assert env["NEO4J_PASSWORD"] == "hunter2"
-    assert env["AWS_ACCESS_KEY_ID"] == "AKIA"
-    assert env["AWS_SECRET_ACCESS_KEY"] == "secret"
+    # Two invocations — one per module — each with --selected-modules
+    # pointing at exactly that module (no comma list).
+    assert len(invocations) == 2
+    modules_seen: List[str] = []
+    for inv in invocations:
+        argv = inv["argv"]
+        assert argv[0] == "/opt/cartography-venv/bin/cartography"
+        assert "--selected-modules" in argv
+        modules_seen.append(argv[argv.index("--selected-modules") + 1])
+        assert "--update-tag" in argv  # incremental=true propagates
+    assert modules_seen == ["aws", "gcp"]
+    # Per-module entries in metadata.modules — both succeeded, each
+    # carries a durationMs.
+    assert [m["status"] for m in meta["modules"]] == ["succeeded", "succeeded"]
+    assert all("durationMs" in m for m in meta["modules"])
+    # env identical across invocations and carries neo4j creds + the
+    # parsed AWS creds-block keys.
+    for inv in invocations:
+        env = inv["env"]
+        assert env["NEO4J_URI"] == "bolt://neo4j:7687"
+        assert env["NEO4J_USER"] == "neo4j"
+        assert env["NEO4J_PASSWORD"] == "hunter2"
+        assert env["AWS_ACCESS_KEY_ID"] == "AKIA"
+        assert env["AWS_SECRET_ACCESS_KEY"] == "secret"
 
 
-def test_subprocess_nonzero_exit_throws_not_swallows(monkeypatch):
-    def fake_run(*args, **kwargs):
-        return _FakeCompleted(returncode=2, stdout="", stderr="boom: auth failed")
+def test_one_module_failure_does_not_abort_the_rest(monkeypatch):
+    # The bulwark report's exact pattern: identitycenter throws
+    # ValidationException for a non-org account, exits 1; the historical
+    # plugin would treat that as a fatal error and discard AWS / GCP
+    # output too. The new posture: log a warning, keep going, exit 0
+    # with the partial inventory and a per-module breakdown.
+    calls: List[str] = []
+
+    def fake_run(argv: List[str], **_kwargs):
+        module = argv[argv.index("--selected-modules") + 1]
+        calls.append(module)
+        if module == "identitycenter":
+            return _FakeCompleted(
+                returncode=1,
+                stdout="",
+                stderr=(
+                    "botocore.exceptions.ClientError: An error occurred (ValidationException) "
+                    "when calling the ListPermissionSets operation: not supported for account "
+                    "instances of IAM Identity Center\n"
+                ),
+            )
+        return _FakeCompleted(
+            returncode=0,
+            stdout="ok\n",
+            stderr=f"Syncing things for account 123 ({module})\n",
+        )
 
     monkeypatch.setattr(subprocess, "run", fake_run)
     req = _build_request(
-        config={"modules": ["aws"]},
+        config={"modules": ["aws", "identitycenter", "gcp"]},
         connection={
             "kind": "neo4j",
-            "slug": "n",
+            "slug": "prod",
             "options": {"uri": "bolt://x"},
             "secret": "neo4j:pw",
         },
     )
-    # Pre-fix behaviour: returned success with status="failed" per module.
-    # New behaviour: raise so the runtime marks the node failed.
-    with pytest.raises(ValueError, match="cartography exited 2.*boom: auth failed"):
-        plugin.handle(req)
+    out = plugin.handle(req)  # no exception — the historical posture
+    meta = out["outputs"]["metadata"]
+    # Every module was attempted (no early bail on the failing one).
+    assert calls == ["aws", "identitycenter", "gcp"]
+    statuses = {m["module"]: m["status"] for m in meta["modules"]}
+    assert statuses == {
+        "aws": "succeeded",
+        "identitycenter": "failed",
+        "gcp": "succeeded",
+    }
+    # The failing module's entry carries enough diagnostics to act on.
+    failed_entry = next(m for m in meta["modules"] if m["module"] == "identitycenter")
+    assert failed_entry["exitCode"] == 1
+    assert "ValidationException" in failed_entry["stderrTail"]
+    # Aggregate exitCode reflects the first failure (1 here), not 0,
+    # so a caller scripting on top can spot the partial state.
+    assert meta["exitCode"] == 1
+    # Top-level warning surfaces the per-module summary without the
+    # operator grepping for it.
+    assert "warning" in meta
+    assert "identitycenter" in meta["warning"]
+    assert "partial inventory" in meta["warning"]
+
+
+def test_every_module_failing_still_returns_normally(monkeypatch):
+    # Pathological case: all modules fail. We still don't raise —
+    # bulwark gets the per-module breakdown and decides what to do.
+    def fake_run(argv: List[str], **_kwargs):
+        return _FakeCompleted(returncode=1, stdout="", stderr="boom\n")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    req = _build_request(
+        config={"modules": ["aws", "gcp"]},
+        connection={"kind": "neo4j", "slug": "n", "options": {"uri": "bolt://x"}, "secret": "neo4j:pw"},
+    )
+    out = plugin.handle(req)
+    meta = out["outputs"]["metadata"]
+    assert all(m["status"] == "failed" for m in meta["modules"])
+    assert meta["exitCode"] == 1
+    # Single warning, mentioning both modules.
+    assert "2 of 2" in meta["warning"]
+    assert "aws" in meta["warning"] and "gcp" in meta["warning"]
+
+
+def test_per_module_timeout_marks_only_that_module_failed(monkeypatch):
+    # Slow module shouldn't poison the fast one. We test by raising
+    # TimeoutExpired for `aws` and a clean run for `gcp`.
+    def fake_run(argv: List[str], **_kwargs):
+        module = argv[argv.index("--selected-modules") + 1]
+        if module == "aws":
+            raise subprocess.TimeoutExpired(cmd="cartography", timeout=1)
+        return _FakeCompleted(returncode=0, stdout="ok\n", stderr="Syncing X\n")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    req = _build_request(
+        config={"modules": ["aws", "gcp"], "timeoutMs": 120_000},
+        connection={"kind": "neo4j", "slug": "n", "options": {"uri": "bolt://x"}, "secret": "neo4j:pw"},
+    )
+    out = plugin.handle(req)
+    statuses = {m["module"]: m["status"] for m in out["outputs"]["metadata"]["modules"]}
+    assert statuses == {"aws": "failed", "gcp": "succeeded"}
+    aws_entry = next(m for m in out["outputs"]["metadata"]["modules"] if m["module"] == "aws")
+    assert "timed out" in aws_entry["error"]
 
 
 def test_subprocess_binary_missing_throws_actionable_error(monkeypatch):
+    # Binary missing is a sidecar-image bug, not a per-module failure
+    # — bubble it. The first module's invocation tries to spawn and
+    # FileNotFoundError fires immediately; the plugin must raise so
+    # the trace clearly shows "rebuild the sidecar."
     def fake_run(*args, **kwargs):
         raise FileNotFoundError(2, "No such file or directory: 'cartography'")
 
@@ -219,19 +311,6 @@ def test_subprocess_binary_missing_throws_actionable_error(monkeypatch):
         connection={"kind": "neo4j", "slug": "n", "options": {"uri": "bolt://x"}, "secret": "neo4j:pw"},
     )
     with pytest.raises(ValueError, match="cartography binary not found"):
-        plugin.handle(req)
-
-
-def test_subprocess_timeout_throws(monkeypatch):
-    def fake_run(*args, **kwargs):
-        raise subprocess.TimeoutExpired(cmd="cartography", timeout=1)
-
-    monkeypatch.setattr(subprocess, "run", fake_run)
-    req = _build_request(
-        config={"modules": ["aws"], "timeoutMs": 1000},
-        connection={"kind": "neo4j", "slug": "n", "options": {"uri": "bolt://x"}, "secret": "neo4j:pw"},
-    )
-    with pytest.raises(ValueError, match="timed out"):
         plugin.handle(req)
 
 
@@ -264,7 +343,10 @@ def test_exit_zero_with_no_sync_output_marks_module_no_data(monkeypatch):
     meta = out["outputs"]["metadata"]
     assert all(m["status"] == "no_data" for m in meta["modules"])
     assert "warning" in meta
-    assert "no sync activity" in meta["warning"]
+    # The per-module wording was tightened with the isolation refactor
+    # to make it clear no module did any work (vs the old global-level
+    # heuristic).
+    assert "no module shows sync activity" in meta["warning"]
 
 
 def test_credssecretref_set_but_missing_secret_attaches_creds_warning(monkeypatch):

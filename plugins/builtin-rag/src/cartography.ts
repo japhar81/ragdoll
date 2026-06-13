@@ -41,6 +41,10 @@ export const CARTOGRAPHY_MODULES = [
   "gcp",
   "github",
   "gsuite",
+  // IAM Identity Center is its own top-level module in cartography
+  // 0.96+. It commonly fails on non-org-root accounts — the python
+  // handler's per-module isolation makes that failure non-fatal.
+  "identitycenter",
   "jamf",
   "kandji",
   "kubernetes",
