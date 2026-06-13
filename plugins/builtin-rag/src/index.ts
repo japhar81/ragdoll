@@ -79,6 +79,12 @@ export {
   wazuhAgentsPullPlugin,
   wazuhSyscollectorPullPlugin
 } from "./wazuh.ts";
+// k8s (Phase 3b) — connection driver + completeness-aware list-pull.
+// The `scan.complete` flag emitted per resource kind is the headline
+// signal — bulwark's append-only diff keys off it to decide whether
+// absences may close edges. RAGdoll does NO diff / resolution /
+// retention here.
+export { k8sConnectionDriver, k8sListPullPlugin } from "./k8s.ts";
 // Data-shaping plugins (JSONata/JMESPath transform + XML codec) live in their
 // own module; re-exported so the plugin-loader's namespace scan registers
 // them alongside the rest.

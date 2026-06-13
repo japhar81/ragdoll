@@ -89,6 +89,25 @@ export function SchedulerScreen() {
     queryKey: ["pipelines"],
     queryFn: () => api.listPipelines()
   });
+  // Resolve id → human label up-front so the schedules table doesn't
+  // render truncated GUIDs. Falls back to "<short-id>" with the full
+  // id on the title attribute when the lookup misses (a foreign-tenant
+  // schedule, a recently-deleted pipeline, …).
+  const tenantNameById = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const t of tenants.data?.tenants ?? []) {
+      m.set(t.id, t.name ?? t.slug);
+    }
+    return m;
+  }, [tenants.data]);
+  const pipelineNameById = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const p of pipelines.data?.pipelines ?? []) {
+      // Prefer the operator-facing display name; fall back to slug.
+      m.set(p.id, p.name ?? p.slug);
+    }
+    return m;
+  }, [pipelines.data]);
   const schedules = useQuery({
     queryKey: ["schedules", filterTenant, filterPipeline],
     queryFn: () =>
@@ -444,11 +463,18 @@ export function SchedulerScreen() {
                     </>
                   ) : (
                     <>
-                      <code title={s.pipelineId ?? ""}>
-                        {shortId(s.pipelineId ?? "—")}
-                      </code>
+                      <strong
+                        title={s.pipelineId ?? ""}
+                      >
+                        {s.pipelineId
+                          ? (pipelineNameById.get(s.pipelineId) ?? shortId(s.pipelineId))
+                          : "—"}
+                      </strong>
                       <span className="muted small" title={s.tenantId ?? ""}>
-                        tenant {shortId(s.tenantId ?? "—")}
+                        tenant{" "}
+                        {s.tenantId
+                          ? (tenantNameById.get(s.tenantId) ?? shortId(s.tenantId))
+                          : "—"}
                       </span>
                     </>
                   )}
