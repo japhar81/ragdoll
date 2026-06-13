@@ -92,6 +92,61 @@ fatal):
 - Timeouts (any subprocess `TimeoutExpired`) — could be slow account
   or hung sync; not informative either way.
 
+### Known-fragile surface — audit on cloud-SDK string changes
+
+**`_EXCLUDED_SUBSTRINGS` is a known-fragile surface.** Matching vendor
+error prose by case-insensitive substring is pragmatic and honest —
+it catches the strings as they actually appear today — but the
+failure direction is **asymmetric and dangerous**:
+
+- **Too STRICT** = a real `excluded` slips through as `failed` → loud
+  failure. Operator notices; classifier list grows. Self-correcting.
+- **Too LOOSE** = a real `failed` is misclassified `excluded` → the
+  crawl reports complete-without-it → bulwark close-by-absences the
+  module's entity types → **silent partial / tombstoning**. The
+  exact failure mode this whole revision exists to prevent. Does not
+  self-correct.
+
+The two ways this drifts to "too loose" without anyone noticing:
+
+1. **Vendor rewording.** AWS / GCP / Azure update an error message and
+   one of our substrings now matches a *transient* error too. The
+   classifier silently demotes throttling to "excluded" and bulwark
+   tombstones live assets.
+2. **New transient errors.** A future API throws a new transient
+   exception whose message coincidentally contains one of our
+   substrings (e.g. a generic "this operation is not supported in
+   this region right now" 503 message).
+
+Required audits:
+
+- **When this list is touched at all** — re-read every entry against
+  the current cloud SDK error catalogs, not the historical phrasing.
+- **When a cloud SDK we use is upgraded** — sweep their changelog
+  for error-message changes.
+- **When a new module is added** to `CARTOGRAPHY_MODULES` — do that
+  vendor's structurally-permanent errors hit any of our substrings?
+  Do they need new ones?
+
+**Prefer structured codes over prose** for any future entry. Both AWS
+(`error.response['Error']['Code'] == 'ValidationException'`,
+specific `Code` strings like `OptInRequired`) and GCP (the
+`google.api_core.exceptions` class hierarchy +
+`error.reason` / `error.details` enums) expose stable structured
+codes. Cartography sometimes hides those by re-raising the underlying
+`botocore.exceptions.ClientError` with the body in the message — when
+the structured code IS exposed in stderr (e.g. `Error Code:
+ValidationException`) match the code, not the prose. Add the structured
+match alongside the prose match, then remove the prose match in a
+follow-up once we're confident the structured form covers every real
+occurrence.
+
+Substring matching is what we ship today because it's what works
+against the strings actually printed; the route to less fragility is
+structured-code-first matching as we encounter each. Naming the
+fragility here means the list gets audited by reflex when it's
+touched — not trusted forever because nobody flagged it.
+
 ### 2. Per-module envelope shape
 
 ```jsonc

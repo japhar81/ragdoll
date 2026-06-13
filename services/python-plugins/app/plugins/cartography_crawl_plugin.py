@@ -183,7 +183,44 @@ MODULE_ENTITY_TYPES: Dict[str, Tuple[str, ...]] = {
 # `excluded` reason. Conservative-by-default — when in doubt, leave a
 # pattern OUT and let the failure stay fatal.
 #
-# Sources for the canonical phrases:
+# ============================================================================
+# KNOWN-FRAGILE SURFACE — AUDIT WHEN YOU TOUCH THIS LIST
+# ============================================================================
+# Substring matching against vendor error prose is what works today
+# but the failure direction is ASYMMETRIC and DANGEROUS:
+#
+#   too STRICT → real `excluded` slips through as `failed` → loud
+#                failure. Operator notices; we tighten. Self-correcting.
+#   too LOOSE  → real `failed` is misclassified `excluded` → crawl
+#                reports complete-without-it → bulwark close-by-absences
+#                the module's entity types → SILENT PARTIAL / TOMBSTONING.
+#                Does not self-correct. The exact failure mode the whole
+#                three-way revision exists to prevent.
+#
+# Two ways this drifts to "too loose" without anyone noticing:
+#   1. Vendor rewords a structural error message and our substring now
+#      ALSO matches a transient error.
+#   2. A future API throws a new transient exception whose message
+#      coincidentally contains one of our substrings.
+#
+# When editing this list:
+#   * Re-read every entry against the cloud SDK's CURRENT error catalog,
+#     not what it said when the entry was added.
+#   * When a cloud SDK we use is upgraded, sweep its changelog for
+#     error-message changes.
+#   * When a new module is added to CARTOGRAPHY_MODULES, audit whether
+#     its structurally-permanent errors hit these substrings (and
+#     whether any TRANSIENT errors do too — that's the dangerous case).
+#
+# Prefer STRUCTURED CODES over prose for any future entry. AWS exposes
+# error codes (`ValidationException`, `OptInRequired`, …) and GCP
+# `google.api_core.exceptions` classes + `reason` enums that are far
+# more stable than free-form messages. When the structured code IS
+# present in cartography's stderr (e.g. "Error Code:
+# ValidationException"), match the code, not the prose. See
+# ADR-0029 §"Known-fragile surface" for the route to less fragility.
+#
+# Sources for the canonical phrases currently in the list:
 #   - AWS ValidationException for IAM Identity Center on a non-org-root
 #     account: ``not supported for account instances of IAM Identity
 #     Center``.
