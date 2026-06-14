@@ -265,6 +265,118 @@ Verification:
 - `wazuh_vulns_pull (indexer): unset indexerBaseUrl → falls back
   to the connection baseUrl` — co-located case still works.
 
+## Amendment — `wazuh_ruleset_pull` (posture read)
+
+bulwark's Wazuh control was being minted as `Control.mode=block` /
+`Control.fidelity=authoritative` from enrollment alone — agent
+exists, therefore covered. That's a posture the system had no
+evidence for; a detect-only deployment (rules firing, no active
+response) gets the same green check as a fully blocking install.
+The posture is READABLE from the Wazuh server-API, so this pull
+reads it and lets bulwark stop guessing.
+
+### What it reads (server-API endpoints — JWT through the existing driver)
+
+| Endpoint                                                       | Purpose                                                                                                       | Failure mode                              |
+| -------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- | ----------------------------------------- |
+| `GET /agents?agents_list=<id>&select=id,group`                 | Membership lookup when `inputs.agents` row doesn't already carry `group`                                      | 404 / empty → agent → `missingAgents`     |
+| `GET /groups/{group_id}/configuration`                         | agent.conf delivered to that group (JSON envelope)                                                            | Non-2xx → `groupConfigs[group].readable=false` |
+| `GET /agents/{agent_id}/config/com/active-response`            | Live active-response section delivered to that agent's wazuh-execd — the decisive `detect` vs `block` signal  | Wazuh 1707 / 1715 (agent offline / component not requestable) → `activeResponse.readable=false` |
+| `GET /rules?status=enabled&offset=&limit=`                     | Manager-wide enabled rules, paginated, ONCE per execute                                                       | Non-2xx → `rulesetSummary.readable=false` |
+
+Same JWT-authed driver, same binding (`requires: wazuh`), same
+empty-tolerance and `pullId` / `pulledAt` stamp contract as the
+other wazuh pulls. NOT the indexer (the indexer-specific contract
+in the earlier amendment applies only to `wazuh_vulns_pull`).
+
+### Row shape (what bulwark consumes)
+
+```jsonc
+{
+  "agentId": "001",
+  "groups": ["default", "linux"],
+  "activeResponse": {
+    "readable": true,
+    "enabledCount": 1,
+    "disabledCount": 1,
+    "commands": [
+      { "command": "firewall-drop", "disabled": false, "level": "6", "timeout": "600" },
+      { "command": "host-deny",     "disabled": true,  "level": "6" }
+    ]
+  },
+  "groupConfigs": {
+    "default": { "readable": true, "config": { /* agent.conf JSON */ } },
+    "linux":   { "readable": true, "config": { /* ... */ } }
+  },
+  "fidelity":     "authoritative",       // bulwark maps Control.fidelity
+  "configSource": "mixed"                 // agent-config + group-config both read
+}
+```
+
+Bulwark mapping (informational — not enforced by RAGdoll):
+- `Control.mode` ← `activeResponse.commands` — any non-disabled
+  command present → `block`; empty / all-disabled →
+  `detect`. (Refusing to read this and defaulting to `block` was
+  the bug.)
+- `Control.fidelity` ← row's `fidelity`. `authoritative` only when
+  the active-response endpoint AND all referenced group configs
+  read successfully. `partial` when either failed — including the
+  common "agent offline" 1707 case. Agents whose memberships
+  themselves can't be read go to `metadata.missingAgents` — they
+  are NOT in the row stream.
+- Coarse Control class ← `metadata.rulesetSummary.groups[]` — the
+  manager-wide rule-group inventory tells bulwark which families
+  (`vulnerability-detector`, `syscheck`, `authentication_failures`,
+  etc.) are loaded, with `count` and `maxLevel` per group.
+
+### Honesty signal — `fidelity` is a SIGNAL, not a verdict
+
+RAGdoll reports `authoritative | partial` based purely on
+"could we read the API." Bulwark decides whether `partial`
+collapses to `declared` or stays as `inferred` — that decision
+depends on which dimension was partial and on bulwark's policy.
+RAGdoll's job is to never claim a posture it couldn't actually
+read. Specifically: an offline agent never gets a fabricated
+empty active-response array; it gets `readable: false`.
+
+### What's deliberately NOT here (deferred)
+
+- **Per-CVE rule matching.** The "which Wazuh rule would have
+  caught this specific CVE" question is the next rabbit hole;
+  it requires deep inspection of rule files and is out of scope
+  for the posture pull. The coarse rule-group inventory + per-
+  agent active-response is the evidence bulwark needs for the
+  mode + fidelity question this pull is fixing.
+- **Endpoint auto-discovery.** The 4.x / 4.8+ server-API paths
+  used here are documented and stable. If a deployment's path
+  layout drifts, the plugin reports the affected dimension as
+  unreadable per the failure-mode column above — no silent
+  fallback that would mask the drift.
+
+### Verification
+
+Tests in `plugins/builtin-rag/test/wazuh.test.ts` — eight new
+cases pin the load-bearing properties:
+
+- chains off `inputs.agents` (reads `group` from row); fidelity
+  goes to `authoritative` when AR + group config both succeed
+- detect-only reality is visible — empty AR section →
+  `enabledCount=0`, fidelity stays `authoritative` (we READ
+  zero-commands, vetted)
+- AR endpoint 400/1707 → `readable=false`, fidelity drops to
+  `partial`, configSource → `group-config` (NOT a fake posture)
+- `skipActiveResponse=true` → no per-agent AR call; every row
+  fidelity=partial (operator opt-out for known-offline fleets)
+- three agents in the same group → group endpoint called ONCE
+  (rate-limit hygiene)
+- row missing `group` → falls back to
+  `/agents?agents_list=<id>` lookup
+- agent with `group=[]` (freshly enrolled, unassigned) →
+  `missingAgents`, batch continues
+- no agents on input → empty rowstream, but `pullId` stamp +
+  `rulesetSummary` still surfaced (manager-side fetch is
+  independent of agent count)
+
 ## Future work
 
 If bulwark requires the canonical `executions.execution_id`

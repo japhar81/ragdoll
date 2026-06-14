@@ -81,7 +81,13 @@ export {
   // Phase C1 (ADR-0031): per-agent CVE evidence + the Phase 5.2
   // wazuh-freshness provenance contract (pullId/pulledAt) bulwark gates
   // windowed close-by-absence on.
-  wazuhVulnsPullPlugin
+  wazuhVulnsPullPlugin,
+  // Posture READ — agent → group memberships + active-response section
+  // + group config + manager-wide rule-group inventory. Promotes
+  // bulwark's Wazuh control from inferred-from-enrollment ("agent
+  // exists, therefore covered") to read-from-config (detect vs block
+  // visible; fidelity reported honestly per agent).
+  wazuhRulesetPullPlugin
 } from "./wazuh.ts";
 // http_source (Phase C1 / ADR-0032) — generic URL → document fetch.
 // The cleaner primitive when github_source's repo-tree shape is overkill;
