@@ -35,6 +35,7 @@ import {
   requireWazuhConnection,
   wazuhAgentsPullPlugin,
   wazuhConnectionDriver,
+  wazuhRulesetPullPlugin,
   wazuhSyscollectorPullPlugin,
   wazuhVulnsPullPlugin,
   __setWazuhFetchForTests,
@@ -1337,6 +1338,570 @@ test("wazuh_vulns_pull (indexer): static-token connection (no Basic creds) → a
     assert.match(meta.perAgentErrors[0].message, /HTTP Basic credentials/);
     assert.deepEqual(meta.missingAgents, []);
   });
+});
+
+// ---------------------------------------------------------------------------
+// wazuh_ruleset_pull — posture READ
+//
+// These tests pin the load-bearing contract bulwark consumes:
+//   - active-response posture is READ (not guessed); empty / all-disabled
+//     commands surface as detect-only, NOT as block
+//   - per-agent active-response unreadable (agent offline) → fidelity=partial
+//   - groups + group config are fetched once and cached across agents
+//     sharing a group (rate-limit hygiene)
+//   - manager-wide ruleset is fetched ONCE per execute, aggregated by group
+//   - pullId / pulledAt stamped (ADR-0031 contract)
+// ---------------------------------------------------------------------------
+
+test("wazuh_ruleset_pull: chains off inputs.agents (reads group from row), reads AR + group config, fidelity=authoritative when both succeed", async () => {
+  const { conn } = registerWazuhAndAcquire("ruleset-happy");
+  let rulesCalls = 0;
+  await withFakeFetch(
+    [
+      {
+        matches: (url) => url.endsWith("/security/user/authenticate"),
+        respond: () => ({ status: 200, body: { data: { token: "t" } } })
+      },
+      // Manager-wide ruleset — fetched ONCE per execute.
+      {
+        matches: (url) => url.includes("/rules"),
+        respond: () => {
+          rulesCalls += 1;
+          return {
+            status: 200,
+            body: {
+              data: {
+                affected_items: [
+                  { id: 5710, level: 5, groups: ["authentication_failed", "ossec"] },
+                  { id: 5712, level: 10, groups: ["authentication_failures", "ossec"] },
+                  { id: 23502, level: 3, groups: ["vulnerability-detector"] }
+                ],
+                total_affected_items: 3
+              }
+            }
+          };
+        }
+      },
+      // Group config for "default" — agent.conf JSON envelope.
+      {
+        matches: (url) => url.includes("/groups/default/configuration"),
+        respond: () => ({
+          status: 200,
+          body: {
+            data: {
+              affected_items: [
+                {
+                  config: {
+                    "active-response": [
+                      { command: "firewall-drop", disabled: "no", level: "6" }
+                    ]
+                  }
+                }
+              ]
+            }
+          }
+        })
+      },
+      // Live agent active-response — the decisive detect/block read.
+      {
+        matches: (url) => url.includes("/agents/001/config/com/active-response"),
+        respond: () => ({
+          status: 200,
+          body: {
+            data: {
+              affected_items: [
+                {
+                  "active-response": [
+                    {
+                      command: "firewall-drop",
+                      disabled: "no",
+                      level: "6",
+                      timeout: "600",
+                      rules_id: "100100"
+                    },
+                    { command: "host-deny", disabled: "yes", level: "6" }
+                  ]
+                }
+              ]
+            }
+          }
+        })
+      }
+    ],
+    async (calls) => {
+      const out = await wazuhRulesetPullPlugin.execute(
+        executeInputWithRequestId(
+          conn,
+          {},
+          {
+            agents: [{ id: "001", name: "host1", group: ["default"] }]
+          },
+          "req-RULESET-1"
+        )
+      );
+      const rows = (out.outputs as {
+        ruleset: Array<{
+          agentId: string;
+          groups: string[];
+          activeResponse: {
+            readable: boolean;
+            enabledCount: number;
+            disabledCount: number;
+            commands: Array<{ command: string; disabled: boolean }>;
+          };
+          groupConfigs: Record<string, { readable: boolean; config?: unknown }>;
+          fidelity: string;
+          configSource: string;
+        }>;
+      }).ruleset;
+      const meta = (out.outputs as {
+        metadata: {
+          pullId: string;
+          pulledAt: string;
+          fetched: number;
+          missingAgents: string[];
+          rulesetSummary: {
+            readable: boolean;
+            totalRules: number;
+            groups: Array<{ group: string; count: number; maxLevel: number }>;
+          };
+        };
+      }).metadata;
+
+      assert.equal(rows.length, 1);
+      const row = rows[0];
+      assert.equal(row.agentId, "001");
+      assert.deepEqual(row.groups, ["default"]);
+
+      // Active-response READ — block-capable: at least one non-disabled
+      // command present. bulwark maps Control.mode from this.
+      assert.equal(row.activeResponse.readable, true);
+      assert.equal(row.activeResponse.commands.length, 2);
+      assert.equal(row.activeResponse.enabledCount, 1);
+      assert.equal(row.activeResponse.disabledCount, 1);
+      assert.equal(row.activeResponse.commands[0].command, "firewall-drop");
+      assert.equal(row.activeResponse.commands[0].disabled, false);
+      assert.equal(row.activeResponse.commands[1].disabled, true);
+
+      // Group config read.
+      assert.equal(row.groupConfigs.default.readable, true);
+      assert.ok(row.groupConfigs.default.config);
+
+      // Both readable → authoritative + mixed.
+      assert.equal(row.fidelity, "authoritative");
+      assert.equal(row.configSource, "mixed");
+
+      // Provenance stamped (ADR-0031 contract).
+      assert.equal(meta.pullId, "req-RULESET-1");
+      assert.match(meta.pulledAt, /^\d{4}-\d{2}-\d{2}T/);
+
+      // Manager-wide ruleset fetched ONCE — bulwark maps the coarse
+      // group inventory from this.
+      assert.equal(rulesCalls, 1);
+      assert.equal(meta.rulesetSummary.readable, true);
+      assert.equal(meta.rulesetSummary.groups.length, 4); // ossec, auth_failed, auth_failures, vuln-detector
+      const byGroup = Object.fromEntries(
+        meta.rulesetSummary.groups.map((g) => [g.group, g])
+      );
+      // ossec appears in 2 rules; vuln-detector in 1; max level for ossec = 10.
+      assert.equal(byGroup.ossec.count, 2);
+      assert.equal(byGroup.ossec.maxLevel, 10);
+      assert.equal(byGroup["vulnerability-detector"].count, 1);
+
+      // No agent record lookup needed — row carried the group.
+      assert.equal(
+        calls.filter((c) => c.url.includes("/agents?agents_list=")).length,
+        0,
+        "must NOT re-fetch agent record when inputs.agents already carries `group`"
+      );
+    }
+  );
+});
+
+test("wazuh_ruleset_pull: detect-only reality is visible — empty active-response section → enabledCount=0 (NOT minted as block)", async () => {
+  // This is the bug-fixing case: an agent that's enrolled but has NO
+  // active-response commands wired. Today bulwark mints Control.mode=block
+  // from enrollment alone; this pull surfaces the truth so bulwark can
+  // map it to Control.mode=detect.
+  const { conn } = registerWazuhAndAcquire("ruleset-detect-only");
+  await withFakeFetch(
+    [
+      {
+        matches: (url) => url.endsWith("/security/user/authenticate"),
+        respond: () => ({ status: 200, body: { data: { token: "t" } } })
+      },
+      {
+        matches: (url) => url.includes("/rules"),
+        respond: () => ({
+          status: 200,
+          body: { data: { affected_items: [], total_affected_items: 0 } }
+        })
+      },
+      {
+        matches: (url) => url.includes("/groups/"),
+        respond: () => ({
+          status: 200,
+          body: { data: { affected_items: [{ config: {} }] } }
+        })
+      },
+      {
+        // Empty active-response section — agent IS connected and DID
+        // respond, but the section delivered to it has zero commands.
+        // This is the canonical detect-only signal.
+        matches: (url) => url.includes("/config/com/active-response"),
+        respond: () => ({
+          status: 200,
+          body: {
+            data: {
+              affected_items: [{ "active-response": [] }]
+            }
+          }
+        })
+      }
+    ],
+    async () => {
+      const out = await wazuhRulesetPullPlugin.execute(
+        executeInputWithRequestId(
+          conn,
+          {},
+          { agents: [{ id: "001", group: ["default"] }] }
+        )
+      );
+      const row = (out.outputs as {
+        ruleset: Array<{
+          activeResponse: { readable: boolean; enabledCount: number; commands: unknown[] };
+          fidelity: string;
+        }>;
+      }).ruleset[0];
+      // readable=true (we got a valid response), enabledCount=0 → detect.
+      assert.equal(row.activeResponse.readable, true);
+      assert.equal(row.activeResponse.enabledCount, 0);
+      assert.equal(row.activeResponse.commands.length, 0);
+      // Both reads succeeded → authoritative. bulwark gets a clean
+      // "detect-only, vetted" signal.
+      assert.equal(row.fidelity, "authoritative");
+    }
+  );
+});
+
+test("wazuh_ruleset_pull: active-response endpoint errors (agent offline 1707) → readable=false, fidelity=partial (NOT a fake posture)", async () => {
+  const { conn } = registerWazuhAndAcquire("ruleset-ar-offline");
+  await withFakeFetch(
+    [
+      {
+        matches: (url) => url.endsWith("/security/user/authenticate"),
+        respond: () => ({ status: 200, body: { data: { token: "t" } } })
+      },
+      {
+        matches: (url) => url.includes("/rules"),
+        respond: () => ({
+          status: 200,
+          body: { data: { affected_items: [], total_affected_items: 0 } }
+        })
+      },
+      {
+        matches: (url) => url.includes("/groups/"),
+        respond: () => ({
+          status: 200,
+          body: { data: { affected_items: [{ config: {} }] } }
+        })
+      },
+      {
+        // Wazuh's "agent disconnected" / "component not requestable"
+        // surfaces as a non-2xx. We MUST NOT default to "no commands
+        // therefore detect-only" — that's a confident lie. We report
+        // unreadable and downgrade fidelity.
+        matches: (url) => url.includes("/config/com/active-response"),
+        respond: () => ({
+          status: 400,
+          body: { error: 1707, message: "Agent disconnected" }
+        })
+      }
+    ],
+    async () => {
+      const out = await wazuhRulesetPullPlugin.execute(
+        executeInputWithRequestId(
+          conn,
+          {},
+          { agents: [{ id: "099", group: ["default"] }] }
+        )
+      );
+      const row = (out.outputs as {
+        ruleset: Array<{
+          activeResponse: { readable: boolean; commands: unknown[]; error?: string; errorStatus?: number };
+          fidelity: string;
+          configSource: string;
+        }>;
+      }).ruleset[0];
+      assert.equal(row.activeResponse.readable, false);
+      assert.equal(row.activeResponse.commands.length, 0);
+      assert.ok(row.activeResponse.error, "must report the error verbatim");
+      assert.equal(row.fidelity, "partial");
+      assert.equal(row.configSource, "group-config");
+    }
+  );
+});
+
+test("wazuh_ruleset_pull: skipActiveResponse=true → no AR calls, every row fidelity=partial (operator opt-out)", async () => {
+  const { conn } = registerWazuhAndAcquire("ruleset-skip-ar");
+  await withFakeFetch(
+    [
+      {
+        matches: (url) => url.endsWith("/security/user/authenticate"),
+        respond: () => ({ status: 200, body: { data: { token: "t" } } })
+      },
+      {
+        matches: (url) => url.includes("/rules"),
+        respond: () => ({
+          status: 200,
+          body: { data: { affected_items: [], total_affected_items: 0 } }
+        })
+      },
+      {
+        matches: (url) => url.includes("/groups/"),
+        respond: () => ({
+          status: 200,
+          body: { data: { affected_items: [{ config: {} }] } }
+        })
+      }
+    ],
+    async (calls) => {
+      const out = await wazuhRulesetPullPlugin.execute(
+        executeInputWithRequestId(
+          conn,
+          { skipActiveResponse: true },
+          { agents: [{ id: "001", group: ["default"] }] }
+        )
+      );
+      const row = (out.outputs as {
+        ruleset: Array<{
+          activeResponse: { readable: boolean };
+          fidelity: string;
+        }>;
+      }).ruleset[0];
+      assert.equal(row.activeResponse.readable, false);
+      assert.equal(row.fidelity, "partial");
+      // Critical: NO per-agent AR endpoint hit when opted out.
+      assert.equal(
+        calls.filter((c) => c.url.includes("/config/com/active-response")).length,
+        0
+      );
+    }
+  );
+});
+
+test("wazuh_ruleset_pull: agents sharing a group → group config fetched ONCE (rate-limit hygiene)", async () => {
+  const { conn } = registerWazuhAndAcquire("ruleset-shared-group");
+  let groupFetches = 0;
+  await withFakeFetch(
+    [
+      {
+        matches: (url) => url.endsWith("/security/user/authenticate"),
+        respond: () => ({ status: 200, body: { data: { token: "t" } } })
+      },
+      {
+        matches: (url) => url.includes("/rules"),
+        respond: () => ({
+          status: 200,
+          body: { data: { affected_items: [], total_affected_items: 0 } }
+        })
+      },
+      {
+        matches: (url) => url.includes("/groups/linux/configuration"),
+        respond: () => {
+          groupFetches += 1;
+          return {
+            status: 200,
+            body: { data: { affected_items: [{ config: {} }] } }
+          };
+        }
+      },
+      {
+        // All agents online + AR section returns empty (we're testing
+        // the group-config caching, not AR posture).
+        matches: (url) => url.includes("/config/com/active-response"),
+        respond: () => ({
+          status: 200,
+          body: { data: { affected_items: [{ "active-response": [] }] } }
+        })
+      }
+    ],
+    async () => {
+      await wazuhRulesetPullPlugin.execute(
+        executeInputWithRequestId(
+          conn,
+          {},
+          {
+            agents: [
+              { id: "001", group: ["linux"] },
+              { id: "002", group: ["linux"] },
+              { id: "003", group: ["linux"] }
+            ]
+          }
+        )
+      );
+      assert.equal(
+        groupFetches,
+        1,
+        "group `linux` must be fetched ONCE and cached — three agents in the same group"
+      );
+    }
+  );
+});
+
+test("wazuh_ruleset_pull: agent row missing group → falls back to /agents?agents_list lookup", async () => {
+  const { conn } = registerWazuhAndAcquire("ruleset-fallback");
+  let agentLookups = 0;
+  await withFakeFetch(
+    [
+      {
+        matches: (url) => url.endsWith("/security/user/authenticate"),
+        respond: () => ({ status: 200, body: { data: { token: "t" } } })
+      },
+      {
+        matches: (url) => url.includes("/rules"),
+        respond: () => ({
+          status: 200,
+          body: { data: { affected_items: [], total_affected_items: 0 } }
+        })
+      },
+      {
+        matches: (url) => url.includes("/agents?agents_list=001"),
+        respond: () => {
+          agentLookups += 1;
+          return {
+            status: 200,
+            body: {
+              data: {
+                affected_items: [{ id: "001", group: ["default", "linux"] }]
+              }
+            }
+          };
+        }
+      },
+      {
+        matches: (url) => url.includes("/groups/"),
+        respond: () => ({
+          status: 200,
+          body: { data: { affected_items: [{ config: {} }] } }
+        })
+      },
+      {
+        matches: (url) => url.includes("/config/com/active-response"),
+        respond: () => ({
+          status: 200,
+          body: { data: { affected_items: [{ "active-response": [] }] } }
+        })
+      }
+    ],
+    async () => {
+      const out = await wazuhRulesetPullPlugin.execute(
+        executeInputWithRequestId(conn, {}, { agentIds: ["001"] })
+      );
+      const row = (out.outputs as {
+        ruleset: Array<{ groups: string[] }>;
+      }).ruleset[0];
+      assert.deepEqual(row.groups, ["default", "linux"]);
+      assert.equal(agentLookups, 1);
+    }
+  );
+});
+
+test("wazuh_ruleset_pull: agent with empty group list → missingAgents, batch continues", async () => {
+  const { conn } = registerWazuhAndAcquire("ruleset-no-groups");
+  await withFakeFetch(
+    [
+      {
+        matches: (url) => url.endsWith("/security/user/authenticate"),
+        respond: () => ({ status: 200, body: { data: { token: "t" } } })
+      },
+      {
+        matches: (url) => url.includes("/rules"),
+        respond: () => ({
+          status: 200,
+          body: { data: { affected_items: [], total_affected_items: 0 } }
+        })
+      },
+      {
+        matches: (url) => url.includes("/groups/default"),
+        respond: () => ({
+          status: 200,
+          body: { data: { affected_items: [{ config: {} }] } }
+        })
+      },
+      {
+        matches: (url) => url.includes("/config/com/active-response"),
+        respond: () => ({
+          status: 200,
+          body: { data: { affected_items: [{ "active-response": [] }] } }
+        })
+      }
+    ],
+    async () => {
+      const out = await wazuhRulesetPullPlugin.execute(
+        executeInputWithRequestId(
+          conn,
+          {},
+          {
+            agents: [
+              { id: "001", group: ["default"] },
+              { id: "NEW", group: [] } // freshly-enrolled, unassigned
+            ]
+          }
+        )
+      );
+      const rows = (out.outputs as { ruleset: Array<{ agentId: string }> }).ruleset;
+      const meta = (out.outputs as {
+        metadata: { missingAgents: string[]; fetched: number };
+      }).metadata;
+      assert.equal(rows.length, 1);
+      assert.equal(rows[0].agentId, "001");
+      assert.deepEqual(meta.missingAgents, ["NEW"]);
+      assert.equal(meta.fetched, 1);
+    }
+  );
+});
+
+test("wazuh_ruleset_pull: no agents → empty output with pullId stamp AND rulesetSummary still fetched (manager-side)", async () => {
+  const { conn } = registerWazuhAndAcquire("ruleset-no-agents");
+  await withFakeFetch(
+    [
+      {
+        matches: (url) => url.endsWith("/security/user/authenticate"),
+        respond: () => ({ status: 200, body: { data: { token: "t" } } })
+      },
+      {
+        matches: (url) => url.includes("/rules"),
+        respond: () => ({
+          status: 200,
+          body: {
+            data: {
+              affected_items: [{ id: 1, level: 3, groups: ["ossec"] }],
+              total_affected_items: 1
+            }
+          }
+        })
+      }
+    ],
+    async () => {
+      const out = await wazuhRulesetPullPlugin.execute(
+        executeInputWithRequestId(conn, {}, {}, "req-EMPTY-AGENTS")
+      );
+      const meta = (out.outputs as {
+        metadata: {
+          pullId: string;
+          fetched: number;
+          rulesetSummary: { readable: boolean; totalRules: number };
+        };
+      }).metadata;
+      assert.equal(meta.fetched, 0);
+      assert.equal(meta.pullId, "req-EMPTY-AGENTS");
+      // Manager-wide ruleset is independent of agent count — should
+      // still be fetched and surface in metadata.
+      assert.equal(meta.rulesetSummary.readable, true);
+      assert.equal(meta.rulesetSummary.totalRules, 1);
+    }
+  );
 });
 
 test("wazuh_vulns_pull (indexer): unset indexerBaseUrl → falls back to the connection baseUrl (co-located case)", async () => {

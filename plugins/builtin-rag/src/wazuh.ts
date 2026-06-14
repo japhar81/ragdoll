@@ -1360,3 +1360,591 @@ function pickAgentIds(
   }
   return [];
 }
+
+/**
+ * Index `inputs.agents` (the natural output of `wazuh_agents_pull`) by
+ * agentId. Lets the ruleset pull read the `group` field straight from
+ * the chain instead of refetching `/agents?agents_list=<id>` for the
+ * memberships. Returns `{}` when no `agents` input is wired — the
+ * caller falls back to the `/agents` lookup.
+ */
+function indexAgentRowsByIdField(
+  inputs: Record<string, unknown>,
+  idField: string
+): Record<string, Record<string, unknown>> {
+  const agents = inputs.agents;
+  if (!Array.isArray(agents)) return {};
+  const out: Record<string, Record<string, unknown>> = {};
+  for (const row of agents) {
+    if (!row || typeof row !== "object") continue;
+    const v = (row as Record<string, unknown>)[idField];
+    const id =
+      typeof v === "string" && v.length > 0
+        ? v
+        : typeof v === "number"
+          ? String(v)
+          : null;
+    if (id) out[id] = row as Record<string, unknown>;
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// wazuh_ruleset_pull
+//
+// Per-agent posture read for the Wazuh control. The deployed control
+// is currently inferred from enrollment ("the agent exists, therefore
+// covered") in bulwark's projection — that mints `Control.mode=block`
+// and `Control.fidelity=authoritative` from zero evidence. This pull
+// READS what the API exposes (rule groups + active-response posture +
+// effective group config) so bulwark can mint mode + fidelity from
+// configuration, not assumption. Detect-only reality (active-response
+// disabled or empty commands) becomes visible.
+//
+// Wazuh server-API surface — NOT the indexer. JWT-authed through the
+// existing driver via authedRequest(). Endpoints used (Wazuh 4.x
+// server-API spec, also present on 4.8+ — only the vulnerability
+// detector moved to the indexer on 4.8+; ruleset stayed):
+//
+//   - `GET /agents?agents_list=<id>` — agent record (group memberships
+//     live on `data.affected_items[0].group: string[]`). Skipped when
+//     the upstream `inputs.agents` row already carries `group`.
+//   - `GET /groups/{group_id}/configuration` — agent.conf JSON for a
+//     group. Deduped across agents that share a group.
+//   - `GET /agents/{agent_id}/config/com/active-response` — live
+//     active-response section delivered to that agent's wazuh-execd.
+//     Requires the agent to be connected; if the agent is offline,
+//     the manager returns a Wazuh error code (1707 / 1715) which we
+//     surface as `activeResponse.readable=false` AND mark the row
+//     `fidelity=partial`. We do NOT pretend a posture we couldn't read.
+//   - `GET /rules?status=enabled&limit=500` — manager-wide rule list,
+//     fetched ONCE per execute and aggregated into a coarse rule-group
+//     summary in metadata (count + maxLevel per group).
+//
+// Pure pull — emits raw shapes verbatim. Bulwark maps `Control.mode`
+// (block-capable when any non-disabled active-response command is
+// present; detect-only otherwise) and `Control.fidelity` (authoritative
+// when both group config + active-response read; partial when AR
+// unreadable; unreadable agents go to `missingAgents`).
+// ---------------------------------------------------------------------------
+
+interface AgentRecordResponse {
+  data?: {
+    affected_items?: Array<{
+      id?: string;
+      group?: string[];
+      [k: string]: unknown;
+    }>;
+  };
+}
+
+interface GroupConfigResponse {
+  data?: {
+    affected_items?: Array<Record<string, unknown>>;
+  };
+}
+
+interface ActiveResponseConfigResponse {
+  data?: {
+    affected_items?: Array<{
+      "active-response"?: Array<Record<string, unknown>>;
+      [k: string]: unknown;
+    }>;
+  };
+  error?: number;
+  message?: string;
+}
+
+interface RulesResponse {
+  data?: {
+    affected_items?: Array<{
+      id?: number;
+      level?: number;
+      groups?: string[];
+      file?: string;
+      [k: string]: unknown;
+    }>;
+    total_affected_items?: number;
+  };
+}
+
+interface ActiveResponseCommand {
+  command: string;
+  disabled: boolean;
+  level?: string;
+  rulesId?: string;
+  location?: string;
+  timeout?: string;
+  [k: string]: unknown;
+}
+
+interface ActiveResponsePosture {
+  readable: boolean;
+  enabledCount: number;
+  disabledCount: number;
+  commands: ActiveResponseCommand[];
+  error?: string;
+  errorStatus?: number;
+}
+
+interface GroupConfigRead {
+  readable: boolean;
+  config?: Record<string, unknown>;
+  error?: string;
+  errorStatus?: number;
+}
+
+interface RulesetRow {
+  agentId: string;
+  groups: string[];
+  activeResponse: ActiveResponsePosture;
+  groupConfigs: Record<string, GroupConfigRead>;
+  // Honesty signal — bulwark decides the final Control.fidelity rating.
+  // - authoritative: groups + active-response + all referenced group
+  //   configs read successfully
+  // - partial: groups read, but at least one of {active-response,
+  //   group config} could NOT be read
+  // Agents whose groups themselves couldn't be read go to
+  // metadata.missingAgents — they do NOT appear here.
+  fidelity: "authoritative" | "partial";
+  // Where the posture data came from — `agent-config` when the live
+  // per-agent active-response was readable (decisive); `group-config`
+  // when only the group-level config was readable; `mixed` when both.
+  configSource: "agent-config" | "group-config" | "mixed";
+}
+
+interface RulesetGroupSummary {
+  group: string;
+  count: number;
+  maxLevel: number;
+}
+
+interface RulesetSummary {
+  readable: boolean;
+  totalRules: number;
+  groups: RulesetGroupSummary[];
+  error?: string;
+  truncated?: boolean;
+}
+
+export const wazuhRulesetPullPlugin: InProcessPlugin = {
+  manifest: {
+    id: "wazuh_ruleset_pull",
+    name: "Wazuh Ruleset & Posture Pull",
+    version: "1.0.0",
+    category: "datasource",
+    contract: 2,
+    requires: [
+      { binding: "wazuh", kind: "wazuh" }
+    ] as unknown as PluginManifest["requires"],
+    description:
+      "Per-agent posture READ from the Wazuh server-API: group memberships, the effective active-response section delivered to each agent, the agent.conf for each group, and a manager-wide rule-group inventory. The control's mode (`detect` vs `block`) and fidelity (`authoritative` / `partial`) become legible to bulwark — detect-only reality (active-response disabled / empty commands) shows up here rather than getting minted as `block` from enrollment alone. Server-API surface (JWT through the existing driver — NOT the indexer). Chains off `wazuh_agents_pull` (reads `inputs.agents` and pulls each row's `group` directly, no per-agent lookup needed). Pure pull — NO observation/control transform; bulwark maps the raw rows. Honors the wazuh-pull empty-tolerance: agents whose memberships can't be read land in `metadata.missingAgents`, batch keeps going. Stamps `metadata.pullId` + `metadata.pulledAt` (Phase 5.2 wazuh-freshness provenance — ADR-0031).",
+    configSchema: {
+      type: "object",
+      properties: {
+        agentIdField: {
+          type: "string",
+          default: "id",
+          description:
+            "When `inputs.agents` is supplied, pull each agent's id from this field (and `group` for the membership shortcut)."
+        },
+        maxAgents: {
+          type: "integer",
+          default: 10000,
+          description:
+            "Hard ceiling on agents per execute(). Defensive against a runaway upstream — operator can lift for megafleets."
+        },
+        rulesetMaxRules: {
+          type: "integer",
+          default: 5000,
+          description:
+            "Cap on manager-wide rules fetched for the `rulesetSummary`. The default covers a stock Wazuh install (≈3.5k enabled rules) with margin; raise for installs that have loaded large custom rule packs."
+        },
+        skipActiveResponse: {
+          type: "boolean",
+          default: false,
+          description:
+            "When true, the plugin does NOT call `/agents/{id}/config/com/active-response`. Useful when the operator knows every agent is offline and wants to avoid per-agent 1707/1715 errors — every row gets `activeResponse.readable=false` and `fidelity=partial`."
+        }
+      },
+      additionalProperties: false
+    },
+    inputPorts: [
+      {
+        name: "agents",
+        description:
+          "Array of agent rows (natural chain from `wazuh_agents_pull`). Each row's `id` + `group` are read directly; if `group` is missing the plugin re-fetches it via `/agents?agents_list=<id>`."
+      },
+      {
+        name: "agentIds",
+        description:
+          "Fallback when `agents` isn't wired — array of agent id strings. Membership for each id is fetched via `/agents?agents_list=<id>`."
+      }
+    ],
+    outputPorts: [
+      {
+        name: "ruleset",
+        description:
+          "Array of `{ agentId, groups, activeResponse, groupConfigs, fidelity, configSource }`. Bulwark maps `Control.mode` from `activeResponse.commands` (any non-disabled command → block-capable; empty/all-disabled → detect-only) and `Control.fidelity` from the `fidelity` field. Raw shapes (active-response command rows, group config JSON) are surfaced verbatim — bulwark normalises."
+      },
+      {
+        name: "metadata",
+        description:
+          "Diagnostic envelope: `{ pullId, pulledAt, fetched, missingAgents, perAgentErrors, rulesetSummary }`. `rulesetSummary` is the manager-wide rule-group inventory (`{ readable, totalRules, groups:[{group,count,maxLevel}], truncated? }`) — fetched ONCE per execute (not per agent). `pullId` + `pulledAt` ride the Phase 5.2 wazuh-freshness contract (ADR-0031) the other wazuh pulls use."
+      }
+    ],
+    capabilities: ["query"],
+    ui: {
+      icon: "shield-check",
+      color: "#dc2626",
+      paletteGroup: "Sources"
+    }
+  },
+  async execute(input) {
+    const conn = requireWazuhConnection(input, "wazuh", "wazuh_ruleset_pull");
+    const client = await acquireClient<WazuhHandle>(conn);
+    const cfg = input.config as {
+      agentIdField?: unknown;
+      maxAgents?: unknown;
+      rulesetMaxRules?: unknown;
+      skipActiveResponse?: unknown;
+    };
+    const idField =
+      typeof cfg.agentIdField === "string" ? cfg.agentIdField : "id";
+    const maxAgents =
+      typeof cfg.maxAgents === "number" && cfg.maxAgents > 0
+        ? Math.floor(cfg.maxAgents)
+        : 10_000;
+    const rulesetMaxRules =
+      typeof cfg.rulesetMaxRules === "number" && cfg.rulesetMaxRules > 0
+        ? Math.floor(cfg.rulesetMaxRules)
+        : 5_000;
+    const skipActiveResponse = cfg.skipActiveResponse === true;
+
+    const prov = deriveWazuhProvenance(input);
+    const agentIds = pickAgentIds(input.inputs, idField);
+    const agentRowsById = indexAgentRowsByIdField(input.inputs, idField);
+
+    // Manager-wide rule-group summary — one fetch per execute, shared
+    // across all rows. Failure here doesn't kill the batch; bulwark
+    // can still consume per-agent rows and treat the rule-group
+    // dimension as unreadable.
+    const rulesetSummary = await fetchManagerRulesetSummary(
+      client,
+      rulesetMaxRules
+    );
+
+    if (agentIds.length === 0) {
+      return {
+        outputs: {
+          ruleset: [],
+          metadata: {
+            pullId: prov.pullId,
+            pulledAt: prov.pulledAt,
+            fetched: 0,
+            missingAgents: [],
+            perAgentErrors: [],
+            rulesetSummary
+          }
+        }
+      };
+    }
+    const trimmed = agentIds.slice(0, maxAgents);
+
+    // Group config is the same value for every agent in a given group
+    // — fetch ONCE and cache. Cache stores `null` for groups whose
+    // config we tried but failed to read, so we don't re-hit the
+    // endpoint twice and so the row carries the {readable:false,error}
+    // shape consistently.
+    const groupConfigCache = new Map<string, GroupConfigRead>();
+
+    const ruleset: RulesetRow[] = [];
+    const missingAgents: string[] = [];
+    const perAgentErrors: Array<{
+      agentId: string;
+      stage: string;
+      status?: number;
+      message: string;
+    }> = [];
+
+    for (const agentId of trimmed) {
+      // ----- groups (the load-bearing read; failure → missing) -----
+      let groups: string[] | null = null;
+      const cached = agentRowsById[agentId];
+      const cachedGroup = cached?.group;
+      if (Array.isArray(cachedGroup)) {
+        groups = cachedGroup.filter(
+          (g): g is string => typeof g === "string" && g.length > 0
+        );
+      } else if (typeof cachedGroup === "string" && cachedGroup.length > 0) {
+        // Some Wazuh responses serialize `group` as a comma-separated
+        // string rather than an array — normalise.
+        groups = cachedGroup
+          .split(",")
+          .map((g) => g.trim())
+          .filter((g) => g.length > 0);
+      }
+      if (groups === null) {
+        try {
+          groups = await fetchAgentGroups(client, agentId);
+        } catch (e) {
+          const err = e as { status?: number; message?: string };
+          if (err.status === 404) {
+            missingAgents.push(agentId);
+            continue;
+          }
+          perAgentErrors.push({
+            agentId,
+            stage: "agent-record",
+            status: err.status,
+            message: err.message ?? String(e)
+          });
+          missingAgents.push(agentId);
+          continue;
+        }
+      }
+      // Empty group set is a legitimate Wazuh state (a freshly-
+      // enrolled agent before being assigned) — surface in
+      // missingAgents because there's no posture to read.
+      if (groups.length === 0) {
+        missingAgents.push(agentId);
+        continue;
+      }
+
+      // ----- per-group config (deduped via cache) -----
+      const groupConfigs: Record<string, GroupConfigRead> = {};
+      let anyGroupConfigUnreadable = false;
+      for (const groupId of groups) {
+        if (!groupConfigCache.has(groupId)) {
+          const result = await safeFetchGroupConfig(client, groupId);
+          groupConfigCache.set(groupId, result);
+        }
+        const result = groupConfigCache.get(groupId)!;
+        groupConfigs[groupId] = result;
+        if (!result.readable) anyGroupConfigUnreadable = true;
+      }
+
+      // ----- per-agent active-response (the decisive detect/block read) -----
+      let activeResponse: ActiveResponsePosture;
+      if (skipActiveResponse) {
+        activeResponse = {
+          readable: false,
+          enabledCount: 0,
+          disabledCount: 0,
+          commands: [],
+          error: "skipActiveResponse=true — operator opted out of per-agent live config"
+        };
+      } else {
+        activeResponse = await fetchAgentActiveResponsePosture(client, agentId);
+      }
+
+      // ----- compose fidelity + configSource -----
+      const fidelity: "authoritative" | "partial" =
+        activeResponse.readable && !anyGroupConfigUnreadable
+          ? "authoritative"
+          : "partial";
+      const configSource: RulesetRow["configSource"] =
+        activeResponse.readable && !anyGroupConfigUnreadable
+          ? "mixed"
+          : activeResponse.readable
+            ? "agent-config"
+            : "group-config";
+
+      ruleset.push({
+        agentId,
+        groups,
+        activeResponse,
+        groupConfigs,
+        fidelity,
+        configSource
+      });
+    }
+
+    return {
+      outputs: {
+        ruleset,
+        metadata: {
+          pullId: prov.pullId,
+          pulledAt: prov.pulledAt,
+          fetched: ruleset.length,
+          missingAgents,
+          perAgentErrors,
+          rulesetSummary,
+          truncated: agentIds.length > trimmed.length
+        }
+      }
+    };
+  }
+};
+
+// ---------------------------------------------------------------------------
+// Helpers — wazuh_ruleset_pull
+//
+// Each helper either returns the raw payload (success) OR a structured
+// "unreadable" shape (failure). Per-agent failures don't throw out of
+// the pull — they downgrade `fidelity` to `partial` on that row.
+// ---------------------------------------------------------------------------
+
+async function fetchAgentGroups(
+  client: WazuhHandle,
+  agentId: string
+): Promise<string[]> {
+  const path = `/agents?agents_list=${encodeURIComponent(agentId)}&select=id,group`;
+  const json = await client.request<AgentRecordResponse>(path);
+  const items = json.data?.affected_items ?? [];
+  if (items.length === 0) {
+    const err = new Error(
+      `wazuh: agent ${agentId} not found via /agents?agents_list`
+    );
+    (err as { status?: number }).status = 404;
+    throw err;
+  }
+  const group = items[0]?.group;
+  if (Array.isArray(group)) {
+    return group.filter(
+      (g): g is string => typeof g === "string" && g.length > 0
+    );
+  }
+  return [];
+}
+
+async function safeFetchGroupConfig(
+  client: WazuhHandle,
+  groupId: string
+): Promise<GroupConfigRead> {
+  try {
+    // `/groups/{group_id}/configuration` returns the agent.conf as
+    // structured JSON (default in 4.x server-API; the `raw=true`
+    // variant returns XML which we don't need).
+    const path = `/groups/${encodeURIComponent(groupId)}/configuration`;
+    const json = await client.request<GroupConfigResponse>(path);
+    const item = json.data?.affected_items?.[0];
+    return {
+      readable: true,
+      config: item ?? {}
+    };
+  } catch (e) {
+    const err = e as { status?: number; message?: string };
+    return {
+      readable: false,
+      error: err.message ?? String(e),
+      errorStatus: err.status
+    };
+  }
+}
+
+async function fetchAgentActiveResponsePosture(
+  client: WazuhHandle,
+  agentId: string
+): Promise<ActiveResponsePosture> {
+  try {
+    const path = `/agents/${encodeURIComponent(agentId)}/config/com/active-response`;
+    const json = await client.request<ActiveResponseConfigResponse>(path);
+    const item = json.data?.affected_items?.[0];
+    const raw = Array.isArray(item?.["active-response"])
+      ? (item!["active-response"] as Array<Record<string, unknown>>)
+      : [];
+    const commands: ActiveResponseCommand[] = raw.map((r) => {
+      // Wazuh serializes `disabled` as the string "yes"/"no" — normalise
+      // to a boolean so bulwark doesn't have to encode the convention.
+      // EVERYTHING else passes through verbatim (level, rules_id, etc.).
+      const rawDisabled = r.disabled;
+      const disabled =
+        typeof rawDisabled === "boolean"
+          ? rawDisabled
+          : typeof rawDisabled === "string"
+            ? rawDisabled.toLowerCase() === "yes"
+            : false;
+      return {
+        ...r,
+        command:
+          typeof r.command === "string" ? r.command : String(r.command ?? ""),
+        disabled
+      } as ActiveResponseCommand;
+    });
+    const enabledCount = commands.filter((c) => !c.disabled).length;
+    const disabledCount = commands.length - enabledCount;
+    return {
+      readable: true,
+      enabledCount,
+      disabledCount,
+      commands
+    };
+  } catch (e) {
+    // Per-agent active-response config requires the agent to be
+    // connected; Wazuh returns 1707 (agent disconnected) / 1715
+    // (component not requestable) when not. Report unreadable rather
+    // than pretend a posture we couldn't read — bulwark downgrades
+    // Control.fidelity from authoritative to partial on this signal.
+    const err = e as { status?: number; message?: string };
+    return {
+      readable: false,
+      enabledCount: 0,
+      disabledCount: 0,
+      commands: [],
+      error: err.message ?? String(e),
+      errorStatus: err.status
+    };
+  }
+}
+
+async function fetchManagerRulesetSummary(
+  client: WazuhHandle,
+  maxRules: number
+): Promise<RulesetSummary> {
+  try {
+    // /rules returns the loaded manager-side rules. Paginate up to
+    // maxRules — the server-API caps `limit` at 500, so we walk.
+    const pageLimit = Math.min(500, maxRules);
+    let offset = 0;
+    let collected = 0;
+    const groupCount = new Map<string, number>();
+    const groupMaxLevel = new Map<string, number>();
+    let total = 0;
+    let truncated = false;
+    while (collected < maxRules) {
+      const remaining = maxRules - collected;
+      const limit = Math.min(pageLimit, remaining);
+      const path = `/rules?status=enabled&offset=${offset}&limit=${limit}`;
+      const json = await client.request<RulesResponse>(path);
+      const items = json.data?.affected_items ?? [];
+      total = json.data?.total_affected_items ?? total;
+      for (const r of items) {
+        const groups = Array.isArray(r.groups) ? r.groups : [];
+        const level = typeof r.level === "number" ? r.level : 0;
+        for (const g of groups) {
+          if (typeof g !== "string" || g.length === 0) continue;
+          groupCount.set(g, (groupCount.get(g) ?? 0) + 1);
+          if (level > (groupMaxLevel.get(g) ?? -Infinity)) {
+            groupMaxLevel.set(g, level);
+          }
+        }
+      }
+      collected += items.length;
+      if (items.length < limit) break;
+      offset += items.length;
+      if (collected >= maxRules && total > collected) truncated = true;
+    }
+    const groups: RulesetGroupSummary[] = Array.from(groupCount.entries())
+      .map(([group, count]) => ({
+        group,
+        count,
+        maxLevel: groupMaxLevel.get(group) ?? 0
+      }))
+      .sort((a, b) => b.count - a.count);
+    return {
+      readable: true,
+      totalRules: total || collected,
+      groups,
+      ...(truncated ? { truncated: true } : {})
+    };
+  } catch (e) {
+    const err = e as { status?: number; message?: string };
+    return {
+      readable: false,
+      totalRules: 0,
+      groups: [],
+      error: err.message ?? String(e)
+    };
+  }
+}
