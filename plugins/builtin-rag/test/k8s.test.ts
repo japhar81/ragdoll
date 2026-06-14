@@ -684,3 +684,100 @@ test("requireK8sConnection: clear error when the binding's kind isn't k8s", () =
     /expected "k8s"/
   );
 });
+
+// ---------------------------------------------------------------------------
+// AMENDMENT-3: exposure + network-control kinds (Phase C1).
+// Each kind gets its own per-kind `complete:true` flag — they share the
+// pullOneResource loop, so a flake on one does not poison the others
+// (ADR-0028 contract).
+// ---------------------------------------------------------------------------
+
+test("k8s_list_pull: Service / Ingress / Route / NetworkPolicy each get their own complete:true on a clean run", async () => {
+  const { conn } = registerK8sStub();
+  await withFakeFetch(
+    [
+      {
+        matches: (url) =>
+          url.includes("/api/v1/services") ||
+          url.includes("/apis/networking.k8s.io/v1/ingresses") ||
+          url.includes("/apis/route.openshift.io/v1/routes") ||
+          url.includes("/apis/networking.k8s.io/v1/networkpolicies"),
+        respond: () => ({
+          status: 200,
+          body: {
+            metadata: { resourceVersion: "rv-clean" },
+            items: [{ metadata: { name: "x" } }]
+          }
+        })
+      }
+    ],
+    async (calls) => {
+      const out = await k8sListPullPlugin.execute(
+        executeInput(conn, {
+          resources: ["services", "ingresses", "routes", "networkpolicies"]
+        })
+      );
+      const scans = (out.outputs as { scans: K8sScan[] }).scans;
+      assert.equal(scans.length, 4);
+      const byKind = Object.fromEntries(scans.map((s) => [s.kind, s]));
+      for (const k of ["Service", "Ingress", "Route", "NetworkPolicy"]) {
+        assert.ok(byKind[k], `missing scan for ${k}`);
+        assert.equal(byKind[k].complete, true, `${k} should be complete`);
+        assert.equal(byKind[k].items.length, 1);
+      }
+      // Sanity: the OpenShift Route really hit the route.openshift.io
+      // API group, NOT the standard networking.k8s.io group. A typo
+      // there would silently fall back to ingresses.
+      const urls = calls.map((c) => c.url);
+      assert.ok(urls.some((u) => u.includes("/apis/route.openshift.io/v1/routes")));
+      assert.ok(urls.some((u) => u.includes("/apis/networking.k8s.io/v1/networkpolicies")));
+    }
+  );
+});
+
+test("k8s_list_pull: a flake on Route does NOT poison Service / Ingress / NetworkPolicy completeness", async () => {
+  // The contract that keeps the partial set bounded: every kind owns
+  // its own complete-flag. If we accidentally collapsed them into a
+  // single global flag, this test fails (Service goes to complete:false
+  // just because the OpenShift API endpoint is missing).
+  const { conn } = registerK8sStub();
+  await withFakeFetch(
+    [
+      {
+        // Cluster has no OpenShift router installed → 404 on /routes.
+        matches: (url) => url.includes("/apis/route.openshift.io/v1/routes"),
+        respond: () => ({ status: 404, body: { kind: "Status", code: 404 } })
+      },
+      {
+        matches: (url) =>
+          url.includes("/api/v1/services") ||
+          url.includes("/apis/networking.k8s.io/v1/ingresses") ||
+          url.includes("/apis/networking.k8s.io/v1/networkpolicies"),
+        respond: () => ({
+          status: 200,
+          body: {
+            metadata: { resourceVersion: "rv-ok" },
+            items: [{ metadata: { name: "x" } }]
+          }
+        })
+      }
+    ],
+    async () => {
+      const out = await k8sListPullPlugin.execute(
+        executeInput(conn, {
+          resources: ["services", "ingresses", "routes", "networkpolicies"]
+        })
+      );
+      const scans = (out.outputs as { scans: K8sScan[] }).scans;
+      const byKind = Object.fromEntries(scans.map((s) => [s.kind, s]));
+      assert.equal(byKind.Service.complete, true);
+      assert.equal(byKind.Ingress.complete, true);
+      assert.equal(byKind.NetworkPolicy.complete, true);
+      // The flaky one is the ONLY one marked partial.
+      assert.equal(byKind.Route.complete, false);
+      // And the partials roll-up reflects exactly that one kind.
+      const meta = (out.outputs as { metadata: { partials: Array<{ kind: string }> } }).metadata;
+      assert.deepEqual(meta.partials.map((p) => p.kind), ["Route"]);
+    }
+  );
+});

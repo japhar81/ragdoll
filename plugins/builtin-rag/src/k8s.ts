@@ -372,6 +372,7 @@ interface ResourceDescriptor {
  *  initial placement graph. CRDs are reachable via the `customResources`
  *  config knob. */
 const BUILTIN_RESOURCES: Record<string, ResourceDescriptor> = {
+  // Workload primitives — placement / what's running.
   pods: { path: "/api/v1/pods", kindLabel: "Pod" },
   nodes: { path: "/api/v1/nodes", kindLabel: "Node" },
   namespaces: { path: "/api/v1/namespaces", kindLabel: "Namespace" },
@@ -390,6 +391,31 @@ const BUILTIN_RESOURCES: Record<string, ResourceDescriptor> = {
   daemonsets: {
     path: "/apis/apps/v1/daemonsets",
     kindLabel: "DaemonSet"
+  },
+  // Exposure + network-control primitives (Phase C1 / AMENDMENT-3).
+  // bulwark's correlation engine consumes these as the topology
+  // service → endpoint → control. Each kind gets its own scan with
+  // its own per-kind `complete` flag (same completeness contract as
+  // the workload kinds — a flaky one cannot poison the others).
+  // Pure pulls — no transform to observation/endpoint shape here.
+  services: { path: "/api/v1/services", kindLabel: "Service" },
+  ingresses: {
+    // Standard k8s ingress.
+    path: "/apis/networking.k8s.io/v1/ingresses",
+    kindLabel: "Ingress"
+  },
+  routes: {
+    // OpenShift route — the primary external exposure on OKD; missing
+    // it leaves bulwark's correlation blind to anything fronted by
+    // OpenShift router. Lives under route.openshift.io, NOT the
+    // standard k8s networking group.
+    path: "/apis/route.openshift.io/v1/routes",
+    kindLabel: "Route"
+  },
+  networkpolicies: {
+    // The k8s network control — both ingress and egress rules.
+    path: "/apis/networking.k8s.io/v1/networkpolicies",
+    kindLabel: "NetworkPolicy"
   }
 };
 

@@ -77,8 +77,19 @@ export type { CartographyModule } from "./cartography.ts";
 export {
   wazuhConnectionDriver,
   wazuhAgentsPullPlugin,
-  wazuhSyscollectorPullPlugin
+  wazuhSyscollectorPullPlugin,
+  // Phase C1 (ADR-0031): per-agent CVE evidence + the Phase 5.2
+  // wazuh-freshness provenance contract (pullId/pulledAt) bulwark gates
+  // windowed close-by-absence on.
+  wazuhVulnsPullPlugin
 } from "./wazuh.ts";
+// http_source (Phase C1 / ADR-0032) — generic URL → document fetch.
+// The cleaner primitive when github_source's repo-tree shape is overkill;
+// powers the ATT&CK / D3FEND reference-ETL pattern (compose with
+// transform + delta_filter + neo4j_write to import versioned ontologies
+// on a slow cron).
+export { httpSourcePlugin } from "./http-source.ts";
+
 // k8s (Phase 3b) — connection driver + completeness-aware list-pull.
 // The `scan.complete` flag emitted per resource kind is the headline
 // signal — bulwark's append-only diff keys off it to decide whether

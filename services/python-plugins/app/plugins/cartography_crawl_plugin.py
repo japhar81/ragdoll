@@ -136,13 +136,29 @@ DEFAULT_TIMEOUT_MS = 1_800_000  # 30 minutes — long crawls are normal
 # via `entityTypeOverrides` on the node config (future enhancement).
 MODULE_ENTITY_TYPES: Dict[str, Tuple[str, ...]] = {
     "aws": (
-        "AWSAccount", "AWSRegion", "EC2Instance", "EC2SecurityGroup",
-        "EC2Subnet", "EBSVolume", "VPC", "RDSInstance", "RDSCluster",
-        "S3Bucket", "LoadBalancer", "LoadBalancerV2", "AWSPolicy",
-        "AWSRole", "AWSUser", "AWSGroup", "AutoScalingGroup",
+        # Identity + accounts.
+        "AWSAccount", "AWSRegion", "AWSPolicy", "AWSRole", "AWSUser",
+        "AWSGroup",
+        # Compute + storage.
+        "EC2Instance", "EBSVolume", "AutoScalingGroup",
         "LaunchConfiguration", "ECSCluster", "ECSService", "ECSTask",
-        "EKSCluster", "ElasticIPAddress", "DNSZone", "DNSRecord",
-        "CloudTrailTrail", "CloudWatchLogGroup",
+        "EKSCluster", "S3Bucket", "RDSInstance", "RDSCluster",
+        # Network — exposure + endpoints (Phase C1 AMENDMENT-3). bulwark's
+        # correlation engine reads ALB / NLB + Elastic IPs / public ENIs
+        # as the *exposure* dimension of `service → endpoint → control`.
+        "EC2Subnet", "VPC", "LoadBalancer", "LoadBalancerV2",
+        "ElasticIPAddress", "NetworkInterface",
+        # Network controls — security groups (with their ingress/egress
+        # rules) and WAFv2 WebACLs (+ rule groups). The WAFv2 rows weren't
+        # in the entityTypes list before this revision; without them
+        # bulwark's projection wouldn't know to gate close-by-absence on
+        # the WAF controls. Module is still just `aws` — these are
+        # sub-syncs of cartography's single AWS module.
+        "EC2SecurityGroup", "IpRule", "IpPermissionInbound",
+        "WAFv2WebACL", "WAFv2RuleGroup",
+        # DNS / observability — useful for downstream correlation but
+        # not control-shaped.
+        "DNSZone", "DNSRecord", "CloudTrailTrail", "CloudWatchLogGroup",
     ),
     "azure": (
         "AzureTenant", "AzureSubscription", "AzureVirtualMachine",

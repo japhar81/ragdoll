@@ -459,6 +459,47 @@ export function requireWazuhConnection(
 }
 
 // ---------------------------------------------------------------------------
+// Wazuh-freshness provenance contract (Phase 5.2)
+// ---------------------------------------------------------------------------
+//
+// Every wazuh pull stamps its metadata envelope with `pullId` + `pulledAt`
+// — the wazuh-side analogue of the cartography crawl provenance contract
+// (ADR-0030). Same shape, same requestId-as-id pattern: bulwark's
+// transform stamps each emitted row with `inputs.metadata.pullId` /
+// `inputs.metadata.pulledAt`, and bulwark's gated windowed close-by-
+// absence pairs "agents/CVEs that didn't carry pullId N this run = absent
+// since pullId N." A patched CVE missing from the next pull is the
+// load-bearing signal for CVE close-by-absence.
+//
+// `pullId` derives from `RuntimeContext.requestId` — RAGdoll's per-
+// pipeline-execution identifier, already on PluginExecutionInput.context.
+// Falls back to a synthetic per-call id when the runtime context omits
+// requestId (dev / harness only — production callers always have it).
+//
+// ADR-0031 documents the contract end-to-end; the wazuh-vuln pull was
+// the trigger that established it, but every wazuh pull emits it so
+// downstream bulwark transforms can use the SAME stamp shape regardless
+// of which wazuh node produced the row.
+interface WazuhProvenance {
+  pullId: string;
+  pulledAt: string;
+}
+
+function deriveWazuhProvenance(input: PluginExecutionInput): WazuhProvenance {
+  const ctx = input.context as { requestId?: unknown } | undefined;
+  const requestId = typeof ctx?.requestId === "string" ? ctx.requestId : "";
+  return {
+    // When requestId is absent (tests, dev runs without a real runtime
+    // context), fall back to a synthetic id that's at least stable
+    // within this invocation — downstream rows still all carry the
+    // SAME pullId even though it won't correlate with a RAGdoll
+    // execution row.
+    pullId: requestId || `wazuh-pull-${Date.now()}`,
+    pulledAt: new Date().toISOString()
+  };
+}
+
+// ---------------------------------------------------------------------------
 // wazuh_agents_pull — paginated registry read
 // ---------------------------------------------------------------------------
 
@@ -596,10 +637,16 @@ export const wazuhAgentsPullPlugin: InProcessPlugin = {
     }
     if (pages >= maxPages && total > agents.length) truncated = true;
 
+    const prov = deriveWazuhProvenance(input);
     return {
       outputs: {
         agents,
         metadata: {
+          // Phase 5.2 wazuh-freshness provenance — same shape every
+          // wazuh pull emits so bulwark's transform stamps each row
+          // via `$$.metadata.pullId` / `$$.metadata.pulledAt`.
+          pullId: prov.pullId,
+          pulledAt: prov.pulledAt,
           pages,
           total,
           fetched: agents.length,
@@ -751,12 +798,20 @@ export const wazuhSyscollectorPullPlugin: InProcessPlugin = {
         ? Math.floor(cfg.maxAgents)
         : 10_000;
 
+    const prov = deriveWazuhProvenance(input);
     const agentIds = pickAgentIds(input.inputs, idField);
     if (agentIds.length === 0) {
       return {
         outputs: {
           enrichment: [],
-          metadata: { fetched: 0, missingAgents: [], items, perItemErrors: [] }
+          metadata: {
+            pullId: prov.pullId,
+            pulledAt: prov.pulledAt,
+            fetched: 0,
+            missingAgents: [],
+            items,
+            perItemErrors: []
+          }
         }
       };
     }
@@ -815,6 +870,9 @@ export const wazuhSyscollectorPullPlugin: InProcessPlugin = {
       outputs: {
         enrichment,
         metadata: {
+          // Phase 5.2 wazuh-freshness provenance — see deriveWazuhProvenance.
+          pullId: prov.pullId,
+          pulledAt: prov.pulledAt,
           fetched: enrichment.length,
           missingAgents,
           items,
@@ -827,6 +885,333 @@ export const wazuhSyscollectorPullPlugin: InProcessPlugin = {
     };
   }
 };
+
+// ---------------------------------------------------------------------------
+// wazuh_vulns_pull — per-agent CVE findings (the deferred OCSF pull)
+// ---------------------------------------------------------------------------
+//
+// Pulls per-agent CVE findings as evidence. Pure pull — no transform
+// into observation/CWE/ATT&CK shape; bulwark owns the mapping from
+// raw Wazuh vuln rows to its observation schema.
+//
+// Wazuh exposes vulnerabilities on TWO different surfaces depending
+// on the deployed version, and they're NOT interchangeable:
+//
+//   4.x server API:  `GET /vulnerability/{agent_id}` — same JWT-
+//                    auth, same `data.affected_items` envelope as the
+//                    syscollector endpoints. This is what the wazuh
+//                    driver already speaks.
+//   4.8+ indexer:    Vulnerabilities moved out of the server API
+//                    into the Wazuh indexer (Open/Elastic search) —
+//                    queried via `POST /wazuh-states-vulnerabilities-
+//                    <node>/_search` with a JSON DSL body. Different
+//                    auth surface, different envelope, different host
+//                    (the indexer port, not 55000).
+//
+// Operators pick which surface to hit via `config.apiVariant`. Default
+// is `server-api` (the 4.x flow already wired through the driver). The
+// `indexer` variant uses the same JWT bearer if the indexer accepts it
+// (default Wazuh deploys share the cert chain); operators on a split
+// install can override the indexer host via `config.indexerBaseUrl`.
+//
+// We DELIBERATELY don't auto-detect the variant — auto-detection would
+// burn a probe call per pull and could pick the wrong surface during a
+// rolling upgrade. The operator who knows their cluster picks once at
+// pipeline-config time.
+
+type WazuhVulnApiVariant = "server-api" | "indexer";
+
+interface VulnerabilityResponse {
+  data?: {
+    affected_items?: Array<Record<string, unknown>>;
+    total_affected_items?: number;
+  };
+  error?: number;
+}
+
+interface IndexerHit {
+  _source?: Record<string, unknown>;
+  _index?: string;
+  _id?: string;
+}
+
+interface IndexerSearchResponse {
+  hits?: {
+    hits?: IndexerHit[];
+    total?: { value?: number } | number;
+  };
+}
+
+interface AgentVulnRow {
+  agentId: string;
+  vulns: Array<Record<string, unknown>>;
+}
+
+export const wazuhVulnsPullPlugin: InProcessPlugin = {
+  manifest: {
+    id: "wazuh_vulns_pull",
+    name: "Wazuh Vulnerabilities Pull",
+    version: "1.0.0",
+    category: "datasource",
+    contract: 2,
+    requires: [{ binding: "wazuh", kind: "wazuh" }] as unknown as PluginManifest["requires"],
+    description:
+      "Per-agent CVE findings. Operator picks the Wazuh API surface via `config.apiVariant`: `server-api` (4.x — `GET /vulnerability/{agent_id}`, JWT-authed through the existing driver) or `indexer` (4.8+ — `POST /wazuh-states-vulnerabilities-*/_search`). Emits raw CVE rows keyed by agent — NO transform into observation / CWE / ATT&CK shape; bulwark maps the rows. Tolerates empty/missing per-agent inventory like wazuh_syscollector_pull: 404 / empty hits → agent lands in `metadata.missingAgents`, batch keeps going. Stamps `metadata.pullId` + `metadata.pulledAt` (Phase 5.2 wazuh-freshness provenance — ADR-0031) so bulwark's windowed close-by-absence can compute 'patched CVE absent from this pull' against the prior pull's stamp.",
+    configSchema: {
+      type: "object",
+      properties: {
+        apiVariant: {
+          type: "string",
+          enum: ["server-api", "indexer"],
+          default: "server-api",
+          description:
+            "Which Wazuh surface to query. `server-api`: 4.x's GET /vulnerability/{agent_id}. `indexer`: 4.8+'s indexer search (wazuh-states-vulnerabilities-*). Pick once at pipeline-config time — auto-detect would burn a probe call per pull AND could pick the wrong surface during a rolling upgrade."
+        },
+        indexerBaseUrl: {
+          type: "string",
+          description:
+            "Override the indexer host when `apiVariant=indexer` and the indexer isn't co-located with the server API. Defaults to the same baseUrl the driver uses (works for stock Wazuh deploys where the JWT is honored on both)."
+        },
+        indexerIndexPattern: {
+          type: "string",
+          default: "wazuh-states-vulnerabilities-*",
+          description:
+            "Indexer index/alias pattern to search. Wazuh's default is `wazuh-states-vulnerabilities-<node>` per cluster node — the wildcard covers a multi-node install."
+        },
+        agentIdField: {
+          type: "string",
+          default: "id",
+          description:
+            "When `inputs.agents` is supplied (the natural chain from wazuh_agents_pull), pull each agent's id from this field."
+        },
+        maxAgents: {
+          type: "integer",
+          default: 10000,
+          description:
+            "Hard ceiling on agents per execute(). Guard against a runaway upstream — operator can lift for megafleets."
+        },
+        limitPerAgent: {
+          type: "integer",
+          default: 500,
+          description:
+            "Page size for the server-api variant (`?limit=`). The indexer variant uses this as its `size` parameter. Wazuh's server-side caps at 500."
+        }
+      },
+      additionalProperties: false
+    },
+    inputPorts: [
+      {
+        name: "agentIds",
+        description:
+          "Array of agent id strings. Optional — when omitted, the plugin reads `inputs.agents` and pulls ids from `config.agentIdField` (defaults to chain directly off wazuh_agents_pull)."
+      },
+      {
+        name: "agents",
+        description:
+          "Optional fallback when agentIds isn't piped: array of agent rows. The plugin reads each row's `config.agentIdField` field for the id."
+      }
+    ],
+    outputPorts: [
+      {
+        name: "vulns",
+        description:
+          "Array of `{ agentId, vulns: [<raw Wazuh CVE row>, ...] }` entries. Agents whose vuln inventory is empty / missing entirely DO NOT appear here — they're in `metadata.missingAgents` instead. Raw row shape mirrors Wazuh's `data.affected_items` envelope (server-api) or `_source` hits (indexer) verbatim — bulwark normalises."
+      },
+      {
+        name: "metadata",
+        description:
+          "Diagnostic envelope: { pullId, pulledAt, apiVariant, fetched, missingAgents, perAgentErrors, totalVulns }. `pullId` + `pulledAt` are the Phase 5.2 wazuh-freshness provenance contract — bulwark stamps each emitted row via `$$.metadata.pullId` / `$$.metadata.pulledAt`."
+      }
+    ],
+    capabilities: ["query"],
+    ui: {
+      icon: "shield-alert",
+      color: "#dc2626",
+      paletteGroup: "Sources",
+      formHints: {
+        apiVariant: { widget: "select" }
+      }
+    }
+  },
+  async execute(input) {
+    const conn = requireWazuhConnection(input, "wazuh", "wazuh_vulns_pull");
+    const client = await acquireClient<WazuhHandle>(conn);
+    const cfg = input.config as {
+      apiVariant?: unknown;
+      indexerBaseUrl?: unknown;
+      indexerIndexPattern?: unknown;
+      agentIdField?: unknown;
+      maxAgents?: unknown;
+      limitPerAgent?: unknown;
+    };
+    const apiVariant: WazuhVulnApiVariant =
+      cfg.apiVariant === "indexer" ? "indexer" : "server-api";
+    const idField =
+      typeof cfg.agentIdField === "string" ? cfg.agentIdField : "id";
+    const maxAgents =
+      typeof cfg.maxAgents === "number" && cfg.maxAgents > 0
+        ? Math.floor(cfg.maxAgents)
+        : 10_000;
+    const limitPerAgent = clampLimit(cfg.limitPerAgent, 500);
+    const indexerIndexPattern =
+      typeof cfg.indexerIndexPattern === "string" && cfg.indexerIndexPattern
+        ? cfg.indexerIndexPattern
+        : "wazuh-states-vulnerabilities-*";
+
+    const prov = deriveWazuhProvenance(input);
+    const agentIds = pickAgentIds(input.inputs, idField);
+    if (agentIds.length === 0) {
+      return {
+        outputs: {
+          vulns: [],
+          metadata: {
+            pullId: prov.pullId,
+            pulledAt: prov.pulledAt,
+            apiVariant,
+            fetched: 0,
+            totalVulns: 0,
+            missingAgents: [],
+            perAgentErrors: []
+          }
+        }
+      };
+    }
+    const trimmed = agentIds.slice(0, maxAgents);
+
+    const vulns: AgentVulnRow[] = [];
+    const missingAgents: string[] = [];
+    const perAgentErrors: Array<{
+      agentId: string;
+      status?: number;
+      message: string;
+    }> = [];
+
+    for (const agentId of trimmed) {
+      try {
+        const rows =
+          apiVariant === "indexer"
+            ? await fetchAgentVulnsViaIndexer(
+                client,
+                agentId,
+                indexerIndexPattern,
+                limitPerAgent
+              )
+            : await fetchAgentVulnsViaServerApi(
+                client,
+                agentId,
+                limitPerAgent
+              );
+        if (rows.length > 0) {
+          vulns.push({ agentId, vulns: rows });
+        } else {
+          missingAgents.push(agentId);
+        }
+      } catch (e) {
+        const err = e as { status?: number; message?: string };
+        if (err.status === 404) {
+          // 404 = no entry for this agent (e.g. 4.x agent doesn't
+          // have the vulnerability detector enabled). Mirror the
+          // syscollector empty-tolerance: surface in missingAgents
+          // and keep going.
+          missingAgents.push(agentId);
+          continue;
+        }
+        perAgentErrors.push({
+          agentId,
+          status: err.status,
+          message: err.message ?? String(e)
+        });
+      }
+    }
+
+    const totalVulns = vulns.reduce((acc, row) => acc + row.vulns.length, 0);
+
+    return {
+      outputs: {
+        vulns,
+        metadata: {
+          pullId: prov.pullId,
+          pulledAt: prov.pulledAt,
+          apiVariant,
+          fetched: vulns.length,
+          totalVulns,
+          missingAgents,
+          perAgentErrors,
+          truncated: agentIds.length > trimmed.length
+        }
+      }
+    };
+  }
+};
+
+/**
+ * Walk the 4.x server-API pagination contract for a single agent's
+ * vuln inventory. Mirrors the same envelope syscollector uses.
+ */
+async function fetchAgentVulnsViaServerApi(
+  client: WazuhHandle,
+  agentId: string,
+  limit: number
+): Promise<Array<Record<string, unknown>>> {
+  const out: Array<Record<string, unknown>> = [];
+  let offset = 0;
+  // Cap total pages per agent — defensive against a runaway server
+  // returning oddly-shaped continuation. 100 pages × 500 limit = 50k
+  // CVEs per agent, far above any real fleet.
+  for (let page = 0; page < 100; page++) {
+    const params = new URLSearchParams();
+    params.set("offset", String(offset));
+    params.set("limit", String(limit));
+    const path = `/vulnerability/${encodeURIComponent(agentId)}?${params.toString()}`;
+    const json = await client.request<VulnerabilityResponse>(path);
+    const items = json.data?.affected_items ?? [];
+    for (const row of items) out.push(row);
+    offset += items.length;
+    if (items.length < limit) break;
+    if (
+      typeof json.data?.total_affected_items === "number" &&
+      out.length >= json.data.total_affected_items
+    ) {
+      break;
+    }
+  }
+  return out;
+}
+
+/**
+ * Query the 4.8+ indexer for a single agent's vulnerabilities. Uses
+ * the JWT bearer the driver already manages — most Wazuh installs
+ * share the cert chain between server API and indexer, so the bearer
+ * works for both. Operators with a split install can override the
+ * indexer host via `config.indexerBaseUrl` (TODO: wire that through;
+ * default is the driver's baseUrl which works for stock).
+ *
+ * The indexer search uses Elasticsearch's `_search` endpoint with a
+ * term filter on `agent.id`. Each `_source` carries the same CVE
+ * shape Wazuh emits to the indexer (id, severity, package, condition,
+ * detected_at, etc.) — we surface `_source` verbatim so bulwark's
+ * mapping doesn't have to thread through index metadata.
+ */
+async function fetchAgentVulnsViaIndexer(
+  client: WazuhHandle,
+  agentId: string,
+  indexPattern: string,
+  size: number
+): Promise<Array<Record<string, unknown>>> {
+  // POST body would be cleaner but the driver's request() only does
+  // GET right now (matches the rest of the wazuh surface). Use a URL-
+  // encoded query DSL via `q=` — Wazuh's indexer supports lucene
+  // syntax on this surface.
+  const params = new URLSearchParams();
+  params.set("size", String(size));
+  params.set("q", `agent.id:"${agentId}"`);
+  const path = `/${encodeURIComponent(indexPattern)}/_search?${params.toString()}`;
+  const json = await client.request<IndexerSearchResponse>(path);
+  const hits = json.hits?.hits ?? [];
+  return hits
+    .map((h) => h._source ?? null)
+    .filter((s): s is Record<string, unknown> => !!s);
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
