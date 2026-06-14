@@ -206,6 +206,65 @@ Tests in `plugins/builtin-rag/test/wazuh.test.ts`:
 - No proto change. No bridge change. No wire change. The wire was
   already carrying the identifier.
 
+## Amendment — indexer (4.8+) wire contract
+
+The original landing of `wazuh_vulns_pull` shipped the indexer
+variant by routing it through the same JWT-bearer + GET-only path
+the server-API surface uses. That path runs green but yields zero
+rows against a real Wazuh 4.8+ indexer. bulwark proved the correct
+wire contract with a direct pull against the live indexer
+(1917 CVEs, per-agent magnitudes ≈ 36–1632). This amendment
+records the proven contract so the next reader doesn't re-derive
+it:
+
+| Dimension          | Server API (4.x)                       | Indexer (4.8+ / OpenSearch)                 |
+| ------------------ | -------------------------------------- | ------------------------------------------- |
+| Endpoint           | `https://<host>:55000`                 | `https://<host>:9200` (often a split host)  |
+| Auth               | JWT — `POST /security/user/authenticate` → `Authorization: Bearer <token>` | **HTTP Basic** per request from the SAME connection secret |
+| Auth-flow probe    | 200 with `{data:{token:…}}`            | 400 — the `/security/user/authenticate` endpoint **does not exist** on the indexer |
+| Search shape       | `GET /vulnerability/{agent_id}?offset=&limit=` | `POST /<indexPattern>/_search` with a JSON DSL body |
+| Body / params      | URL query params                       | `{"size": <limitPerAgent>, "query": {"term": {"agent.id": "<id>"}}}` |
+| Hit shape          | `data.affected_items[]`                | `hits.hits[]._source` (surfaced verbatim)   |
+| Wazuh secret kind | `{username,password}` or `{token}`     | **`{username,password}` REQUIRED** — `{token}` errors actionably |
+
+Two RAGdoll-side knobs make this work:
+
+- **`config.indexerBaseUrl`** — wired through the plugin, accepts a
+  full URL (`https://wazuh-indexer.acme.com:9200`) or a bare
+  hostname (defaults to `https://<host>:9200`). When unset, falls
+  back to the connection's `baseUrl` — only correct for the rare
+  co-located case.
+- **Internal `indexerSearch()` helper** — scoped to the indexer
+  variant. Does NOT route through `authedRequest` /
+  `ensureToken`. Builds the `Authorization: Basic <b64>` header
+  per request, honors `verifyTls=false` via the same undici
+  per-request dispatcher pattern the rest of the wazuh driver
+  uses, surfaces non-2xx with a short body snippet (creds never
+  logged).
+
+The server-API path is untouched — it remains the JWT/GET surface
+documented in ADR-0027. The amendment scope is the indexer variant
+only.
+
+Verification:
+
+- `wazuh_vulns_pull (indexer): POST /<indexPattern>/_search to
+  indexerBaseUrl with Basic auth + JSON body` — pins all four
+  proven properties (endpoint host:port, POST method, Basic auth,
+  DSL body); explicitly asserts the plugin DOES NOT call
+  `/security/user/authenticate` on this surface and DOES NOT touch
+  the server-API host.
+- `wazuh_vulns_pull (indexer): empty hits → agent lands in
+  missingAgents` — empty-tolerance contract preserved.
+- `wazuh_vulns_pull (indexer): indexerBaseUrl accepts a bare
+  hostname → https://<host>:9200` — config knob shape.
+- `wazuh_vulns_pull (indexer): static-token connection → actionable
+  error, NOT silent failure` — operator visibility on the
+  wrong-secret-shape mistake (rather than 0 rows that look like
+  an empty fleet).
+- `wazuh_vulns_pull (indexer): unset indexerBaseUrl → falls back
+  to the connection baseUrl` — co-located case still works.
+
 ## Future work
 
 If bulwark requires the canonical `executions.execution_id`
