@@ -36,6 +36,7 @@ import {
   wazuhAgentsPullPlugin,
   wazuhConnectionDriver,
   wazuhSyscollectorPullPlugin,
+  wazuhVulnsPullPlugin,
   __setWazuhFetchForTests,
   type WazuhFetch,
   type WazuhHandle
@@ -807,4 +808,402 @@ test("driver: two acquires against the same connection.id return the SAME handle
   const a = await acquireClient<WazuhHandle>(conn);
   const b = await acquireClient<WazuhHandle>(conn);
   assert.strictEqual(a, b);
+});
+
+// ---------------------------------------------------------------------------
+// Phase 5.2 wazuh-freshness provenance contract (ADR-0031)
+//
+// Every wazuh pull plugin stamps `metadata.pullId` + `metadata.pulledAt`,
+// derived from `RuntimeContext.requestId`. Bulwark stamps each emitted
+// row with that pair via `$$.metadata.pullId` / `$$.metadata.pulledAt`
+// and gates windowed close-by-absence on "pulled CVEs/agents that were
+// absent from the NEXT pull stamp." If these stop appearing in the
+// envelope, bulwark's freshness windows go dark — break loud here.
+// ---------------------------------------------------------------------------
+
+function executeInputWithRequestId(
+  conn: ResolvedExternalConnection,
+  config: Record<string, unknown>,
+  inputs: Record<string, unknown> = {},
+  requestId = "req-fixed-123"
+) {
+  const base = executeInput(conn, config, inputs) as unknown as {
+    context: { requestId?: string };
+  };
+  base.context.requestId = requestId;
+  return base as unknown as Parameters<typeof wazuhAgentsPullPlugin.execute>[0];
+}
+
+test("wazuh_agents_pull: metadata stamps pullId (from context.requestId) + pulledAt", async () => {
+  counter = 0;
+  const { conn } = registerWazuhAndAcquire("prov-agents");
+  await withFakeFetch(
+    [
+      {
+        matches: (url) => url.endsWith("/security/user/authenticate"),
+        respond: () => ({ status: 200, body: { data: { token: "t" } } })
+      },
+      {
+        matches: (url) => url.includes("/agents"),
+        respond: () => ({
+          status: 200,
+          body: {
+            data: {
+              affected_items: [{ id: "001" }],
+              total_affected_items: 1
+            }
+          }
+        })
+      }
+    ],
+    async () => {
+      const out = await wazuhAgentsPullPlugin.execute(
+        executeInputWithRequestId(conn, { limit: 50 }, {}, "req-AGENTS-42")
+      );
+      const meta = (out.outputs as {
+        metadata: { pullId: string; pulledAt: string };
+      }).metadata;
+      assert.equal(meta.pullId, "req-AGENTS-42");
+      // pulledAt is ISO-8601 — exact value depends on wall clock; just
+      // assert shape.
+      assert.match(meta.pulledAt, /^\d{4}-\d{2}-\d{2}T/);
+    }
+  );
+});
+
+test("wazuh_syscollector_pull: metadata stamps pullId + pulledAt", async () => {
+  counter = 0;
+  const { conn } = registerWazuhAndAcquire("prov-sysco");
+  await withFakeFetch(
+    [
+      {
+        matches: (url) => url.endsWith("/security/user/authenticate"),
+        respond: () => ({ status: 200, body: { data: { token: "t" } } })
+      },
+      {
+        matches: (url) => url.includes("/syscollector/001/hardware"),
+        respond: () => ({
+          status: 200,
+          body: { data: { affected_items: [{ board_serial: "S" }] } }
+        })
+      },
+      {
+        matches: (url) => url.includes("/syscollector/001/"),
+        respond: () => ({ status: 200, body: { data: { affected_items: [] } } })
+      }
+    ],
+    async () => {
+      const out = await wazuhSyscollectorPullPlugin.execute(
+        executeInputWithRequestId(
+          conn,
+          { items: ["hardware", "os"] },
+          { agentIds: ["001"] },
+          "req-SYSCO-99"
+        )
+      );
+      const meta = (out.outputs as {
+        metadata: { pullId: string; pulledAt: string };
+      }).metadata;
+      assert.equal(meta.pullId, "req-SYSCO-99");
+      assert.match(meta.pulledAt, /^\d{4}-\d{2}-\d{2}T/);
+      // Per-row stamping is bulwark's job (it reads
+      // `$$.metadata.pullId` during projection) — the pull plugin
+      // itself only stamps the metadata envelope. Sanity-check that:
+      // a misguided "stamp each row in-place" would change the wire
+      // contract upstream of bulwark.
+      const enrichment = (out.outputs as {
+        enrichment: Array<Record<string, unknown>>;
+      }).enrichment;
+      assert.equal(enrichment.length, 1);
+      assert.equal((enrichment[0] as { pullId?: string }).pullId, undefined);
+    }
+  );
+});
+
+// ---------------------------------------------------------------------------
+// wazuh_vulns_pull — NEW (Phase C1, Job 1). Two API variants.
+// ---------------------------------------------------------------------------
+
+test("wazuh_vulns_pull (server-api): per-agent pagination, missingAgents tolerance, 404 lands as missing", async () => {
+  const { conn } = registerWazuhAndAcquire("vulns-server");
+  // Three agents. A: two pages then short page. B: empty inventory
+  // (200 with affected_items=[]). C: 404 (vuln detector not enabled).
+  // The batch must finish; A → vulns, B + C → missingAgents.
+  let aPage = 0;
+  await withFakeFetch(
+    [
+      {
+        matches: (url) => url.endsWith("/security/user/authenticate"),
+        respond: () => ({ status: 200, body: { data: { token: "t" } } })
+      },
+      {
+        matches: (url) => url.includes("/vulnerability/A"),
+        respond: () => {
+          aPage += 1;
+          if (aPage === 1) {
+            return {
+              status: 200,
+              body: {
+                data: {
+                  affected_items: [
+                    { name: "CVE-2024-0001", severity: "High" },
+                    { name: "CVE-2024-0002", severity: "Medium" }
+                  ],
+                  total_affected_items: 3
+                }
+              }
+            };
+          }
+          // Short page → terminates the loop.
+          return {
+            status: 200,
+            body: {
+              data: {
+                affected_items: [{ name: "CVE-2024-0003", severity: "Low" }],
+                total_affected_items: 3
+              }
+            }
+          };
+        }
+      },
+      {
+        matches: (url) => url.includes("/vulnerability/B"),
+        respond: () => ({
+          status: 200,
+          body: { data: { affected_items: [], total_affected_items: 0 } }
+        })
+      },
+      {
+        matches: (url) => url.includes("/vulnerability/C"),
+        respond: () => ({ status: 404, body: { error: "no vuln data" } })
+      }
+    ],
+    async (calls) => {
+      const out = await wazuhVulnsPullPlugin.execute(
+        executeInputWithRequestId(
+          conn,
+          { apiVariant: "server-api", limitPerAgent: 2 },
+          { agentIds: ["A", "B", "C"] },
+          "req-VULNS-1"
+        )
+      );
+      const vulns = (out.outputs as {
+        vulns: Array<{ agentId: string; vulns: Array<{ name: string }> }>;
+      }).vulns;
+      const meta = (out.outputs as {
+        metadata: {
+          pullId: string;
+          pulledAt: string;
+          apiVariant: string;
+          fetched: number;
+          totalVulns: number;
+          missingAgents: string[];
+          perAgentErrors: Array<{ agentId: string; status?: number }>;
+        };
+      }).metadata;
+
+      assert.equal(vulns.length, 1);
+      assert.equal(vulns[0].agentId, "A");
+      assert.deepEqual(
+        vulns[0].vulns.map((v) => v.name),
+        ["CVE-2024-0001", "CVE-2024-0002", "CVE-2024-0003"]
+      );
+
+      // Empty inventory AND 404 both land in missingAgents — bulwark
+      // distinguishes "absent from pull" from "errored on fetch."
+      assert.deepEqual(meta.missingAgents.sort(), ["B", "C"]);
+      assert.equal(meta.fetched, 1);
+      assert.equal(meta.totalVulns, 3);
+      assert.equal(meta.perAgentErrors.length, 0);
+
+      // Provenance — ADR-0031 contract.
+      assert.equal(meta.pullId, "req-VULNS-1");
+      assert.match(meta.pulledAt, /^\d{4}-\d{2}-\d{2}T/);
+      assert.equal(meta.apiVariant, "server-api");
+
+      // Pagination params on A's calls.
+      const aCalls = calls.filter((c) => c.url.includes("/vulnerability/A"));
+      assert.equal(aCalls.length, 2);
+      assert.match(aCalls[0].url, /limit=2/);
+      assert.match(aCalls[0].url, /offset=0/);
+      assert.match(aCalls[1].url, /offset=2/);
+    }
+  );
+});
+
+test("wazuh_vulns_pull (server-api): non-404 errors land in perAgentErrors, batch keeps going", async () => {
+  const { conn } = registerWazuhAndAcquire("vulns-err");
+  await withFakeFetch(
+    [
+      {
+        matches: (url) => url.endsWith("/security/user/authenticate"),
+        respond: () => ({ status: 200, body: { data: { token: "t" } } })
+      },
+      {
+        matches: (url) => url.includes("/vulnerability/OK"),
+        respond: () => ({
+          status: 200,
+          body: {
+            data: {
+              affected_items: [{ name: "CVE-OK" }],
+              total_affected_items: 1
+            }
+          }
+        })
+      },
+      {
+        matches: (url) => url.includes("/vulnerability/BOOM"),
+        respond: () => ({ status: 500, body: { error: "indexer down" } })
+      }
+    ],
+    async () => {
+      const out = await wazuhVulnsPullPlugin.execute(
+        executeInputWithRequestId(
+          conn,
+          { apiVariant: "server-api" },
+          { agentIds: ["OK", "BOOM"] }
+        )
+      );
+      const meta = (out.outputs as {
+        metadata: {
+          perAgentErrors: Array<{ agentId: string; status?: number }>;
+          fetched: number;
+          missingAgents: string[];
+        };
+      }).metadata;
+      assert.equal(meta.perAgentErrors.length, 1);
+      assert.equal(meta.perAgentErrors[0].agentId, "BOOM");
+      assert.equal(meta.perAgentErrors[0].status, 500);
+      // OK agent still made it through.
+      assert.equal(meta.fetched, 1);
+      // A 5xx is an error, NOT absence — it must not land in missingAgents.
+      assert.deepEqual(meta.missingAgents, []);
+    }
+  );
+});
+
+test("wazuh_vulns_pull (indexer): hits /<indexPattern>/_search with agent.id term, surfaces _source rows verbatim", async () => {
+  const { conn } = registerWazuhAndAcquire("vulns-indexer");
+  await withFakeFetch(
+    [
+      {
+        matches: (url) => url.endsWith("/security/user/authenticate"),
+        respond: () => ({ status: 200, body: { data: { token: "t" } } })
+      },
+      {
+        matches: (url) =>
+          url.includes("/wazuh-states-vulnerabilities-") &&
+          url.includes("/_search"),
+        respond: () => ({
+          status: 200,
+          body: {
+            hits: {
+              hits: [
+                {
+                  _source: {
+                    "vulnerability.id": "CVE-2025-1234",
+                    "vulnerability.severity": "Critical",
+                    "package.name": "openssl"
+                  }
+                },
+                {
+                  _source: {
+                    "vulnerability.id": "CVE-2025-5678",
+                    "vulnerability.severity": "High",
+                    "package.name": "libc"
+                  }
+                }
+              ]
+            }
+          }
+        })
+      }
+    ],
+    async (calls) => {
+      const out = await wazuhVulnsPullPlugin.execute(
+        executeInputWithRequestId(
+          conn,
+          {
+            apiVariant: "indexer",
+            indexerIndexPattern: "wazuh-states-vulnerabilities-*",
+            limitPerAgent: 100
+          },
+          { agentIds: ["007"] },
+          "req-INDEXER-7"
+        )
+      );
+      const vulns = (out.outputs as {
+        vulns: Array<{
+          agentId: string;
+          vulns: Array<Record<string, unknown>>;
+        }>;
+      }).vulns;
+      const meta = (out.outputs as {
+        metadata: { pullId: string; apiVariant: string; totalVulns: number };
+      }).metadata;
+
+      assert.equal(vulns.length, 1);
+      assert.equal(vulns[0].agentId, "007");
+      assert.equal(vulns[0].vulns.length, 2);
+      assert.equal(vulns[0].vulns[0]["vulnerability.id"], "CVE-2025-1234");
+
+      assert.equal(meta.apiVariant, "indexer");
+      assert.equal(meta.totalVulns, 2);
+      assert.equal(meta.pullId, "req-INDEXER-7");
+
+      // The lucene term filter MUST quote the agent id — otherwise an
+      // id like "001:agent2" would match both halves.
+      const searchCall = calls.find((c) => c.url.includes("/_search"));
+      assert.ok(searchCall);
+      assert.match(decodeURIComponent(searchCall!.url), /agent\.id:"007"/);
+      assert.match(searchCall!.url, /size=100/);
+    }
+  );
+});
+
+test("wazuh_vulns_pull: reads agent ids from inputs.agents via agentIdField (chain off wazuh_agents_pull)", async () => {
+  const { conn } = registerWazuhAndAcquire("vulns-chain");
+  await withFakeFetch(
+    [
+      {
+        matches: (url) => url.endsWith("/security/user/authenticate"),
+        respond: () => ({ status: 200, body: { data: { token: "t" } } })
+      },
+      {
+        matches: (url) => url.includes("/vulnerability/abc-123"),
+        respond: () => ({
+          status: 200,
+          body: { data: { affected_items: [{ name: "CVE-X" }], total_affected_items: 1 } }
+        })
+      }
+    ],
+    async () => {
+      const out = await wazuhVulnsPullPlugin.execute(
+        executeInputWithRequestId(
+          conn,
+          { apiVariant: "server-api" },
+          { agents: [{ id: "abc-123", name: "host-1" }] }
+        )
+      );
+      const vulns = (out.outputs as { vulns: Array<{ agentId: string }> }).vulns;
+      assert.equal(vulns[0].agentId, "abc-123");
+    }
+  );
+});
+
+test("wazuh_vulns_pull: no agent ids → empty output with pullId stamp (no crash)", async () => {
+  const { conn } = registerWazuhAndAcquire("vulns-empty");
+  await withFakeFetch([], async () => {
+    const out = await wazuhVulnsPullPlugin.execute(
+      executeInputWithRequestId(conn, { apiVariant: "server-api" }, {}, "req-EMPTY")
+    );
+    const meta = (out.outputs as {
+      metadata: { pullId: string; fetched: number; missingAgents: string[] };
+    }).metadata;
+    assert.equal(meta.fetched, 0);
+    assert.deepEqual(meta.missingAgents, []);
+    // Provenance still stamped even on the no-op path — bulwark needs
+    // a stamp on every run, including pulls that didn't see any agents.
+    assert.equal(meta.pullId, "req-EMPTY");
+  });
 });

@@ -762,3 +762,28 @@ def test_parse_neo4j_credentials_handles_raw_password():
 def test_parse_neo4j_credentials_handles_none():
     user, pw = plugin._parse_neo4j_credentials(None)
     assert (user, pw) == ("neo4j", "")
+
+
+# ---------------------------------------------------------------------------
+# AMENDMENT-3 (Phase C1, ADR-0029 amendment): MODULE_ENTITY_TYPES["aws"]
+# carries the exposure + network-control entity types bulwark gates close-
+# by-absence on. The list must NEVER drop these silently — bulwark's
+# WAF / SG / public-reachability scenarios go dark if any of these
+# entries goes missing from the contract.
+# ---------------------------------------------------------------------------
+
+
+def test_aws_module_entity_types_carry_exposure_and_control_kinds():
+    aws_types = set(plugin.MODULE_ENTITY_TYPES["aws"])
+    # Exposure dimension — service → endpoint.
+    assert "LoadBalancer" in aws_types, "ELB classic missing — ALB/NLB scenarios go dark"
+    assert "LoadBalancerV2" in aws_types, "ELBv2 (ALB/NLB) missing — modern exposure surface"
+    assert "ElasticIPAddress" in aws_types, "EIPs missing — public-reachability dimension"
+    assert "NetworkInterface" in aws_types, "ENIs missing — public-IP attachment surface"
+    # Network control — SG with its rules.
+    assert "EC2SecurityGroup" in aws_types, "SGs missing — primary network control"
+    assert "IpRule" in aws_types, "SG rule rows missing — SG-without-rules is a false-empty case"
+    assert "IpPermissionInbound" in aws_types, "Inbound permissions missing — same"
+    # WAF control — the gap this amendment closes.
+    assert "WAFv2WebACL" in aws_types, "WAFv2 ACLs missing — WAF coverage scenario goes dark"
+    assert "WAFv2RuleGroup" in aws_types, "WAFv2 rule groups missing — WAF rule-coverage scenario goes dark"

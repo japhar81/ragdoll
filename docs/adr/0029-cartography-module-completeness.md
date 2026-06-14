@@ -235,10 +235,41 @@ return partial." That is intentionally NOT done in this ADR — the
 gate must come first, or the safety-property reversal we just avoided
 would land.
 
+## Amendment (Phase C1) — exposure + network-control entity types
+
+The `MODULE_ENTITY_TYPES["aws"]` list in
+`services/python-plugins/app/plugins/cartography_crawl_plugin.py` was
+extended with the rows bulwark's correlation engine reads as the
+**exposure** dimension of `service → endpoint → control`:
+
+- `LoadBalancer` + `LoadBalancerV2` (classic ELB + ALB/NLB)
+- `ElasticIPAddress` + `NetworkInterface` (public-reachability)
+- `EC2SecurityGroup` + `IpRule` + `IpPermissionInbound` (the
+  network control — rules belong with their group so a "SG present
+  but missing its rules" case isn't a false-positive close)
+- `WAFv2WebACL` + `WAFv2RuleGroup` (the WAF control — without
+  these on the entityTypes list, bulwark's WAF-coverage scenarios
+  silently couldn't gate close-by-absence on WAFv2 entities, which
+  is the projection bug the Phase C1 amendment closes)
+
+Module identifier remains `aws` — these are cartography sub-syncs
+of a single AWS module, not separate modules. The list is
+contracts-only: it tells bulwark "these entity types belong to a
+module that this run reported as `complete`" — actual graph
+writing is cartography's, not the handler's.
+
+`NetworkPolicy` / `Ingress` / `Route` / `Service` are the analogous
+**k8s** entries; those live in `BUILTIN_RESOURCES` in
+`plugins/builtin-rag/src/k8s.ts` and ship per-kind `complete`
+flags from `k8s_list_pull` per ADR-0028 §"Per-resource
+completeness" — same shape, different surface.
+
 ## References
 
 - ADR-0028 §"Completeness rule" — the per-collection completeness
   pattern this ADR specialises.
+- ADR-0031 — wazuh-pull provenance contract (the sibling stamp on
+  the wazuh side).
 - Cartography module catalog — https://cartography-cncf.github.io/cartography/
 - AWS IAM Identity Center API reference (`ListPermissionSets`
   ValidationException) — https://docs.aws.amazon.com/singlesignon/latest/APIReference/API_ListPermissionSets.html
