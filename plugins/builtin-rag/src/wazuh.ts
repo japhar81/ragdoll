@@ -945,6 +945,10 @@ interface IndexerSearchResponse {
 interface AgentVulnRow {
   agentId: string;
   vulns: Array<Record<string, unknown>>;
+  /** This agent's set hit the indexer result window (>10k CVEs) — INCOMPLETE.
+   *  bulwark floor-labels it and never absence-sweeps it. The common case is
+   *  `false` (pagination drained the whole set). */
+  truncated?: boolean;
 }
 
 export const wazuhVulnsPullPlugin: InProcessPlugin = {
@@ -1094,7 +1098,9 @@ export const wazuhVulnsPullPlugin: InProcessPlugin = {
 
     for (const agentId of trimmed) {
       try {
-        const rows =
+        // Indexer paginates the FULL per-agent set (truncated only past the 10k
+        // window). Server-api returns one clamped page → never truncated here.
+        const res =
           apiVariant === "indexer"
             ? await fetchAgentVulnsViaIndexer(
                 client,
@@ -1103,13 +1109,9 @@ export const wazuhVulnsPullPlugin: InProcessPlugin = {
                 indexerIndexPattern,
                 limitPerAgent
               )
-            : await fetchAgentVulnsViaServerApi(
-                client,
-                agentId,
-                limitPerAgent
-              );
-        if (rows.length > 0) {
-          vulns.push({ agentId, vulns: rows });
+            : { rows: await fetchAgentVulnsViaServerApi(client, agentId, limitPerAgent), truncated: false };
+        if (res.rows.length > 0) {
+          vulns.push({ agentId, vulns: res.rows, truncated: res.truncated });
         } else {
           missingAgents.push(agentId);
         }
@@ -1215,27 +1217,44 @@ async function fetchAgentVulnsViaServerApi(
  * Surface it as-is so bulwark's normaliser doesn't have to thread
  * through index metadata.
  */
+/** OpenSearch `from + size` is bounded by `index.max_result_window` (default
+ *  10000). Page through the full per-agent set up to that ceiling — pagination is
+ *  the DEFAULT so a heavy host (1600+ CVEs) is captured WHOLE, not clipped at one
+ *  page. `truncated` is the edge case: a host with MORE than the ceiling. The
+ *  caller threads `truncated` so bulwark never absence-sweeps an incomplete set. */
+const INDEXER_RESULT_WINDOW = 10000;
+
 async function fetchAgentVulnsViaIndexer(
   handle: WazuhHandle,
   agentId: string,
   indexerBaseUrl: string,
   indexPattern: string,
-  size: number
-): Promise<Array<Record<string, unknown>>> {
-  const body = {
-    size,
-    query: { term: { "agent.id": agentId } }
-  };
-  const json = await indexerSearch<IndexerSearchResponse>(
-    handle,
-    indexerBaseUrl,
-    indexPattern,
-    body
-  );
-  const hits = json.hits?.hits ?? [];
-  return hits
-    .map((h) => h._source ?? null)
-    .filter((s): s is Record<string, unknown> => !!s);
+  pageSize: number
+): Promise<{ rows: Array<Record<string, unknown>>; total: number; truncated: boolean }> {
+  const page = Math.min(Math.max(pageSize, 1), 1000);
+  const rows: Array<Record<string, unknown>> = [];
+  let from = 0;
+  let total = 0;
+  for (;;) {
+    const size = Math.min(page, INDEXER_RESULT_WINDOW - from);
+    if (size <= 0) break;
+    const json = await indexerSearch<IndexerSearchResponse>(handle, indexerBaseUrl, indexPattern, {
+      from,
+      size,
+      // Deterministic page order so `from`-paging doesn't skip/dup across requests.
+      sort: [{ _doc: "asc" }],
+      query: { term: { "agent.id": agentId } }
+    });
+    const hits = json.hits?.hits ?? [];
+    total = typeof json.hits?.total === "number" ? json.hits.total : json.hits?.total?.value ?? total;
+    for (const h of hits) if (h._source) rows.push(h._source);
+    from += hits.length;
+    if (hits.length < size) break; // drained the matching set
+    if (from >= INDEXER_RESULT_WINDOW) break; // hit the from+size ceiling
+  }
+  // Truncated only when the host genuinely has MORE than we could page (the rare
+  // edge case) — NOT the default. bulwark floor-labels + never absence-sweeps it.
+  return { rows, total, truncated: total > rows.length };
 }
 
 /**

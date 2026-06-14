@@ -1226,6 +1226,41 @@ test("wazuh_vulns_pull (indexer): POST /<indexPattern>/_search to indexerBaseUrl
   );
 });
 
+test("wazuh_vulns_pull (indexer): PAGINATES the full per-agent set (the default — a heavy host isn't clipped)", async () => {
+  resetConnectionRegistry();
+  registerConnectionDriver("wazuh", wazuhConnectionDriver.driver, wazuhConnectionDriver.driverManifest);
+  const conn = fakeWazuhConn("vulns-indexer-paged", { baseUrl: "https://idx.acme.com", port: 9200 });
+  // page=2 (limitPerAgent) over a 3-CVE host → page1 (full, 2) then page2 (short,
+  // 1) → drains all 3 across TWO requests. truncated stays false (got it all).
+  let call = 0;
+  await withFakeFetch(
+    [
+      {
+        matches: (url, method) => method === "POST" && url.endsWith("/_search"),
+        respond: () => {
+          call += 1;
+          const hits = call === 1
+            ? [{ _source: { "vulnerability.id": "CVE-1" } }, { _source: { "vulnerability.id": "CVE-2" } }]
+            : [{ _source: { "vulnerability.id": "CVE-3" } }];
+          return { status: 200, body: { hits: { total: { value: 3 }, hits } } };
+        }
+      }
+    ],
+    async (calls) => {
+      const out = await wazuhVulnsPullPlugin.execute(
+        executeInputWithRequestId(conn, { apiVariant: "indexer", indexerBaseUrl: "https://idx.acme.com:9200", limitPerAgent: 2 }, { agentIds: ["007"] }, "req-PAGE")
+      );
+      const o = out.outputs as { vulns: Array<{ agentId: string; vulns: unknown[]; truncated?: boolean }> };
+      const searches = calls.filter((c) => c.url.endsWith("/_search"));
+      assert.equal(searches.length, 2, "two pages fetched (multi-request pagination, not one clipped page)");
+      assert.equal(o.vulns[0].vulns.length, 3, "the FULL set drained (3 CVEs), not clipped at the page size");
+      assert.equal(o.vulns[0].truncated, false, "got everything → NOT truncated (the common case)");
+      // page-2 request carried from=2 (deterministic paging).
+      assert.equal(JSON.parse(searches[1].body!).from, 2);
+    }
+  );
+});
+
 test("wazuh_vulns_pull (indexer): empty hits → agent lands in missingAgents (unchanged tolerance)", async () => {
   resetConnectionRegistry();
   registerConnectionDriver(
