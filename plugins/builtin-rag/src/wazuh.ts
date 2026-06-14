@@ -956,7 +956,7 @@ export const wazuhVulnsPullPlugin: InProcessPlugin = {
     contract: 2,
     requires: [{ binding: "wazuh", kind: "wazuh" }] as unknown as PluginManifest["requires"],
     description:
-      "Per-agent CVE findings. Operator picks the Wazuh API surface via `config.apiVariant`: `server-api` (4.x — `GET /vulnerability/{agent_id}`, JWT-authed through the existing driver) or `indexer` (4.8+ — `POST /wazuh-states-vulnerabilities-*/_search`). Emits raw CVE rows keyed by agent — NO transform into observation / CWE / ATT&CK shape; bulwark maps the rows. Tolerates empty/missing per-agent inventory like wazuh_syscollector_pull: 404 / empty hits → agent lands in `metadata.missingAgents`, batch keeps going. Stamps `metadata.pullId` + `metadata.pulledAt` (Phase 5.2 wazuh-freshness provenance — ADR-0031) so bulwark's windowed close-by-absence can compute 'patched CVE absent from this pull' against the prior pull's stamp.",
+      "Per-agent CVE findings. Operator picks the Wazuh API surface via `config.apiVariant`: `server-api` (4.x — `GET /vulnerability/{agent_id}`, JWT-authed through the existing driver) or `indexer` (4.8+ — `POST /<indexPattern>/_search` against the OpenSearch indexer on `:9200`, **HTTP Basic** auth from the same connection secret; NOT the server-API JWT). The two surfaces require different auth and usually run on different hosts/ports — when the indexer is split from the server API, supply its URL via `config.indexerBaseUrl` (e.g. `https://wazuh-indexer.acme.com:9200`). Emits raw CVE rows keyed by agent — NO transform into observation / CWE / ATT&CK shape; bulwark maps the rows. Tolerates empty/missing per-agent inventory like wazuh_syscollector_pull: 404 / empty hits → agent lands in `metadata.missingAgents`, batch keeps going. Stamps `metadata.pullId` + `metadata.pulledAt` (Phase 5.2 wazuh-freshness provenance — ADR-0031) so bulwark's windowed close-by-absence can compute 'patched CVE absent from this pull' against the prior pull's stamp.",
     configSchema: {
       type: "object",
       properties: {
@@ -970,7 +970,7 @@ export const wazuhVulnsPullPlugin: InProcessPlugin = {
         indexerBaseUrl: {
           type: "string",
           description:
-            "Override the indexer host when `apiVariant=indexer` and the indexer isn't co-located with the server API. Defaults to the same baseUrl the driver uses (works for stock Wazuh deploys where the JWT is honored on both)."
+            "URL of the Wazuh indexer (OpenSearch) for the `apiVariant=indexer` path. Accepts a full URL like `https://wazuh-indexer.acme.com:9200` or a bare hostname (defaults to `https://<host>:9200`). The indexer almost always runs on a different port (9200) than the server API (55000), and often a different host — this knob exists because the proven topology is split. When unset, the plugin falls back to the connection's `baseUrl`, which is only correct in the rare same-host-same-port case."
         },
         indexerIndexPattern: {
           type: "string",
@@ -1057,6 +1057,12 @@ export const wazuhVulnsPullPlugin: InProcessPlugin = {
       typeof cfg.indexerIndexPattern === "string" && cfg.indexerIndexPattern
         ? cfg.indexerIndexPattern
         : "wazuh-states-vulnerabilities-*";
+    // Resolved lazily — only used on the indexer path, but computing
+    // once outside the per-agent loop keeps the call site clean.
+    const indexerBaseUrl =
+      apiVariant === "indexer"
+        ? resolveIndexerBaseUrl(cfg.indexerBaseUrl, client)
+        : "";
 
     const prov = deriveWazuhProvenance(input);
     const agentIds = pickAgentIds(input.inputs, idField);
@@ -1093,6 +1099,7 @@ export const wazuhVulnsPullPlugin: InProcessPlugin = {
             ? await fetchAgentVulnsViaIndexer(
                 client,
                 agentId,
+                indexerBaseUrl,
                 indexerIndexPattern,
                 limitPerAgent
               )
@@ -1179,38 +1186,132 @@ async function fetchAgentVulnsViaServerApi(
 }
 
 /**
- * Query the 4.8+ indexer for a single agent's vulnerabilities. Uses
- * the JWT bearer the driver already manages — most Wazuh installs
- * share the cert chain between server API and indexer, so the bearer
- * works for both. Operators with a split install can override the
- * indexer host via `config.indexerBaseUrl` (TODO: wire that through;
- * default is the driver's baseUrl which works for stock).
+ * Query the 4.8+ Wazuh indexer (OpenSearch) for a single agent's
+ * vulnerabilities. The indexer surface is intentionally NOT routed
+ * through `authedRequest` / `ensureToken` — the server-API JWT does
+ * NOT work against the indexer.
  *
- * The indexer search uses Elasticsearch's `_search` endpoint with a
- * term filter on `agent.id`. Each `_source` carries the same CVE
- * shape Wazuh emits to the indexer (id, severity, package, condition,
- * detected_at, etc.) — we surface `_source` verbatim so bulwark's
- * mapping doesn't have to thread through index metadata.
+ * Contract proved against the live indexer (bulwark direct-pull,
+ * 1917 CVEs, per-agent counts ~36-1632 of the proven magnitude):
+ *
+ *   - **Endpoint:** OpenSearch on `:9200` (NOT the server API on
+ *     `:55000`). When the indexer is co-located, the URL is the
+ *     same host with a different port; when split, the operator
+ *     supplies `config.indexerBaseUrl`.
+ *   - **Auth:** HTTP Basic with the connection's parsed
+ *     `{username, password}` on EVERY request. `POST
+ *     /security/user/authenticate` returns 400 on the indexer
+ *     (server-API endpoint doesn't exist there) — using the
+ *     JWT bearer that flow returns is exactly the bug this
+ *     function used to ship with.
+ *   - **Request:** `POST /<indexPattern>/_search` with a JSON DSL
+ *     body. GET-with-`q=` is unreliable on the wildcarded index
+ *     pattern (Lucene parser interprets the colon in the field
+ *     name unevenly across OpenSearch versions) — POST + `term`
+ *     filter is the unambiguous wire contract bulwark uses.
+ *
+ * `_source` of each hit is the CVE row Wazuh wrote to the indexer
+ * verbatim (id, severity, package, condition, detected_at, etc.).
+ * Surface it as-is so bulwark's normaliser doesn't have to thread
+ * through index metadata.
  */
 async function fetchAgentVulnsViaIndexer(
-  client: WazuhHandle,
+  handle: WazuhHandle,
   agentId: string,
+  indexerBaseUrl: string,
   indexPattern: string,
   size: number
 ): Promise<Array<Record<string, unknown>>> {
-  // POST body would be cleaner but the driver's request() only does
-  // GET right now (matches the rest of the wazuh surface). Use a URL-
-  // encoded query DSL via `q=` — Wazuh's indexer supports lucene
-  // syntax on this surface.
-  const params = new URLSearchParams();
-  params.set("size", String(size));
-  params.set("q", `agent.id:"${agentId}"`);
-  const path = `/${encodeURIComponent(indexPattern)}/_search?${params.toString()}`;
-  const json = await client.request<IndexerSearchResponse>(path);
+  const body = {
+    size,
+    query: { term: { "agent.id": agentId } }
+  };
+  const json = await indexerSearch<IndexerSearchResponse>(
+    handle,
+    indexerBaseUrl,
+    indexPattern,
+    body
+  );
   const hits = json.hits?.hits ?? [];
   return hits
     .map((h) => h._source ?? null)
     .filter((s): s is Record<string, unknown> => !!s);
+}
+
+/**
+ * POST a search body against the Wazuh indexer (OpenSearch). Scoped
+ * to the indexer variant — see `fetchAgentVulnsViaIndexer` for the
+ * proven-contract docblock. Returns the parsed JSON body; throws on
+ * non-2xx with a short snippet for the trace (creds never logged).
+ *
+ * Lives outside the driver's `request()` because the driver's GET-
+ * only path is correct for the server API and we deliberately don't
+ * widen its surface for one variant. The indexer's auth shape is
+ * different (Basic per-request, NOT the server-API JWT) so keeping
+ * the two paths separate also keeps the contracts honest.
+ */
+async function indexerSearch<T>(
+  handle: WazuhHandle,
+  indexerBaseUrl: string,
+  indexPattern: string,
+  body: Record<string, unknown>
+): Promise<T> {
+  if (handle.credentials.kind !== "basic") {
+    // The indexer needs Basic — a `{token:"..."}` secret was set up
+    // for the server-API surface and is meaningless here. Refuse
+    // loudly rather than ship 401s that look like an auth flake.
+    throw new Error(
+      `wazuh: indexer variant requires HTTP Basic credentials on the connection "${handle.slug}" — got a static-token secret. Set the secret to \`{"username":"...","password":"..."}\` (the Wazuh indexer / OpenSearch does NOT honor the server-API JWT).`
+    );
+  }
+  const fetcher = getFetch();
+  const b64 = Buffer.from(
+    `${handle.credentials.username}:${handle.credentials.password}`,
+    "utf8"
+  ).toString("base64");
+  const url = `${indexerBaseUrl}/${encodeURIComponent(indexPattern)}/_search`;
+  const res = await fetcher(url, {
+    method: "POST",
+    headers: {
+      accept: "application/json",
+      "content-type": "application/json",
+      authorization: `Basic ${b64}`
+    },
+    body: JSON.stringify(body),
+    rejectUnauthorized: handle.verifyTls
+  });
+  if (!res.ok) {
+    const snippet = await safeReadShortBody(res);
+    const err = new Error(
+      `wazuh: indexer POST ${url} -> ${res.status} on connection "${handle.slug}": ${snippet}`
+    );
+    (err as { status?: number }).status = res.status;
+    throw err;
+  }
+  return (await res.json()) as T;
+}
+
+/**
+ * Resolve the indexer base URL. When `config.indexerBaseUrl` is set,
+ * accept either a full `https://host:9200` URL or a bare hostname
+ * (defaults to `https://<host>:9200`). When unset, fall back to the
+ * driver's `baseUrl` (only correct for the rare case where the
+ * indexer is co-located on the same host AND port as the server
+ * API; the common topology is split — see the ADR-0031 indexer
+ * amendment).
+ */
+function resolveIndexerBaseUrl(
+  raw: unknown,
+  handle: WazuhHandle
+): string {
+  if (typeof raw === "string" && raw.trim()) {
+    const v = raw.trim();
+    if (v.startsWith("http://") || v.startsWith("https://")) {
+      return v.replace(/\/+$/, "");
+    }
+    return `https://${v}:9200`;
+  }
+  return handle.baseUrl;
 }
 
 // ---------------------------------------------------------------------------

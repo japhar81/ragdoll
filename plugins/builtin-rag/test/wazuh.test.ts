@@ -1082,22 +1082,46 @@ test("wazuh_vulns_pull (server-api): non-404 errors land in perAgentErrors, batc
   );
 });
 
-test("wazuh_vulns_pull (indexer): hits /<indexPattern>/_search with agent.id term, surfaces _source rows verbatim", async () => {
-  const { conn } = registerWazuhAndAcquire("vulns-indexer");
+// ---------------------------------------------------------------------------
+// wazuh_vulns_pull — indexer variant (Wazuh 4.8+ / OpenSearch).
+//
+// The proven contract (bulwark direct pull, 1917 CVEs live):
+//   - OpenSearch endpoint on :9200, NOT the server API on :55000
+//   - HTTP Basic auth per request (server-API JWT does NOT work)
+//   - Real POST /<indexPattern>/_search with a JSON DSL body
+//   - _source hits surfaced verbatim
+//
+// These tests pin all four properties. A regression that re-routes
+// the indexer path back through `authedRequest` (bearer JWT, GET-with-
+// q=) fails LOUDLY here so the scheduled pipeline can't silently go
+// dark again.
+// ---------------------------------------------------------------------------
+
+test("wazuh_vulns_pull (indexer): POST /<indexPattern>/_search to indexerBaseUrl with Basic auth + JSON body (the proven contract)", async () => {
+  // Connection points at the server API on :55000; the indexer lives
+  // at a SEPARATE host on :9200. The plugin MUST hit the latter.
+  resetConnectionRegistry();
+  registerConnectionDriver(
+    "wazuh",
+    wazuhConnectionDriver.driver,
+    wazuhConnectionDriver.driverManifest
+  );
+  const conn = fakeWazuhConn("vulns-indexer", {
+    baseUrl: "https://wazuh-server.acme.com",
+    port: 55000
+  });
   await withFakeFetch(
     [
       {
-        matches: (url) => url.endsWith("/security/user/authenticate"),
-        respond: () => ({ status: 200, body: { data: { token: "t" } } })
-      },
-      {
-        matches: (url) =>
-          url.includes("/wazuh-states-vulnerabilities-") &&
-          url.includes("/_search"),
+        matches: (url, method) =>
+          method === "POST" &&
+          url.startsWith("https://wazuh-indexer.acme.com:9200/") &&
+          url.endsWith("/_search"),
         respond: () => ({
           status: 200,
           body: {
             hits: {
+              total: { value: 2 },
               hits: [
                 {
                   _source: {
@@ -1125,38 +1149,235 @@ test("wazuh_vulns_pull (indexer): hits /<indexPattern>/_search with agent.id ter
           conn,
           {
             apiVariant: "indexer",
+            indexerBaseUrl: "https://wazuh-indexer.acme.com:9200",
             indexerIndexPattern: "wazuh-states-vulnerabilities-*",
-            limitPerAgent: 100
+            limitPerAgent: 500
           },
           { agentIds: ["007"] },
           "req-INDEXER-7"
         )
       );
       const vulns = (out.outputs as {
-        vulns: Array<{
-          agentId: string;
-          vulns: Array<Record<string, unknown>>;
-        }>;
+        vulns: Array<{ agentId: string; vulns: Array<Record<string, unknown>> }>;
       }).vulns;
       const meta = (out.outputs as {
         metadata: { pullId: string; apiVariant: string; totalVulns: number };
       }).metadata;
 
+      // _source surfaced verbatim — bulwark's wire contract.
       assert.equal(vulns.length, 1);
       assert.equal(vulns[0].agentId, "007");
       assert.equal(vulns[0].vulns.length, 2);
       assert.equal(vulns[0].vulns[0]["vulnerability.id"], "CVE-2025-1234");
-
       assert.equal(meta.apiVariant, "indexer");
       assert.equal(meta.totalVulns, 2);
       assert.equal(meta.pullId, "req-INDEXER-7");
 
-      // The lucene term filter MUST quote the agent id — otherwise an
-      // id like "001:agent2" would match both halves.
-      const searchCall = calls.find((c) => c.url.includes("/_search"));
-      assert.ok(searchCall);
-      assert.match(decodeURIComponent(searchCall!.url), /agent\.id:"007"/);
-      assert.match(searchCall!.url, /size=100/);
+      // 1. The plugin MUST NOT call /security/user/authenticate on
+      //    the indexer path — that returns 400 on OpenSearch and is
+      //    exactly the bug the original variant shipped with.
+      const authCalls = calls.filter((c) =>
+        c.url.endsWith("/security/user/authenticate")
+      );
+      assert.equal(authCalls.length, 0, "indexer path must NOT call authenticate");
+
+      // 2. Exactly one call to the indexer host on :9200, POST, /_search.
+      const search = calls.find((c) =>
+        c.url.startsWith("https://wazuh-indexer.acme.com:9200/")
+      );
+      assert.ok(search, "must hit indexerBaseUrl, not the server-API baseUrl");
+      assert.equal(search!.method, "POST");
+      assert.match(search!.url, /\/_search$/);
+      assert.equal(
+        search!.url,
+        "https://wazuh-indexer.acme.com:9200/wazuh-states-vulnerabilities-*/_search"
+      );
+
+      // 3. NO call to the server-API host on :55000 from the indexer path.
+      const serverApiCalls = calls.filter((c) =>
+        c.url.startsWith("https://wazuh-server.acme.com")
+      );
+      assert.equal(
+        serverApiCalls.length,
+        0,
+        "indexer variant must not hit the server-API baseUrl"
+      );
+
+      // 4. Authorization header is HTTP Basic with the connection's
+      //    creds — NOT a bearer JWT. (fakeWazuhConn defaults to
+      //    {"username":"admin","password":"hunter2"}.)
+      assert.ok(search!.headers, "search call needs headers");
+      const auth = search!.headers!.authorization;
+      assert.match(auth, /^Basic /);
+      const decoded = Buffer.from(auth.replace(/^Basic /, ""), "base64").toString(
+        "utf8"
+      );
+      assert.equal(decoded, "admin:hunter2");
+      assert.equal(search!.headers!["content-type"], "application/json");
+
+      // 5. Body is a real OpenSearch DSL — `size` + `term` on
+      //    `agent.id`. Not URL-encoded `q=` lucene.
+      assert.ok(search!.body, "POST _search must carry a body");
+      const body = JSON.parse(search!.body!);
+      assert.equal(body.size, 500);
+      assert.deepEqual(body.query, { term: { "agent.id": "007" } });
+    }
+  );
+});
+
+test("wazuh_vulns_pull (indexer): empty hits → agent lands in missingAgents (unchanged tolerance)", async () => {
+  resetConnectionRegistry();
+  registerConnectionDriver(
+    "wazuh",
+    wazuhConnectionDriver.driver,
+    wazuhConnectionDriver.driverManifest
+  );
+  const conn = fakeWazuhConn("vulns-indexer-empty");
+  await withFakeFetch(
+    [
+      {
+        matches: (url, method) =>
+          method === "POST" && url.endsWith("/_search"),
+        respond: () => ({
+          status: 200,
+          body: { hits: { total: { value: 0 }, hits: [] } }
+        })
+      }
+    ],
+    async () => {
+      const out = await wazuhVulnsPullPlugin.execute(
+        executeInputWithRequestId(
+          conn,
+          {
+            apiVariant: "indexer",
+            indexerBaseUrl: "https://wazuh-indexer.acme.com:9200"
+          },
+          { agentIds: ["NOPE"] }
+        )
+      );
+      const meta = (out.outputs as {
+        metadata: { missingAgents: string[]; perAgentErrors: unknown[]; fetched: number };
+      }).metadata;
+      assert.deepEqual(meta.missingAgents, ["NOPE"]);
+      assert.equal(meta.fetched, 0);
+      assert.equal(meta.perAgentErrors.length, 0);
+    }
+  );
+});
+
+test("wazuh_vulns_pull (indexer): indexerBaseUrl accepts a bare hostname → defaults to https://<host>:9200", async () => {
+  resetConnectionRegistry();
+  registerConnectionDriver(
+    "wazuh",
+    wazuhConnectionDriver.driver,
+    wazuhConnectionDriver.driverManifest
+  );
+  const conn = fakeWazuhConn("vulns-indexer-host");
+  await withFakeFetch(
+    [
+      {
+        matches: (url, method) =>
+          method === "POST" && url.endsWith("/_search"),
+        respond: () => ({
+          status: 200,
+          body: { hits: { hits: [{ _source: { x: 1 } }] } }
+        })
+      }
+    ],
+    async (calls) => {
+      await wazuhVulnsPullPlugin.execute(
+        executeInputWithRequestId(
+          conn,
+          { apiVariant: "indexer", indexerBaseUrl: "indexer.acme.com" },
+          { agentIds: ["A"] }
+        )
+      );
+      const search = calls.find((c) => c.url.endsWith("/_search"))!;
+      // Bare hostname → schema + 9200 default.
+      assert.ok(search.url.startsWith("https://indexer.acme.com:9200/"));
+    }
+  );
+});
+
+test("wazuh_vulns_pull (indexer): static-token connection (no Basic creds) → actionable error, NOT a silent failure", async () => {
+  // An operator configured the connection with `{"token":"..."}` for
+  // the server-API surface and switched the plugin to apiVariant=indexer.
+  // The indexer cannot use that token — refuse loudly rather than
+  // emit 0 rows that look like an empty fleet.
+  resetConnectionRegistry();
+  registerConnectionDriver(
+    "wazuh",
+    wazuhConnectionDriver.driver,
+    wazuhConnectionDriver.driverManifest
+  );
+  const conn = fakeWazuhConn(
+    "vulns-token-only",
+    {},
+    '{"token":"longlived-bearer"}'
+  );
+  await withFakeFetch([], async () => {
+    const out = await wazuhVulnsPullPlugin.execute(
+      executeInputWithRequestId(
+        conn,
+        {
+          apiVariant: "indexer",
+          indexerBaseUrl: "https://wazuh-indexer.acme.com:9200"
+        },
+        { agentIds: ["A"] }
+      )
+    );
+    // Per-agent error surfaces in the metadata envelope (mirroring the
+    // 500-error tolerance contract: error is NOT absence — it must NOT
+    // land in missingAgents).
+    const meta = (out.outputs as {
+      metadata: { perAgentErrors: Array<{ agentId: string; message: string }>; missingAgents: string[] };
+    }).metadata;
+    assert.equal(meta.perAgentErrors.length, 1);
+    assert.equal(meta.perAgentErrors[0].agentId, "A");
+    assert.match(meta.perAgentErrors[0].message, /HTTP Basic credentials/);
+    assert.deepEqual(meta.missingAgents, []);
+  });
+});
+
+test("wazuh_vulns_pull (indexer): unset indexerBaseUrl → falls back to the connection baseUrl (co-located case)", async () => {
+  // Co-located deploys (rare, but supported) — operator didn't supply
+  // indexerBaseUrl. Plugin falls back to handle.baseUrl. This MUST
+  // remain a valid default so a stock single-host install still works
+  // without an extra config knob.
+  resetConnectionRegistry();
+  registerConnectionDriver(
+    "wazuh",
+    wazuhConnectionDriver.driver,
+    wazuhConnectionDriver.driverManifest
+  );
+  // Bare hostname so `buildWazuhBaseUrl` applies the port — full URLs
+  // are used verbatim and would ignore the `port` option (existing
+  // contract; documented on buildWazuhBaseUrl).
+  const conn = fakeWazuhConn("vulns-colocated", {
+    baseUrl: "wazuh.acme.com",
+    port: 55000
+  });
+  await withFakeFetch(
+    [
+      {
+        matches: (url, method) =>
+          method === "POST" && url.endsWith("/_search"),
+        respond: () => ({
+          status: 200,
+          body: { hits: { hits: [{ _source: { x: 1 } }] } }
+        })
+      }
+    ],
+    async (calls) => {
+      await wazuhVulnsPullPlugin.execute(
+        executeInputWithRequestId(
+          conn,
+          { apiVariant: "indexer" },
+          { agentIds: ["A"] }
+        )
+      );
+      const search = calls.find((c) => c.url.endsWith("/_search"))!;
+      assert.ok(search.url.startsWith("https://wazuh.acme.com:55000/"));
     }
   );
 });
