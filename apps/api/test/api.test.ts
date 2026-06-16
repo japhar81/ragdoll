@@ -626,3 +626,58 @@ test("usage summary aggregates records for the tenant", async () => {
   assert.equal(res.body.summary.outputTokens, 20);
   assert.equal(res.body.summary.count, 1);
 });
+
+// Regression: GET /api/executions?pipelineId=<id> must scope to that one
+// pipeline's runs. The contract was silently dropped once (the param was
+// parsed nowhere), so every consumer that asked for one pipeline got the
+// global-latest executions instead — which made the Bulwark pipeline console
+// show every card as a mirror of the most recent run across all pipelines.
+test("GET /api/executions filters by pipelineId", async () => {
+  const { request, deps } = buildHarness();
+  const admin = { "x-actor-id": "admin", "x-roles": "platform_admin" };
+
+  const seed = (executionId: string, pipelineId: string) =>
+    deps.executionStore.start({
+      executionId,
+      tenantId: "tenant-a",
+      pipelineId,
+      pipelineVersionId: "v1",
+      environment: "prod",
+      status: "succeeded",
+      startedAt: new Date().toISOString(),
+      actorId: "admin"
+    });
+
+  await seed("exec-p1-a", "pipeline-1");
+  await seed("exec-p1-b", "pipeline-1");
+  await seed("exec-p2-a", "pipeline-2");
+
+  // Scoped: only pipeline-1's runs come back.
+  const scoped = await request({
+    method: "GET",
+    path: "/api/executions",
+    query: { pipelineId: "pipeline-1", limit: "10" },
+    headers: admin
+  });
+  assert.equal(scoped.status, 200);
+  const ids = scoped.body.executions
+    .map((e: { executionId: string }) => e.executionId)
+    .sort();
+  assert.deepEqual(ids, ["exec-p1-a", "exec-p1-b"]);
+  assert.ok(
+    scoped.body.executions.every(
+      (e: { pipelineId: string }) => e.pipelineId === "pipeline-1"
+    ),
+    "every returned execution belongs to the requested pipeline"
+  );
+
+  // Unscoped: omitting pipelineId still returns all pipelines' runs.
+  const all = await request({
+    method: "GET",
+    path: "/api/executions",
+    query: { limit: "10" },
+    headers: admin
+  });
+  assert.equal(all.status, 200);
+  assert.equal(all.body.executions.length, 3);
+});

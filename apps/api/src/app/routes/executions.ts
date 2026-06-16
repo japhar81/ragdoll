@@ -26,6 +26,13 @@ export function registerExecutionsRoutes(
       ctx.principal.roles.includes("platform_admin") || !tenantId
         ? undefined
         : tenantId;
+    // Optional `?pipelineId=<uuid>` scopes results to one pipeline's runs.
+    // Clients (e.g. the Bulwark pipeline console) rely on this to read a
+    // single pipeline's real run state rather than the global latest.
+    const pipelineId =
+      typeof ctx.request.query.pipelineId === "string"
+        ? ctx.request.query.pipelineId
+        : undefined;
     // Cursor pagination: `?limit=<1..200>&cursor=<base64>`. When neither is
     // supplied the legacy "all rows" path runs to preserve back-compat for
     // existing API clients (and the test suite). The web Executions screen
@@ -35,6 +42,7 @@ export function registerExecutionsRoutes(
       const limit = Math.max(1, Math.min(200, Number(rawLimit) || 50));
       const page = await deps.executionStore.listExecutionsPage({
         tenantId: scope,
+        pipelineId,
         limit,
         cursor:
           typeof ctx.request.query.cursor === "string"
@@ -47,7 +55,10 @@ export function registerExecutionsRoutes(
         total: page.total
       });
     }
-    const executions = await deps.executionStore.listExecutions(scope);
+    const executions = await deps.executionStore.listExecutions(
+      scope,
+      pipelineId
+    );
     return ok({ executions });
   });
 

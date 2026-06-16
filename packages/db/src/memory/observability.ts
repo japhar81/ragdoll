@@ -138,9 +138,13 @@ export class InMemoryExecutionStore implements ExecutionStore {
   }
 
   // Async read methods (the control-plane `ReadableExecutionStore` contract).
-  async listExecutions(tenantId?: string): Promise<ExecutionRecord[]> {
+  async listExecutions(
+    tenantId?: string,
+    pipelineId?: string
+  ): Promise<ExecutionRecord[]> {
     return this.executions
       .filter((e) => tenantId === undefined || e.tenantId === tenantId)
+      .filter((e) => pipelineId === undefined || e.pipelineId === pipelineId)
       .map((e) => structuredClone(e));
   }
 

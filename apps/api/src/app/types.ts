@@ -102,14 +102,20 @@ export interface CursorPage<T> {
  * queries the executions / execution_nodes tables.
  */
 export interface ReadableExecutionStore extends ExecutionStore {
-  listExecutions(tenantId?: string): Promise<ExecutionRecord[]>;
+  /** `pipelineId` scopes to a single pipeline's runs; omit for all pipelines. */
+  listExecutions(
+    tenantId?: string,
+    pipelineId?: string
+  ): Promise<ExecutionRecord[]>;
   /**
    * Cursor-paginated list ordered by (started_at DESC, id DESC). Optional
    * on the interface so the in-memory test store can fall back to the
    * full `listExecutions` slicing — Postgres-backed deployments override.
+   * `pipelineId` scopes the page (and its total) to one pipeline's runs.
    */
   listExecutionsPage?(args: {
     tenantId?: string;
+    pipelineId?: string;
     limit: number;
     cursor?: string;
   }): Promise<CursorPage<ExecutionRecord>>;

@@ -205,16 +205,25 @@ export class PostgresExecutionStore implements ExecutionStore {
   }
 
   // ---- read path (control-plane ReadableExecutionStore) -----------------
-  async listExecutions(tenantId?: string): Promise<ExecutionRecord[]> {
-    const result =
-      tenantId === undefined
-        ? await this.pool.query<Record<string, unknown>>(
-            `SELECT * FROM executions ORDER BY started_at DESC`
-          )
-        : await this.pool.query<Record<string, unknown>>(
-            `SELECT * FROM executions WHERE tenant_id = $1 ORDER BY started_at DESC`,
-            [tenantId]
-          );
+  async listExecutions(
+    tenantId?: string,
+    pipelineId?: string
+  ): Promise<ExecutionRecord[]> {
+    const clauses: string[] = [];
+    const params: unknown[] = [];
+    if (tenantId !== undefined) {
+      params.push(tenantId);
+      clauses.push(`tenant_id = $${params.length}`);
+    }
+    if (pipelineId !== undefined) {
+      params.push(pipelineId);
+      clauses.push(`pipeline_id = $${params.length}`);
+    }
+    const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
+    const result = await this.pool.query<Record<string, unknown>>(
+      `SELECT * FROM executions ${where} ORDER BY started_at DESC`,
+      params
+    );
     return result.rows.map(rowToExecutionRecord);
   }
 
@@ -226,6 +235,7 @@ export class PostgresExecutionStore implements ExecutionStore {
    */
   async listExecutionsPage(args: {
     tenantId?: string;
+    pipelineId?: string;
     limit: number;
     cursor?: string;
   }): Promise<{ rows: ExecutionRecord[]; nextCursor: string | null; total: number }> {
@@ -235,6 +245,10 @@ export class PostgresExecutionStore implements ExecutionStore {
     if (args.tenantId !== undefined) {
       filterParams.push(args.tenantId);
       filterClauses.push(`tenant_id = $${filterParams.length}`);
+    }
+    if (args.pipelineId !== undefined) {
+      filterParams.push(args.pipelineId);
+      filterClauses.push(`pipeline_id = $${filterParams.length}`);
     }
     const countWhere = filterClauses.length
       ? `WHERE ${filterClauses.join(" AND ")}`
