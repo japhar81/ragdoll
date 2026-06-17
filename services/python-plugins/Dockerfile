@@ -108,21 +108,45 @@ RUN python -m venv /opt/cartography-venv \
 # rebuilding the image (the handler reads CLOUDQUERY_AWS_SOURCE_VERSION
 # / CLOUDQUERY_POSTGRESQL_DEST_VERSION).
 #
-# Pin the CLI version explicitly; bump intentionally + verify
-# `cloudquery --version` in the new image before merging. Architecture
-# selected by TARGETARCH so multi-arch builds work; falls back to amd64.
-ARG CLOUDQUERY_VERSION=5.34.1
+# By default we fetch GitHub's `latest` redirect so the build doesn't
+# break when the pinned-version-in-the-Dockerfile drifts out of date
+# (cloudquery cuts CLI releases frequently). PRODUCTION OPERATORS
+# SHOULD PIN — pass --build-arg CLOUDQUERY_VERSION=X.Y.Z and the build
+# pulls the matching tagged release. Same pin-intentionally rule as
+# the cartography layer above; unpinned builds are only acceptable for
+# dev/iteration. Architecture selected by TARGETARCH so multi-arch
+# builds work; falls back to amd64.
+ARG CLOUDQUERY_VERSION=latest
 ARG TARGETARCH=amd64
+# Note on `latest`: the cloudquery repo is a MONOREPO and most releases
+# are individual source/destination plugin releases, NOT CLI releases.
+# `/releases/latest/download/cloudquery_linux_amd64` therefore 404s when
+# the most recent tag isn't a CLI release. We resolve the latest CLI tag
+# (`cli-v*`) via the GitHub API + grep, then download from that tagged
+# release. When the operator pins via `--build-arg CLOUDQUERY_VERSION=X.Y.Z`
+# we skip the discovery and go straight to the pinned tag.
 RUN set -eux; \
     case "${TARGETARCH}" in \
       amd64)  CQ_ASSET="cloudquery_linux_amd64" ;; \
       arm64)  CQ_ASSET="cloudquery_linux_arm64" ;; \
       *)      CQ_ASSET="cloudquery_linux_amd64" ;; \
     esac; \
+    if [ "${CLOUDQUERY_VERSION}" = "latest" ]; then \
+      CLI_TAG=$(curl -fsSL "https://api.github.com/repos/cloudquery/cloudquery/releases?per_page=100" \
+        | grep -oE '"tag_name": "cli-v[0-9.]+"' \
+        | head -1 \
+        | cut -d'"' -f4); \
+      if [ -z "${CLI_TAG}" ]; then \
+        echo "Failed to discover latest cloudquery CLI tag from GitHub API — pin --build-arg CLOUDQUERY_VERSION explicitly" >&2; \
+        exit 1; \
+      fi; \
+      CQ_URL="https://github.com/cloudquery/cloudquery/releases/download/${CLI_TAG}/${CQ_ASSET}"; \
+    else \
+      CQ_URL="https://github.com/cloudquery/cloudquery/releases/download/cli-v${CLOUDQUERY_VERSION}/${CQ_ASSET}"; \
+    fi; \
+    echo "Installing cloudquery from ${CQ_URL}"; \
     mkdir -p /opt/cloudquery; \
-    curl -fsSL \
-      "https://github.com/cloudquery/cloudquery/releases/download/cli-v${CLOUDQUERY_VERSION}/${CQ_ASSET}" \
-      -o /opt/cloudquery/cloudquery; \
+    curl -fsSL "${CQ_URL}" -o /opt/cloudquery/cloudquery; \
     chmod a+x /opt/cloudquery/cloudquery; \
     /opt/cloudquery/cloudquery --version >/dev/null
 
