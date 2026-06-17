@@ -98,6 +98,34 @@ RUN python -m venv /opt/cartography-venv \
     && /opt/cartography-venv/bin/cartography --help >/dev/null \
     && chmod -R a+rX /opt/cartography-venv
 
+# --- cloudquery: static CLI binary -----------------------------------------
+# cloudquery is a Go binary distributed as a single static artifact per
+# platform. We install JUST the CLI here; the AWS source + postgresql
+# destination plugins are downloaded by `cloudquery sync` on first use
+# (cached under ~/.local/share/cloudquery), keyed by the versions the
+# Python handler pins in its spec YAML. This keeps the build small and
+# lets the source/destination plugin versions bump via env without
+# rebuilding the image (the handler reads CLOUDQUERY_AWS_SOURCE_VERSION
+# / CLOUDQUERY_POSTGRESQL_DEST_VERSION).
+#
+# Pin the CLI version explicitly; bump intentionally + verify
+# `cloudquery --version` in the new image before merging. Architecture
+# selected by TARGETARCH so multi-arch builds work; falls back to amd64.
+ARG CLOUDQUERY_VERSION=5.34.1
+ARG TARGETARCH=amd64
+RUN set -eux; \
+    case "${TARGETARCH}" in \
+      amd64)  CQ_ASSET="cloudquery_linux_amd64" ;; \
+      arm64)  CQ_ASSET="cloudquery_linux_arm64" ;; \
+      *)      CQ_ASSET="cloudquery_linux_amd64" ;; \
+    esac; \
+    mkdir -p /opt/cloudquery; \
+    curl -fsSL \
+      "https://github.com/cloudquery/cloudquery/releases/download/cli-v${CLOUDQUERY_VERSION}/${CQ_ASSET}" \
+      -o /opt/cloudquery/cloudquery; \
+    chmod a+x /opt/cloudquery/cloudquery; \
+    /opt/cloudquery/cloudquery --version >/dev/null
+
 # Source last so edits only rebuild this cheap layer.
 COPY services/python-plugins/app ./app
 
