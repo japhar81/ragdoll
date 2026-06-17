@@ -223,7 +223,110 @@ Python —
   + a sibling ADR amendment, not a widening of this one. The seam
   stays sharp.
 
-## Future work
+## Amendment — OSS plugin source via `registry: local`
+
+The original landing ran the cloudquery sync with `registry: cloudquery`
+on both the source and the destination — the CLI's default, which
+pulls plugins from CloudQuery Hub (`hub.cloudquery.io`). That broke
+the moment we ran it live: bulwark's first scheduled pipeline failed
+with
+
+```
+Error: unauthorized. Try logging in via `cloudquery login`
+```
+
+even though the AWS source plugin is Apache-2.0 OSS. The Hub now
+requires `cloudquery login` / `CLOUDQUERY_API_KEY` for ALL plugin
+downloads, including the OSS ones; the docker registry
+(`docker.cloudquery.io`) is equally auth-gated; Docker Hub doesn't
+mirror them. The OSS path that bypasses Hub auth is one of three
+registries cloudquery supports for plugin resolution:
+
+| Registry     | Resolution mechanism                                  | Auth?                     | Practical fit for our sidecar    |
+| ------------ | ----------------------------------------------------- | ------------------------- | -------------------------------- |
+| `cloudquery` | Hub download                                          | Hub login / API key req'd | NO (the bug)                     |
+| `docker`     | `docker pull` + `docker run` of the plugin image       | Hub auth + docker socket  | NO (no docker access in sidecar) |
+| `grpc`       | Plugin runs out-of-band; CLI connects to gRPC address | None                      | Yes — escape hatch only          |
+| **`local`**  | CLI exec()s a binary on the sidecar FS                | **None**                  | **Yes — default**                |
+
+### Decision
+
+- **Default `registry: local`.** The OSS path. The python-plugins
+  sidecar's Dockerfile pre-downloads the AWS source + PostgreSQL
+  destination plugin binaries from the cloudquery monorepo's GitHub
+  release assets and installs them at `/opt/cq-plugins/source-aws`
+  and `/opt/cq-plugins/destination-postgresql`. cloudquery exec()s
+  them directly — no auth, no network at sync time, no docker.
+- **Pinned versions.** AWS source `v22.19.2`, PostgreSQL destination
+  `v7.3.0`. These are the LATEST versions with public GitHub release
+  binaries (newer versions exist only on the Hub / Docker registry,
+  both gated). Both serve cloudquery plugin protocol v3, which the
+  CLI v6.36.x speaks; smoke-tested under the live sidecar — the
+  `Start sync` log proceeds past plugin handshake, exec works,
+  table coverage includes the route-table headline scope
+  (`aws_ec2_route_tables`, `aws_ec2_routes`). Pin bumps go through
+  the same intentional-bump rule cartography uses: bump,
+  rebuild, verify `Start sync` survives, then merge.
+- **Override knobs.** Operators with a private mirror can override
+  `awsPluginPath` / `pgPluginPath` / `awsPluginVersion` /
+  `pgPluginVersion` via per-node config. Operators with a Hub
+  account can flip `registry` to `cloudquery` to opt back into the
+  Hub flow. The defaults stay OSS so a fresh operator never hits
+  Hub auth without explicitly opting in.
+- **Refuse loudly.** When `registry: local` is in force AND either
+  plugin path doesn't exist on disk, the handler raises BEFORE
+  invoking cloudquery — operators get an actionable error
+  ("rebuild the sidecar OR set config.awsPluginPath") instead of a
+  cryptic exec failure inside the CLI.
+
+### Why not docker / grpc by default
+
+- **Docker socket mount is a footgun.** Mounting `/var/run/docker.sock`
+  into the python-plugins sidecar gives it root-equivalent control
+  over the host docker daemon — a sharp escalation for what was
+  previously a constrained sidecar. The local-binary path achieves
+  the same Hub-bypass with no host trust expansion. Available as
+  `registry: docker` for operators who explicitly want it.
+- **gRPC requires an out-of-band plugin process.** Useful for
+  operators who already run the cloudquery plugins as separate
+  services (e.g. shared across multiple ingesters), but heavier
+  setup than `local` for a default. Available as `registry: grpc`.
+
+### Cost / trade-offs
+
+- The pinned versions are **behind** the latest Hub versions. The
+  bulwark Z4 adapter must accept the v22 row shape for AWS / v7 row
+  shape for PG. cloudquery follows semver for column adds; the
+  route-table tables (`aws_ec2_route_tables`, `aws_ec2_routes`)
+  have been schema-stable across the v22 → v33 range we observed.
+  If a bulwark migration requires a column only present on Hub-only
+  plugin versions, the resolution path is either (a) bump to a
+  newer Hub-distributed plugin via `registry: cloudquery` with
+  operator-supplied API key, or (b) wait for cloudquery to
+  re-publish a GitHub release asset.
+- The sidecar image gains ~80 MB per pre-downloaded plugin binary
+  (~150 MB total). Acceptable cost for offline-at-sync-time
+  guarantees + zero Hub coupling.
+
+### Verification
+
+- Smoke-tested live in the sidecar before the fix landed: the same
+  spec that used to die on Hub auth (`Error: unauthorized. Try
+  logging in via 'cloudquery login'`) now reaches "Start sync" and
+  the per-plugin gRPC `GetVersions` handshake succeeds. Termination
+  on the test was the deliberately-invalid PG DSN — confirming
+  the Hub-auth wall is gone and the rest of the pipeline lights up.
+- TS — `plugins/builtin-rag/test/cloudquery.test.ts`: 3 new cases
+  pin the OSS default (registry defaults to `local`; OSS-no-Hub-
+  login spelled out in the description; private-mirror override
+  knobs surfaced).
+- Python — `services/python-plugins/tests/test_cloudquery_aws_sync.py`:
+  spec emission test rewritten to assert
+  `src.spec.registry == "local"` + `src.spec.path == "/opt/cq-plugins/source-aws"`
+  (and the destination mirror). 3 new cases: missing-plugin-binary
+  under `registry: local` raises actionably, `registry: grpc`
+  skips the path-existence check, unknown registry rejected.
+- Plugin-suite headline: 371 tests pass (was 368, +3).
 
 - **CLI version pin policy.** `CLOUDQUERY_VERSION` is pinned in
   the Dockerfile; `CLOUDQUERY_AWS_SOURCE_VERSION` and

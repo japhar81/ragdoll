@@ -150,6 +150,62 @@ RUN set -eux; \
     chmod a+x /opt/cloudquery/cloudquery; \
     /opt/cloudquery/cloudquery --version >/dev/null
 
+# --- cloudquery OSS plugin binaries (registry: local) ----------------------
+# Why bundled-in-the-image:
+#   The cloudquery CLI defaults to `registry: cloudquery` which pulls
+#   plugins from CloudQuery Hub (https://hub.cloudquery.io) — which now
+#   REQUIRES an account + `cloudquery login` even for the Apache-2.0
+#   licensed OSS plugins. Same applies to their `docker.cloudquery.io`
+#   docker registry (auth-gated). To stay on the OSS path with zero
+#   external auth at sync time, we pre-download the plugin binaries
+#   from the cloudquery monorepo's GitHub releases and run them via
+#   `registry: local` — cloudquery just exec()s the binary; no
+#   credentials, no network, no docker-in-docker.
+#
+# Versions:
+#   The Hub-distributed plugins are on v33/v8 (AWS source / PG
+#   destination), but those tags are NOT published as GitHub release
+#   assets — they live ONLY in the Hub / Docker registry. The LATEST
+#   versions with public GitHub binaries are v22.19.2 (source-aws) and
+#   v7.3.0 (destination-postgresql). Both serve cloudquery's plugin
+#   protocol v3, which matches what the CLI v6.36.x speaks. Smoke-
+#   tested: `Start sync` proceeds, plugin GetVersions handshakes
+#   succeed, sync only fails on a real-network step (e.g. the
+#   destination DSN), confirming the Hub-auth wall is gone.
+#
+# Sanity:
+#   * Pin both versions explicitly; bump intentionally and re-verify
+#     `Start sync` survives the GetVersions handshake before merging
+#     a bump.
+#   * If cloudquery ever re-publishes v33/v8 binaries to GitHub
+#     releases (or exposes an anon Hub token), bump the pins and
+#     drop this layer in favour of the on-demand download path.
+ARG CQ_AWS_SOURCE_VERSION=22.19.2
+ARG CQ_POSTGRESQL_DEST_VERSION=7.3.0
+RUN set -eux; \
+    case "${TARGETARCH}" in \
+      amd64)  CQ_OS_ARCH="linux_amd64" ;; \
+      arm64)  CQ_OS_ARCH="linux_arm64" ;; \
+      *)      CQ_OS_ARCH="linux_amd64" ;; \
+    esac; \
+    mkdir -p /opt/cq-plugins /tmp/cq-dl; \
+    # AWS source plugin -----------------------------------------------------
+    curl -fsSL \
+      "https://github.com/cloudquery/cloudquery/releases/download/plugins-source-aws-v${CQ_AWS_SOURCE_VERSION}/aws_${CQ_OS_ARCH}.zip" \
+      -o /tmp/cq-dl/aws.zip; \
+    python -m zipfile -e /tmp/cq-dl/aws.zip /tmp/cq-dl/aws/; \
+    install -m 0755 /tmp/cq-dl/aws/plugins/source/aws /opt/cq-plugins/source-aws; \
+    /opt/cq-plugins/source-aws info >/dev/null; \
+    # PostgreSQL destination plugin ----------------------------------------
+    curl -fsSL \
+      "https://github.com/cloudquery/cloudquery/releases/download/plugins-destination-postgresql-v${CQ_POSTGRESQL_DEST_VERSION}/postgresql_${CQ_OS_ARCH}.zip" \
+      -o /tmp/cq-dl/pg.zip; \
+    python -m zipfile -e /tmp/cq-dl/pg.zip /tmp/cq-dl/pg/; \
+    install -m 0755 /tmp/cq-dl/pg/plugins/destination/postgresql /opt/cq-plugins/destination-postgresql; \
+    /opt/cq-plugins/destination-postgresql info >/dev/null; \
+    rm -rf /tmp/cq-dl; \
+    chmod -R a+rX /opt/cq-plugins
+
 # Source last so edits only rebuild this cheap layer.
 COPY services/python-plugins/app ./app
 

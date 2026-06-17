@@ -15,12 +15,34 @@ the python-plugins service.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from typing import Any, Dict, List
 
 import pytest
 
 from app.plugins import cloudquery_aws_sync_plugin as plugin
+
+
+# The handler short-circuits with a loud error when registry=local and
+# either plugin binary is missing from disk. That's the right behaviour
+# in the sidecar (where the Dockerfile installs the binaries), but in
+# the pytest environment those paths don't exist. Auto-mock
+# `os.path.exists` to return True for the cq-plugins paths so the rest
+# of the test surface (config validation, spec emission, subprocess
+# path) is reachable. Tests that specifically exercise the
+# missing-binary guard set `_plugin_paths_exist` to False locally.
+@pytest.fixture(autouse=True)
+def _plugin_paths_exist(monkeypatch):
+    real_exists = os.path.exists
+
+    def fake_exists(p):
+        if isinstance(p, str) and p.startswith("/opt/cq-plugins/"):
+            return True
+        return real_exists(p)
+
+    monkeypatch.setattr(os.path, "exists", fake_exists)
+    return fake_exists
 
 
 def _build_request(
@@ -228,7 +250,13 @@ def test_subprocess_writes_two_doc_yaml_spec_and_invokes_cloudquery(monkeypatch)
     dst = json.loads(dst_yaml)
     assert src["kind"] == "source"
     assert src["spec"]["name"] == "aws"
-    assert src["spec"]["path"] == "cloudquery/aws"
+    # CRITICAL — registry MUST default to `local` (OSS path, no
+    # CloudQuery Hub login required). A regression that flips this back
+    # to `cloudquery` breaks every operator without a Hub account.
+    assert src["spec"]["registry"] == "local"
+    # And `path` MUST be the on-disk binary location, NOT the Hub
+    # plugin slug `cloudquery/aws`.
+    assert src["spec"]["path"] == "/opt/cq-plugins/source-aws"
     assert src["spec"]["tables"] == [
         "aws_ec2_route_tables",
         "aws_ec2_routes",
@@ -240,6 +268,10 @@ def test_subprocess_writes_two_doc_yaml_spec_and_invokes_cloudquery(monkeypatch)
     assert aws_spec["accounts"] == [{"id": "123456789012", "local_profile": ""}]
     assert dst["kind"] == "destination"
     assert dst["spec"]["name"] == "postgresql"
+    # Destination registry + path mirror the source — `local` with the
+    # on-disk binary.
+    assert dst["spec"]["registry"] == "local"
+    assert dst["spec"]["path"] == "/opt/cq-plugins/destination-postgresql"
     # The PG DSN comes from connection.secret, NOT from any config knob
     # — the seam discipline (host/port/dsn not exposed in config).
     assert dst["spec"]["spec"] == {
@@ -301,6 +333,65 @@ def test_non_zero_exit_raises_loudly_with_stderr_tail_in_envelope(monkeypatch):
     meta = exc.value.metadata  # type: ignore[attr-defined]
     assert meta["exitCode"] == 2
     assert "AccessDenied" in meta["cloudqueryStderrTail"]
+
+
+def test_missing_plugin_binary_under_registry_local_raises_actionable_error(monkeypatch):
+    # When the sidecar image was built without the plugin binaries (or
+    # the operator pointed `awsPluginPath` at a path that doesn't
+    # exist), we MUST refuse loudly BEFORE invoking cloudquery — a
+    # cryptic exec error from cloudquery is much harder to act on.
+    # Override the autouse fixture so the paths really look missing.
+    real_exists = os.path.exists
+    monkeypatch.setattr(os.path, "exists", real_exists)
+    req = _build_request(
+        config={"awsPluginPath": "/does/not/exist/aws-plugin"},
+        connection=_pg_conn(),
+    )
+    with pytest.raises(ValueError, match="awsPluginPath.*does not exist"):
+        plugin.handle(req)
+
+
+def test_registry_grpc_skips_path_existence_check(monkeypatch):
+    # `registry: grpc` means `path` is a network address, not a file —
+    # the existence check MUST NOT fire on it. Operator points cloudquery
+    # at an out-of-band plugin process and the sync proceeds.
+    real_exists = os.path.exists
+    monkeypatch.setattr(os.path, "exists", real_exists)
+
+    captured: Dict[str, Any] = {}
+
+    def fake_run(argv, env=None, timeout=None, capture_output=False, text=False, check=False):
+        with open(argv[2], encoding="utf-8") as f:
+            captured["spec"] = f.read()
+        return _FakeCompleted(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    req = _build_request(
+        config={
+            "registry": "grpc",
+            "awsPluginPath": "localhost:7777",
+            "pgPluginPath": "localhost:7778",
+        },
+        connection=_pg_conn(),
+    )
+    out = plugin.handle(req)
+    assert out["outputs"]["metadata"]["exitCode"] == 0
+    src_yaml, _, dst_yaml = captured["spec"].partition("\n---\n")
+    src = json.loads(src_yaml)
+    dst = json.loads(dst_yaml)
+    assert src["spec"]["registry"] == "grpc"
+    assert src["spec"]["path"] == "localhost:7777"
+    assert dst["spec"]["registry"] == "grpc"
+    assert dst["spec"]["path"] == "localhost:7778"
+
+
+def test_rejects_unknown_registry():
+    req = _build_request(
+        config={"registry": "no-such-registry"},
+        connection=_pg_conn(),
+    )
+    with pytest.raises(ValueError, match="unknown registry"):
+        plugin.handle(req)
 
 
 def test_missing_cloudquery_binary_raises_actionable_error(monkeypatch):
