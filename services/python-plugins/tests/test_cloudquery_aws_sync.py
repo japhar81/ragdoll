@@ -84,13 +84,32 @@ def _build_request(
 
 
 def _pg_conn(slug: str = "bulwark-pg") -> Dict[str, Any]:
+    """Default postgres connection — DSN lives in `options.url` /
+    `options.connectionString` AND in discrete fields, mirroring
+    EXACTLY what bulwark writes into the connection record:
+
+        SELECT jsonb_pretty(config) FROM connections WHERE kind='postgres';
+        →  { url, connectionString, host, port, user, password,
+             database, sslmode }
+
+    `secret` is None — bulwark's connection has no separate secret-ref;
+    everything is in the options blob. The handler resolves this via
+    `_resolve_pg_dsn`'s precedence ladder.
+    """
     return {
         "kind": "postgres",
         "slug": slug,
-        "options": {"database": "bulwark"},
-        # Postgres uses DSN-as-the-secret (postgres-core.ts) — the
-        # handler hands this straight to cloudquery's destination spec.
-        "secret": "postgres://cq:hunter2@db:5432/bulwark",
+        "options": {
+            "url": "postgres://bulwark:bulwark@host.docker.internal:5442/bulwark",
+            "connectionString": "postgres://bulwark:bulwark@host.docker.internal:5442/bulwark",
+            "host": "host.docker.internal",
+            "port": 5442,
+            "user": "bulwark",
+            "password": "bulwark",
+            "database": "bulwark",
+            "sslmode": "disable",
+        },
+        "secret": None,
     }
 
 
@@ -144,12 +163,17 @@ def test_rejects_non_postgres_destination_kind():
         plugin.handle(req)
 
 
-def test_rejects_missing_pg_dsn_secret():
+def test_rejects_when_no_dsn_anywhere_on_connection():
+    # No `options.connectionString` / `url` / discrete fields, no
+    # `secret` either — handler must refuse loudly with an
+    # actionable message naming every place it looked.
     req = _build_request(
         config={},
-        connection={"kind": "postgres", "slug": "pg", "secret": ""},
+        connection={"kind": "postgres", "slug": "pg", "options": {}, "secret": None},
     )
-    with pytest.raises(ValueError, match="has no resolved DSN secret"):
+    with pytest.raises(
+        ValueError, match="did not yield a usable DSN.*options.connectionString.*options.url",
+    ):
         plugin.handle(req)
 
 
@@ -272,10 +296,13 @@ def test_subprocess_writes_two_doc_yaml_spec_and_invokes_cloudquery(monkeypatch)
     # on-disk binary.
     assert dst["spec"]["registry"] == "local"
     assert dst["spec"]["path"] == "/opt/cq-plugins/destination-postgresql"
-    # The PG DSN comes from connection.secret, NOT from any config knob
-    # — the seam discipline (host/port/dsn not exposed in config).
+    # The PG DSN is resolved from the BOUND CONNECTION's options
+    # (bulwark writes `url` + `connectionString` + discrete fields
+    # into the connection.config blob — see _pg_conn). The seam
+    # discipline still holds: no host/port/dsn exposed in plugin
+    # config; we only read from the dataset binding.
     assert dst["spec"]["spec"] == {
-        "connection_string": "postgres://cq:hunter2@db:5432/bulwark"
+        "connection_string": "postgres://bulwark:bulwark@host.docker.internal:5442/bulwark?sslmode=disable"
     }
     # Default writeMode is "overwrite" — safest for evidence pulls.
     assert dst["spec"]["write_mode"] == "overwrite"
@@ -421,7 +448,11 @@ def test_credsSecretRef_set_but_no_matching_secret_attaches_credsWarning(monkeyp
     meta = out["outputs"]["metadata"]
     assert "credsWarning" in meta
     assert "aws-prod" in meta["credsWarning"]
-    assert "node.secrets" in meta["credsWarning"]
+    # The warning names the missing companion declaration (the
+    # `secrets: { <name>: <secret-ref> }` block on the spec node)
+    # so the operator can act on it without a docs lookup.
+    assert "secrets:" in meta["credsWarning"]
+    assert "spec node" in meta["credsWarning"]
 
 
 def test_seam_discipline_handler_emits_only_telemetry_no_row_payload(monkeypatch):
@@ -474,6 +505,112 @@ def test_parse_table_counts_skips_unparseable_lines_without_failing():
         + "\nsome other noise"
     )
     assert plugin._parse_table_counts(stderr) == {"aws_ec2_routes": 7}
+
+
+# ---------------------------------------------------------------------------
+# PG DSN resolution ladder — `_resolve_pg_dsn` covers four shapes a
+# bound postgres connection can arrive in. These tests pin each rung
+# of the ladder so a future contributor refactoring the resolver
+# can't silently drop a path that bulwark (or a legacy operator)
+# depends on.
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_pg_dsn_prefers_options_connectionString_over_url():
+    # Bulwark sends BOTH `connectionString` and `url`. They should be
+    # equal in practice, but the resolver picks `connectionString`
+    # first — that's the canonical key in bulwark's
+    # connectionConfigFor("postgres") shape.
+    conn = {
+        "options": {
+            "connectionString": "postgres://A@a/db1",
+            "url": "postgres://B@b/db2",
+            "host": "ignored",
+        }
+    }
+    assert plugin._resolve_pg_dsn(conn) == "postgres://A@a/db1?sslmode=disable"
+
+
+def test_resolve_pg_dsn_falls_back_to_options_url_when_connectionString_missing():
+    conn = {"options": {"url": "postgres://x@h/db"}}
+    assert plugin._resolve_pg_dsn(conn) == "postgres://x@h/db?sslmode=disable"
+
+
+def test_resolve_pg_dsn_assembles_from_discrete_fields_when_no_dsn_string():
+    # The path some operators wire when their connection authoring UI
+    # exposes per-field inputs instead of a full DSN. Must produce a
+    # libpq-parseable DSN with port + sslmode threaded through.
+    conn = {
+        "options": {
+            "host": "host.docker.internal",
+            "port": 5442,
+            "user": "bulwark",
+            "password": "bulwark",
+            "database": "bulwark",
+            "sslmode": "disable",
+        }
+    }
+    assert (
+        plugin._resolve_pg_dsn(conn)
+        == "postgres://bulwark:bulwark@host.docker.internal:5442/bulwark?sslmode=disable"
+    )
+
+
+def test_resolve_pg_dsn_percent_encodes_special_chars_in_credentials():
+    # A password like `p:ss/w@rd` would otherwise break the DSN parser.
+    conn = {
+        "options": {
+            "host": "h",
+            "user": "u@x",
+            "password": "p:ss/w@rd",
+            "database": "db",
+        }
+    }
+    out = plugin._resolve_pg_dsn(conn)
+    # The user `u@x` and password `p:ss/w@rd` are percent-encoded;
+    # the host is left alone.
+    assert "u%40x" in out
+    assert "p%3Ass%2Fw%40rd" in out
+    assert "@h/db" in out
+
+
+def test_resolve_pg_dsn_falls_back_to_connection_secret_when_options_empty():
+    # The historical RAGdoll postgres-core convention (ADR-0024):
+    # connections that pre-date bulwark's options-as-config shape
+    # carry the DSN in `secret`. The resolver still honors them.
+    conn = {"options": {}, "secret": "postgres://legacy@h/db"}
+    assert plugin._resolve_pg_dsn(conn) == "postgres://legacy@h/db?sslmode=disable"
+
+
+def test_resolve_pg_dsn_returns_empty_when_nothing_to_work_with():
+    assert plugin._resolve_pg_dsn({}) == ""
+    assert plugin._resolve_pg_dsn({"options": {}, "secret": ""}) == ""
+    # `options.host` alone (no database) isn't enough to assemble.
+    assert plugin._resolve_pg_dsn({"options": {"host": "h"}}) == ""
+
+
+def test_ensure_sslmode_disable_default_appends_when_absent():
+    assert (
+        plugin._ensure_sslmode_disable_default("postgres://u@h/db")
+        == "postgres://u@h/db?sslmode=disable"
+    )
+    # Already has a query string → append with `&`, not a second `?`.
+    assert (
+        plugin._ensure_sslmode_disable_default("postgres://u@h/db?foo=1")
+        == "postgres://u@h/db?foo=1&sslmode=disable"
+    )
+
+
+def test_ensure_sslmode_disable_NEVER_overrides_explicit_sslmode():
+    # Operator pinning `sslmode=require` (or any other value) MUST
+    # keep that value — never silently downgrade to disable.
+    for dsn in (
+        "postgres://u@h/db?sslmode=require",
+        "postgres://u@h/db?sslmode=verify-full",
+        "postgres://u@h/db?sslmode=disable",
+        "postgres://u@h/db?foo=1&sslmode=require&bar=2",
+    ):
+        assert plugin._ensure_sslmode_disable_default(dsn) == dsn
 
 
 def test_parse_banner_counts_as_defensive_fallback():

@@ -71,6 +71,7 @@ import re
 import subprocess  # noqa: S404 — shelling out to cloudquery is the design
 import tempfile
 import time
+import urllib.parse
 import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -150,6 +151,99 @@ CLOUDQUERY_POSTGRESQL_DEST_VERSION = os.environ.get(
 ALLOWED_REGISTRIES = ("local", "grpc", "docker", "cloudquery")
 
 logger = logging.getLogger("ragdoll.python-plugins.cloudquery")
+
+
+def _ensure_sslmode_disable_default(dsn: str) -> str:
+    """Append `sslmode=disable` when the DSN doesn't already specify one.
+
+    Why: cloudquery's PostgreSQL destination uses pgx, whose default
+    sslmode is `prefer`. Against a dev Postgres without TLS (the
+    common bulwark setup, where the bound connection has no certs)
+    the prefer-flow handshake can fail mid-init with libpq's "SSL
+    connection has been closed unexpectedly." Be explicit when the
+    operator's DSN doesn't pin one — operators with TLS pin
+    `sslmode=require` (or stronger) and we leave it alone.
+
+    Preserved as-is when the DSN already carries any `sslmode=...`
+    value, including `sslmode=disable` — never overwrite operator
+    intent.
+    """
+    if not dsn:
+        return dsn
+    if "sslmode=" in dsn:
+        return dsn
+    sep = "&" if "?" in dsn else "?"
+    return f"{dsn}{sep}sslmode=disable"
+
+
+def _assemble_pg_dsn_from_fields(options: Dict[str, Any]) -> Optional[str]:
+    """Build a `postgres://user:pass@host:port/db?sslmode=…` DSN from
+    the discrete fields bulwark's postgres connection config carries
+    (`host`, `port`, `user`, `password`, `database`, `sslmode`).
+
+    Returns `None` when there's not enough to build a useful DSN
+    (the caller falls back to the next resolution path). Special-
+    chars in user / password are percent-encoded so DSNs with `:`,
+    `@`, `/`, or `+` in the credentials still round-trip cleanly.
+    """
+    host = options.get("host")
+    database = options.get("database")
+    if not host or not database:
+        return None
+    user = options.get("user")
+    password = options.get("password")
+    port = options.get("port")
+    sslmode = options.get("sslmode")
+
+    user_part = ""
+    if user is not None and str(user) != "":
+        user_part = urllib.parse.quote_plus(str(user))
+        if password is not None and str(password) != "":
+            user_part += f":{urllib.parse.quote_plus(str(password))}"
+        user_part += "@"
+    port_part = f":{int(port)}" if port not in (None, "") else ""
+    dsn = f"postgres://{user_part}{host}/{database}".replace(
+        f"{host}/", f"{host}{port_part}/", 1
+    )
+    if sslmode:
+        dsn += f"?sslmode={sslmode}"
+    return dsn
+
+
+def _resolve_pg_dsn(conn: Dict[str, Any]) -> str:
+    """Resolve the PostgreSQL DSN cloudquery's destination plugin needs.
+
+    Bulwark's `kind=postgres` connection config carries the
+    full DSN in `options.connectionString` AND in `options.url`,
+    plus discrete fields (`host`, `port`, `user`, `password`,
+    `database`, `sslmode`). The original RAGdoll postgres-core
+    driver convention (ADR-0024) puts the DSN in
+    `connection.secret`. Both shapes need to work.
+
+    Resolution order (first non-empty wins):
+      1. `options.connectionString`  — bulwark's primary key
+      2. `options.url`               — bulwark's alias
+      3. Assembled from discrete `options.{host,...}` fields
+      4. `connection.secret`         — historical RAGdoll convention
+
+    Final step: append `sslmode=disable` when the resolved DSN
+    doesn't already specify one (the bulwark-dev-Postgres path
+    has no TLS; pgx's `prefer` default can fail handshake — see
+    `_ensure_sslmode_disable_default`).
+    """
+    options = conn.get("options") or {}
+    if isinstance(options, dict):
+        for key in ("connectionString", "url"):
+            v = options.get(key)
+            if isinstance(v, str) and v.strip():
+                return _ensure_sslmode_disable_default(v.strip())
+        assembled = _assemble_pg_dsn_from_fields(options)
+        if assembled:
+            return _ensure_sslmode_disable_default(assembled)
+    secret = conn.get("secret")
+    if isinstance(secret, str) and secret.strip():
+        return _ensure_sslmode_disable_default(secret.strip())
+    return ""
 
 
 def _require_postgres_connection(request_dataset: Dict[str, Any]) -> Dict[str, Any]:
@@ -427,7 +521,11 @@ def handle(request) -> Dict[str, Any]:
     cfg = _resolve_config(config)
     conn = _require_postgres_connection(request.dataset)
     target_slug = str(conn.get("slug") or "")
-    pg_dsn = str(conn.get("secret") or "")
+    # Resolve from options first (bulwark's primary path: `url` /
+    # `connectionString` / discrete fields) then fall back to
+    # `secret` (the historical RAGdoll postgres-core convention).
+    # See `_resolve_pg_dsn` for the full precedence ladder.
+    pg_dsn = _resolve_pg_dsn(conn)
 
     # Provenance — same shape cartography_crawl uses (ADR-0030). We call
     # it `syncId` here because the noun upstream is "sync," but it
@@ -462,9 +560,13 @@ def handle(request) -> Dict[str, Any]:
 
     if not pg_dsn:
         raise ValueError(
-            f"cloudquery_aws_sync: postgres connection {target_slug!r} has no "
-            "resolved DSN secret — cloudquery's destination plugin needs a "
-            "`postgres://user:pass@host:5432/db` connection string."
+            f"cloudquery_aws_sync: postgres connection {target_slug!r} did not "
+            "yield a usable DSN — looked at `options.connectionString`, "
+            "`options.url`, the discrete `options.{host,port,user,password,"
+            "database,sslmode}` fields, and `connection.secret`. Set ONE of "
+            "those on the bound postgres connection so cloudquery's "
+            "destination plugin has a `postgres://user:pass@host:port/db` "
+            "connection string."
         )
 
     creds_secret_ref = config.get("credsSecretRef")
