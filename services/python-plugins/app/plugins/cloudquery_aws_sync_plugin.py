@@ -114,18 +114,40 @@ DEFAULT_BIN = "/opt/cloudquery/cloudquery"
 
 DEFAULT_TIMEOUT_MS = 1_800_000  # 30 minutes — long multi-region syncs are normal
 
-# Plugin versions pinned at build time. cloudquery's spec file pins the
-# source + destination plugin versions independently of the CLI binary;
-# bumping requires confirming bulwark's Z4 adapter still understands
-# the row shape (cloudquery follows semver — major bumps can rename
-# columns or split tables). Override at runtime via env if a tenant
-# needs a specific build.
+# Plugin paths + versions — `registry: local` path (OSS, no Hub login).
+#
+# The cloudquery CLI's default registry (`cloudquery`) pulls plugins
+# from CloudQuery Hub which now requires `cloudquery login` even for
+# the OSS plugins. We pre-download the plugin BINARIES into the sidecar
+# image (see services/python-plugins/Dockerfile) and run them via
+# `registry: local` — cloudquery just exec()s them; no auth, no
+# network, no docker-in-docker.
+#
+# Defaults match the Dockerfile-installed binaries. The `version`
+# field on `registry: local` specs is informational (carried for the
+# trace + cloudquery internals); the actual binary is the one at
+# `path`. Operators with a private mirror can override either via
+# env (CLOUDQUERY_*) or per-node config (`awsPluginPath` /
+# `pgPluginPath` / `awsPluginVersion` / `pgPluginVersion`).
+CLOUDQUERY_AWS_PLUGIN_PATH = os.environ.get(
+    "CLOUDQUERY_AWS_PLUGIN_PATH", "/opt/cq-plugins/source-aws"
+)
+CLOUDQUERY_PG_PLUGIN_PATH = os.environ.get(
+    "CLOUDQUERY_PG_PLUGIN_PATH", "/opt/cq-plugins/destination-postgresql"
+)
 CLOUDQUERY_AWS_SOURCE_VERSION = os.environ.get(
-    "CLOUDQUERY_AWS_SOURCE_VERSION", "v32.0.0"
+    "CLOUDQUERY_AWS_SOURCE_VERSION", "v22.19.2"
 )
 CLOUDQUERY_POSTGRESQL_DEST_VERSION = os.environ.get(
-    "CLOUDQUERY_POSTGRESQL_DEST_VERSION", "v8.0.0"
+    "CLOUDQUERY_POSTGRESQL_DEST_VERSION", "v7.3.0"
 )
+# Registry vocabulary — `local` is the OSS path (no Hub auth). `docker`
+# requires docker socket access (not available in our sidecar). `grpc`
+# is out-of-band — the plugin runs as a separate process and cloudquery
+# connects to its gRPC address. `cloudquery` is the Hub default and
+# requires login. We default to `local` so the OSS path is the one
+# operators get for free; the others stay available as escape hatches.
+ALLOWED_REGISTRIES = ("local", "grpc", "docker", "cloudquery")
 
 logger = logging.getLogger("ragdoll.python-plugins.cloudquery")
 
@@ -203,13 +225,36 @@ def _resolve_config(config: Dict[str, Any]) -> Dict[str, Any]:
     if runner not in ("subprocess", "dry-run"):
         raise ValueError(f"cloudquery_aws_sync: unknown runner {runner!r}")
 
+    registry = str(cfg.get("registry") or "local")
+    if registry not in ALLOWED_REGISTRIES:
+        raise ValueError(
+            f"cloudquery_aws_sync: unknown registry {registry!r} — "
+            f"allowed: {', '.join(ALLOWED_REGISTRIES)}"
+        )
+
     cfg["_tables"] = tables
     cfg["_regions"] = regions
     cfg["_account_id"] = account_id
     cfg["_write_mode"] = write_mode
     cfg["_runner"] = runner
+    cfg["_registry"] = registry
     cfg["_bin"] = str(cfg.get("cloudqueryBin") or DEFAULT_BIN)
     cfg["_timeout_ms"] = int(cfg.get("timeoutMs") or DEFAULT_TIMEOUT_MS)
+    # Plugin path / version resolution. Config wins over env wins over
+    # the in-image defaults — operators can point at a private mirror
+    # without rebuilding the sidecar.
+    cfg["_aws_plugin_path"] = str(
+        cfg.get("awsPluginPath") or CLOUDQUERY_AWS_PLUGIN_PATH
+    )
+    cfg["_pg_plugin_path"] = str(
+        cfg.get("pgPluginPath") or CLOUDQUERY_PG_PLUGIN_PATH
+    )
+    cfg["_aws_plugin_version"] = str(
+        cfg.get("awsPluginVersion") or CLOUDQUERY_AWS_SOURCE_VERSION
+    )
+    cfg["_pg_plugin_version"] = str(
+        cfg.get("pgPluginVersion") or CLOUDQUERY_POSTGRESQL_DEST_VERSION
+    )
     return cfg
 
 
@@ -239,12 +284,39 @@ def _build_spec(
     account_id: Optional[str],
     write_mode: str,
     pg_dsn: str,
+    registry: str,
+    aws_plugin_path: str,
+    pg_plugin_path: str,
+    aws_plugin_version: str,
+    pg_plugin_version: str,
 ) -> str:
     """Produce the YAML spec cloudquery's `sync` subcommand consumes.
 
     Two documents in one file (the cloudquery convention):
-      1. source plugin block (AWS) — names the tables + regions + scope
-      2. destination plugin block (postgresql) — connection_string + write_mode
+      1. source plugin block (AWS) — tables + regions + scope
+      2. destination plugin block (postgresql) — connection_string +
+         write_mode
+
+    The `registry` arg drives the source/destination block's registry
+    field, which in turn changes the meaning of `path`:
+
+      * `local` (DEFAULT, OSS path)   `path` is the local FS path to
+                                       the plugin binary. cloudquery
+                                       exec()s it. No Hub auth.
+      * `grpc`                         `path` is the gRPC address of an
+                                       already-running plugin process.
+                                       No Hub auth.
+      * `docker`                       `path` is a docker image
+                                       reference; cloudquery `docker
+                                       pull` + `docker run`s it. The
+                                       sidecar needs docker socket
+                                       access (NOT default in our
+                                       compose stack).
+      * `cloudquery`                   Hub default — requires
+                                       `cloudquery login` /
+                                       CLOUDQUERY_API_KEY for any
+                                       non-trivial plugin (including
+                                       OSS plugins). Avoid.
 
     YAML is hand-rolled (no PyYAML dep in the main sidecar env). The
     structure is small + deterministic so manual emission is fine and
@@ -262,9 +334,9 @@ def _build_spec(
         "kind": "source",
         "spec": {
             "name": "aws",
-            "registry": "cloudquery",
-            "path": "cloudquery/aws",
-            "version": CLOUDQUERY_AWS_SOURCE_VERSION,
+            "registry": registry,
+            "path": aws_plugin_path,
+            "version": aws_plugin_version,
             "tables": tables,
             "destinations": ["postgresql"],
             "spec": aws_spec,
@@ -274,9 +346,9 @@ def _build_spec(
         "kind": "destination",
         "spec": {
             "name": "postgresql",
-            "registry": "cloudquery",
-            "path": "cloudquery/postgresql",
-            "version": CLOUDQUERY_POSTGRESQL_DEST_VERSION,
+            "registry": registry,
+            "path": pg_plugin_path,
+            "version": pg_plugin_version,
             "write_mode": write_mode,
             "spec": {"connection_string": pg_dsn},
         },
@@ -422,12 +494,36 @@ def handle(request) -> Dict[str, Any]:
     env = dict(os.environ)
     env.update(aws_env)
 
+    # Sanity-check: when registry=local, the plugin binaries MUST
+    # exist on disk. Catching this here makes the error legible
+    # ("plugin binary missing — rebuild the sidecar image OR override
+    # awsPluginPath / pgPluginPath") rather than waiting for
+    # cloudquery to fail with a cryptic exec error.
+    if cfg["_registry"] == "local":
+        for label, path in (
+            ("awsPluginPath", cfg["_aws_plugin_path"]),
+            ("pgPluginPath", cfg["_pg_plugin_path"]),
+        ):
+            if not os.path.exists(path):
+                raise ValueError(
+                    f"cloudquery_aws_sync: registry=local but {label} {path!r} "
+                    "does not exist in the sidecar. Rebuild the python-plugins "
+                    "image (Dockerfile installs the OSS plugin binaries under "
+                    "/opt/cq-plugins/) OR set config.awsPluginPath / "
+                    "config.pgPluginPath to a path that does."
+                )
+
     spec_yaml = _build_spec(
         tables=cfg["_tables"],
         regions=cfg["_regions"],
         account_id=cfg["_account_id"],
         write_mode=cfg["_write_mode"],
         pg_dsn=pg_dsn,
+        registry=cfg["_registry"],
+        aws_plugin_path=cfg["_aws_plugin_path"],
+        pg_plugin_path=cfg["_pg_plugin_path"],
+        aws_plugin_version=cfg["_aws_plugin_version"],
+        pg_plugin_version=cfg["_pg_plugin_version"],
     )
 
     # Write the spec to a temp file; cloudquery's `sync` takes a path

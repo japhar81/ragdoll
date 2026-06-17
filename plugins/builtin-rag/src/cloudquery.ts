@@ -102,6 +102,40 @@ export const CLOUDQUERY_WRITE_MODES = [
 ] as const;
 export type CloudQueryWriteMode = (typeof CLOUDQUERY_WRITE_MODES)[number];
 
+/** Plugin-source-resolution registries the OSS path supports.
+ *
+ *   - `local`      — Default. Plugin binary lives on the sidecar FS
+ *                    (`/opt/cq-plugins/source-aws` /
+ *                    `/opt/cq-plugins/destination-postgresql` from
+ *                    the Dockerfile). cloudquery exec()s it. No
+ *                    auth, no network.
+ *   - `grpc`       — Plugin runs out-of-band; `path` is the gRPC
+ *                    address. Useful for operators running plugins
+ *                    in a separate container they control.
+ *   - `docker`     — cloudquery `docker pull` + `docker run`s the
+ *                    image. Requires docker socket access on the
+ *                    sidecar (NOT enabled by default in our
+ *                    compose stack).
+ *   - `cloudquery` — Hub default. Requires `cloudquery login` /
+ *                    CLOUDQUERY_API_KEY EVEN FOR OSS PLUGINS as
+ *                    of late 2025. Avoid in production paths;
+ *                    listed here for completeness so the Builder
+ *                    UI can surface it for operators with Hub
+ *                    accounts.
+ *
+ * Default is `local` — the OSS-without-auth path is the one
+ * operators get without any extra configuration. See ADR-0033
+ * §"Amendment — OSS plugin source via registry: local."
+ */
+export const CLOUDQUERY_PLUGIN_REGISTRIES = [
+  "local",
+  "grpc",
+  "docker",
+  "cloudquery"
+] as const;
+export type CloudQueryPluginRegistry =
+  (typeof CLOUDQUERY_PLUGIN_REGISTRIES)[number];
+
 export const cloudqueryAwsSyncManifest: PluginManifest = {
   id: "cloudquery_aws_sync",
   name: "CloudQuery AWS Sync",
@@ -122,7 +156,7 @@ export const cloudqueryAwsSyncManifest: PluginManifest = {
     { binding: "destination", kind: "postgres" }
   ] as unknown as PluginManifest["requires"],
   description:
-    "Runs a scoped `cloudquery sync` (CloudQuery's AWS source plugin → Postgres destination plugin) and lands the rows in the Postgres connection bound to this node's `destination` binding. Default scope is the route-table tables (`aws_ec2_route_tables`, `aws_ec2_routes`); additive tables come from the same network/exposure surface bulwark consumes (VPC, subnet, gateway, ELBv2 — see `CLOUDQUERY_AWS_ALLOWED_TABLES`).\n\n## Seam discipline (READ THIS FIRST)\n\nbulwark AUTHORS the pipeline that uses this plugin; bulwark owns the canonical mapping (`aws_ec2_route_tables` rows → RouteTable nodes — Z4 adapter) and the multi-source merge (`Route exists?` — Z6). **RAGdoll PULLS only.** This plugin reports row counts per table and otherwise has no opinion about what those rows mean. If you find yourself reaching for resolution / canonical-node logic inside this plugin, that's the seam being crossed — push it back to bulwark.\n\n## Wiring AWS credentials\n\nCloud credentials require TWO things on the spec node — `config.credsSecretRef` alone is not enough (same gotcha as cartography_crawl):\n\n```jsonc\n{\n  \"id\": \"cq-sync\",\n  \"plugin\": { \"category\": \"datasource\", \"id\": \"cloudquery_aws_sync\", \"version\": \"1.0.0\" },\n  \"dataset\": { \"slug\": \"<dataset whose `destination` binding points at a kind=postgres connection>\" },\n  \"config\": {\n    \"tables\": [\"aws_ec2_route_tables\", \"aws_ec2_routes\"],\n    \"regions\": [\"us-east-1\"],\n    \"accountId\": \"123456789012\",\n    \"credsSecretRef\": \"aws-prod\"\n  },\n  \"secrets\": {\n    \"aws-prod\": { \"scope\": \"tenant\", \"key\": \"AWS_PROD_CREDS\" }\n  }\n}\n```\n\nThe credsSecretRef value is a `.env`-style block (one `KEY=VALUE` per line — `AWS_ACCESS_KEY_ID=...`, `AWS_SECRET_ACCESS_KEY=...`, optional `AWS_SESSION_TOKEN=...`, optional `AWS_DEFAULT_REGION=...`). The sidecar exports each line into cloudquery's subprocess env; raw values never appear in argv, the trace, or the logs.\n\n## What lands where\n\ncloudquery's Postgres destination plugin owns the destination DDL: it CREATEs the tables (`aws_ec2_route_tables`, `aws_ec2_routes`, etc.) and writes rows into them with cloudquery's native column shape (snake_case, `_cq_id` / `_cq_sync_time` provenance columns, etc.). bulwark reads from THESE TABLES verbatim — RAGdoll does NOT remap them. A bulwark schema bump that adds a column maps to a CloudQuery version bump that exposes that column in `_source`, not to a code change here.",
+    "Runs a scoped `cloudquery sync` (CloudQuery's AWS source plugin → Postgres destination plugin) and lands the rows in the Postgres connection bound to this node's `destination` binding. Default scope is the route-table tables (`aws_ec2_route_tables`, `aws_ec2_routes`); additive tables come from the same network/exposure surface bulwark consumes (VPC, subnet, gateway, ELBv2 — see `CLOUDQUERY_AWS_ALLOWED_TABLES`).\n\n## Plugin source: OSS / no Hub login (the default)\n\nThe AWS source + PostgreSQL destination plugins are sourced via `registry: local` by default — the OSS path, no `cloudquery login` / CLOUDQUERY_API_KEY required. The plugin binaries ship inside the python-plugins sidecar image at `/opt/cq-plugins/source-aws` and `/opt/cq-plugins/destination-postgresql` (versions pinned in the Dockerfile). cloudquery exec()s them directly. Operators with a private mirror can override via `config.awsPluginPath` / `config.pgPluginPath`; operators with a Hub account can switch `config.registry` to `cloudquery`. See ADR-0033 §Amendment for why the default moved off the Hub.\n\n## Seam discipline (READ THIS FIRST)\n\nbulwark AUTHORS the pipeline that uses this plugin; bulwark owns the canonical mapping (`aws_ec2_route_tables` rows → RouteTable nodes — Z4 adapter) and the multi-source merge (`Route exists?` — Z6). **RAGdoll PULLS only.** This plugin reports row counts per table and otherwise has no opinion about what those rows mean. If you find yourself reaching for resolution / canonical-node logic inside this plugin, that's the seam being crossed — push it back to bulwark.\n\n## Wiring AWS credentials\n\nCloud credentials require TWO things on the spec node — `config.credsSecretRef` alone is not enough (same gotcha as cartography_crawl):\n\n```jsonc\n{\n  \"id\": \"cq-sync\",\n  \"plugin\": { \"category\": \"datasource\", \"id\": \"cloudquery_aws_sync\", \"version\": \"1.0.0\" },\n  \"dataset\": { \"slug\": \"<dataset whose `destination` binding points at a kind=postgres connection>\" },\n  \"config\": {\n    \"tables\": [\"aws_ec2_route_tables\", \"aws_ec2_routes\"],\n    \"regions\": [\"us-east-1\"],\n    \"accountId\": \"123456789012\",\n    \"credsSecretRef\": \"aws-prod\"\n  },\n  \"secrets\": {\n    \"aws-prod\": { \"scope\": \"tenant\", \"key\": \"AWS_PROD_CREDS\" }\n  }\n}\n```\n\nThe credsSecretRef value is a `.env`-style block (one `KEY=VALUE` per line — `AWS_ACCESS_KEY_ID=...`, `AWS_SECRET_ACCESS_KEY=...`, optional `AWS_SESSION_TOKEN=...`, optional `AWS_DEFAULT_REGION=...`). The sidecar exports each line into cloudquery's subprocess env; raw values never appear in argv, the trace, or the logs.\n\n## What lands where\n\ncloudquery's Postgres destination plugin owns the destination DDL: it CREATEs the tables (`aws_ec2_route_tables`, `aws_ec2_routes`, etc.) and writes rows into them with cloudquery's native column shape (snake_case, `_cq_id` / `_cq_sync_time` provenance columns, etc.). bulwark reads from THESE TABLES verbatim — RAGdoll does NOT remap them. A bulwark schema bump that adds a column maps to a CloudQuery version bump that exposes that column in `_source`, not to a code change here.",
   configSchema: {
     type: "object",
     required: ["tables"],
@@ -154,6 +188,33 @@ export const cloudqueryAwsSyncManifest: PluginManifest = {
         default: "overwrite",
         description:
           "How cloudquery's Postgres destination handles existing rows. `overwrite` (default): each sync REPLACES the prior snapshot — safest for evidence pulls. `append`: rows accumulate (operator owns retention). `overwrite-delete-stale`: overwrite + drop rows the new snapshot didn't include (cloudquery's `overwrite-delete-stale` write mode)."
+      },
+      registry: {
+        type: "string",
+        enum: [...CLOUDQUERY_PLUGIN_REGISTRIES],
+        default: "local",
+        description:
+          "How cloudquery resolves the AWS source + Postgres destination plugins. Defaults to `local` — the OSS path, no CloudQuery Hub login required (the plugin binaries ship inside the python-plugins sidecar image; cloudquery exec()s them). Switch to `grpc` to point at out-of-band plugin processes, `docker` if the sidecar gets docker socket access, or `cloudquery` to use the Hub registry (which requires `cloudquery login` / CLOUDQUERY_API_KEY EVEN FOR OSS PLUGINS). See ADR-0033 §Amendment for the rationale."
+      },
+      awsPluginPath: {
+        type: "string",
+        description:
+          "Override for the AWS source plugin location. Meaning depends on `registry`: a filesystem path for `local`, a gRPC address (`host:port`) for `grpc`, a docker image reference for `docker`, a Hub plugin path (`cloudquery/aws`) for `cloudquery`. Defaults: `/opt/cq-plugins/source-aws` for `local`. Only set when pointing at a private mirror or a custom build."
+      },
+      pgPluginPath: {
+        type: "string",
+        description:
+          "Override for the PostgreSQL destination plugin location — same semantics as `awsPluginPath`. Defaults: `/opt/cq-plugins/destination-postgresql` for `local`."
+      },
+      awsPluginVersion: {
+        type: "string",
+        description:
+          "Version label for the AWS source plugin (informational on `registry: local`; used for image tag / Hub lookup on `docker` / `cloudquery`). Defaults to the version of the binary baked into the sidecar image."
+      },
+      pgPluginVersion: {
+        type: "string",
+        description:
+          "Version label for the PostgreSQL destination plugin — same semantics as `awsPluginVersion`."
       },
       cloudqueryBin: {
         type: "string",
@@ -215,6 +276,7 @@ export const cloudqueryAwsSyncManifest: PluginManifest = {
       tables: { widget: "tags" },
       regions: { widget: "tags" },
       writeMode: { widget: "select" },
+      registry: { widget: "select" },
       runner: { widget: "select" },
       timeoutMs: { widget: "number", min: 60_000, step: 60_000 }
     }

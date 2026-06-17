@@ -19,6 +19,7 @@ import {
   cloudqueryAwsSyncManifest,
   CLOUDQUERY_AWS_ALLOWED_TABLES,
   CLOUDQUERY_AWS_DEFAULT_TABLES,
+  CLOUDQUERY_PLUGIN_REGISTRIES,
   CLOUDQUERY_WRITE_MODES
 } from "../src/cloudquery.ts";
 import { loadPluginRegistry } from "../../../packages/plugin-loader/src/index.ts";
@@ -90,6 +91,58 @@ test("cloudquery_aws_sync manifest: writeMode enum + runner enum are surfaced", 
   assert.equal(schema.properties?.runner?.default, "subprocess");
   // 30-minute default timeout — matches cartography_crawl (long syncs are normal).
   assert.equal(schema.properties?.timeoutMs?.default, 1_800_000);
+});
+
+test("cloudquery_aws_sync manifest: registry defaults to `local` (OSS path — no Hub login)", () => {
+  // Headline of this fix: with `registry: cloudquery` the sync dies on
+  // "Try logging in via `cloudquery login`" even for Apache-2.0 plugins.
+  // The default MUST stay `local` so a fresh operator never hits Hub
+  // auth without explicitly opting in.
+  const schema = cloudqueryAwsSyncManifest.configSchema as {
+    properties?: Record<string, { enum?: unknown[]; default?: unknown; description?: string }>;
+  };
+  assert.equal(schema.properties?.registry?.default, "local");
+  assert.deepEqual(
+    schema.properties?.registry?.enum,
+    [...CLOUDQUERY_PLUGIN_REGISTRIES]
+  );
+  // Description warns about the `cloudquery` Hub option requiring auth
+  // even for OSS plugins — otherwise an operator could flip the knob
+  // thinking it's safer + get surprise auth failures.
+  const desc = schema.properties?.registry?.description ?? "";
+  assert.match(desc, /no CloudQuery Hub login required|no `cloudquery login` \/ CLOUDQUERY_API_KEY/i);
+  assert.match(desc, /OSS/);
+});
+
+test("cloudquery_aws_sync manifest: plugin path/version overrides exist for private mirrors", () => {
+  // Operators with private artefact mirrors (e.g. internal Nexus) need
+  // to point at a different path WITHOUT rebuilding the sidecar image.
+  // These knobs are the documented seam for that.
+  const schema = cloudqueryAwsSyncManifest.configSchema as {
+    properties?: Record<string, unknown>;
+  };
+  for (const k of [
+    "awsPluginPath",
+    "pgPluginPath",
+    "awsPluginVersion",
+    "pgPluginVersion"
+  ]) {
+    assert.ok(
+      schema.properties?.[k],
+      `configSchema must surface ${k} for the private-mirror escape hatch`
+    );
+  }
+});
+
+test("cloudquery_aws_sync manifest: description spells out the OSS-no-Hub-login default", () => {
+  // Loud + discoverable. Operators reading the Builder Docs tab need
+  // to see WHY the default registry is `local` and what their escape
+  // hatches are. This is the documentation of the fix the user just
+  // shipped.
+  const d = cloudqueryAwsSyncManifest.description ?? "";
+  assert.match(d, /no CloudQuery Hub login required|no `cloudquery login`/i);
+  assert.match(d, /OSS/);
+  assert.match(d, /registry: local/i);
 });
 
 test("cloudquery_aws_sync manifest: credsSecretRef is a secret-ref AND warns about the dual-declaration trap", () => {
