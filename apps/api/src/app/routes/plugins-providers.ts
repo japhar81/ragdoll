@@ -96,6 +96,97 @@ export function registerPluginsProvidersRoutes(
     return ok({ sources });
   });
 
+  // PLUGIN-ARCH-1 close-out: CRUD on the plugin sources catalog.
+  // The store-level methods are present on `DbPluginSourceStore` and
+  // the in-memory shim used by tests; both are gated behind
+  // `plugin:manage` here. Built-in (`builtin` / `sample-text`) source
+  // ids are reserved — the API refuses to create / patch / delete
+  // them so the safety-net rows never disappear.
+  const RESERVED_SOURCE_IDS = new Set(["builtin", "sample-text"]);
+
+  api.route("POST", "/api/plugins/sources", async (ctx) => {
+    enforce(ctx.principal, "plugin:manage");
+    const store = deps.pluginSourceStore;
+    if (!store) return error(503, "plugin_source_store_not_wired");
+    const body = (ctx.request.body ?? {}) as Record<string, unknown>;
+    const id = String(body.id ?? "").trim();
+    const gitUrl = String(body.gitUrl ?? "").trim();
+    if (!/^[a-z0-9][a-z0-9._-]{0,127}$/i.test(id)) {
+      return error(400, "invalid_source_id");
+    }
+    if (RESERVED_SOURCE_IDS.has(id.toLowerCase())) {
+      return error(400, "reserved_source_id");
+    }
+    if (!gitUrl) return error(400, "git_url_required");
+    if (!store.create) return error(501, "store_does_not_support_create");
+    const created = await store.create({
+      id,
+      gitUrl,
+      ref: typeof body.ref === "string" ? body.ref : undefined,
+      subpath: typeof body.subpath === "string" ? body.subpath : undefined,
+      displayName:
+        typeof body.displayName === "string" ? body.displayName : undefined,
+      description:
+        typeof body.description === "string" ? body.description : undefined,
+      enabled: body.enabled === undefined ? true : Boolean(body.enabled),
+      requireSignature:
+        body.requireSignature === undefined
+          ? false
+          : Boolean(body.requireSignature),
+      allowedSigners:
+        typeof body.allowedSigners === "string"
+          ? body.allowedSigners
+          : undefined
+    });
+    return ok({ source: created });
+  });
+
+  api.route("PATCH", "/api/plugins/sources/:id", async (ctx) => {
+    enforce(ctx.principal, "plugin:manage");
+    const store = deps.pluginSourceStore;
+    if (!store) return error(503, "plugin_source_store_not_wired");
+    const id = ctx.params.id;
+    if (RESERVED_SOURCE_IDS.has(id.toLowerCase())) {
+      return error(400, "reserved_source_id");
+    }
+    if (!store.update) return error(501, "store_does_not_support_update");
+    const body = (ctx.request.body ?? {}) as Record<string, unknown>;
+    const patch: Parameters<NonNullable<typeof store.update>>[1] = {};
+    if (typeof body.gitUrl === "string") patch.gitUrl = body.gitUrl;
+    if (typeof body.ref === "string") patch.ref = body.ref;
+    if (typeof body.subpath === "string") patch.subpath = body.subpath;
+    if (typeof body.displayName === "string")
+      patch.displayName = body.displayName;
+    if (typeof body.description === "string")
+      patch.description = body.description;
+    if (body.enabled !== undefined) patch.enabled = Boolean(body.enabled);
+    if (body.requireSignature !== undefined)
+      patch.requireSignature = Boolean(body.requireSignature);
+    if (typeof body.allowedSigners === "string")
+      patch.allowedSigners = body.allowedSigners;
+    try {
+      const updated = await store.update(id, patch);
+      return ok({ source: updated });
+    } catch (e) {
+      const msg = (e as Error).message;
+      if (/not found/i.test(msg)) return error(404, "not_found");
+      throw e;
+    }
+  });
+
+  api.route("DELETE", "/api/plugins/sources/:id", async (ctx) => {
+    enforce(ctx.principal, "plugin:manage");
+    const store = deps.pluginSourceStore;
+    if (!store) return error(503, "plugin_source_store_not_wired");
+    const id = ctx.params.id;
+    if (RESERVED_SOURCE_IDS.has(id.toLowerCase())) {
+      return error(400, "reserved_source_id");
+    }
+    if (!store.remove) return error(501, "store_does_not_support_delete");
+    await store.remove(id);
+    return ok({ ok: true });
+  });
+
   // PLUGIN-ARCH-1: admin-only refresh. Rebuilds the registry off-line
   // against the source store, atomically swaps the holder's pointer.
   // In-flight requests keep their snapshot of the prior registry; new

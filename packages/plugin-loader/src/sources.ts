@@ -48,6 +48,16 @@ export interface PluginSource {
   ref?: string;
   /** Subpath inside the repo to scan; empty string = repo root. */
   subpath?: string;
+  /** PLUGIN-ARCH-1 close-out: when true, the lifecycle's `verify`
+   *  stage runs `git verify-commit` against `allowedSigners` and
+   *  refuses to load on a bad / missing / untrusted signature.
+   *  Opt-in per source so existing rows keep working unchanged. */
+  requireSignature?: boolean;
+  /** PLUGIN-ARCH-1 close-out: SSH allowed-signers file content.
+   *  Opaque text — format is whatever
+   *  `gpg.ssh.allowedSignersFile` expects. Used only when
+   *  `requireSignature` is true. */
+  allowedSigners?: string;
   /** Last-known-good fetch state. NULL for sources that haven't
    *  loaded yet. */
   lastCommitSha?: string;
@@ -62,6 +72,19 @@ export interface PluginSource {
  * the test harness so the loader's lifecycle can be exercised without
  * spinning up Postgres.
  */
+/** Input shape for create / update — same shape both consume. */
+export interface PluginSourceUpsert {
+  id: string;
+  gitUrl: string;
+  ref?: string;
+  subpath?: string;
+  displayName?: string;
+  description?: string;
+  enabled?: boolean;
+  requireSignature?: boolean;
+  allowedSigners?: string;
+}
+
 export interface PluginSourceStore {
   /** List every source row that the loader should iterate (`enabled`
    *  filter is the caller's choice — the loader filters to
@@ -77,6 +100,14 @@ export interface PluginSourceStore {
     ok: boolean;
     error?: string | null;
   }): Promise<void>;
+  /** PLUGIN-ARCH-1 close-out: CRUD for the admin UI's "Plugin
+   *  Sources" screen. The store-level methods are gated by the
+   *  `plugin:manage` permission at the route layer (see
+   *  `apps/api/src/app/routes/plugins-providers.ts`). */
+  create?(source: PluginSourceUpsert): Promise<PluginSource>;
+  update?(id: string, patch: Partial<PluginSourceUpsert>): Promise<PluginSource>;
+  remove?(id: string): Promise<void>;
+  get?(id: string): Promise<PluginSource | undefined>;
 }
 
 /** Always-on virtual sources for the in-tree built-in modules.
@@ -127,6 +158,7 @@ export class DbPluginSourceStore implements PluginSourceStore {
     const result = await this.pool.query<DbRow>(
       `SELECT
          id, git_url, ref, subpath, display_name, description, enabled,
+         require_signature, allowed_signers,
          last_commit_sha, last_fetched_at, last_load_ok, last_load_error
        FROM plugin_sources
        ${where}
@@ -152,6 +184,85 @@ export class DbPluginSourceStore implements PluginSourceStore {
        WHERE id = $1`,
       [args.id, args.commitSha ?? null, args.fetchedAt, args.ok, args.error ?? null]
     );
+  }
+
+  async create(source: PluginSourceUpsert): Promise<PluginSource> {
+    await this.pool.query(
+      `INSERT INTO plugin_sources
+         (id, git_url, ref, subpath, display_name, description, enabled,
+          require_signature, allowed_signers)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+      [
+        source.id,
+        source.gitUrl,
+        source.ref ?? "main",
+        source.subpath ?? "",
+        source.displayName ?? null,
+        source.description ?? null,
+        source.enabled ?? true,
+        source.requireSignature ?? false,
+        source.allowedSigners ?? null
+      ]
+    );
+    const created = await this.get(source.id);
+    if (!created) {
+      throw new Error(`DbPluginSourceStore.create: row ${source.id} disappeared`);
+    }
+    return created;
+  }
+
+  async update(
+    id: string,
+    patch: Partial<PluginSourceUpsert>
+  ): Promise<PluginSource> {
+    // Build a UPDATE only for fields the caller actually sent. Keep
+    // the SQL small + the diff visible to anyone reading the row's
+    // audit log.
+    const sets: string[] = [];
+    const args: unknown[] = [id];
+    const set = (col: string, val: unknown) => {
+      args.push(val);
+      sets.push(`${col} = $${args.length}`);
+    };
+    if (patch.gitUrl !== undefined) set("git_url", patch.gitUrl);
+    if (patch.ref !== undefined) set("ref", patch.ref);
+    if (patch.subpath !== undefined) set("subpath", patch.subpath);
+    if (patch.displayName !== undefined) set("display_name", patch.displayName);
+    if (patch.description !== undefined) set("description", patch.description);
+    if (patch.enabled !== undefined) set("enabled", patch.enabled);
+    if (patch.requireSignature !== undefined)
+      set("require_signature", patch.requireSignature);
+    if (patch.allowedSigners !== undefined)
+      set("allowed_signers", patch.allowedSigners);
+    if (sets.length === 0) {
+      const existing = await this.get(id);
+      if (!existing) throw new Error(`plugin_sources row ${id} not found`);
+      return existing;
+    }
+    sets.push("updated_at = now()");
+    await this.pool.query(
+      `UPDATE plugin_sources SET ${sets.join(", ")} WHERE id = $1`,
+      args
+    );
+    const updated = await this.get(id);
+    if (!updated) throw new Error(`plugin_sources row ${id} not found after update`);
+    return updated;
+  }
+
+  async remove(id: string): Promise<void> {
+    await this.pool.query(`DELETE FROM plugin_sources WHERE id = $1`, [id]);
+  }
+
+  async get(id: string): Promise<PluginSource | undefined> {
+    const result = await this.pool.query<DbRow>(
+      `SELECT
+         id, git_url, ref, subpath, display_name, description, enabled,
+         require_signature, allowed_signers,
+         last_commit_sha, last_fetched_at, last_load_ok, last_load_error
+       FROM plugin_sources WHERE id = $1`,
+      [id]
+    );
+    return result.rows[0] ? rowToSource(result.rows[0]) : undefined;
   }
 }
 
@@ -182,6 +293,49 @@ export class InMemoryPluginSourceStore implements PluginSourceStore {
   setSources(next: PluginSource[]): void {
     this.sources = next;
   }
+  async create(source: PluginSourceUpsert): Promise<PluginSource> {
+    if (this.sources.some((s) => s.id === source.id)) {
+      throw new Error(`plugin source ${source.id} already exists`);
+    }
+    const row: PluginSource = {
+      id: source.id,
+      kind: "git",
+      enabled: source.enabled ?? true,
+      gitUrl: source.gitUrl,
+      ref: source.ref ?? "main",
+      subpath: source.subpath,
+      displayName: source.displayName,
+      description: source.description,
+      requireSignature: source.requireSignature ?? false,
+      allowedSigners: source.allowedSigners
+    };
+    this.sources.push(row);
+    return { ...row };
+  }
+  async update(
+    id: string,
+    patch: Partial<PluginSourceUpsert>
+  ): Promise<PluginSource> {
+    const row = this.sources.find((s) => s.id === id);
+    if (!row) throw new Error(`plugin source ${id} not found`);
+    if (patch.gitUrl !== undefined) row.gitUrl = patch.gitUrl;
+    if (patch.ref !== undefined) row.ref = patch.ref;
+    if (patch.subpath !== undefined) row.subpath = patch.subpath || undefined;
+    if (patch.displayName !== undefined) row.displayName = patch.displayName;
+    if (patch.description !== undefined) row.description = patch.description;
+    if (patch.enabled !== undefined) row.enabled = patch.enabled;
+    if (patch.requireSignature !== undefined)
+      row.requireSignature = patch.requireSignature;
+    if (patch.allowedSigners !== undefined) row.allowedSigners = patch.allowedSigners;
+    return { ...row };
+  }
+  async remove(id: string): Promise<void> {
+    this.sources = this.sources.filter((s) => s.id !== id);
+  }
+  async get(id: string): Promise<PluginSource | undefined> {
+    const row = this.sources.find((s) => s.id === id);
+    return row ? { ...row } : undefined;
+  }
 }
 
 interface DbRow {
@@ -192,6 +346,8 @@ interface DbRow {
   display_name: string | null;
   description: string | null;
   enabled: boolean;
+  require_signature: boolean | null;
+  allowed_signers: string | null;
   last_commit_sha: string | null;
   last_fetched_at: string | null;
   last_load_ok: boolean | null;
@@ -208,6 +364,8 @@ function rowToSource(row: DbRow): PluginSource {
     gitUrl: row.git_url,
     ref: row.ref,
     subpath: row.subpath || undefined,
+    requireSignature: row.require_signature ?? false,
+    allowedSigners: row.allowed_signers ?? undefined,
     lastCommitSha: row.last_commit_sha ?? undefined,
     lastFetchedAt: row.last_fetched_at ?? undefined,
     lastLoadOk: row.last_load_ok ?? undefined,

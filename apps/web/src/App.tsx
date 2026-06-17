@@ -20,6 +20,7 @@ import { PipelineBuilder } from "./components/PipelineBuilder.tsx";
 import { PipelinesScreen } from "./components/PipelinesScreen.tsx";
 import { DatasetsScreen } from "./components/DatasetsScreen.tsx";
 import { ConnectionsScreen } from "./components/ConnectionsScreen.tsx";
+import { PluginSourcesScreen } from "./components/PluginSourcesScreen.tsx";
 // ExternalConnectionsScreen folded into ConnectionsScreen (ADR-0023).
 import { SchedulerScreen } from "./components/SchedulerScreen.tsx";
 import { TenantsScreen } from "./components/TenantsScreen.tsx";
@@ -162,7 +163,9 @@ const NAV_GROUPS: Array<{ group: string; items: NavItem[] }> = [
       // Per-(tenant, env) backing-store host + creds registry. Datasets
       // reference these by name; plugins resolve them through the dataset
       // and never see the host directly.
-      { path: "/connections", label: "Connections", perms: ["connection:read"] }
+      { path: "/connections", label: "Connections", perms: ["connection:read"] },
+      // PLUGIN-ARCH-1 close-out: external repo plugin sources.
+      { path: "/plugin-sources", label: "Plugin Sources", perms: ["plugin:manage"] }
     ]
   },
   {
@@ -351,6 +354,7 @@ function Shell() {
         <Route path="/config" element={<ConfigScreen />} />
         <Route path="/secrets" element={<SecretsScreen />} />
         <Route path="/connections" element={<ConnectionsScreen />} />
+        <Route path="/plugin-sources" element={<PluginSourcesScreen />} />
         {/* /external-connections folded into /connections (ADR-0023). */}
         <Route path="/executions" element={<ExecutionsScreen />} />
         <Route path="/audit" element={<AuditScreen />} />

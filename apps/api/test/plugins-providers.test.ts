@@ -224,6 +224,154 @@ test("plugins surfaced through /api/plugins carry the `source` provenance field 
   }
 });
 
+// ---------------------------------------------------------------------------
+// PLUGIN-ARCH-1 close-out: CRUD on /api/plugins/sources
+// ---------------------------------------------------------------------------
+
+test("POST /api/plugins/sources creates a new git source row (plugin:manage required)", async () => {
+  const h = buildHarness({ withAuth: true });
+  const auth = await seedAuth(h);
+  const res = await h.request({
+    method: "POST",
+    path: "/api/plugins/sources",
+    headers: auth,
+    body: {
+      id: "ext-acme",
+      gitUrl: "https://git.acme.invalid/plugins.git",
+      ref: "main",
+      subpath: "src",
+      enabled: true,
+      requireSignature: true,
+      allowedSigners: "octocat ssh-ed25519 AAAA"
+    }
+  });
+  assert.equal(res.status, 200);
+  assert.equal(res.body.source.id, "ext-acme");
+  assert.equal(res.body.source.kind, "git");
+  assert.equal(res.body.source.requireSignature, true);
+  // And the new row shows up on the listing endpoint.
+  const list = await h.request({
+    method: "GET",
+    path: "/api/plugins/sources",
+    headers: auth
+  });
+  assert.ok(list.body.sources.some((s: { id: string }) => s.id === "ext-acme"));
+});
+
+test("POST /api/plugins/sources refuses reserved ids (builtin / sample-text) and malformed ids", async () => {
+  const h = buildHarness({ withAuth: true });
+  const auth = await seedAuth(h);
+  for (const id of ["builtin", "sample-text", "BUILTIN"]) {
+    const res = await h.request({
+      method: "POST",
+      path: "/api/plugins/sources",
+      headers: auth,
+      body: { id, gitUrl: "https://x.invalid/y.git" }
+    });
+    assert.equal(res.status, 400, `id=${id} must be rejected as reserved`);
+  }
+  for (const id of ["", "../escape", "with space", "WAY-TOO-LONG".repeat(20)]) {
+    const res = await h.request({
+      method: "POST",
+      path: "/api/plugins/sources",
+      headers: auth,
+      body: { id, gitUrl: "https://x.invalid/y.git" }
+    });
+    assert.equal(res.status, 400, `id=${JSON.stringify(id)} must be rejected as malformed`);
+  }
+});
+
+test("PATCH /api/plugins/sources/:id updates a subset of fields (the audit-log-friendly minimal-UPDATE shape)", async () => {
+  const h = buildHarness({ withAuth: true });
+  const auth = await seedAuth(h);
+  await h.request({
+    method: "POST",
+    path: "/api/plugins/sources",
+    headers: auth,
+    body: {
+      id: "ext-patch",
+      gitUrl: "https://x.invalid/y.git",
+      ref: "main",
+      enabled: true
+    }
+  });
+  const res = await h.request({
+    method: "PATCH",
+    path: "/api/plugins/sources/ext-patch",
+    headers: auth,
+    body: { enabled: false, ref: "release-1.2" }
+  });
+  assert.equal(res.status, 200);
+  assert.equal(res.body.source.enabled, false);
+  assert.equal(res.body.source.ref, "release-1.2");
+  // Unmentioned fields are preserved.
+  assert.equal(res.body.source.gitUrl, "https://x.invalid/y.git");
+});
+
+test("DELETE /api/plugins/sources/:id removes a row; reserved ids are refused", async () => {
+  const h = buildHarness({ withAuth: true });
+  const auth = await seedAuth(h);
+  await h.request({
+    method: "POST",
+    path: "/api/plugins/sources",
+    headers: auth,
+    body: { id: "ext-del", gitUrl: "https://x.invalid/y.git" }
+  });
+  const del = await h.request({
+    method: "DELETE",
+    path: "/api/plugins/sources/ext-del",
+    headers: auth
+  });
+  assert.equal(del.status, 200);
+  const reserved = await h.request({
+    method: "DELETE",
+    path: "/api/plugins/sources/builtin",
+    headers: auth
+  });
+  assert.equal(reserved.status, 400);
+});
+
+test("POST/PATCH/DELETE /api/plugins/sources require plugin:manage (viewer rejected)", async () => {
+  const h = buildHarness({ withAuth: true });
+  const id = randomUUID();
+  const now = new Date().toISOString();
+  await h.deps.users!.create({
+    id,
+    email: `viewer-${randomUUID().slice(0, 6)}@x.io`,
+    displayName: "v",
+    passwordHash: await new PasswordService().hash("password123"),
+    status: "active",
+    createdAt: now,
+    updatedAt: now
+  });
+  await h.deps.rbacPolicies!.addGrant({
+    id: randomUUID(),
+    userId: id,
+    role: "viewer",
+    scope: "*",
+    createdAt: now
+  });
+  const auth = {
+    authorization: `Bearer ${h.sessions.sign({ id, type: "user", roles: [] }, 3600)}`
+  };
+  for (const op of [
+    { method: "POST" as const, path: "/api/plugins/sources", body: { id: "x", gitUrl: "y" } },
+    { method: "PATCH" as const, path: "/api/plugins/sources/x", body: { enabled: false } },
+    { method: "DELETE" as const, path: "/api/plugins/sources/x", body: {} }
+  ]) {
+    const res = await h.request({
+      method: op.method,
+      path: op.path,
+      headers: auth,
+      body: op.body
+    });
+    assert.ok(
+      res.status === 401 || res.status === 403,
+      `${op.method} ${op.path} must require plugin:manage (got ${res.status})`
+    );
+  }
+});
+
 test("GET /api/providers lists registered model-provider adapters", async () => {
   const h = buildHarness({ withAuth: true });
   const auth = await seedAuth(h);
