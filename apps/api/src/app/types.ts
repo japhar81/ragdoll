@@ -171,6 +171,13 @@ export interface AppDeps {
   queue: QueuePort;
   secretProvider: SecretProvider;
   pluginRegistry: PluginRegistry;
+  /** PLUGIN-ARCH-1: when present, /api/plugins/sources + /api/plugins/refresh
+   *  light up. Holder owns the current `PluginRegistry` reference; refresh
+   *  rebuilds + swaps it atomically (in-flight requests keep the snapshot
+   *  they already resolved). Optional so legacy harnesses + tests without
+   *  a source store still construct a valid `AppDeps`. */
+  pluginRegistryHolder?: import("../../../../packages/plugin-loader/src/index.ts").PluginRegistryHolder;
+  pluginSourceStore?: import("../../../../packages/plugin-loader/src/index.ts").PluginSourceStore;
   providerRegistry: ProviderRegistry;
   logger: StructuredLogger;
   /** RAGDOLL_ENV; the dev auth fallback is rejected when this is "production". */

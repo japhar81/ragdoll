@@ -559,11 +559,58 @@ export interface ExternalPluginEndpoint {
   timeoutMs?: number;
 }
 
+/**
+ * Source provenance — where a registered plugin's code came from.
+ *
+ * PLUGIN-ARCH-1: every `RegisteredPlugin` records the repo source it
+ * was loaded from so the catalog (`/api/plugins`) can show the
+ * operator "this plugin came from <repoId> @ <commitSha>." The seam
+ * a future trust tier (signing/allowlist/sandbox) attaches to
+ * without re-architecting registration. Optional so plugins
+ * registered through legacy paths (or in tests that don't care)
+ * don't have to carry it.
+ *
+ * Built-in plugins (the `plugins/*` modules compiled into the
+ * worker image) carry `kind: "local"` provenance with the in-tree
+ * module path; external repo-loaded plugins carry `kind: "git"`
+ * with `gitUrl` + `commitSha`. Both are projected to the API the
+ * same way so the UI never has to special-case which is which.
+ */
+export interface PluginSourceProvenance {
+  /** Logical id of the source (the `plugin_sources.id` row, or a
+   *  reserved id like `"builtin"` / `"sample-text"` for the
+   *  in-tree built-ins). */
+  repoId: string;
+  /** `local` — the source code lives in the worker image (no git
+   *  fetch). `git` — the source was cloned from `gitUrl` at
+   *  `commitSha`. */
+  kind: "local" | "git";
+  /** Git URL when `kind: "git"`; absent for local sources. */
+  gitUrl?: string;
+  /** Operator-supplied ref (branch/tag/commit) before resolution;
+   *  for diagnostics — `commitSha` is the load-bearing field. */
+  ref?: string;
+  /** Resolved commit sha — populated for `git`, absent for `local`.
+   *  Loading paths are content-addressed by this sha so a refresh
+   *  for an unchanged sha is a true no-op. */
+  commitSha?: string;
+  /** Subpath inside the repo / module the loader scanned. Empty
+   *  string when not applicable. */
+  subpath?: string;
+  /** ISO-8601 timestamp of when this source was fetched. */
+  loadedAt?: string;
+}
+
 export interface RegisteredPlugin {
   manifest: PluginManifest;
   mode: "in_process" | "external";
   implementation?: InProcessPlugin;
   external?: ExternalPluginEndpoint;
+  /** PLUGIN-ARCH-1 provenance — where this plugin's code came from.
+   *  Optional so legacy callers + tests that don't care still
+   *  compile cleanly; the loader populates it for every plugin
+   *  it registers. */
+  source?: PluginSourceProvenance;
 }
 
 export class PluginRegistry {

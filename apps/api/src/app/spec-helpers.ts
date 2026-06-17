@@ -72,6 +72,19 @@ export function projectPlugin(plugin: RegisteredPlugin): {
     paletteGroup?: string;
     module?: string;
   };
+  /** PLUGIN-ARCH-1: where this plugin's code came from. Present on
+   *  every plugin the new loader registers; absent on legacy paths
+   *  (the UI tolerates both — the operator just sees no provenance
+   *  badge for legacy plugins). */
+  source?: {
+    repoId: string;
+    kind: "local" | "git";
+    gitUrl?: string;
+    ref?: string;
+    commitSha?: string;
+    subpath?: string;
+    loadedAt?: string;
+  };
 } {
   const m = plugin.manifest;
   const ui = m.ui
@@ -115,7 +128,11 @@ export function projectPlugin(plugin: RegisteredPlugin): {
     ...(m.inputPorts !== undefined ? { inputPorts: m.inputPorts } : {}),
     ...(m.outputPorts !== undefined ? { outputPorts: m.outputPorts } : {}),
     ...(m.dynamicPorts !== undefined ? { dynamicPorts: m.dynamicPorts } : {}),
-    ...(ui !== undefined ? { ui } : {})
+    ...(ui !== undefined ? { ui } : {}),
+    // PLUGIN-ARCH-1: surface where this plugin's code came from. The
+    // /api/plugins client uses it to render a provenance badge + drive
+    // the per-source status indicator in the Builder palette.
+    ...(plugin.source !== undefined ? { source: { ...plugin.source } } : {})
   };
 }
 

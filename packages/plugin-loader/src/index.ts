@@ -14,21 +14,49 @@ import {
   isConnectionDriverPlugin,
   registerConnectionDriverPlugin
 } from "../../external-connections/src/index.ts";
-import * as builtinRagModule from "../../../plugins/builtin-rag/src/index.ts";
-import * as sampleTextModule from "../../../plugins/sample-text/index.ts";
+// In-tree built-in plugin modules. Statically imported so the legacy
+// sync `loadPluginRegistry()` keeps working without an `await`.
+// The new store-backed path in `loadPluginRegistryWithStore` reaches
+// the SAME modules through `lifecycle.loadSource` (dynamic-import of
+// the file path) — both code paths converge on the same plugins.
+import * as builtinRagSyncModule from "../../../plugins/builtin-rag/src/index.ts";
+import * as sampleTextSyncModule from "../../../plugins/sample-text/index.ts";
 import { cartographyCrawlManifest } from "../../../plugins/builtin-rag/src/cartography.ts";
 import { cloudqueryAwsSyncManifest } from "../../../plugins/builtin-rag/src/cloudquery.ts";
+import {
+  BUILTIN_SOURCE_ID,
+  type PluginSource,
+  type PluginSourceStore
+} from "./sources.ts";
+import {
+  buildPluginRegistry,
+  PluginRegistryHolder
+} from "./registry-holder.ts";
 
-/**
- * The set of plugin module namespaces we scan for `InProcessPlugin` exports.
- * Adding a new plugin export to any of these modules (e.g. another agent
- * extending builtin-rag) is automatically picked up because we iterate
- * `Object.values()` of each namespace.
- */
-const PLUGIN_MODULES: Array<Record<string, unknown>> = [
-  builtinRagModule as unknown as Record<string, unknown>,
-  sampleTextModule as unknown as Record<string, unknown>
-];
+// PLUGIN-ARCH-1 re-exports — the holder + lifecycle + source store
+// are the public seam for callers that want refresh, provenance, or
+// a custom source store (e.g. the API's DB-backed store).
+export {
+  PluginRegistryHolder,
+  buildPluginRegistry,
+  refreshPluginRegistry,
+  type RefreshReport
+} from "./registry-holder.ts";
+export {
+  BUILTIN_SOURCES,
+  BUILTIN_SOURCE_ID,
+  SAMPLE_TEXT_SOURCE_ID,
+  DbPluginSourceStore,
+  InMemoryPluginSourceStore,
+  type PluginSource,
+  type PluginSourceStore
+} from "./sources.ts";
+export {
+  loadSource,
+  __clearPluginCacheForTests,
+  type LoadOpts,
+  type SourceLoadStatus
+} from "./lifecycle.ts";
 
 /**
  * Duck-types a module export as an `InProcessPlugin`.
@@ -206,8 +234,15 @@ const SCRAPY_MANIFEST: PluginManifest = {
  * and `scrapy_spider` plugins as external HTTP plugins pointed at that base
  * URL. When the env var is unset this is a no-op, so default/offline behavior
  * is unchanged. Registration is additive to in-process auto-discovery.
+ *
+ * Exported so the holder-aware code path
+ * (`loadPluginRegistryWithStore` + `refreshPluginRegistry`'s
+ * `postRegister` hook) can re-apply these env-driven plugins to
+ * EVERY freshly-built registry. The source store doesn't know about
+ * them — they're a runtime capability of the python-plugins sidecar,
+ * not a git-loadable source.
  */
-function registerExternalPlugins(registry: PluginRegistry): void {
+export function registerExternalPlugins(registry: PluginRegistry): void {
   const baseUrl = process.env.PYTHON_PLUGIN_URL;
   if (!baseUrl) return;
   const timeoutMs = Number(process.env.PYTHON_PLUGIN_TIMEOUT_MS ?? 300000);
@@ -249,43 +284,111 @@ function registerExternalPlugins(registry: PluginRegistry): void {
 }
 
 /**
- * Builds a `PluginRegistry` containing every `InProcessPlugin` exported by the
- * builtin-rag and sample-text modules. Each is registered as an in-process
- * plugin keyed by `category:id:version` (see `pluginKey`).
+ * Builds a `PluginRegistry` containing every in-process and external
+ * plugin known to the runtime.
  *
- * Iteration is over `Object.values(moduleNamespace)`, so plugins added
- * concurrently to those modules are automatically included with no edits here.
+ * PLUGIN-ARCH-1 made the source list a first-class abstraction
+ * (`PluginSourceStore` — DB-backed in production, in-memory in
+ * tests). This function preserves the legacy "no async" call
+ * signature for callers that don't care about source rows by
+ * loading only the in-tree built-ins synchronously plus the external
+ * PYTHON_PLUGIN_URL plugins. Callers that want the full architecture
+ * (DB-backed sources, refresh, provenance reporting) use
+ * `buildPluginRegistry({store})` directly + a `PluginRegistryHolder`
+ * — see `apps/api/src/server.ts` for the canonical wiring.
  *
- * When `process.env.PYTHON_PLUGIN_URL` is set, the external Python crawler
- * plugins are also registered (additive; see {@link registerExternalPlugins}).
+ * Iteration over the built-in module namespaces is preserved —
+ * plugins added to `plugins/builtin-rag` are still picked up without
+ * any edits here.
  */
 export function loadPluginRegistry(): PluginRegistry {
+  // Synchronous in-tree load — kept compatible with the legacy
+  // signature. Uses the same scan/duck-type as the new lifecycle so
+  // adding a plugin to plugins/builtin-rag/src works identically
+  // through both code paths.
   const registry = new PluginRegistry();
-  for (const moduleNamespace of PLUGIN_MODULES) {
-    for (const exported of Object.values(moduleNamespace)) {
-      // ADR-0024: drivers ship as plugin manifests so the loader's
-      // module scan finds them on the same path that finds DAG plugins.
-      // They route into the imperative driver map (so existing
-      // acquireClient / probeConnection paths keep working unchanged)
-      // and surface via /api/connection-kinds, NOT /api/plugins —
-      // drivers don't appear in the builder palette and have no
-      // execute() to call.
+  void registerInTreeBuiltins(registry);
+  registerExternalPlugins(registry);
+  return registry;
+}
+
+/**
+ * PLUGIN-ARCH-1: async loader that consumes a source store. The API +
+ * worker wire this through a `PluginRegistryHolder` so the refresh
+ * endpoint can swap the registry atomically.
+ *
+ * `extraSources` is for tests / staging — sources beyond what the
+ * store returns (the in-memory test store handles this directly, so
+ * production callers leave it empty).
+ */
+export async function loadPluginRegistryWithStore(args: {
+  store: PluginSourceStore;
+  extraSources?: PluginSource[];
+}): Promise<{ holder: PluginRegistryHolder; statuses: SourceLoadStatusFromLifecycle[] }> {
+  const { registry, statuses } = await buildPluginRegistry({
+    store: args.extraSources?.length
+      ? wrapStoreWithExtras(args.store, args.extraSources)
+      : args.store
+  });
+  // External PYTHON_PLUGIN_URL plugins are layered on top — they
+  // aren't part of the source-store world (they're a runtime
+  // capability of the sidecar). Registering them HERE keeps the
+  // existing operator-facing semantics: set PYTHON_PLUGIN_URL +
+  // cartography/crawl4ai/scrapy/cloudquery_aws_sync show up.
+  registerExternalPlugins(registry);
+  const holder = new PluginRegistryHolder(registry, statuses);
+  return { holder, statuses };
+}
+
+type SourceLoadStatusFromLifecycle = Awaited<
+  ReturnType<typeof buildPluginRegistry>
+>["statuses"][number];
+
+function wrapStoreWithExtras(
+  base: PluginSourceStore,
+  extras: PluginSource[]
+): PluginSourceStore {
+  return {
+    async list(opts) {
+      const inner = await base.list(opts);
+      return [...inner, ...(opts?.enabledOnly ? extras.filter((s) => s.enabled) : extras)];
+    },
+    markLoadResult: (a) => base.markLoadResult(a)
+  };
+}
+
+/**
+ * Sync register the in-tree built-in plugin modules. Used by the
+ * legacy-signature `loadPluginRegistry()` for callers that don't
+ * want to plumb a source store. The new lifecycle does the same
+ * work for the canonical store-backed code path.
+ *
+ * Kept here (not deleted) because:
+ *   - The API + worker tests still call `loadPluginRegistry()` to
+ *     exercise the registry without a Postgres dep.
+ *   - The frontend dev `pipeline-spec` validator imports the
+ *     registry shape from this module.
+ */
+function registerInTreeBuiltins(registry: PluginRegistry): void {
+  for (const moduleNs of [builtinRagSyncModule, sampleTextSyncModule]) {
+    for (const exported of Object.values(moduleNs)) {
       if (isConnectionDriverPlugin(exported)) {
         registerConnectionDriverPlugin(exported);
         continue;
       }
       if (!isInProcessPlugin(exported)) continue;
       const plugin = exported;
-      const registered: RegisteredPlugin = {
+      registry.register({
         mode: "in_process",
         manifest: plugin.manifest,
-        implementation: plugin
-      };
-      registry.register(registered);
+        implementation: plugin,
+        source: {
+          repoId: BUILTIN_SOURCE_ID,
+          kind: "local"
+        }
+      });
     }
   }
-  registerExternalPlugins(registry);
-  return registry;
 }
 
 /**
