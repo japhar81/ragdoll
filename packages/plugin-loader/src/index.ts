@@ -17,6 +17,7 @@ import {
 import * as builtinRagModule from "../../../plugins/builtin-rag/src/index.ts";
 import * as sampleTextModule from "../../../plugins/sample-text/index.ts";
 import { cartographyCrawlManifest } from "../../../plugins/builtin-rag/src/cartography.ts";
+import { cloudqueryAwsSyncManifest } from "../../../plugins/builtin-rag/src/cloudquery.ts";
 
 /**
  * The set of plugin module namespaces we scan for `InProcessPlugin` exports.
@@ -218,10 +219,17 @@ function registerExternalPlugins(registry: PluginRegistry): void {
   const cartographyTimeoutMs = Number(
     process.env.PYTHON_PLUGIN_CARTOGRAPHY_TIMEOUT_MS ?? 1_800_000
   );
+  // cloudquery syncs are the same shape as cartography crawls — real
+  // multi-region AWS syncs run for tens of minutes. Same env-overridable
+  // budget so operators can lift it for megafleets without a code change.
+  const cloudqueryTimeoutMs = Number(
+    process.env.PYTHON_PLUGIN_CLOUDQUERY_TIMEOUT_MS ?? 1_800_000
+  );
   const externalRegistrations: Array<{ manifest: PluginManifest; timeoutMs: number }> = [
     { manifest: CRAWL4AI_MANIFEST, timeoutMs },
     { manifest: SCRAPY_MANIFEST, timeoutMs },
-    { manifest: cartographyCrawlManifest, timeoutMs: cartographyTimeoutMs }
+    { manifest: cartographyCrawlManifest, timeoutMs: cartographyTimeoutMs },
+    { manifest: cloudqueryAwsSyncManifest, timeoutMs: cloudqueryTimeoutMs }
   ];
   for (const { manifest, timeoutMs: perPluginTimeout } of externalRegistrations) {
     const registered: RegisteredPlugin = {

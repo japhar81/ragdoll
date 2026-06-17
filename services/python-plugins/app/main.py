@@ -30,6 +30,7 @@ from app.connect_bridge import build_connect_app
 from app.models import ExecuteRequest
 from app.plugins import (
     cartography_crawl_plugin,
+    cloudquery_aws_sync_plugin,
     crawl4ai_plugin,
     rerank_bge_plugin,
     scrapy_plugin,
@@ -38,6 +39,7 @@ from app.plugins import (
 # plugin.id -> handler(ExecuteRequest) -> dict with outputs/usage/metadata
 HANDLERS: Dict[str, Callable[[ExecuteRequest], Dict[str, Any]]] = {
     cartography_crawl_plugin.PLUGIN_ID: cartography_crawl_plugin.handle,
+    cloudquery_aws_sync_plugin.PLUGIN_ID: cloudquery_aws_sync_plugin.handle,
     crawl4ai_plugin.PLUGIN_ID: crawl4ai_plugin.handle,
     rerank_bge_plugin.PLUGIN_ID: rerank_bge_plugin.handle,
     scrapy_plugin.PLUGIN_ID: scrapy_plugin.handle,
