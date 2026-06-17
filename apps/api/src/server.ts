@@ -101,7 +101,11 @@ import {
   InMemoryExecutionStore,
   type PoolLike
 } from "../../../packages/db/src/index.ts";
-import { loadRegistries } from "../../../packages/plugin-loader/src/index.ts";
+import {
+  loadRegistries,
+  DbPluginSourceStore,
+  InMemoryPluginSourceStore
+} from "../../../packages/plugin-loader/src/index.ts";
 import {
   DatabaseEncryptedSecretProvider,
   InMemorySecretRepository,
@@ -198,6 +202,18 @@ async function buildDeps(): Promise<{
     transport: redisUrl ? "redis" : "in-process"
   });
   const { plugins: pluginRegistry, providers: providerRegistry } = loadRegistries();
+  // PLUGIN-ARCH-1: holder + source store light up the
+  // /api/plugins/sources + /api/plugins/refresh endpoints. The holder
+  // initially wraps the SAME `pluginRegistry` produced above so the
+  // first request after boot sees the same plugin set the sync loader
+  // produced. Refresh rebuilds from the source store + atomically
+  // swaps; the prior registry is intact for any in-flight execution.
+  let pluginRegistryHolder: import(
+    "../../../packages/plugin-loader/src/index.ts"
+  ).PluginRegistryHolder | undefined;
+  let pluginSourceStore: import(
+    "../../../packages/plugin-loader/src/index.ts"
+  ).PluginSourceStore | undefined;
   // When REDIS_URL is set, enqueue onto the SAME BullMQ queue the separate
   // worker container consumes (both default to "ragdoll-jobs"); otherwise an
   // in-process queue. bullmq/ioredis are lazy-imported so `npm test` stays
@@ -275,6 +291,9 @@ async function buildDeps(): Promise<{
 
   if (databaseUrl) {
     pool = await createPool({ connectionString: databaseUrl });
+    // PLUGIN-ARCH-1: bind the DB-backed source store to the same
+    // pool the rest of the API uses. Holder rebuild on /refresh.
+    pluginSourceStore = new DbPluginSourceStore(pool);
     const executionStore = new PostgresExecutionStore(pool);
     const migration = await runMigrations(pool, defaultMigrationsDir());
     logger.info("migrations_applied", {
@@ -349,6 +368,8 @@ async function buildDeps(): Promise<{
         new StaticKeyProvider(keyEncryptionSecret)
       ),
       pluginRegistry,
+      pluginRegistryHolder,
+      pluginSourceStore,
       providerRegistry,
       logger,
       env,
@@ -358,6 +379,12 @@ async function buildDeps(): Promise<{
     usersForBootstrap = users;
   } else {
     secretRepository = new InMemorySecretRepository();
+    // PLUGIN-ARCH-1: in-memory deployments still get a working holder
+    // + store so the refresh endpoint is exercisable in dev /
+    // tests. The store starts empty (no external sources), which
+    // means refresh is a no-op + always-succeeds — the built-ins
+    // reload from the in-tree path.
+    pluginSourceStore = new InMemoryPluginSourceStore([]);
     const { InMemoryApiKeyRepository } = await import(
       "../../../packages/db/src/index.ts"
     );
@@ -404,12 +431,34 @@ async function buildDeps(): Promise<{
         new StaticKeyProvider(keyEncryptionSecret)
       ),
       pluginRegistry,
+      pluginRegistryHolder,
+      pluginSourceStore,
       providerRegistry,
       logger,
       env
     };
     rbacForAuthz = rbacPolicies;
     usersForBootstrap = users;
+  }
+
+  // PLUGIN-ARCH-1: bind the holder + plumb it into deps. The holder
+  // initially wraps the sync-loaded registry above so existing
+  // routes (which destructure `deps.pluginRegistry`) get the
+  // expected plugin set. Refresh rebuilds + swaps via
+  // `holder.swap(...)`; routes re-read `deps.pluginRegistry` at
+  // request time and see the new pointer.
+  if (pluginSourceStore) {
+    const { PluginRegistryHolder } = await import(
+      "../../../packages/plugin-loader/src/index.ts"
+    );
+    pluginRegistryHolder = new PluginRegistryHolder(pluginRegistry, []);
+    deps.pluginRegistryHolder = pluginRegistryHolder;
+    deps.pluginSourceStore = pluginSourceStore;
+    // The holder IS a PluginRegistry (extends + delegates). Point
+    // `deps.pluginRegistry` at it so routes that still type
+    // `PluginRegistry` get the live, swappable instance — old code
+    // unchanged, refresh becomes effective the moment the swap lands.
+    deps.pluginRegistry = pluginRegistryHolder;
   }
 
   // --- Authorizer: real Casbin when importable, else the equivalent

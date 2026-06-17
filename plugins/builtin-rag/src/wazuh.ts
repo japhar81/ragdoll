@@ -1616,7 +1616,13 @@ export const wazuhRulesetPullPlugin: InProcessPlugin = {
     ui: {
       icon: "shield-check",
       color: "#dc2626",
-      paletteGroup: "Sources"
+      paletteGroup: "Sources",
+      formHints: {
+        agentIdField: { widget: "text" },
+        maxAgents: { widget: "number", min: 1, step: 1 },
+        rulesetMaxRules: { widget: "number", min: 1, step: 100 },
+        skipActiveResponse: { widget: "checkbox" }
+      }
     }
   },
   async execute(input) {

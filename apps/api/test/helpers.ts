@@ -52,6 +52,7 @@ import { ConsoleJsonLogger } from "../../../packages/observability/src/index.ts"
 import { InMemoryQueue } from "../../../apps/worker/src/index.ts";
 import type { ChangeBus } from "../../../packages/events/src/index.ts";
 import { PluginRegistry, type InProcessPlugin } from "../../../packages/plugin-sdk/src/index.ts";
+import * as pluginLoaderForTests from "../../../packages/plugin-loader/src/index.ts";
 import { ProviderRegistry, type ProviderAdapter } from "../../../packages/providers/src/index.ts";
 import type { PipelineSpec } from "../../../packages/core/src/index.ts";
 
@@ -135,6 +136,10 @@ export function buildHarness(options: BuildOptions = {}): Harness {
     manifest: fakeEchoPlugin.manifest,
     implementation: fakeEchoPlugin
   });
+  const pluginRegistryHolderForDeps = new pluginLoaderForTests.PluginRegistryHolder(
+    pluginRegistry,
+    []
+  );
   const providerRegistry = new ProviderRegistry();
   providerRegistry.register(fakeProvider);
 
@@ -203,7 +208,17 @@ export function buildHarness(options: BuildOptions = {}): Harness {
       new InMemorySecretRepository(),
       new StaticKeyProvider("test-key")
     ),
-    pluginRegistry,
+    // PLUGIN-ARCH-1: wire the holder + an empty in-memory source store
+    // so tests can exercise /api/plugins/sources + /api/plugins/refresh
+    // without spinning up Postgres. The holder wraps the same registry
+    // we built above so /api/plugins keeps returning the seeded
+    // fake_echo plugin from the legacy path. Critically:
+    // `pluginRegistry` is the holder (not the raw registry) so a
+    // `holder.swap()` reaches routes that destructure deps.pluginRegistry
+    // — exactly the wiring `apps/api/src/server.ts` uses in prod.
+    pluginRegistry: pluginRegistryHolderForDeps,
+    pluginRegistryHolder: pluginRegistryHolderForDeps,
+    pluginSourceStore: new pluginLoaderForTests.InMemoryPluginSourceStore([]),
     providerRegistry,
     logger: new ConsoleJsonLogger(),
     env: options.env ?? "development"
