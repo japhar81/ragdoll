@@ -46,6 +46,12 @@ import {
   GitFetchError,
   resolveRefToSha
 } from "./git-fetcher.ts";
+import { ensureDependenciesInstalled, InstallError } from "./install-deps.ts";
+import {
+  verifyCommitSignature,
+  SignatureVerifyError,
+  type VerifyResult
+} from "./verify-signature.ts";
 import {
   BUILTIN_SOURCE_ID,
   SAMPLE_TEXT_SOURCE_ID,
@@ -76,11 +82,17 @@ export interface SourceLoadStatus {
   errorStage?:
     | "resolve"
     | "clone"
+    | "install"
     | "verify"
     | "import"
     | "scan"
     | "register"
     | "disabled";
+  /** PLUGIN-ARCH-1 close-out: signature verification result. Present
+   *  for git sources where `requireSignature: true`; absent for
+   *  sources that don't opt into signing. */
+  signatureVerified?: boolean;
+  signedBy?: string;
 }
 
 /**
@@ -103,7 +115,15 @@ const realImport: ImportFn = (specifier) =>
  * already-extracted RegisteredPlugin objects so the refresh path
  * doesn't have to re-scan the module's exports).
  */
-const pluginCache = new Map<string, RegisteredPlugin[]>();
+interface PluginCacheEntry {
+  plugins: RegisteredPlugin[];
+  /** Captured at first-successful-load and replayed on subsequent
+   *  cache hits — install + verify are deterministic for a given
+   *  sha, so the cached envelope is honest. */
+  verify?: VerifyResult;
+}
+
+const pluginCache = new Map<string, PluginCacheEntry>();
 
 function cacheKey(repoId: string, commitSha: string | undefined): string {
   return `${repoId}@${commitSha ?? "local"}`;
@@ -126,6 +146,23 @@ export interface LoadOpts {
    *  Test fixtures point this at a path-shape that exists in the
    *  test environment. */
   resolveBuiltinPath?: (source: PluginSource) => string;
+  /** PLUGIN-ARCH-1 close-out: test seam for the npm-install step.
+   *  Default: real `ensureDependenciesInstalled` from
+   *  install-deps.ts. Tests inject a stub that simulates install
+   *  success / failure without actually spawning npm. */
+  installFn?: (workingCopy: string) => Promise<void>;
+  /** Skip the install step entirely (test seam). Used by tests
+   *  that exercise non-install code paths without writing a fake
+   *  package.json into the working copy. */
+  skipInstall?: boolean;
+  /** PLUGIN-ARCH-1 close-out: test seam for the git verify-commit
+   *  step. Default: real `verifyCommitSignature` from
+   *  verify-signature.ts. */
+  verifyFn?: (args: {
+    workingCopy: string;
+    sha: string;
+    allowedSigners: string;
+  }) => Promise<VerifyResult>;
 }
 
 /**
@@ -153,6 +190,8 @@ export async function loadSource(
   // -------------------------- resolve target path / sha
   let commitSha: string | undefined;
   let importTarget: string;
+  let workingCopyPath: string | undefined;
+  let verifyResult: VerifyResult | undefined;
   try {
     if (source.kind === "git") {
       const gitUrl = source.gitUrl;
@@ -171,17 +210,24 @@ export async function loadSource(
       }
       commitSha = sha;
       // Ensure the working copy exists. Test mode (`skipFetch`)
-      // synthesises a path that the import stub knows how to handle.
+      // synthesises a path that the import stub knows how to handle
+      // AND sets `workingCopyPath` to that same synthetic path so the
+      // install + verify branches downstream still fire — tests
+      // exercise the full lifecycle by injecting `installFn` /
+      // `verifyFn` stubs that recognise the `__memory__/` prefix.
       if (opts.skipFetch) {
-        importTarget = `__memory__/${source.id}/${sha}/${source.subpath ?? ""}`;
+        const syntheticPath = `__memory__/${source.id}/${sha}/${source.subpath ?? ""}`;
+        importTarget = syntheticPath;
+        workingCopyPath = syntheticPath;
       } else {
         try {
-          const { workingCopyPath } = await ensureCommitOnDisk({
+          const fetched = await ensureCommitOnDisk({
             repoId: source.id,
             gitUrl,
             sha,
             cacheDir: opts.cacheDir
           });
+          workingCopyPath = fetched.workingCopyPath;
           importTarget = resolvePath(workingCopyPath, source.subpath ?? "");
         } catch (e) {
           const stage =
@@ -217,19 +263,103 @@ export async function loadSource(
   }
 
   // -------------------------- cache hit?
+  // Both install + verify are deterministic for a given sha; if
+  // we've already loaded this (repoId, sha) successfully this
+  // process, the cache replays the same plugin set + the same
+  // verify metadata. A refresh-against-unchanged-sha is a no-op
+  // for install AND verify — the operator sees the
+  // signed-by / signatureVerified replay from the original load.
   const key = cacheKey(source.id, commitSha);
   const cached = pluginCache.get(key);
   if (cached) {
-    for (const p of cached) registry.register(p);
+    for (const p of cached.plugins) registry.register(p);
     return {
       id: source.id,
       kind: source.kind,
       status: "loaded",
       commitSha,
       ref: source.ref,
-      pluginCount: cached.length,
-      loadedAt
+      pluginCount: cached.plugins.length,
+      loadedAt,
+      ...(cached.verify
+        ? {
+            signatureVerified: cached.verify.signatureVerified,
+            ...(cached.verify.signedBy
+              ? { signedBy: cached.verify.signedBy }
+              : {})
+          }
+        : {})
     };
+  }
+
+  // -------------------------- verify (KISS: opt-in per source)
+  // PLUGIN-ARCH-1 close-out Build 2. Runs in the existing `verify`
+  // stage AFTER the cache check (so a cache hit replays the prior
+  // verify result via `cached.verify`) but BEFORE install (so an
+  // untrusted source never triggers `npm install`). A
+  // bad/missing/untrusted signature is `failed{stage:'verify'}`;
+  // the plugin never reaches scan/register.
+  if (
+    source.kind === "git" &&
+    source.requireSignature === true &&
+    workingCopyPath !== undefined &&
+    commitSha !== undefined
+  ) {
+    const allowed = source.allowedSigners ?? "";
+    if (!allowed.trim()) {
+      return failed(
+        source,
+        "verify",
+        `requireSignature is true but allowedSigners is empty — populate the per-source signer list before re-enabling verification`,
+        loadedAt,
+        { ref: source.ref, commitSha }
+      );
+    }
+    try {
+      const verifyFn = opts.verifyFn ?? verifyCommitSignature;
+      verifyResult = await verifyFn({
+        workingCopy: workingCopyPath,
+        sha: commitSha,
+        allowedSigners: allowed
+      });
+    } catch (e) {
+      const msg = e instanceof SignatureVerifyError
+        ? `${e.message}: ${e.stderrTail ?? "(no stderr)"}`
+        : (e as Error).message;
+      return failed(source, "verify", msg, loadedAt, {
+        ref: source.ref,
+        commitSha
+      });
+    }
+  }
+
+  // -------------------------- install (KISS: per-sha cached)
+  // PLUGIN-ARCH-1 close-out Build 1. Runs AFTER verify (so an
+  // untrusted source never reaches `npm install`) but BEFORE
+  // import (so the plugin's transitive deps resolve). Idempotent
+  // by `<workingCopy>/.ragdoll-installed` — re-runs that hit the
+  // marker are a no-op.
+  if (
+    source.kind === "git" &&
+    !opts.skipInstall &&
+    workingCopyPath !== undefined
+  ) {
+    const installFn =
+      opts.installFn ??
+      (async (wc: string) => {
+        await ensureDependenciesInstalled(wc);
+      });
+    try {
+      await installFn(workingCopyPath);
+    } catch (e) {
+      const msg = e instanceof InstallError
+        ? `${e.message}: ${e.stderrTail ?? "(no stderr)"}`
+        : (e as Error).message;
+      return failed(source, "install", msg, loadedAt, {
+        ref: source.ref,
+        commitSha
+      });
+    }
   }
 
   // -------------------------- import
@@ -252,7 +382,13 @@ export async function loadSource(
     ref: source.ref,
     commitSha,
     subpath: source.subpath || undefined,
-    loadedAt
+    loadedAt,
+    ...(verifyResult
+      ? {
+          signatureVerified: verifyResult.signatureVerified,
+          ...(verifyResult.signedBy ? { signedBy: verifyResult.signedBy } : {})
+        }
+      : {})
   };
   let registered: RegisteredPlugin[];
   try {
@@ -272,7 +408,7 @@ export async function loadSource(
     });
   }
 
-  pluginCache.set(key, registered);
+  pluginCache.set(key, { plugins: registered, verify: verifyResult });
   return {
     id: source.id,
     kind: source.kind,
@@ -280,7 +416,13 @@ export async function loadSource(
     commitSha,
     ref: source.ref,
     pluginCount: registered.length,
-    loadedAt
+    loadedAt,
+    ...(verifyResult
+      ? {
+          signatureVerified: verifyResult.signatureVerified,
+          ...(verifyResult.signedBy ? { signedBy: verifyResult.signedBy } : {})
+        }
+      : {})
   };
 }
 

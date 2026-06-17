@@ -218,7 +218,129 @@ exit 0.
 - The trust policy seam is `RegisteredPlugin.source`; the policy
   itself is deferred.
 
-## Out of scope (PLUGIN-ARCH-2 follow-ons)
+## Amendment — close-out (Builds 1 / 2 / 3)
+
+After the initial landing, three gaps remained between the
+architecture and a bulwark-ready plugin surface. All three closed
+without touching the unchanged duck-type contract.
+
+### Build 1 — dependency install (the obvious gap)
+
+A bare git checkout doesn't have `node_modules`. A plugin that
+imports `lodash` failed at the `import` stage. We close this with
+an `install` stage inserted in the lifecycle right after the cache
+check and BEFORE verify:
+
+- New helper `ensureDependenciesInstalled(workingCopy)` in
+  `packages/plugin-loader/src/install-deps.ts`.
+- `npm ci` when a `package-lock.json` is present, else `npm install`.
+  Flags: `--omit=dev --ignore-scripts --no-audit --no-fund
+  --loglevel=error`.
+- Content-addressed: a sentinel file `.ragdoll-installed` in the
+  working copy is the marker. A second load against the same sha
+  hits the in-process plugin cache and skips install entirely; a
+  cold restart hits the marker and skips install at the helper
+  level too.
+- Per-source isolation: an install failure surfaces as
+  `failed{stage:'install'}` with the stderr tail. New stage in
+  the `errorStage` union.
+- Hard timeout (default 5 min, `RAGDOLL_PLUGIN_INSTALL_TIMEOUT_MS`
+  override) so a hung registry can't wedge a refresh.
+
+KISS safety:
+- `--ignore-scripts` by default — postinstall scripts don't run.
+  Plugins that need them become a future opt-in (named explicitly
+  here as a trust-tier concern; KISS now = install works,
+  scripts don't).
+- `NPM_CONFIG_FETCH_RETRIES=1` — fail loud rather than retry
+  forever inside the child.
+- npm config (registry / auth token) inherited from the worker's
+  env, not from `$HOME/.npmrc`, so the install runs against a
+  known-good registry posture.
+
+### Build 2 — signature verification (KISS: verify, don't build a PKI)
+
+Provenance is recorded; this layer VERIFIES git's own commit
+signature against a per-source allowed-signers file. New columns
+on `plugin_sources` (migration `024_plugin_sources_signing.sql`):
+`require_signature` + `allowed_signers`. Per-source, default OFF.
+
+- Helper `verifyCommitSignature` in
+  `packages/plugin-loader/src/verify-signature.ts` runs
+  `git -c gpg.format=ssh -c
+  gpg.ssh.allowedSignersFile=<tmp> verify-commit <sha>` against a
+  hermetic per-call temp file. Exit code is the verdict;
+  signer identity parsed from stderr (`Good "git" signature for
+  <id> with <key-type> key`).
+- Verify runs in the existing `verify` stage, AFTER the cache
+  check, BEFORE install. Order: an untrusted source NEVER reaches
+  `npm install`.
+- A bad / missing / untrusted signature is `failed{stage:'verify'}`;
+  the plugin doesn't load. An empty `allowedSigners` with
+  `requireSignature: true` is a loud refusal at the same stage.
+- Provenance gains `signatureVerified: true` + `signedBy: "<id>"`
+  on every plugin from a verified source. `GET /api/plugins`
+  surfaces both — operators see the "signed by X" badge.
+
+KISS boundaries (explicit):
+- No key management UI, no revocation, no chain-of-trust.
+- Reuses git's own verifier — no custom crypto, no PKI.
+- Opt-in per source. A source that doesn't require signing keeps
+  its legacy behaviour.
+
+### Build 3 — surface (admin screen + CRUD)
+
+- `POST/PATCH/DELETE /api/plugins/sources/:id` added to the
+  routes file, all gated by `plugin:manage`. Reserved ids
+  (`builtin` / `sample-text`) refused on every mutation so the
+  safety-net rows are never editable.
+- `PluginSourcesScreen.tsx` mirrors `ConnectionsScreen.tsx`:
+  - List rows (id, kind badge, git url + ref + sha, last fetched,
+    status + per-source failure stage, plugin count).
+  - Side-drawer editor for create / update — git url, ref,
+    subpath, description, enabled, signing toggle + allowed-signers
+    textarea.
+  - Refresh button → `POST /api/plugins/refresh` → inline diff
+    (added / removed / updated). The "add a source → refresh →
+    plugin appears" moment made visible.
+  - Built-in rows surfaced read-only; non-builtin rows get
+    Edit + Delete (`plugin:manage` enforced both server-side AND
+    via the `canManage` button-disable in the UI).
+- Failed sources render their stage + error tail so operators
+  diagnose without reading logs.
+- Nav: new "Plugin Sources" entry under the "Connections" group,
+  gated by `plugin:manage` so non-admins don't see it.
+
+### Verification (close-out)
+
+Plugin-loader (32 tests total, +14 new):
+- install: `installFn` called exactly ONCE per `(repoId, sha)`;
+  second load hits cache and skips it
+- install failure → `failed{stage:'install'}` with the error
+  message; no plugin loads
+- `skipInstall: true` operator opt-out
+- verify: requireSignature + bad signature → `failed{stage:'verify'}`,
+  install NEVER runs (load-bearing ordering invariant), no plugin
+  registered
+- verify: requireSignature + empty allowedSigners → refused
+  BEFORE invoking `verifyFn`
+- verify: success stamps `signatureVerified` + `signedBy` on the
+  status AND the plugin's `source` provenance
+- verify: `requireSignature: false` → `verifyFn` NEVER called
+- helper-level: empty signers refused; bad sha refused;
+  non-zero git exit surfaced with stderr tail; success parses
+  the signer id
+- `ensureDependenciesInstalled`: returns `not-needed` /
+  `already-cached` / fails loudly with stderr
+
+API (5 new tests):
+- POST / PATCH / DELETE round-trip; minimal-UPDATE shape
+  (audit-friendly)
+- reserved ids refused on every mutation
+- malformed ids refused on POST
+- viewer-level user gets 403 on every mutation
+
+UI: bundle builds cleanly; route + nav entry wired.
 
 - **The trust policy**: signing, allowlist, sandboxing. Provenance
   is recorded; what to DO with it is the next ADR.

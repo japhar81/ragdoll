@@ -1021,8 +1021,82 @@ export const api = {
         "x-tenant-id": tenantId,
         ...(environmentId ? { "x-environment": environmentId } : {})
       }
-    )
+    ),
+
+  // ---- PLUGIN-ARCH-1: plugin sources + refresh -------------------------
+  // The "Plugin Sources" admin screen consumes these. /sources lists the
+  // built-in + DB rows with last-load status; refresh rebuilds + swaps
+  // the registry and returns the diff. CRUD requires `plugin:manage`;
+  // GET requires `execution:view_logs`.
+  listPluginSources: () =>
+    request<{ sources: PluginSourceView[] }>("GET", "/api/plugins/sources"),
+  createPluginSource: (input: PluginSourceUpsertInput) =>
+    request<{ source: PluginSourceView }>(
+      "POST",
+      "/api/plugins/sources",
+      input
+    ),
+  updatePluginSource: (id: string, patch: Partial<PluginSourceUpsertInput>) =>
+    request<{ source: PluginSourceView }>(
+      "PATCH",
+      `/api/plugins/sources/${encodeURIComponent(id)}`,
+      patch
+    ),
+  deletePluginSource: (id: string) =>
+    request<{ ok: true }>(
+      "DELETE",
+      `/api/plugins/sources/${encodeURIComponent(id)}`
+    ),
+  refreshPluginRegistry: () =>
+    request<PluginRefreshReport>("POST", "/api/plugins/refresh", {})
 };
+
+export interface PluginSourceView {
+  id: string;
+  kind: "local" | "git";
+  builtin: boolean;
+  enabled: boolean;
+  displayName?: string;
+  description?: string;
+  gitUrl?: string;
+  ref?: string;
+  subpath?: string;
+  // requireSignature/allowedSigners aren't returned by the list endpoint
+  // (the API project shape elides them for the catalog view); the screen
+  // re-fetches them on edit via the create/update round-trip.
+  lastCommitSha?: string;
+  lastFetchedAt?: string;
+  status?: "loaded" | "skipped" | "failed";
+  pluginCount?: number;
+  error?: string;
+  errorStage?:
+    | "resolve"
+    | "clone"
+    | "install"
+    | "verify"
+    | "import"
+    | "scan"
+    | "register"
+    | "disabled";
+}
+
+export interface PluginSourceUpsertInput {
+  id?: string;
+  gitUrl?: string;
+  ref?: string;
+  subpath?: string;
+  displayName?: string;
+  description?: string;
+  enabled?: boolean;
+  requireSignature?: boolean;
+  allowedSigners?: string;
+}
+
+export interface PluginRefreshReport {
+  sources: PluginSourceView[];
+  diff: { added: string[]; removed: string[]; updated: string[] };
+  pluginCount: number;
+}
 
 export interface PipelineDatasetBindingView {
   id: string;

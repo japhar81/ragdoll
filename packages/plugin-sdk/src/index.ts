@@ -599,6 +599,15 @@ export interface PluginSourceProvenance {
   subpath?: string;
   /** ISO-8601 timestamp of when this source was fetched. */
   loadedAt?: string;
+  /** PLUGIN-ARCH-1 close-out: signature verification result.
+   *  Surfaced on `/api/plugins` so the operator sees the
+   *  "signed by X" badge. Absent for sources that don't require
+   *  signing (KISS: signing is opt-in per source — see ADR-0034). */
+  signatureVerified?: boolean;
+  /** Best-effort signer identity parsed from git's verify-commit
+   *  stderr (e.g. `octocat`). Display-only — the verdict is the
+   *  boolean above. */
+  signedBy?: string;
 }
 
 export interface RegisteredPlugin {
