@@ -164,10 +164,20 @@ export async function ensureCommitOnDisk(args: {
   // already-good dir and is a no-op.)
   const tmpPath = `${workingCopyPath}.partial-${process.pid}-${nonce()}`;
   try {
+    // --no-hardlinks is the load-bearing flag for `file://` URLs:
+    //   git's "local optimization" hardlinks objects from a file://
+    //   source into the clone, which means a write to the source
+    //   repo's .git/objects/ later would mutate the cached working
+    //   copy too. That breaks the content-addressed cache invariant
+    //   (a path keyed by sha must be IMMUTABLE post-clone). The flag
+    //   is a no-op on https / ssh / git transports (those always
+    //   copy), so keeping it on unconditionally avoids a per-scheme
+    //   branch.
     await runGit([
       "clone",
       "--quiet",
       "--no-tags",
+      "--no-hardlinks",
       "--filter=blob:none",
       args.gitUrl,
       tmpPath

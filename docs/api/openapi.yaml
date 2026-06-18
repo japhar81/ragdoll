@@ -218,6 +218,100 @@ components:
               description: >-
                 Optional ESM module URL exporting a custom ConfigEditor React
                 component (see ADR 0008). Type/contract seam only.
+        source:
+          type: object
+          description: >-
+            PLUGIN-ARCH-1 (ADR-0034). Where this plugin's code came
+            from. Surfaced on every plugin so the operator sees the
+            "from <repo> @ <sha>" provenance.
+          required: [repoId, kind]
+          properties:
+            repoId:
+              type: string
+              description: Logical id of the source — matches a row in `plugin_sources`, or one of the reserved ids `builtin` / `sample-text`.
+            kind: { type: string, enum: [local, git] }
+            gitUrl: { type: string }
+            ref: { type: string }
+            commitSha: { type: string }
+            subpath: { type: string }
+            loadedAt: { type: string, format: date-time }
+            signatureVerified:
+              type: boolean
+              description: >-
+                PLUGIN-ARCH-1 close-out (Build 2). Present when the
+                source's `requireSignature` is true AND
+                `git verify-commit` passed. Absent for sources that
+                don't require signing.
+            signedBy:
+              type: string
+              description: Best-effort signer identity parsed from git's verify-commit stderr (display-only).
+    PluginSource:
+      type: object
+      description: PLUGIN-ARCH-1 (ADR-0034) source catalog row.
+      required: [id, kind, enabled, builtin]
+      properties:
+        id: { type: string }
+        kind: { type: string, enum: [local, git] }
+        builtin: { type: boolean, description: True for the safety-net rows (`builtin` / `sample-text`). Edit / delete are refused on these. }
+        enabled: { type: boolean }
+        displayName: { type: string }
+        description: { type: string }
+        gitUrl:
+          type: string
+          description: >-
+            https / ssh / file:// transports all supported. For a local
+            bare repo (testing / air-gapped install) use
+            `file:///absolute/path/to/repo.git`; the loader clones with
+            `--no-hardlinks` so the cached working copy is immutable
+            even if the source repo is modified later.
+        ref: { type: string }
+        subpath: { type: string }
+        lastCommitSha: { type: string }
+        lastFetchedAt: { type: string, format: date-time }
+        status: { type: string, enum: [loaded, skipped, failed] }
+        pluginCount: { type: integer }
+        error: { type: string }
+        errorStage:
+          type: string
+          enum: [resolve, clone, install, verify, import, scan, register, disabled]
+          description: >-
+            Failure stage. `install` covers npm-install failures (the
+            install runs `npm ci`/`npm install --omit=dev
+            --ignore-scripts`). `verify` covers the
+            `requireSignature` path's `git verify-commit` outcome.
+    PluginSourceUpsert:
+      type: object
+      description: Body shape for POST /api/plugins/sources + PATCH /api/plugins/sources/{id}.
+      properties:
+        id: { type: string, description: "Required on POST; ignored on PATCH (the path id wins)." }
+        gitUrl: { type: string }
+        ref: { type: string }
+        subpath: { type: string }
+        displayName: { type: string }
+        description: { type: string }
+        enabled: { type: boolean }
+        requireSignature: { type: boolean }
+        allowedSigners:
+          type: string
+          description: >-
+            SSH allowed-signers file content. Used only when
+            `requireSignature` is true. Opaque to the API — passed
+            verbatim to `gpg.ssh.allowedSignersFile` at verify time.
+    PluginRefreshReport:
+      type: object
+      required: [sources, diff, pluginCount]
+      properties:
+        sources:
+          type: array
+          items: { $ref: "#/components/schemas/PluginSource" }
+        diff:
+          type: object
+          required: [added, removed, updated]
+          properties:
+            added: { type: array, items: { type: string } }
+            removed: { type: array, items: { type: string } }
+            updated: { type: array, items: { type: string }, description: "Same plugin key, different commit sha." }
+        pluginCount: { type: integer }
     PipelineFolder:
       type: object
       required: [id, name, createdAt]
@@ -2243,6 +2337,116 @@ paths:
                   markdown: { type: string }
         "404":
           description: Plugin exists but no docs file is shipped for it.
+  /api/plugins/sources:
+    get:
+      summary: List plugin sources (built-in + DB-backed git rows)
+      description: >-
+        PLUGIN-ARCH-1 (ADR-0034). Built-in sources (`builtin` /
+        `sample-text`) always surface — they're the safety-net rows
+        that load even before the first refresh. External git sources
+        come from the `plugin_sources` table. Each row's `status` /
+        `pluginCount` / `error` reflect the holder's most recent
+        refresh.
+      responses:
+        "200":
+          description: Source catalog.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  sources:
+                    type: array
+                    items: { $ref: "#/components/schemas/PluginSource" }
+        "503":
+          description: Holder / source store not wired (legacy harness).
+    post:
+      summary: Create a new external (git) plugin source (plugin:manage)
+      description: >-
+        Reserved ids (`builtin`, `sample-text`) are refused.
+        `gitUrl` supports https / ssh / file:// transports. When
+        `requireSignature` is true, populate `allowedSigners` (an
+        SSH allowed-signers file content) — the lifecycle's verify
+        stage runs `git verify-commit` against it before load.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PluginSourceUpsert" }
+      responses:
+        "200":
+          description: Created source.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  source: { $ref: "#/components/schemas/PluginSource" }
+        "400": { description: Invalid / reserved id, or missing gitUrl }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /api/plugins/sources/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
+    patch:
+      summary: Update an external plugin source (plugin:manage)
+      description: >-
+        Minimal-UPDATE shape — only the fields the caller sends are
+        modified; unmentioned fields preserved. Reserved ids
+        (`builtin`, `sample-text`) refused.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PluginSourceUpsert" }
+      responses:
+        "200":
+          description: Updated source.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  source: { $ref: "#/components/schemas/PluginSource" }
+        "400": { description: Reserved id }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      summary: Remove an external plugin source (plugin:manage)
+      description: >-
+        The source's plugins disappear on the next refresh. Reserved
+        ids (`builtin`, `sample-text`) refused — they're safety-net
+        rows.
+      responses:
+        "200": { description: Deleted }
+        "400": { description: Reserved id }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /api/plugins/refresh:
+    post:
+      summary: Rebuild the plugin registry from the sources + atomic swap (plugin:manage)
+      description: >-
+        Walks every enabled source through the lifecycle (resolve →
+        clone → verify → install → import → scan → register), builds
+        a fresh `PluginRegistry`, and atomically swaps the holder's
+        pointer. In-flight executions keep the snapshot they already
+        resolved; new requests see the post-swap registry. Returns
+        the per-source status + the diff (added / removed / updated
+        plugin keys) so the admin sees exactly what changed.
+      responses:
+        "200":
+          description: Refresh report.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PluginRefreshReport" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "503":
+          description: Holder / source store not wired (legacy harness).
   /api/providers:
     get:
       summary: List providers from the loaded provider registry
