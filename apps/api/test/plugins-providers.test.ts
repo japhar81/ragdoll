@@ -85,11 +85,13 @@ test("GET /api/plugins/:id/docs rejects path traversal attempts", async () => {
 // PLUGIN-ARCH-1: /api/plugins/sources + /api/plugins/refresh
 // ---------------------------------------------------------------------------
 
-test("GET /api/plugins/sources surfaces the holder's per-source statuses (empty store → empty rows array)", async () => {
-  // Harness wires an empty in-memory PluginSourceStore + a holder
-  // around the seeded registry. With zero rows in the store, the
-  // response shows zero rows; once we add a row the next refresh
-  // surfaces it.
+test("GET /api/plugins/sources always surfaces the built-in rows, even before any refresh has run", async () => {
+  // Built-in (`builtin` / `sample-text`) rows are the catalog's
+  // safety net — operators need to see them BEFORE the first
+  // refresh, because the boot path uses the legacy synchronous
+  // loader which doesn't populate holder statuses. The route
+  // pulls built-ins from the in-code `BUILTIN_SOURCES` descriptor
+  // list so the response is honest at boot.
   const h = buildHarness({ withAuth: true });
   const auth = await seedAuth(h);
   const res = await h.request({
@@ -98,10 +100,18 @@ test("GET /api/plugins/sources surfaces the holder's per-source statuses (empty 
     headers: auth
   });
   assert.equal(res.status, 200);
-  // No rows yet (store is empty) → response is an empty `sources`
-  // array. The holder's `statuses()` is also empty because the
-  // harness never ran a build/refresh.
-  assert.deepEqual(res.body.sources, []);
+  const ids = (res.body.sources as Array<{ id: string; builtin: boolean }>).map(
+    (s) => s.id
+  );
+  assert.ok(ids.includes("builtin"), "builtin row must be present");
+  assert.ok(ids.includes("sample-text"), "sample-text row must be present");
+  // And both carry the `builtin: true` flag so the UI knows to
+  // render them read-only.
+  for (const s of res.body.sources as Array<{ id: string; builtin: boolean }>) {
+    if (s.id === "builtin" || s.id === "sample-text") {
+      assert.equal(s.builtin, true);
+    }
+  }
 });
 
 test("POST /api/plugins/refresh rebuilds the registry through the source store + returns a diff envelope", async () => {
