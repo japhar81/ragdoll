@@ -462,8 +462,16 @@ export function PluginSourcesScreen() {
                 onChange={(e) =>
                   setDraft({ ...draft, gitUrl: e.target.value })
                 }
-                placeholder="https://git.internal.example/plugins.git"
+                placeholder="https://git.internal.example/plugins.git  or  file:///srv/plugins/repo.git"
               />
+              <p className="muted field-help" style={{ fontSize: 11 }}>
+                https / ssh / file:// transports all supported. For a
+                local bare repo (testing / air-gapped install), use
+                <code> file:///absolute/path/to/repo.git</code> — git
+                clones with <code>--no-hardlinks</code> so the cached
+                working copy is immutable even if the source repo is
+                modified later.
+              </p>
             </label>
             <label>
               <div className="muted">Ref (branch / tag / commit sha)</div>

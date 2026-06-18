@@ -364,6 +364,48 @@ UI: bundle builds cleanly; route + nav entry wired.
   HANDLERS at startup. Repo-driven Python plugin loading would
   mirror this design on the sidecar side.
 
+## Amendment — file:// URL support
+
+Operators with a local mirror, an air-gapped install, or a dev
+workflow that bypasses a hosted Git server can point a plugin
+source at a `file:///path/to/bare-repo.git` URL. git supports it
+natively; the lifecycle's existing resolve → fetch → import →
+scan → register path covers it without a code branch.
+
+One non-obvious correctness concern needed handling:
+
+**`git clone --no-hardlinks` is load-bearing for `file://`.**
+
+By default, `git clone` of a `file://` URL uses git's "local
+optimization" — it **hardlinks** objects from the source bare repo
+into the clone's `.git/objects/`. That means a write to the source
+repo's objects later (e.g. `git gc`, `git push -f`, or a manual
+mutation) would mutate the cached working copy too. That breaks
+the content-addressed cache invariant: a path keyed by sha MUST be
+immutable post-clone.
+
+`--no-hardlinks` is unconditionally applied to the clone command
+— it's a no-op on https / ssh / git transports (those always
+copy) so keeping it on without a per-scheme branch is the right
+call.
+
+Verification: `packages/plugin-loader/test/file-url.test.ts` runs
+the full lifecycle against a real bare repo created with `git
+init --bare`, including a test that:
+
+1. Clones the source via `file://` into the cache,
+2. Reads the cached plugin file's content,
+3. Mutates the source repo (commits different content +
+   force-pushes + `git gc --prune=now`),
+4. Re-reads the cached file and asserts it's UNCHANGED.
+
+That's the `--no-hardlinks` guarantee made tangible.
+
+The screen's URL input placeholder mentions both shapes:
+`https://git.internal.example/plugins.git  or
+file:///srv/plugins/repo.git`, with help text explaining the
+no-hardlinks behaviour.
+
 ## References
 
 - `packages/plugin-loader/src/sources.ts` — source store + types.
