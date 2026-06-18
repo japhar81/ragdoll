@@ -16,7 +16,10 @@
 import { enforce } from "../../../../../packages/auth/src/index.ts";
 import { ok, error } from "../http-utils.ts";
 import { readPluginDoc, projectPlugin } from "../spec-helpers.ts";
-import { refreshPluginRegistry } from "../../../../../packages/plugin-loader/src/index.ts";
+import {
+  BUILTIN_SOURCES,
+  refreshPluginRegistry
+} from "../../../../../packages/plugin-loader/src/index.ts";
 import type { PluginRef } from "../../../../../packages/core/src/index.ts";
 import type { AppDeps } from "../types.ts";
 import type { RouteRegistry } from "./types.ts";
@@ -50,27 +53,37 @@ export function registerPluginsProvidersRoutes(
       // even on a degraded deployment.
       return ok({ sources: [] });
     }
-    // Pull live status from the holder (the last build/refresh result)
-    // + zip with the source rows so disabled / not-yet-loaded sources
-    // still appear in the response.
+    // Built-in rows ALWAYS surface, even before the first refresh.
+    // The boot path uses the legacy synchronous `loadRegistries()`
+    // which doesn't populate `holder.statuses()` — without this,
+    // an operator visiting the screen at boot would see an empty
+    // catalog. The descriptors are the source of truth for the
+    // catalog row shape; the holder's status overlay (when present)
+    // adds the live `loaded / failed / pluginCount` envelope.
     const statuses = holder.statuses();
     const statusById = new Map(statuses.map((s) => [s.id, s]));
     const rows = await store.list({ enabledOnly: false });
     const sources = [
-      // Built-ins surface as the synthetic ids the loader uses.
-      ...statuses
-        .filter((s) => s.kind === "local")
-        .map((s) => ({
-          id: s.id,
-          kind: s.kind,
+      // Built-ins from the in-code descriptor list — same set the
+      // loader uses every refresh, kept here so the catalog is
+      // honest before any refresh has run.
+      ...BUILTIN_SOURCES.map((b) => {
+        const live = statusById.get(b.id);
+        return {
+          id: b.id,
+          kind: b.kind,
+          displayName: b.displayName,
+          description: b.description,
           enabled: true,
           builtin: true,
-          status: s.status,
-          pluginCount: s.pluginCount,
-          loadedAt: s.loadedAt,
-          error: s.error,
-          errorStage: s.errorStage
-        })),
+          subpath: b.subpath,
+          status: live?.status,
+          pluginCount: live?.pluginCount,
+          loadedAt: live?.loadedAt,
+          error: live?.error,
+          errorStage: live?.errorStage
+        };
+      }),
       // External (DB-backed) sources: marry the row + the live status.
       ...rows.map((row) => {
         const live = statusById.get(row.id);
