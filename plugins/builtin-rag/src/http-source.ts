@@ -51,6 +51,9 @@ interface HttpSourceConfig {
   url?: unknown;
   method?: unknown;
   headers?: unknown;
+  /** Logical input.secrets key whose value is sent in the Authorization header. */
+  authorizationSecretRef?: unknown;
+  authorizationScheme?: unknown;
   acceptHeader?: unknown;
   allowPrivateNetworks?: unknown;
   timeoutMs?: unknown;
@@ -166,6 +169,14 @@ export const httpSourcePlugin: InProcessPlugin = {
           description:
             "Optional request headers — e.g. an `Authorization: Bearer ...` if the URL requires it, or `User-Agent` to identify the puller. NEVER place secrets in this map; resolve them through input.secrets and splice them in via a transform-by-config pattern."
         },
+        authorizationSecretRef: {
+          type: "string",
+          description: "Logical node.secrets name containing an authorization token. The value never enters config or traces."
+        },
+        authorizationScheme: {
+          type: "string", enum: ["Bearer", "token"], default: "Bearer",
+          description: "Authorization scheme prepended to the resolved secret."
+        },
         acceptHeader: {
           type: "string",
           description:
@@ -245,6 +256,14 @@ export const httpSourcePlugin: InProcessPlugin = {
       for (const [k, v] of Object.entries(cfg.headers as Record<string, unknown>)) {
         if (typeof v === "string") headers[k.toLowerCase()] = v;
       }
+    }
+    if (typeof cfg.authorizationSecretRef === "string" && cfg.authorizationSecretRef.length > 0) {
+      const token = input.secrets?.[cfg.authorizationSecretRef];
+      if (typeof token !== "string" || token.length === 0) {
+        throw new Error(`http_source: authorization secret '${cfg.authorizationSecretRef}' was not resolved`);
+      }
+      const scheme = cfg.authorizationScheme === "token" ? "token" : "Bearer";
+      headers.authorization = `${scheme} ${token}`;
     }
     const timeoutMs =
       typeof cfg.timeoutMs === "number" && cfg.timeoutMs > 0

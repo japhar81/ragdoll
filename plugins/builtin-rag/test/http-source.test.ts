@@ -98,13 +98,13 @@ test("ssrfReason: case-insensitive", () => {
 // execute() — pre-fetch validation branches (no live HTTP)
 // ---------------------------------------------------------------------------
 
-function execInput(config: Record<string, unknown>) {
+function execInput(config: Record<string, unknown>, secrets: Record<string, string> = {}) {
   return {
     node: { id: "n", category: "datasource" },
     plugin: { id: "http_source", version: "1.0.0", category: "datasource" },
     config,
     inputs: {},
-    secrets: {},
+    secrets,
     dataset: { slug: "ds", bindings: {} },
     context: {
       executionId: "ex",
@@ -192,4 +192,19 @@ test("http_source: manifest declares the single `documents` output port (same sh
   const ports = httpSourcePlugin.manifest.outputPorts ?? [];
   assert.equal(ports.length, 1);
   assert.equal(ports[0].name, "documents");
+});
+
+test("http_source: resolves authorization only from input.secrets with an explicit scheme", async () => {
+  const original = globalThis.fetch;
+  let authorization = "";
+  globalThis.fetch = (async (_url, init) => {
+    authorization = String((init?.headers as Record<string, string>)?.authorization ?? "");
+    return new Response('{"data":[]}', { status: 200, headers: { "content-type": "application/json" } });
+  }) as typeof fetch;
+  try {
+    await httpSourcePlugin.execute(execInput({ url: "https://api.snyk.io/rest/orgs/x/issues", authorizationSecretRef: "snyk", authorizationScheme: "token" }, { snyk: "secret-token" }));
+    assert.equal(authorization, "token secret-token");
+  } finally {
+    globalThis.fetch = original;
+  }
 });
