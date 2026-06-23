@@ -51,6 +51,7 @@ import type {
 } from "../../../packages/db/src/index.ts";
 import type { QueueJob } from "./index.ts";
 import { resolveRunVersion } from "./handlers/version-resolution.ts";
+import { resolveConnectionSecret } from "../../../packages/secrets/src/index.ts";
 
 // Worker types (WorkerDeps, WorkerRepositories, job + result shapes,
 // Worker interface) live in ./handlers/types.ts. Re-exported below so
@@ -1125,21 +1126,18 @@ export function createWorker(deps: WorkerDeps): Worker {
         // the resolver's cascade walk (we already know which row we're
         // probing) but go through SecretProvider so the credential
         // resolution path matches execution time.
+        // Cascade across scopes (tenant → global) keyed off the row's
+        // tenant boundary, INDEPENDENTLY of the connection's own scope
+        // — matches execution-time resolution so a probe's auth result
+        // reflects what a real run would see. (No runtime environment
+        // in a sweep, so the env scope is skipped; tenant + global
+        // still cascade.)
         let secret: string | undefined;
         if (row.secretRefKey) {
-          try {
-            secret = await deps.secretProvider.get(
-              {
-                scope: row.tenantId ? "tenant" : "global",
-                tenantId: row.tenantId ?? undefined,
-                key: row.secretRefKey
-              },
-              row.tenantId ?? ""
-            );
-          } catch {
-            // Carry on without a secret — the driver may not need it,
-            // or its probe will surface a clear "missing secret" error.
-          }
+          secret = await resolveConnectionSecret(deps.secretProvider, {
+            key: row.secretRefKey,
+            tenantId: row.tenantId ?? undefined
+          });
         }
         const result = await probeConnection({
           id: row.id,
