@@ -32,7 +32,7 @@ import type {
   TenantRepository,
   EnvironmentRepository
 } from "../../db/src/index.ts";
-import type { SecretProvider } from "../../secrets/src/index.ts";
+import { type SecretProvider, resolveConnectionSecret } from "../../secrets/src/index.ts";
 import { applyNamespacePolicy } from "./dataset-namespace.ts";
 
 export interface DatasetResolverDeps {
@@ -197,20 +197,19 @@ export function buildDatasetResolver(deps: DatasetResolverDeps): DatasetResolver
             // Resolution is best-effort: a missing/unresolvable secret
             // leaves the binding usable for no-auth drivers and lets
             // credentialed drivers surface a clear error themselves.
+            // Cascade the secret across scopes INDEPENDENTLY of the
+            // connection's scope (env → tenant → global, keyed off the
+            // runtime tenant boundary). A tenant connection can use a
+            // global credential and vice versa — see
+            // `resolveConnectionSecret`. The runtime tenant is the
+            // boundary, NOT the connection's own scope.
             let resolvedSecret: string | undefined;
             if (deps.secrets && conn.secretRefKey) {
-              try {
-                resolvedSecret = await deps.secrets.get(
-                  {
-                    scope: conn.tenantId ? "tenant" : "global",
-                    tenantId: conn.tenantId ?? undefined,
-                    key: conn.secretRefKey
-                  },
-                  conn.tenantId ?? args.tenantId ?? ""
-                );
-              } catch {
-                /* leave undefined; driver may not need it */
-              }
+              resolvedSecret = await resolveConnectionSecret(deps.secrets, {
+                key: conn.secretRefKey,
+                tenantId: conn.tenantId ?? args.tenantId ?? undefined,
+                environment: args.environmentId ?? undefined
+              });
             }
             connection = {
               id: conn.id,

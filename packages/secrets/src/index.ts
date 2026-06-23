@@ -123,6 +123,73 @@ export class DatabaseEncryptedSecretProvider implements SecretProvider {
   }
 }
 
+/**
+ * Resolve a connection's secret by its logical key, cascading across
+ * scopes INDEPENDENTLY of where the connection row itself lives.
+ *
+ * A connection references a secret only by its `secretRefKey` (a
+ * logical string). The scope a secret is *stored* at is orthogonal to
+ * the connection's scope:
+ *
+ *   - a tenant-scoped connection can legitimately use a GLOBAL
+ *     credential (shared org-wide creds, no need to elevate the
+ *     connection to global just to reach them);
+ *   - a global connection running under a tenant can use a
+ *     TENANT-scoped credential (per-tenant override of a shared
+ *     connection's creds).
+ *
+ * So we walk the same `environment → tenant → global` cascade every
+ * other resource uses, keyed off the RUNTIME tenant boundary
+ * (`tenantId` / `environment` of the execution), NOT the connection's
+ * own scope. The previous code derived the secret scope from the
+ * connection (`conn.tenantId ? "tenant" : "global"`), which is the
+ * bug — a tenant connection could never see a global secret and vice
+ * versa.
+ *
+ * Returns the first hit, or `undefined` when no scope has the key.
+ * Misses (and any per-scope access-denied) fall through to the next
+ * scope; the caller decides whether a missing secret is fatal (most
+ * credentialed drivers will surface their own clear error).
+ */
+export async function resolveConnectionSecret(
+  secrets: Pick<SecretProvider, "get">,
+  args: {
+    key: string;
+    /** Runtime tenant boundary — the tenant the execution runs under.
+     *  Used both as the tenant-scope ref's tenantId AND as the
+     *  boundary guard. Empty / undefined → only the global scope is
+     *  attempted. */
+    tenantId?: string;
+    /** Runtime environment — when present, the environment scope is
+     *  tried first (most specific). */
+    environment?: string;
+  }
+): Promise<string | undefined> {
+  const attempts: SecretRef[] = [];
+  if (args.tenantId && args.environment) {
+    attempts.push({
+      scope: "environment",
+      tenantId: args.tenantId,
+      environment: args.environment,
+      key: args.key
+    });
+  }
+  if (args.tenantId) {
+    attempts.push({ scope: "tenant", tenantId: args.tenantId, key: args.key });
+  }
+  attempts.push({ scope: "global", key: args.key });
+  for (const ref of attempts) {
+    try {
+      return await secrets.get(ref, args.tenantId ?? "");
+    } catch {
+      // Miss / denied at this scope → fall through to the next. The
+      // cascade always passes a matching tenant boundary so a hit is
+      // never an out-of-tenant leak.
+    }
+  }
+  return undefined;
+}
+
 export class SecretNotFoundError extends Error {
   constructor(ref: SecretRef) {
     super(`Secret not found for ${secretRefKey(ref)}`);

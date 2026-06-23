@@ -21,7 +21,7 @@
  */
 
 import type { ConnectionRepository, ConnectionRow } from "../../db/src/types.ts";
-import type { SecretProvider } from "../../secrets/src/index.ts";
+import { type SecretProvider, resolveConnectionSecret } from "../../secrets/src/index.ts";
 
 export type { ConnectionRow, ConnectionRepository };
 
@@ -64,24 +64,20 @@ export class ExternalConnectionResolver {
   ): Promise<ResolvedExternalConnection | undefined> {
     const row = await this.repo.resolveSlug(args);
     if (!row) return undefined;
+    // Cascade the secret across scopes (env → tenant → global) keyed
+    // off the runtime tenant boundary, INDEPENDENTLY of the
+    // connection's own scope. A tenant connection can use a global
+    // credential and a global connection (running under a tenant) can
+    // use a tenant credential — see `resolveConnectionSecret`. An
+    // unresolved secret still surfaces the connection row; the driver
+    // factory decides whether to fail.
     let secret: string | undefined;
     if (row.secretRefKey) {
-      try {
-        secret = await this.secrets.get(
-          // SecretRef shape expected by SecretProvider. The connection's
-          // secretRefKey is a key into the tenant's secret store.
-          {
-            scope: row.tenantId ? "tenant" : "global",
-            tenantId: row.tenantId ?? undefined,
-            key: row.secretRefKey
-          },
-          row.tenantId ?? args.tenantId ?? ""
-        );
-      } catch {
-        // A connection with an unresolved secret still surfaces — the
-        // driver factory decides whether to fail (most will). Letting
-        // resolution succeed lets the UI display the connection row.
-      }
+      secret = await resolveConnectionSecret(this.secrets, {
+        key: row.secretRefKey,
+        tenantId: row.tenantId ?? args.tenantId ?? undefined,
+        environment: args.environmentId ?? undefined
+      });
     }
     return {
       id: row.id,
