@@ -14,7 +14,12 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import {
   registerSidecarGitPlugins,
-  applyExternalPlugins
+  applyExternalPlugins,
+  pushSidecarSources,
+  buildPluginRegistry,
+  InMemoryPluginSourceStore,
+  __clearPluginCacheForTests,
+  type PluginSource
 } from "../src/index.ts";
 import { PluginRegistry } from "../../plugin-sdk/src/index.ts";
 
@@ -167,6 +172,164 @@ test("registerSidecarGitPlugins: sidecar unreachable → silent no-op (registry 
     await registerSidecarGitPlugins(registry); // must not throw
     assert.equal(registry.list().length, 0);
   });
+});
+
+// ---------------------------------------------------------------------------
+// pushSidecarSources — single source of truth: RAGdoll pushes
+// host:"sidecar" plugin_sources rows to the sidecar's /admin/reload.
+// ---------------------------------------------------------------------------
+
+/** Stub sidecar that records the /admin/reload body + token, replies
+ *  with a status report. */
+function startReloadStub(): Promise<{
+  baseUrl: string;
+  close: () => Promise<void>;
+  lastBody: () => unknown;
+  lastToken: () => string | undefined;
+}> {
+  let body: unknown;
+  let token: string | undefined;
+  const server = http.createServer((req: IncomingMessage, res: ServerResponse) => {
+    if (req.method === "POST" && req.url === "/admin/reload") {
+      token = req.headers["x-ragdoll-admin-token"] as string | undefined;
+      const chunks: Buffer[] = [];
+      req.on("data", (c) => chunks.push(c));
+      req.on("end", () => {
+        body = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
+        const sources = (body as { sources?: Array<{ id: string }> }).sources ?? [];
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(
+          JSON.stringify({
+            sources: sources.map((s) => ({
+              id: s.id,
+              status: "loaded",
+              pluginCount: 1,
+              commitSha: "f".repeat(40),
+              error: null,
+              errorStage: null,
+              pluginIds: [`${s.id}_plug`]
+            }))
+          })
+        );
+      });
+      return;
+    }
+    res.writeHead(404);
+    res.end();
+  });
+  return new Promise((resolve) => {
+    server.listen(0, "127.0.0.1", () => {
+      const { port } = server.address() as AddressInfo;
+      resolve({
+        baseUrl: `http://127.0.0.1:${port}`,
+        lastBody: () => body,
+        lastToken: () => token,
+        close: () => new Promise<void>((done) => server.close(() => done()))
+      });
+    });
+  });
+}
+
+const sidecarRow = (id: string): PluginSource => ({
+  id,
+  kind: "git",
+  host: "sidecar",
+  enabled: true,
+  gitUrl: `https://git.invalid/${id}.git`,
+  ref: "main",
+  subpath: "plugins"
+});
+
+const workerRow = (id: string): PluginSource => ({
+  id,
+  kind: "git",
+  host: "worker",
+  enabled: true,
+  gitUrl: `https://git.invalid/${id}.git`,
+  ref: "main"
+});
+
+test("pushSidecarSources: POSTs ONLY host:sidecar rows to /admin/reload with the admin token; marks results on the store", async () => {
+  const stub = await startReloadStub();
+  const store = new InMemoryPluginSourceStore([
+    sidecarRow("py_a"),
+    workerRow("ts_b") // must NOT be pushed
+  ]);
+  try {
+    await withEnv(
+      {
+        PYTHON_PLUGIN_URL: stub.baseUrl,
+        RAGDOLL_SIDECAR_ADMIN_TOKEN: "sekret"
+      },
+      async () => {
+        const result = await pushSidecarSources(store);
+        assert.equal(result.pushed, true);
+        assert.equal(stub.lastToken(), "sekret");
+        // Only the sidecar row is in the pushed body.
+        const sources = (stub.lastBody() as { sources: Array<{ id: string }> })
+          .sources;
+        assert.deepEqual(sources.map((s) => s.id), ["py_a"]);
+        // The sidecar's status was marked on the store row.
+        const row = await store.get!("py_a");
+        assert.equal(row?.lastLoadOk, true);
+        assert.equal(row?.lastCommitSha, "f".repeat(40));
+      }
+    );
+  } finally {
+    await stub.close();
+  }
+});
+
+test("pushSidecarSources: pushes an EMPTY list when there are no sidecar rows (so a removed source is dropped)", async () => {
+  const stub = await startReloadStub();
+  const store = new InMemoryPluginSourceStore([workerRow("ts_only")]);
+  try {
+    await withEnv({ PYTHON_PLUGIN_URL: stub.baseUrl }, async () => {
+      const result = await pushSidecarSources(store);
+      assert.equal(result.pushed, true);
+      const sources = (stub.lastBody() as { sources: unknown[] }).sources;
+      assert.deepEqual(sources, []);
+    });
+  } finally {
+    await stub.close();
+  }
+});
+
+test("pushSidecarSources: no PYTHON_PLUGIN_URL → not pushed, no throw", async () => {
+  const store = new InMemoryPluginSourceStore([sidecarRow("py_a")]);
+  await withEnv({ PYTHON_PLUGIN_URL: undefined }, async () => {
+    const result = await pushSidecarSources(store);
+    assert.equal(result.pushed, false);
+    assert.match(result.reason ?? "", /PYTHON_PLUGIN_URL/);
+  });
+});
+
+test("pushSidecarSources: sidecar unreachable → not pushed, reason surfaced, no throw", async () => {
+  const store = new InMemoryPluginSourceStore([sidecarRow("py_a")]);
+  await withEnv({ PYTHON_PLUGIN_URL: "http://127.0.0.1:1" }, async () => {
+    const result = await pushSidecarSources(store);
+    assert.equal(result.pushed, false);
+    assert.match(result.reason ?? "", /unreachable/);
+  });
+});
+
+test("buildPluginRegistry: host:sidecar rows are NOT loaded in-process (they're pushed to the sidecar instead)", async () => {
+  __clearPluginCacheForTests();
+  // A sidecar row with a bogus git URL. If the in-process lifecycle
+  // TRIED to load it, it'd appear in the statuses as a failed source.
+  // It must be skipped entirely.
+  const store = new InMemoryPluginSourceStore([sidecarRow("py_skip")]);
+  const { statuses } = await buildPluginRegistry({
+    store,
+    loadOpts: {
+      resolveBuiltinPath: (s) => `__memory__/${s.id}/local/`,
+      importFn: async () => ({})
+    }
+  });
+  // Only the two built-in (local) sources were walked — the sidecar
+  // row never reached the lifecycle.
+  assert.ok(!statuses.some((s) => s.id === "py_skip"));
+  assert.ok(statuses.every((s) => s.kind === "local"));
 });
 
 test("applyExternalPlugins: layers hardcoded built-in sidecar manifests AND git-loaded plugins", async () => {

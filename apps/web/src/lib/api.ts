@@ -1054,6 +1054,10 @@ export const api = {
 export interface PluginSourceView {
   id: string;
   kind: "local" | "git";
+  /** PLUGIN-ARCH-2: where the source runs. `worker` = TS in-process;
+   *  `sidecar` = pushed to the python-plugins sidecar. Absent on
+   *  built-in rows (always worker). */
+  host?: "worker" | "sidecar";
   builtin: boolean;
   enabled: boolean;
   displayName?: string;
@@ -1088,6 +1092,7 @@ export interface PluginSourceUpsertInput {
   displayName?: string;
   description?: string;
   enabled?: boolean;
+  host?: "worker" | "sidecar";
   requireSignature?: boolean;
   allowedSigners?: string;
 }
@@ -1096,6 +1101,21 @@ export interface PluginRefreshReport {
   sources: PluginSourceView[];
   diff: { added: string[]; removed: string[]; updated: string[] };
   pluginCount: number;
+  /** PLUGIN-ARCH-2: outcome of pushing `host: "sidecar"` rows to the
+   *  python-plugins sidecar's /admin/reload. */
+  sidecar?: {
+    pushed: boolean;
+    reason?: string;
+    report?: {
+      sources: Array<{
+        id: string;
+        status: string;
+        pluginCount?: number;
+        error?: string | null;
+        errorStage?: string | null;
+      }>;
+    };
+  };
 }
 
 export interface PipelineDatasetBindingView {

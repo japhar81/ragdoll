@@ -19,7 +19,8 @@ import { readPluginDoc, projectPlugin } from "../spec-helpers.ts";
 import {
   BUILTIN_SOURCES,
   refreshPluginRegistry,
-  applyExternalPlugins
+  applyExternalPlugins,
+  pushSidecarSources
 } from "../../../../../packages/plugin-loader/src/index.ts";
 import type { PluginRef } from "../../../../../packages/core/src/index.ts";
 import type { AppDeps } from "../types.ts";
@@ -86,11 +87,23 @@ export function registerPluginsProvidersRoutes(
         };
       }),
       // External (DB-backed) sources: marry the row + the live status.
+      // `host: "worker"` rows have a live worker-side status in the
+      // holder; `host: "sidecar"` rows don't (the sidecar loads them) —
+      // their status comes from the row's last-load fields, which
+      // `pushSidecarSources` stamps via markLoadResult.
       ...rows.map((row) => {
         const live = statusById.get(row.id);
+        const derivedStatus =
+          live?.status ??
+          (row.lastLoadOk === true
+            ? "loaded"
+            : row.lastLoadOk === false
+              ? "failed"
+              : undefined);
         return {
           id: row.id,
           kind: row.kind,
+          host: row.host ?? "worker",
           displayName: row.displayName,
           description: row.description,
           enabled: row.enabled,
@@ -100,7 +113,7 @@ export function registerPluginsProvidersRoutes(
           subpath: row.subpath,
           lastCommitSha: live?.commitSha ?? row.lastCommitSha,
           lastFetchedAt: live?.loadedAt ?? row.lastFetchedAt,
-          status: live?.status ?? (row.lastLoadOk === false ? "failed" : undefined),
+          status: derivedStatus,
           pluginCount: live?.pluginCount ?? 0,
           error: live?.error ?? row.lastLoadError,
           errorStage: live?.errorStage
@@ -143,6 +156,10 @@ export function registerPluginsProvidersRoutes(
       description:
         typeof body.description === "string" ? body.description : undefined,
       enabled: body.enabled === undefined ? true : Boolean(body.enabled),
+      // PLUGIN-ARCH-2: `worker` (TS in-process, default) or `sidecar`
+      // (pushed to the python-plugins sidecar). Anything else falls
+      // back to `worker`.
+      host: body.host === "sidecar" ? "sidecar" : "worker",
       requireSignature:
         body.requireSignature === undefined
           ? false
@@ -174,6 +191,8 @@ export function registerPluginsProvidersRoutes(
     if (typeof body.description === "string")
       patch.description = body.description;
     if (body.enabled !== undefined) patch.enabled = Boolean(body.enabled);
+    if (body.host === "worker" || body.host === "sidecar")
+      patch.host = body.host;
     if (body.requireSignature !== undefined)
       patch.requireSignature = Boolean(body.requireSignature);
     if (typeof body.allowedSigners === "string")
@@ -218,16 +237,20 @@ export function registerPluginsProvidersRoutes(
     if (!holder || !store) {
       return error(503, "plugin_source_store_not_wired");
     }
-    // `applyExternalPlugins` re-layers the env-driven sidecar plugins
-    // (hardcoded built-ins + git-loaded ones discovered via the
-    // sidecar's /manifests) onto the freshly-built registry — without
-    // it, a refresh would drop every external plugin. PLUGIN-ARCH-2.
+    // PLUGIN-ARCH-2 single source of truth: push the `host: "sidecar"`
+    // rows to the python-plugins sidecar FIRST so it clones + imports
+    // them, THEN rebuild the registry. `applyExternalPlugins`
+    // (postRegister) re-layers the env-driven sidecar plugins
+    // (hardcoded built-ins + the git-loaded ones discovered via
+    // /manifests, which now reflect what we just pushed) — without it,
+    // a refresh would drop every external plugin.
+    const sidecar = await pushSidecarSources(store);
     const report = await refreshPluginRegistry({
       holder,
       store,
       postRegister: applyExternalPlugins
     });
-    return ok(report);
+    return ok({ ...report, sidecar });
   });
 
   api.route("GET", "/api/plugins/:category/:id/:version", async (ctx) => {

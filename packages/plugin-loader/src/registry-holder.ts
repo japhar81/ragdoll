@@ -76,9 +76,15 @@ export async function buildPluginRegistry(args: {
   const registry = new PluginRegistry();
   const statuses: SourceLoadStatus[] = [];
   const dbSources = await args.store.list({ enabledOnly: false });
+  // PLUGIN-ARCH-2: only `host: "worker"` (or unset) rows run in-process
+  // through the TS lifecycle. `host: "sidecar"` rows are Python code
+  // pushed to the python-plugins sidecar (see `pushSidecarSources`) and
+  // discovered back via `/manifests` — they're NOT cloned/imported
+  // here. Skipping them keeps a Python repo from being import-attempted
+  // as a TS module (which would surface as a per-source `failed`).
   const all: PluginSource[] = [
     ...BUILTIN_SOURCES.map((s) => ({ ...s })),
-    ...dbSources
+    ...dbSources.filter((s) => (s.host ?? "worker") === "worker")
   ];
   for (const source of all) {
     const status = await loadSource(source, registry, args.loadOpts ?? {});
