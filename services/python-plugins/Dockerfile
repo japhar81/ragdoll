@@ -38,9 +38,11 @@ ENV PYTHONUNBUFFERED=1 \
 WORKDIR /app
 
 # curl is used by the compose/k8s health probes; ca-certificates for TLS
-# crawling. playwright --with-deps pulls the rest of Chromium's libs.
+# crawling. git is used by the PLUGIN-ARCH-2 git plugin loader
+# (app/git_source.py) to clone external Python plugin repos. playwright
+# --with-deps pulls the rest of Chromium's libs.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends curl ca-certificates \
+    && apt-get install -y --no-install-recommends curl ca-certificates git \
     && rm -rf /var/lib/apt/lists/*
 
 RUN pip install "poetry==${POETRY_VERSION}"

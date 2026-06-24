@@ -18,7 +18,7 @@ single `final` chunk for clients that call ExecuteServerStream.
 from __future__ import annotations
 
 import logging
-from typing import Any, Callable, Dict, List
+from typing import Any, Callable, Dict, List, Optional
 
 from connectrpc.code import Code
 from connectrpc.errors import ConnectError
@@ -133,18 +133,36 @@ def _result_to_proto(result: Dict[str, Any]) -> ProtoExecuteResponse:
 
 
 def build_connect_app(
-    handlers: Dict[str, Callable[[ExecuteRequest], Dict[str, Any]]],
-    plugin_ids: List[str],
+    handlers: Dict[str, Callable[[ExecuteRequest], Dict[str, Any]]]
+    | Callable[[str], Optional[Callable[[ExecuteRequest], Dict[str, Any]]]],
+    plugin_ids: List[str] | Callable[[], List[str]],
 ):
-    """Construct the Connect ASGI app that fronts the existing HANDLERS dict.
+    """Construct the Connect ASGI app that fronts the plugin registry.
 
-    The plugin_id used by the server is the literal string "ragdoll-python-plugins"
-    (this is a multi-plugin sidecar, not a single-plugin host). Health
-    reports the full list of registered plugin ids.
+    `handlers` may be a static dict OR a resolver callable
+    `(plugin_id) -> handler | None`. The resolver form lets git-loaded
+    plugins (PLUGIN-ARCH-2) appear without rebuilding the app — the
+    Connect routes read the LIVE registry on every call.
+
+    `plugin_ids` may be a static list OR a callable returning the live
+    list (for Health).
+
+    The plugin_id used by the server is the literal string
+    "ragdoll-python-plugins" (this is a multi-plugin sidecar, not a
+    single-plugin host). Health reports the full list of registered
+    plugin ids.
     """
 
+    def _resolve(plugin: str):
+        if callable(handlers):
+            return handlers(plugin)
+        return handlers.get(plugin)
+
+    def _ids() -> List[str]:
+        return list(plugin_ids()) if callable(plugin_ids) else list(plugin_ids)
+
     async def execute(req: ProtoExecuteRequest, ctx: RequestContext) -> ProtoExecuteResponse:
-        handler = handlers.get(req.plugin)
+        handler = _resolve(req.plugin)
         if handler is None:
             raise ConnectError(Code.UNIMPLEMENTED, f"unknown plugin {req.plugin}")
         pydantic_req = _proto_to_pydantic(req)
@@ -160,7 +178,7 @@ def build_connect_app(
         return _result_to_proto(result)
 
     async def health(_req: ProtoHealthRequest, _ctx: RequestContext) -> ProtoHealthResponse:
-        return ProtoHealthResponse(ok=True, plugins=plugin_ids, message="")
+        return ProtoHealthResponse(ok=True, plugins=_ids(), message="")
 
     return create_plugin_server(
         plugin_id="ragdoll-python-plugins",

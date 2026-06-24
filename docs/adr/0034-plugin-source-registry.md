@@ -360,9 +360,11 @@ UI: bundle builds cleanly; route + nav entry wired.
   snapshot until restart. A worker-side refresh endpoint (or a
   Redis pub/sub channel the worker subscribes to) is an
   obvious follow-on.
-- **Python sidecar dynamic loading**: the sidecar registers its
+- **Python sidecar dynamic loading**: ~~the sidecar registers its
   HANDLERS at startup. Repo-driven Python plugin loading would
-  mirror this design on the sidecar side.
+  mirror this design on the sidecar side.~~ **DONE** — see the
+  "Amendment — Python sidecar git loading (PLUGIN-ARCH-2)"
+  section below.
 
 ## Amendment — file:// URL support
 
@@ -405,6 +407,97 @@ The screen's URL input placeholder mentions both shapes:
 `https://git.internal.example/plugins.git  or
 file:///srv/plugins/repo.git`, with help text explaining the
 no-hardlinks behaviour.
+
+## Amendment — Python sidecar git loading (PLUGIN-ARCH-2)
+
+The TS in-process loader (this ADR) had a sibling gap: the Python
+sidecar's plugins were all baked into the image, registered in a
+static `HANDLERS` dict. This amendment lets the sidecar load
+plugin handlers from external (internal/trusted) git repos too —
+the Python mirror of the same design.
+
+### Sidecar side (`services/python-plugins`)
+
+- `app/git_source.py` — content-addressed git fetch, a direct port
+  of `git-fetcher.ts`: `git ls-remote` to resolve ref → sha,
+  `git clone --no-hardlinks --filter=blob:none` into
+  `<cache>/<repoId>/<sha>/`, idempotent on a repeat `(repoId, sha)`.
+  Same `--no-hardlinks` `file://` invariant.
+- `app/plugin_loader.py` — per-source lifecycle (resolve → clone →
+  install deps → import → scan → register) with per-source
+  isolation + provenance. A git-loaded plugin module uses the SAME
+  duck-type every built-in sidecar plugin already exposes:
+
+      PLUGIN_ID = "my_plugin"            # str
+      def handle(request) -> dict: ...   # the handler
+      MANIFEST = {...}                   # optional, for RAGdoll discovery
+
+  Discovery scans the subpath's top-level `.py` files. Deps are
+  pip-installed into an isolated, content-addressed `.ragdoll_deps`
+  dir inside the working copy (marker-gated, once per sha — the
+  Python analogue of the TS `npm ci` install stage). Per-source
+  failure → a `failed` status with the stage (`resolve` / `clone`
+  / `install` / `import` / `scan` / `register`), never crashing the
+  load.
+- `app/main.py` — `HANDLERS` became `BUILTIN_HANDLERS` + a LIVE
+  resolver (`_resolve_handler`) the Connect bridge reads on every
+  call, so reloads are visible without rebuilding the app.
+  Built-ins win over git-loaded on an id collision (a vendor repo
+  can't shadow a first-party plugin). Sources load from
+  `RAGDOLL_PYTHON_PLUGIN_SOURCES` (a JSON array) at startup; a
+  token-gated `POST /admin/reload` reloads at runtime (accepting
+  the source list in the body so RAGdoll can push the current
+  `plugin_sources` rows). The registry SWAP on reload replaces the
+  whole git-loaded set, so a removed source's plugins disappear.
+- `GET /manifests` — lists every git-loaded plugin's id + manifest
+  + provenance. This is RAGdoll's discovery surface.
+- Dockerfile — `git` added to the apt install (it wasn't present).
+
+### RAGdoll side (`packages/plugin-loader`)
+
+- `registerSidecarGitPlugins(registry)` — queries the sidecar's
+  `GET /manifests` and registers each reported plugin as an
+  external plugin pointed at the sidecar, with the git provenance
+  the sidecar reports. A module with no `MANIFEST` gets a
+  synthesised minimal manifest so it's still referenceable +
+  executable. Best-effort: sidecar down / older image (no
+  `/manifests`) / no `PYTHON_PLUGIN_URL` → silent no-op.
+- `applyExternalPlugins(registry)` — the hardcoded built-in sidecar
+  manifests + the git-loaded discovery, run together. Wired as the
+  `postRegister` hook on `/api/plugins/refresh` (which ALSO fixes a
+  latent bug: the refresh path previously dropped ALL external
+  PYTHON_PLUGIN_URL plugins on a registry swap because it never
+  re-layered them) and called once at API boot so git-loaded
+  sidecar plugins appear in the builder palette without a manual
+  refresh.
+
+### Verification
+
+Python — `services/python-plugins/tests/test_plugin_loader.py`
+(real `git init --bare` fixtures, auto-skip when git absent):
+resolve `main` → sha; sha short-circuit; content-addressed +
+idempotent clone; end-to-end load registers the handler + stamps
+provenance + the manifest; cache-hit replays the same object;
+disabled source skipped; a bad source is isolated and the good one
+still loads; a non-plugin module registers nothing; a removed
+source disappears on reload; `parse_sources_env` happy + garbage
+paths.
+
+TS — `packages/plugin-loader/test/sidecar-git-plugins.test.ts`
+(stub `/manifests` server): registers with manifest + provenance;
+synthesises a manifest when `MANIFEST` is omitted; no
+`PYTHON_PLUGIN_URL` / 404 / unreachable → silent no-op;
+`applyExternalPlugins` layers hardcoded built-ins AND git-loaded.
+
+### Deferred (still PLUGIN-ARCH-2+)
+
+- Signature verification for sidecar git plugins (the TS side has
+  it; the Python side trusts the internal/trusted model for now).
+- RAGdoll pushing `plugin_sources` rows to the sidecar's
+  `/admin/reload` on `/api/plugins/refresh` (today the sidecar
+  reads its sources from env; the reload endpoint + body contract
+  exist, but the API doesn't yet push). The discovery half
+  (`/manifests` → RAGdoll registers) IS wired.
 
 ## References
 

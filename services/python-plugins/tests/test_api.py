@@ -27,7 +27,16 @@ def test_healthz(client):
     assert r.status_code == 200
     body = r.json()
     assert body["ok"] is True
-    assert body["plugins"] == ["crawl4ai_crawler", "rerank_bge_local", "scrapy_spider"]
+    # The built-in sidecar plugins. Set comparison — dict insertion
+    # order isn't a contract, and PLUGIN-ARCH-2 git-loaded plugins
+    # (none in this test) would append beyond this set.
+    assert set(body["plugins"]) >= {
+        "cartography_crawl",
+        "cloudquery_aws_sync",
+        "crawl4ai_crawler",
+        "rerank_bge_local",
+        "scrapy_spider",
+    }
 
 
 # --------------------------------------------------------------------------- #
