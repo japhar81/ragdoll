@@ -53,18 +53,22 @@ class _FakeClient:
 
     def __init__(self) -> None:
         # Lazy import so the SERVICE_ROOT sys.path tweak above is in effect.
-        from app.main import HANDLERS, PLUGIN_IDS
+        # PLUGIN-ARCH-2: the static HANDLERS dict became BUILTIN_HANDLERS +
+        # a live resolver. The fake client mirrors production by resolving
+        # through `_resolve_handler` / `_live_plugin_ids`.
+        from app.main import BUILTIN_HANDLERS, _live_plugin_ids, _resolve_handler
         from app.models import ExecuteRequest
 
-        self._handlers = HANDLERS
-        self._plugin_ids = PLUGIN_IDS
+        self._resolve = _resolve_handler
+        self._handlers = BUILTIN_HANDLERS
+        self._plugin_ids_fn = _live_plugin_ids
         self._ExecuteRequest = ExecuteRequest
 
     # /healthz — same payload the Starlette shim returns in production.
     def get(self, path: str) -> _FakeResponse:
         if path != "/healthz":
             return _FakeResponse(404, {"error": f"unknown path {path}"})
-        return _FakeResponse(200, {"ok": True, "plugins": self._plugin_ids})
+        return _FakeResponse(200, {"ok": True, "plugins": self._plugin_ids_fn()})
 
     # /execute — test-only dispatch mirror. Production serves the equivalent
     # over the Connect `PluginRuntime.Execute` RPC; the per-plugin dispatch
@@ -77,7 +81,7 @@ class _FakeClient:
         except ValidationError as exc:
             return _FakeResponse(200, {"error": f"invalid request body: {exc.errors()}"})
         plugin_id = request.plugin.id
-        handler = self._handlers.get(plugin_id)
+        handler = self._resolve(plugin_id)
         if handler is None:
             return _FakeResponse(200, {"error": f"unknown plugin {plugin_id}"})
         try:

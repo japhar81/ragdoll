@@ -459,6 +459,21 @@ async function buildDeps(): Promise<{
     // `PluginRegistry` get the live, swappable instance — old code
     // unchanged, refresh becomes effective the moment the swap lands.
     deps.pluginRegistry = pluginRegistryHolder;
+    // PLUGIN-ARCH-2: discover git-loaded sidecar plugins at boot so
+    // they appear in the builder palette without requiring a manual
+    // refresh. Best-effort — a sidecar that's down / on an older image
+    // is a silent no-op (the sync load above already registered the
+    // hardcoded built-in sidecar manifests).
+    try {
+      const { registerSidecarGitPlugins } = await import(
+        "../../../packages/plugin-loader/src/index.ts"
+      );
+      await registerSidecarGitPlugins(pluginRegistry);
+    } catch (e) {
+      logger.warn("sidecar_git_plugin_discovery_failed", {
+        error: e instanceof Error ? e.message : String(e)
+      });
+    }
   }
 
   // --- Authorizer: real Casbin when importable, else the equivalent

@@ -18,7 +18,8 @@ import { ok, error } from "../http-utils.ts";
 import { readPluginDoc, projectPlugin } from "../spec-helpers.ts";
 import {
   BUILTIN_SOURCES,
-  refreshPluginRegistry
+  refreshPluginRegistry,
+  applyExternalPlugins
 } from "../../../../../packages/plugin-loader/src/index.ts";
 import type { PluginRef } from "../../../../../packages/core/src/index.ts";
 import type { AppDeps } from "../types.ts";
@@ -217,7 +218,15 @@ export function registerPluginsProvidersRoutes(
     if (!holder || !store) {
       return error(503, "plugin_source_store_not_wired");
     }
-    const report = await refreshPluginRegistry({ holder, store });
+    // `applyExternalPlugins` re-layers the env-driven sidecar plugins
+    // (hardcoded built-ins + git-loaded ones discovered via the
+    // sidecar's /manifests) onto the freshly-built registry — without
+    // it, a refresh would drop every external plugin. PLUGIN-ARCH-2.
+    const report = await refreshPluginRegistry({
+      holder,
+      store,
+      postRegister: applyExternalPlugins
+    });
     return ok(report);
   });
 

@@ -284,6 +284,125 @@ export function registerExternalPlugins(registry: PluginRegistry): void {
 }
 
 /**
+ * PLUGIN-ARCH-2: discover git-loaded sidecar plugins.
+ *
+ * The Python sidecar can load plugin handlers from external git repos
+ * (mirror of the TS in-process git loader — ADR-0034). Those plugins
+ * aren't known at RAGdoll build time, so RAGdoll queries the sidecar's
+ * `GET /manifests` endpoint and registers each reported plugin as an
+ * external plugin pointed at the sidecar — same transport the built-in
+ * sidecar plugins use, with the git provenance the sidecar reports.
+ *
+ * Best-effort: a sidecar that's down / doesn't expose `/manifests`
+ * (older image) is a silent no-op so the registry still builds. When
+ * `PYTHON_PLUGIN_URL` is unset there's no sidecar at all — also a
+ * no-op.
+ */
+export async function registerSidecarGitPlugins(
+  registry: PluginRegistry
+): Promise<void> {
+  const baseUrl = process.env.PYTHON_PLUGIN_URL;
+  if (!baseUrl) return;
+  const timeoutMs = Number(process.env.PYTHON_PLUGIN_TIMEOUT_MS ?? 300000);
+  let payload: { plugins?: SidecarManifestRow[] } | undefined;
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 10_000);
+    try {
+      const res = await fetch(`${baseUrl.replace(/\/+$/, "")}/manifests`, {
+        signal: controller.signal
+      });
+      if (!res.ok) return;
+      payload = (await res.json()) as { plugins?: SidecarManifestRow[] };
+    } finally {
+      clearTimeout(timer);
+    }
+  } catch {
+    // Sidecar unreachable / no /manifests endpoint / bad JSON → no-op.
+    return;
+  }
+  for (const row of payload?.plugins ?? []) {
+    if (!row || typeof row.id !== "string") continue;
+    // Use the sidecar-reported manifest when present; otherwise
+    // synthesise a minimal one from the id so the plugin is at least
+    // referenceable + executable (no config form, but it runs).
+    const manifest = normaliseSidecarManifest(row);
+    if (!manifest) continue;
+    registry.register({
+      mode: "external",
+      manifest,
+      external: { baseUrl, timeoutMs },
+      source: row.source
+        ? {
+            repoId: row.source.repoId,
+            kind: "git",
+            commitSha: row.source.commitSha ?? undefined
+          }
+        : undefined
+    });
+  }
+}
+
+interface SidecarManifestRow {
+  id: string;
+  manifest?: Record<string, unknown> | null;
+  source?: { repoId: string; kind?: string; commitSha?: string | null };
+}
+
+function normaliseSidecarManifest(
+  row: SidecarManifestRow
+): PluginManifest | undefined {
+  const m = (row.manifest ?? {}) as Record<string, unknown>;
+  const id = typeof m.id === "string" ? m.id : row.id;
+  if (!id) return undefined;
+  return {
+    id,
+    name: typeof m.name === "string" ? m.name : id,
+    version: typeof m.version === "string" ? m.version : "1.0.0",
+    category: (typeof m.category === "string"
+      ? m.category
+      : "datasource") as PluginManifest["category"],
+    description:
+      typeof m.description === "string"
+        ? m.description
+        : `Git-loaded sidecar plugin (${row.source?.repoId ?? "external"}).`,
+    ...(m.contract !== undefined
+      ? { contract: m.contract as PluginManifest["contract"] }
+      : {}),
+    ...(m.configSchema !== undefined
+      ? { configSchema: m.configSchema as PluginManifest["configSchema"] }
+      : {}),
+    ...(m.secretsSchema !== undefined
+      ? { secretsSchema: m.secretsSchema as PluginManifest["secretsSchema"] }
+      : {}),
+    ...(m.inputPorts !== undefined
+      ? { inputPorts: m.inputPorts as PluginManifest["inputPorts"] }
+      : {}),
+    ...(m.outputPorts !== undefined
+      ? { outputPorts: m.outputPorts as PluginManifest["outputPorts"] }
+      : {}),
+    ...(m.capabilities !== undefined
+      ? { capabilities: m.capabilities as PluginManifest["capabilities"] }
+      : {}),
+    ...(m.ui !== undefined ? { ui: m.ui as PluginManifest["ui"] } : {})
+  };
+}
+
+/**
+ * Apply ALL external (env-driven) plugins to a freshly-built registry:
+ * the hardcoded built-in sidecar manifests + the git-loaded sidecar
+ * plugins discovered over HTTP. Used as the `postRegister` hook on
+ * build / refresh so external plugins survive a registry swap (without
+ * this, a refresh would drop every sidecar plugin).
+ */
+export async function applyExternalPlugins(
+  registry: PluginRegistry
+): Promise<void> {
+  registerExternalPlugins(registry);
+  await registerSidecarGitPlugins(registry);
+}
+
+/**
  * Builds a `PluginRegistry` containing every in-process and external
  * plugin known to the runtime.
  *
