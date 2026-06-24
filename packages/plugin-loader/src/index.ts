@@ -402,6 +402,111 @@ export async function applyExternalPlugins(
   await registerSidecarGitPlugins(registry);
 }
 
+/** Outcome of pushing the `host: "sidecar"` rows to the sidecar's
+ *  `/admin/reload`. `pushed` is false (with a `reason`) when there's
+ *  nothing to push or the sidecar couldn't be reached — best-effort,
+ *  so a down sidecar never fails the refresh. `report` is the
+ *  sidecar's per-source status when it responded. */
+export interface SidecarPushResult {
+  pushed: boolean;
+  reason?: string;
+  report?: {
+    sources: Array<{
+      id: string;
+      status: string;
+      pluginCount?: number;
+      commitSha?: string | null;
+      error?: string | null;
+      errorStage?: string | null;
+      pluginIds?: string[];
+    }>;
+  };
+}
+
+/**
+ * PLUGIN-ARCH-2: push the `host: "sidecar"` plugin sources to the
+ * python-plugins sidecar's `POST /admin/reload`, making the
+ * `plugin_sources` table the single source of truth for BOTH the TS
+ * in-process plugins AND the Python sidecar plugins.
+ *
+ * The sidecar clones + imports each pushed source and serves the
+ * resulting handlers; RAGdoll then discovers them back via
+ * `registerSidecarGitPlugins` (`/manifests`). Call this BEFORE the
+ * discovery so the sidecar has the plugins loaded by the time
+ * `/manifests` is queried.
+ *
+ * Best-effort: no `PYTHON_PLUGIN_URL`, no sidecar-host rows, or an
+ * unreachable sidecar → `{ pushed: false, reason }` (never throws).
+ * When `RAGDOLL_SIDECAR_ADMIN_TOKEN` is set it's sent as the
+ * `x-ragdoll-admin-token` header (the sidecar's `/admin/reload` gate).
+ */
+export async function pushSidecarSources(
+  store: PluginSourceStore
+): Promise<SidecarPushResult> {
+  const baseUrl = process.env.PYTHON_PLUGIN_URL;
+  if (!baseUrl) return { pushed: false, reason: "no PYTHON_PLUGIN_URL" };
+  const rows = (await store.list({ enabledOnly: false })).filter(
+    (s) => s.host === "sidecar"
+  );
+  // Always POST — even with zero sidecar rows — so a source REMOVED
+  // from the table is dropped on the sidecar (the reload swaps the
+  // whole set). The sidecar treats an empty list as "unload everything
+  // git-loaded."
+  const sources = rows.map((s) => ({
+    id: s.id,
+    gitUrl: s.gitUrl,
+    ref: s.ref ?? "main",
+    subpath: s.subpath ?? "",
+    enabled: s.enabled
+  }));
+  const headers: Record<string, string> = { "content-type": "application/json" };
+  const token = process.env.RAGDOLL_SIDECAR_ADMIN_TOKEN;
+  if (token) headers["x-ragdoll-admin-token"] = token;
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 60_000);
+    try {
+      const res = await fetch(`${baseUrl.replace(/\/+$/, "")}/admin/reload`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ sources }),
+        signal: controller.signal
+      });
+      if (!res.ok) {
+        return {
+          pushed: false,
+          reason: `sidecar /admin/reload returned ${res.status}`
+        };
+      }
+      const report = (await res.json()) as SidecarPushResult["report"];
+      // Mark each pushed row's load result on the store so the catalog
+      // shows the sidecar's outcome (status / sha / error) the same way
+      // worker-host rows are marked.
+      for (const s of report?.sources ?? []) {
+        try {
+          await store.markLoadResult({
+            id: s.id,
+            commitSha: s.commitSha ?? null,
+            fetchedAt: new Date().toISOString(),
+            ok: s.status === "loaded",
+            error: s.error ?? null
+          });
+        } catch {
+          /* courtesy only */
+        }
+      }
+      return { pushed: true, report };
+    } finally {
+      clearTimeout(timer);
+    }
+  } catch (e) {
+    return {
+      pushed: false,
+      reason: `sidecar unreachable: ${e instanceof Error ? e.message : String(e)}`
+    };
+  }
+}
+
 /**
  * Builds a `PluginRegistry` containing every in-process and external
  * plugin known to the runtime.

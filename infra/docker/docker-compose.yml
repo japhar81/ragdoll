@@ -240,6 +240,11 @@ services:
       dockerfile: services/python-plugins/Dockerfile
     environment:
       PORT: "8000"
+      # PLUGIN-ARCH-2: optional gate on POST /admin/reload. When set,
+      # RAGdoll must send the same value (see the api/worker env) for
+      # its plugin_sources push to be accepted. Unset → the endpoint is
+      # open (dev default). Set the SAME value on both via the host env.
+      RAGDOLL_SIDECAR_ADMIN_TOKEN: ${RAGDOLL_SIDECAR_ADMIN_TOKEN:-}
     # Published on the host so tests/e2e/cross-language-plugin.e2e.test.ts
     # (Phase B) can hit the sidecar's Connect endpoint without piping
     # through `docker exec`. Production deployments (helm) DO NOT expose
@@ -315,6 +320,9 @@ services:
       # the (slow) python-plugins build to be healthy to start.
       PYTHON_PLUGIN_URL: http://python-plugins:8000
       PYTHON_PLUGIN_TIMEOUT_MS: "300000"
+      # PLUGIN-ARCH-2: must match the sidecar's token for the
+      # plugin_sources push (POST /admin/reload) to be accepted.
+      RAGDOLL_SIDECAR_ADMIN_TOKEN: ${RAGDOLL_SIDECAR_ADMIN_TOKEN:-}
       # Required by the SSE /api/pipelines/:id/stream path which runs
       # provider_chat in-process inside the API container. The local-demo
       # seed deliberately does NOT pin `llm.base_url` (so the same spec

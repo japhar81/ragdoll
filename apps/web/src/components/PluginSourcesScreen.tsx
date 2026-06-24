@@ -37,6 +37,7 @@ interface Draft {
   displayName: string;
   description: string;
   enabled: boolean;
+  host: "worker" | "sidecar";
   requireSignature: boolean;
   allowedSigners: string;
 }
@@ -50,6 +51,7 @@ function emptyDraft(): Draft {
     displayName: "",
     description: "",
     enabled: true,
+    host: "worker",
     requireSignature: false,
     allowedSigners: ""
   };
@@ -64,6 +66,7 @@ function fromSource(s: PluginSourceView): Draft {
     displayName: s.displayName ?? "",
     description: s.description ?? "",
     enabled: s.enabled,
+    host: s.host === "sidecar" ? "sidecar" : "worker",
     // The list endpoint doesn't echo the signing material back (the
     // catalog view elides it); operators re-supply the textarea on
     // edit. A blank `allowedSigners` with `requireSignature: true`
@@ -133,6 +136,9 @@ export function PluginSourcesScreen() {
   const [editing, setEditing] = useState<EditMode>(null);
   const [draft, setDraft] = useState<Draft>(emptyDraft);
   const [lastDiff, setLastDiff] = useState<DiffReport | null>(null);
+  const [lastSidecar, setLastSidecar] = useState<
+    import("../lib/api.ts").PluginRefreshReport["sidecar"] | null
+  >(null);
   const [refreshError, setRefreshError] = useState<string | null>(null);
 
   const openNew = () => {
@@ -155,6 +161,7 @@ export function PluginSourcesScreen() {
         displayName: draft.displayName || undefined,
         description: draft.description || undefined,
         enabled: draft.enabled,
+        host: draft.host,
         requireSignature: draft.requireSignature,
         allowedSigners: draft.requireSignature ? draft.allowedSigners : undefined
       }),
@@ -172,6 +179,7 @@ export function PluginSourcesScreen() {
         displayName: draft.displayName,
         description: draft.description,
         enabled: draft.enabled,
+        host: draft.host,
         requireSignature: draft.requireSignature,
         // Only ship `allowedSigners` when the operator typed
         // something in this edit — keeps the audit log free of
@@ -196,6 +204,7 @@ export function PluginSourcesScreen() {
     onMutate: () => setRefreshError(null),
     onSuccess: (report) => {
       setLastDiff(report.diff);
+      setLastSidecar(report.sidecar ?? null);
       qc.invalidateQueries({ queryKey: ["plugin-sources"] });
     },
     onError: (e) =>
@@ -309,11 +318,43 @@ export function PluginSourcesScreen() {
         </div>
       )}
 
+      {lastSidecar && (
+        <div className="exec-detail" style={{ marginBottom: 12, padding: 12 }}>
+          <strong>Sidecar push</strong>{" "}
+          {lastSidecar.pushed ? (
+            <>
+              <span className="status status-succeeded" style={{ marginLeft: 6 }}>
+                pushed {lastSidecar.report?.sources?.length ?? 0} source(s)
+              </span>
+              {(lastSidecar.report?.sources ?? []).some(
+                (s) => s.status === "failed"
+              ) && (
+                <ul style={{ margin: "4px 0 0 18px", fontSize: 12 }}>
+                  {(lastSidecar.report?.sources ?? [])
+                    .filter((s) => s.status === "failed")
+                    .map((s) => (
+                      <li key={s.id} className="error">
+                        <code>{s.id}</code> — {s.errorStage}: {s.error}
+                      </li>
+                    ))}
+                </ul>
+              )}
+            </>
+          ) : (
+            <span className="muted" style={{ marginLeft: 6 }}>
+              — not pushed ({lastSidecar.reason}). Sidecar-host sources need
+              a reachable PYTHON_PLUGIN_URL.
+            </span>
+          )}
+        </div>
+      )}
+
       <table className="grid">
         <thead>
           <tr>
             <th>Id</th>
             <th>Kind</th>
+            <th>Host</th>
             <th>Repo</th>
             <th>Ref · sha</th>
             <th>Last fetched</th>
@@ -324,7 +365,7 @@ export function PluginSourcesScreen() {
         <tbody>
           {sources.length === 0 && (
             <tr>
-              <td colSpan={7} className="muted">
+              <td colSpan={8} className="muted">
                 {sourcesQ.data ? "No plugin sources." : "Loading…"}
               </td>
             </tr>
@@ -351,6 +392,22 @@ export function PluginSourcesScreen() {
                   )}
                 </td>
                 <td style={dim}>{s.kind}</td>
+                <td style={dim}>
+                  {s.builtin ? (
+                    <span className="muted">—</span>
+                  ) : (
+                    <span
+                      className="status"
+                      title={
+                        s.host === "sidecar"
+                          ? "Runs in the python-plugins sidecar (pushed to /admin/reload)."
+                          : "Runs in the Node worker (TS in-process)."
+                      }
+                    >
+                      {s.host ?? "worker"}
+                    </span>
+                  )}
+                </td>
                 <td style={dim}>
                   {s.gitUrl ? (
                     <code style={{ fontSize: 11 }}>{s.gitUrl}</code>
@@ -490,6 +547,26 @@ export function PluginSourcesScreen() {
                 }
                 placeholder="src"
               />
+            </label>
+            <label>
+              <div className="muted">Host (where the code runs)</div>
+              <select
+                value={draft.host}
+                onChange={(e) =>
+                  setDraft({
+                    ...draft,
+                    host: e.target.value === "sidecar" ? "sidecar" : "worker"
+                  })
+                }
+              >
+                <option value="worker">worker — TS in-process</option>
+                <option value="sidecar">sidecar — Python sidecar</option>
+              </select>
+              <p className="muted field-help" style={{ fontSize: 11 }}>
+                {draft.host === "sidecar"
+                  ? "Pushed to the python-plugins sidecar's /admin/reload on refresh; the repo's PLUGIN_ID + handle module is cloned + imported there."
+                  : "Loaded by the Node worker via the in-process TS lifecycle (the repo exports {manifest, execute})."}
+              </p>
             </label>
             <label style={{ gridColumn: "1 / -1" }}>
               <div className="muted">Description</div>

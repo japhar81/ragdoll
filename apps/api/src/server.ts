@@ -459,15 +459,25 @@ async function buildDeps(): Promise<{
     // `PluginRegistry` get the live, swappable instance — old code
     // unchanged, refresh becomes effective the moment the swap lands.
     deps.pluginRegistry = pluginRegistryHolder;
-    // PLUGIN-ARCH-2: discover git-loaded sidecar plugins at boot so
-    // they appear in the builder palette without requiring a manual
-    // refresh. Best-effort — a sidecar that's down / on an older image
-    // is a silent no-op (the sync load above already registered the
+    // PLUGIN-ARCH-2: at boot, PUSH the `host: "sidecar"` plugin_sources
+    // rows to the python-plugins sidecar (single source of truth), then
+    // discover the resulting plugins back via /manifests so they appear
+    // in the builder palette without requiring a manual refresh.
+    // Best-effort — a sidecar that's down / on an older image is a
+    // silent no-op (the sync load above already registered the
     // hardcoded built-in sidecar manifests).
     try {
-      const { registerSidecarGitPlugins } = await import(
+      const { pushSidecarSources, registerSidecarGitPlugins } = await import(
         "../../../packages/plugin-loader/src/index.ts"
       );
+      const push = await pushSidecarSources(pluginSourceStore);
+      if (push.pushed) {
+        logger.info("sidecar_sources_pushed", {
+          sources: push.report?.sources?.length ?? 0
+        });
+      } else if (push.reason && push.reason !== "no PYTHON_PLUGIN_URL") {
+        logger.warn("sidecar_sources_push_skipped", { reason: push.reason });
+      }
       await registerSidecarGitPlugins(pluginRegistry);
     } catch (e) {
       logger.warn("sidecar_git_plugin_discovery_failed", {

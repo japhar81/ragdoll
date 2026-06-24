@@ -32,9 +32,19 @@ export const BUILTIN_SOURCE_ID = "builtin";
 export const SAMPLE_TEXT_SOURCE_ID = "sample-text";
 
 /** PLUGIN-ARCH-1 source descriptor — what the loader iterates. */
+/** PLUGIN-ARCH-2: where a source's code runs.
+ *  - `worker`  — TS in-process (the PLUGIN-ARCH-1 lifecycle). Default.
+ *  - `sidecar` — pushed to the python-plugins sidecar's /admin/reload;
+ *                discovered back via /manifests. */
+export type PluginSourceHost = "worker" | "sidecar";
+
 export interface PluginSource {
   id: string;
   kind: "local" | "git";
+  /** PLUGIN-ARCH-2: which host runs this source's code. Defaults to
+   *  `worker` (TS in-process). Built-in/local sources are always
+   *  `worker`. */
+  host?: PluginSourceHost;
   /** Operator-facing label; defaults to `id` when absent. */
   displayName?: string;
   description?: string;
@@ -81,6 +91,7 @@ export interface PluginSourceUpsert {
   displayName?: string;
   description?: string;
   enabled?: boolean;
+  host?: PluginSourceHost;
   requireSignature?: boolean;
   allowedSigners?: string;
 }
@@ -157,7 +168,7 @@ export class DbPluginSourceStore implements PluginSourceStore {
     const where = opts.enabledOnly ? "WHERE enabled = TRUE" : "";
     const result = await this.pool.query<DbRow>(
       `SELECT
-         id, git_url, ref, subpath, display_name, description, enabled,
+         id, host, git_url, ref, subpath, display_name, description, enabled,
          require_signature, allowed_signers,
          last_commit_sha, last_fetched_at, last_load_ok, last_load_error
        FROM plugin_sources
@@ -189,11 +200,12 @@ export class DbPluginSourceStore implements PluginSourceStore {
   async create(source: PluginSourceUpsert): Promise<PluginSource> {
     await this.pool.query(
       `INSERT INTO plugin_sources
-         (id, git_url, ref, subpath, display_name, description, enabled,
+         (id, host, git_url, ref, subpath, display_name, description, enabled,
           require_signature, allowed_signers)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
       [
         source.id,
+        source.host ?? "worker",
         source.gitUrl,
         source.ref ?? "main",
         source.subpath ?? "",
@@ -230,6 +242,7 @@ export class DbPluginSourceStore implements PluginSourceStore {
     if (patch.displayName !== undefined) set("display_name", patch.displayName);
     if (patch.description !== undefined) set("description", patch.description);
     if (patch.enabled !== undefined) set("enabled", patch.enabled);
+    if (patch.host !== undefined) set("host", patch.host);
     if (patch.requireSignature !== undefined)
       set("require_signature", patch.requireSignature);
     if (patch.allowedSigners !== undefined)
@@ -256,7 +269,7 @@ export class DbPluginSourceStore implements PluginSourceStore {
   async get(id: string): Promise<PluginSource | undefined> {
     const result = await this.pool.query<DbRow>(
       `SELECT
-         id, git_url, ref, subpath, display_name, description, enabled,
+         id, host, git_url, ref, subpath, display_name, description, enabled,
          require_signature, allowed_signers,
          last_commit_sha, last_fetched_at, last_load_ok, last_load_error
        FROM plugin_sources WHERE id = $1`,
@@ -300,6 +313,7 @@ export class InMemoryPluginSourceStore implements PluginSourceStore {
     const row: PluginSource = {
       id: source.id,
       kind: "git",
+      host: source.host ?? "worker",
       enabled: source.enabled ?? true,
       gitUrl: source.gitUrl,
       ref: source.ref ?? "main",
@@ -324,6 +338,7 @@ export class InMemoryPluginSourceStore implements PluginSourceStore {
     if (patch.displayName !== undefined) row.displayName = patch.displayName;
     if (patch.description !== undefined) row.description = patch.description;
     if (patch.enabled !== undefined) row.enabled = patch.enabled;
+    if (patch.host !== undefined) row.host = patch.host;
     if (patch.requireSignature !== undefined)
       row.requireSignature = patch.requireSignature;
     if (patch.allowedSigners !== undefined) row.allowedSigners = patch.allowedSigners;
@@ -340,6 +355,7 @@ export class InMemoryPluginSourceStore implements PluginSourceStore {
 
 interface DbRow {
   id: string;
+  host: string | null;
   git_url: string;
   ref: string;
   subpath: string;
@@ -358,6 +374,7 @@ function rowToSource(row: DbRow): PluginSource {
   return {
     id: row.id,
     kind: "git",
+    host: (row.host === "sidecar" ? "sidecar" : "worker"),
     displayName: row.display_name ?? undefined,
     description: row.description ?? undefined,
     enabled: row.enabled,

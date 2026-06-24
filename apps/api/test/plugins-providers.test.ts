@@ -268,6 +268,71 @@ test("POST /api/plugins/sources creates a new git source row (plugin:manage requ
   assert.ok(list.body.sources.some((s: { id: string }) => s.id === "ext-acme"));
 });
 
+test("POST /api/plugins/sources: host round-trips (worker default; sidecar when set); PATCH flips it", async () => {
+  const h = buildHarness({ withAuth: true });
+  const auth = await seedAuth(h);
+  // Default host is worker.
+  const a = await h.request({
+    method: "POST",
+    path: "/api/plugins/sources",
+    headers: auth,
+    body: { id: "ts-src", gitUrl: "https://x.invalid/ts.git" }
+  });
+  assert.equal(a.body.source.host, "worker");
+  // Explicit sidecar host.
+  const b = await h.request({
+    method: "POST",
+    path: "/api/plugins/sources",
+    headers: auth,
+    body: { id: "py-src", gitUrl: "https://x.invalid/py.git", host: "sidecar" }
+  });
+  assert.equal(b.body.source.host, "sidecar");
+  // The list surfaces host on each row.
+  const list = await h.request({
+    method: "GET",
+    path: "/api/plugins/sources",
+    headers: auth
+  });
+  const byId = Object.fromEntries(
+    (list.body.sources as Array<{ id: string; host?: string }>).map((s) => [s.id, s.host])
+  );
+  assert.equal(byId["ts-src"], "worker");
+  assert.equal(byId["py-src"], "sidecar");
+  // PATCH flips a worker row to sidecar.
+  const patched = await h.request({
+    method: "PATCH",
+    path: "/api/plugins/sources/ts-src",
+    headers: auth,
+    body: { host: "sidecar" }
+  });
+  assert.equal(patched.body.source.host, "sidecar");
+  // A bogus host value is ignored (stays whatever it was).
+  const ignored = await h.request({
+    method: "PATCH",
+    path: "/api/plugins/sources/py-src",
+    headers: auth,
+    body: { host: "mars" }
+  });
+  assert.equal(ignored.body.source.host, "sidecar");
+});
+
+test("POST /api/plugins/refresh: report carries a `sidecar` push result (no PYTHON_PLUGIN_URL in the harness → not pushed)", async () => {
+  const h = buildHarness({ withAuth: true });
+  const auth = await seedAuth(h);
+  const res = await h.request({
+    method: "POST",
+    path: "/api/plugins/refresh",
+    headers: auth,
+    body: {}
+  });
+  assert.equal(res.status, 200);
+  assert.ok(res.body.sidecar, "refresh report must include the sidecar push result");
+  // The test harness doesn't set PYTHON_PLUGIN_URL, so the push is a
+  // graceful no-op with the reason surfaced.
+  assert.equal(res.body.sidecar.pushed, false);
+  assert.match(res.body.sidecar.reason, /PYTHON_PLUGIN_URL/);
+});
+
 test("POST /api/plugins/sources refuses reserved ids (builtin / sample-text) and malformed ids", async () => {
   const h = buildHarness({ withAuth: true });
   const auth = await seedAuth(h);

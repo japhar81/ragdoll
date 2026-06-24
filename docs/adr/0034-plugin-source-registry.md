@@ -489,15 +489,45 @@ synthesises a manifest when `MANIFEST` is omitted; no
 `PYTHON_PLUGIN_URL` / 404 / unreachable → silent no-op;
 `applyExternalPlugins` layers hardcoded built-ins AND git-loaded.
 
+### Single source of truth (DONE)
+
+`plugin_sources` is now the single source of truth for BOTH plugin
+families. Migration `025_plugin_sources_host.sql` adds a `host`
+column:
+
+- `host: "worker"` (default) — TS in-process. Loaded by the
+  lifecycle in `buildPluginRegistry` (which now SKIPS sidecar-host
+  rows so a Python repo is never import-attempted as a TS module).
+- `host: "sidecar"` — Python. `pushSidecarSources(store)` POSTs the
+  enabled sidecar-host rows to the sidecar's `POST /admin/reload`
+  (always, even an empty list, so a removed row is dropped — the
+  reload swaps the whole git-loaded set). RAGdoll then discovers the
+  resulting plugins back via `registerSidecarGitPlugins`
+  (`/manifests`) and stamps each row's load result on the store via
+  `markLoadResult`.
+
+Wired into the refresh route (push → rebuild → discover; the
+response carries a `sidecar` push report) AND API boot. The
+sidecar's `/admin/reload` is gated by `RAGDOLL_SIDECAR_ADMIN_TOKEN`
+(matched on both sides via the compose env); unset → open (dev
+default). The Plugin Sources screen exposes the `host` as a select
+on the editor + a column in the list, and surfaces the sidecar push
+result inline after a refresh.
+
+The sidecar's `RAGDOLL_PYTHON_PLUGIN_SOURCES` env still works as a
+fallback for an air-gapped sidecar RAGdoll can't reach.
+
+Verified: `pushSidecarSources` posts ONLY sidecar-host rows with the
+token + marks results; empty-list-drops-removed; no-URL / unreachable
+graceful no-op; `buildPluginRegistry` skips sidecar rows in-process;
+the API CRUD round-trips `host` + the refresh report carries
+`sidecar`. Plus a live e2e (a `host: "sidecar"` row pushed +
+served).
+
 ### Deferred (still PLUGIN-ARCH-2+)
 
 - Signature verification for sidecar git plugins (the TS side has
   it; the Python side trusts the internal/trusted model for now).
-- RAGdoll pushing `plugin_sources` rows to the sidecar's
-  `/admin/reload` on `/api/plugins/refresh` (today the sidecar
-  reads its sources from env; the reload endpoint + body contract
-  exist, but the API doesn't yet push). The discovery half
-  (`/manifests` → RAGdoll registers) IS wired.
 
 ## References
 
