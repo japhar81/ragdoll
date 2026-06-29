@@ -4,7 +4,7 @@
  * - `enqueuePipelineRun` — async / queue-backed. Resolves the
  *   effective pipeline version (via activations or deployments),
  *   validates the spec, mints an executionId, writes the `running`
- *   record, and enqueues a BullMQ `run_pipeline` job. Returns the
+ *   record, and enqueues a `run_pipeline` job. Returns the
  *   execution + job ids; the worker does the actual DAG execution.
  *
  * - `runSyncPipeline` — synchronous, in-process. Reuses the worker's

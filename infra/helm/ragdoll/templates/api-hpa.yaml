@@ -1,8 +1,8 @@
 {{- if .Values.api.autoscaling.enabled }}
-# API autoscaler. Safe to enable because every shared state goes through
-# Redis when REDIS_URL is set (change-event bus, BullMQ queue, SSO
-# pending-state cache) — session tokens are stateless HMACs. Defaults
-# conservative: min 2 / max 6 / 70% CPU.
+# API autoscaler. Safe to enable because every shared state is external:
+# the job queue goes through NATS JetStream (NATS_URL); the change-event
+# bus + SSO pending-state cache go through Redis (REDIS_URL) — and session
+# tokens are stateless HMACs. Defaults conservative: min 2 / max 6 / 70% CPU.
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:

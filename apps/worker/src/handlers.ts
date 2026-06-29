@@ -2,7 +2,7 @@
  * Framework-agnostic RAGdoll worker job handlers.
  *
  * `createWorker(deps)` returns `{ handle(job, signal?) }`. Every dependency is
- * injected so this module imports no transport (bullmq / ioredis) and no
+ * injected so this module imports no transport (NATS client / ioredis) and no
  * database driver (pg) — only foundation packages — keeping the unit/functional
  * test path install-free and offline.
  */
@@ -383,8 +383,9 @@ export function createWorker(deps: WorkerDeps): Worker {
    * resolve the enqueuer's CURRENT scoped authorize closure and call
    * {@link requirePermission} against the run's scope. If the grant has
    * been revoked since enqueue, a {@link PermissionDeniedError} is thrown
-   * — the caller records a `denied` execution and propagates the error
-   * to BullMQ so the job is not retried (`status: "denied"` is terminal,
+   * — the caller records a `denied` execution and propagates the error so
+   * the job is not retried (run_pipeline enqueues attempts:1, so the NATS
+   * consumer term()s the message — `status: "denied"` is terminal,
    * distinct from `failed`).
    *
    * Returns the closure + the actor block so the caller can wire both
@@ -483,7 +484,8 @@ export function createWorker(deps: WorkerDeps): Worker {
     // Runs BEFORE version resolution so a denied job never touches the
     // pipeline_versions table. Throws PermissionDeniedError when the enqueuer
     // has lost pipeline:run since enqueue; we record a `denied` execution
-    // and rethrow so BullMQ treats the job as terminally rejected.
+    // and rethrow so the consumer treats the job as terminally rejected
+    // (run_pipeline is attempts:1 → term, no redelivery).
     const executionId = payload.executionId ?? randomUUID();
     let principalAuthorize: RuntimeContext["principalAuthorize"];
     let actor: { id: string; type: PrincipalType; roles?: string[] } | undefined;

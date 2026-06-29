@@ -34,9 +34,9 @@ spec:
         target:
           type: Utilization
           averageUtilization: {{ .Values.worker.autoscaling.targetCPUUtilizationPercentage }}
-  # Scale up promptly (60s) but cool down slowly (5m) — BullMQ jobs
-  # are long-tailed and a freshly started worker pays the Ollama-warmer
-  # cost. We'd rather keep capacity than thrash.
+  # Scale up promptly (60s) but cool down slowly (5m) — queue jobs are
+  # long-tailed and a freshly started worker pays the Ollama-warmer cost.
+  # We'd rather keep capacity than thrash.
   behavior:
     scaleUp:
       stabilizationWindowSeconds: 60

@@ -43,7 +43,7 @@ export interface OllamaWarmerHandle {
    * at least once (i.e. is pulled AND loadable). Rejects if any model
    * cannot be made ready within {@link OllamaWarmerOptions.readyTimeoutMs}.
    *
-   * Callers (e.g. the BullMQ consumer) await this to avoid taking
+   * Callers (e.g. the NATS JetStream consumer) await this to avoid taking
    * jobs while `ollama-pull` is still fetching weights — otherwise the
    * first /api/embed comes back 404 and the pipeline crashes.
    */

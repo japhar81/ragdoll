@@ -26,10 +26,13 @@
  *     by the old holder's shutdown handler.
  *  4. Split-brain window: between "old holder pauses" and "old holder
  *     notices its lease expired", both pods may briefly believe they
- *     are leader. BullMQ deduplicates job ids, and the scheduler
- *     enqueues with deterministic ids (`schedule:<id>:<tickAt>`), so a
- *     duplicate enqueue drops cleanly. Document this caveat below
- *     instead of plumbing fencing tokens through the queue.
+ *     are leader. The real guard is `markRun`: the winner advances each
+ *     schedule's `next_run_at` right after it fires, so the other pod's
+ *     `listDue` no longer returns it. (The queue also collapses a
+ *     re-publish of the same job id within JetStream's duplicate window,
+ *     but scheduler fires use fresh ids — the lease + markRun bound the
+ *     overlap.) Document this caveat below instead of plumbing fencing
+ *     tokens through the queue.
  *  5. Pure of `ioredis` at the top level — dynamic import + a small
  *     `RedisLikeClient` slice so unit tests stay offline.
  */

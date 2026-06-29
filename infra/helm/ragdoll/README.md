@@ -191,8 +191,8 @@ existing secret:
 
 - **Change-event bus** (`/api/events` WebSocket fan-out) →
   Redis pubsub channel `ragdoll:changes`.
-- **Job queue** (worker fan-out, retry, scheduling) → BullMQ on
-  Redis.
+- **Job queue** (worker fan-out, retry, dead-letter) → NATS JetStream
+  work-queue stream (`NATS_URL`).
 - **SSO pending-state cache** (10-min TTL between OIDC/SAML start
   and callback) → Redis with server-side `EX` TTL. Without this
   a callback that lands on a different api pod than the start
@@ -209,8 +209,8 @@ The worker's built-in cron scheduler ticks every schedule defined in
 the platform. Running >1 worker replica with naive timers would fire
 each schedule N times, so the scheduler is gated by a Redis lease:
 
-- Every worker pod starts both the BullMQ consumer AND a scheduler
-  interval timer.
+- Every worker pod binds the shared NATS JetStream consumer AND starts a
+  scheduler interval timer.
 - Each pod periodically tries `SET ragdoll:scheduler:leader <podId> NX
   PX 10000`. Whoever succeeds holds the lease for 10 s and renews
   every ~3 s.
@@ -230,9 +230,12 @@ acquires the lease cleanly.
 
 Split-brain caveat: during a lease handoff (a pod pausing >10 s, then
 waking up before its next renewal attempt) two pods may briefly both
-believe they are leader. BullMQ jobs are deduplicated by job id, and
-the scheduler enqueues with deterministic `schedule:<id>:<tickAt>`
-ids, so a duplicate enqueue from the brief overlap drops cleanly.
+believe they are leader. The primary guard is the lease itself plus
+`markRun`, which advances each schedule's `next_run_at` right after it
+fires — so the other pod's `listDue` no longer returns it. (JetStream also
+deduplicates re-publishes of the *same* `Nats-Msg-Id`/job id within the
+stream's duplicate window, which collapses a producer-side publish retry,
+though scheduler fires use fresh ids so the lease is what bounds overlap.)
 
 `WORKER_SCHEDULER_ENABLED=false` is retained as a cluster-wide
 emergency kill-switch (e.g. silence a runaway schedule while

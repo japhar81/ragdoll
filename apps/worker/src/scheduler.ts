@@ -8,7 +8,7 @@
  * activation table at execution time. After enqueuing it advances the
  * schedule's `next_run_at` via `markRun`.
  *
- * This module is intentionally dependency-free (no bullmq / ioredis / pg /
+ * This module is intentionally dependency-free (no NATS client / ioredis / pg /
  * runtime imports) so the offline test path stays install-free: it depends
  * only on the queue port, the schedule repository contract, and the
  * dependency-free cron evaluator.

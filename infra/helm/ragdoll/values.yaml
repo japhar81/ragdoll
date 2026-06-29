@@ -89,9 +89,10 @@ serviceAccount:
 # API
 # ---------------------------------------------------------------------------
 #
-# Multi-pod safe: every shared state goes through Redis when REDIS_URL is set
-# (change-event bus, BullMQ queue, SSO pending-state cache). Session tokens
-# are stateless HMACs. So api.replicas > 1 just works as long as REDIS_URL is
+# Multi-pod safe: shared state is external — the job queue via NATS
+# JetStream (NATS_URL), the change-event bus + SSO pending-state cache via
+# Redis (REDIS_URL). Session tokens are stateless HMACs. So api.replicas > 1
+# just works as long as NATS_URL + REDIS_URL are
 # wired on the existing secret.
 api:
   replicas: 2
@@ -131,8 +132,8 @@ api:
 # ---------------------------------------------------------------------------
 #
 # Single autoscaled Deployment. Workers are interchangeable: every pod
-# runs both the BullMQ consumer AND the cron scheduler timer, but only
-# the pod that currently holds the Redis-backed
+# binds the shared NATS JetStream consumer AND runs the cron scheduler
+# timer, but only the pod that currently holds the Redis-backed
 # `ragdoll:scheduler:leader` lease actually enqueues scheduled runs.
 # Failover is automatic (lease TTL 10 s, renewed every ~3 s).
 #
@@ -242,6 +243,12 @@ qdrant:
   # Used when bundledqdrant.enabled is false. The bundled Qdrant lives
   # at `http://ragdoll-qdrant:6333` cluster-internally.
   url: "http://ragdoll-qdrant:6333"
+
+nats:
+  # Used when bundlednats.enabled is false — point at your external
+  # NATS+JetStream (e.g. nats://my-nats:4222). The bundled NATS lives at
+  # `nats://<release>-nats:4222` cluster-internally.
+  url: ""
 
 opensearch:
   # Used when bundledopensearch.enabled is false. The bundled
@@ -455,9 +462,10 @@ bundledpostgres:
       requests: { cpu: 250m, memory: 512Mi }
       limits: { cpu: "2", memory: 2Gi }
 
-# Redis — Bitnami legacy chart. Backs BullMQ (job queue + leader
-# election + dead-letter), the change-event bus, the SSO state cache.
-# All of those are re-derivable on Redis restart so persistence is
+# Redis — Bitnami legacy chart. Backs the scheduler leader-election lease,
+# the change-event bus, and the SSO state cache. (The job queue moved to
+# NATS JetStream — see bundlednats.) All of those are re-derivable on Redis
+# restart so persistence is
 # optional. Single replica, standalone, auth disabled — the cluster
 # network namespace is the security boundary.
 bundledredis:
@@ -502,6 +510,26 @@ bundledredis:
       save ""
       stop-writes-on-bgsave-error no
       appendonly no
+
+# NATS + JetStream — the job queue (replaced BullMQ/Redis; ADR 0004).
+# Hand-rolled single-replica Deployment + Service + PVC. Defaults ON so the
+# api/worker get a working queue out of the box; disable + set `nats.url` to
+# point at an external NATS+JetStream. Persistence ON: a queued job is the
+# source of truth until a worker acks it.
+bundlednats:
+  enabled: true
+  image:
+    repository: nats
+    tag: "2.10-alpine"
+    pullPolicy: IfNotPresent
+  resources:
+    requests: { cpu: 50m, memory: 64Mi }
+    limits: { cpu: "1", memory: 512Mi }
+  persistence:
+    enabled: true
+    size: 5Gi
+    storageClassName: ""
+    accessModes: [ReadWriteOnce]
 
 # Qdrant — hand-rolled inline (no Bitnami chart exists). Persistence
 # defaults ON because Qdrant IS source of truth for the vector index;

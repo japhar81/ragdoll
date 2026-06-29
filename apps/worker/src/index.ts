@@ -1,11 +1,11 @@
 /**
  * Shared queue contract for the RAGdoll worker.
  *
- * This module is intentionally dependency-free (no bullmq / ioredis / pg /
- * runtime imports) so it can be imported by the API app and by the offline
+ * This module is intentionally dependency-free (no NATS client / ioredis / pg
+ * / runtime imports) so it can be imported by the API app and by the offline
  * test suite without any install. Job handlers live in `./handlers.ts`; the
- * BullMQ adapter + production consumer live in `./bullmq.ts`; the production
- * entrypoint lives in `./main.ts`.
+ * NATS JetStream adapter + production consumer live in `./nats.ts`; the
+ * production entrypoint lives in `./main.ts`.
  */
 
 export type QueueJobType =

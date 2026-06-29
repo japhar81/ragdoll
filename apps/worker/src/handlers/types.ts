@@ -1,7 +1,7 @@
 /**
  * Worker dependency contract + job payload / result shapes.
  *
- * Kept as a pure type module so `bullmq.ts`, `main.ts`, `scheduler.ts`,
+ * Kept as a pure type module so `nats.ts`, `main.ts`, `scheduler.ts`,
  * and the e2e harness can `import type { … }` without pulling in the
  * runtime executor. The implementations live in the rest of
  * `apps/worker/src/handlers/*`.
@@ -214,7 +214,7 @@ export interface SystemSweeps {
 
 /**
  * Snapshot of the principal that enqueued a job. Captured at the API
- * boundary (`request.principal`) and serialized into the BullMQ payload.
+ * boundary (`request.principal`) and serialized into the queue payload.
  * The worker uses it to re-check authorization at dequeue time so a
  * principal whose grant was revoked between enqueue and dequeue cannot
  * keep firing pipelines through previously-queued work.

@@ -1,10 +1,10 @@
 {{/*
 Worker deployment.
 
-Workers are interchangeable: every pod runs both the BullMQ consumer
-AND the cron scheduler timer. Only the pod that currently holds the
-Redis-backed `ragdoll:scheduler:leader` lease actually enqueues
-scheduled runs — the others' timers no-op. Failover is automatic
+Workers are interchangeable: every pod binds the shared NATS JetStream
+durable consumer AND runs the cron scheduler timer. Only the pod that
+currently holds the Redis-backed `ragdoll:scheduler:leader` lease actually
+enqueues scheduled runs — the others' timers no-op. Failover is automatic
 (lease TTL 10 s, renewed every ~3 s).
 
 The earlier leader/follower split (one Deployment pinned to replicas:1
@@ -72,7 +72,7 @@ spec:
                 name: {{ include "ragdoll.secretName" . }}
           env:
             # Per-pod identity for the OTel service.instance.id +
-            # BullMQ worker name + leader-election lease token.
+            # worker identity + leader-election lease token.
             # Downward API → pod name keeps each replica distinguishable
             # and gives the lease a verifiable owner string.
             - name: WORKER_ID

@@ -42,6 +42,30 @@ services:
       timeout: 3s
       retries: 20
 
+  # NATS + JetStream — the job queue (replaced BullMQ/Redis; ADR 0004).
+  # `-js` enables JetStream; `-sd /data` persists the work-queue stream
+  # across restarts so queued jobs survive a recreate. The monitoring port
+  # 8222 backs the healthcheck (/healthz). Redis stays for the change bus,
+  # scheduler leader-election lease, and SSO state store — only the queue
+  # moved here.
+  nats:
+    image: nats:2.10-alpine
+    command: ["-js", "-sd", "/data", "-m", "8222"]
+    ports:
+      - "4222:4222"
+      - "8222:8222"
+    volumes:
+      - nats-data:/data
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "wget -q -O - http://127.0.0.1:8222/healthz | grep -q ok || exit 1",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
   # Prometheus exporter for Postgres. Scraped by the bundled OTel collector
   # at postgres-exporter:9187; surfaces pg_stat_database / pg_locks / etc.
   postgres-exporter:
@@ -289,6 +313,8 @@ services:
       RAGDOLL_ENV: development
       DATABASE_URL: postgres://ragdoll:ragdoll@postgres:5432/ragdoll
       REDIS_URL: redis://redis:6379
+      # Job queue (NATS JetStream). api enqueues, workers consume.
+      NATS_URL: nats://nats:4222
       SECRET_ENCRYPTION_KEY: local-dev-only-change-me-32-bytes-min
       SESSION_SECRET: local-dev-only-change-me-session-hmac
       # Auth is strict default-deny (no x-roles header trust). The first boot
@@ -346,6 +372,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      nats:
+        condition: service_healthy
       db-init:
         condition: service_completed_successfully
       python-plugins:
@@ -362,9 +390,9 @@ services:
       timeout: 3s
       retries: 20
 
-  # Two worker replicas to prove BullMQ scale-out. Both consume from the
-  # same Redis queue; BullMQ distributes jobs across them so a Run-All
-  # of N pipelines lands roughly N/2 on each worker, capped by
+  # Two worker replicas to prove queue scale-out. Both bind to the same
+  # NATS JetStream durable consumer; JetStream distributes jobs across them
+  # so a Run-All of N pipelines lands roughly N/2 on each worker, capped by
   # WORKER_CONCURRENCY. The Grafana "Worker scale-out" dashboard shows
   # the split live. The two services share everything except WORKER_ID,
   # OTEL service.instance.id, and depends_on (worker-2 doesn't block
@@ -378,6 +406,8 @@ services:
       WORKER_ID: worker-1
       DATABASE_URL: postgres://ragdoll:ragdoll@postgres:5432/ragdoll
       REDIS_URL: redis://redis:6379
+      # Job queue (NATS JetStream). api enqueues, workers consume.
+      NATS_URL: nats://nats:4222
       SECRET_ENCRYPTION_KEY: local-dev-only-change-me-32-bytes-min
       QDRANT_URL: http://qdrant:6333
       OPENSEARCH_URL: http://opensearch:9200
@@ -409,6 +439,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      nats:
+        condition: service_healthy
       db-init:
         condition: service_completed_successfully
       api:
@@ -430,6 +462,8 @@ services:
       WORKER_SCHEDULER_ENABLED: "false"
       DATABASE_URL: postgres://ragdoll:ragdoll@postgres:5432/ragdoll
       REDIS_URL: redis://redis:6379
+      # Job queue (NATS JetStream). api enqueues, workers consume.
+      NATS_URL: nats://nats:4222
       SECRET_ENCRYPTION_KEY: local-dev-only-change-me-32-bytes-min
       QDRANT_URL: http://qdrant:6333
       OPENSEARCH_URL: http://opensearch:9200
@@ -460,6 +494,8 @@ services:
       postgres:
         condition: service_healthy
       redis:
+        condition: service_healthy
+      nats:
         condition: service_healthy
       db-init:
         condition: service_completed_successfully
@@ -507,6 +543,7 @@ services:
 volumes:
   postgres-data:
   qdrant-data:
+  nats-data:
   opensearch-data:
   dgraph-data:
   ollama-data:
