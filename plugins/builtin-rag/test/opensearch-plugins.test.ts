@@ -172,6 +172,55 @@ test("opensearch_output bulk-indexes documents, stamps tenantId, provisions kNN 
   assert.deepEqual(doc.vector, [1, 0]);
 });
 
+test("opensearch_output: chunks path honors idField for the bulk _id (issues-log #7)", async (t) => {
+  // The chunks branch used to ignore idField and always auto-generate
+  // an _id → every re-ingest appended duplicates. Now it reads the
+  // named field off each chunk, symmetric with the documents path.
+  const calls = stubFetch(t, (method, path) => {
+    if (method === "HEAD") return { status: 200 };
+    if (path.includes("/_bulk")) return { json: { errors: false } };
+    return { json: {} };
+  });
+  await openSearchOutputPlugin.execute({
+    context: ctx(),
+    node: { id: "sink", plugin: { category: "sink", id: "opensearch_output", version: "1.0.0" } },
+    inputs: {
+      chunks: [
+        { text: "a", docId: "u", index: 0, id: "u#0" },
+        { text: "b", docId: "u", index: 1, id: "u#1" }
+      ]
+    },
+    config: { ...CFG, idField: "id" },
+    secrets: {},
+    dataset: fakeTextDataset({ host: "os.test" })
+  });
+  const bulk = calls.find((c) => c.url.includes("/_bulk"))!;
+  const lines = (bulk.body as string).trim().split("\n");
+  // NDJSON: action line then doc line, per chunk.
+  assert.equal(JSON.parse(lines[0]).index._id, "u#0");
+  assert.equal(JSON.parse(lines[2]).index._id, "u#1");
+});
+
+test("opensearch_output: chunks path without idField still auto-generates _id (unchanged default)", async (t) => {
+  const calls = stubFetch(t, (method, path) => {
+    if (method === "HEAD") return { status: 200 };
+    if (path.includes("/_bulk")) return { json: { errors: false } };
+    return { json: {} };
+  });
+  await openSearchOutputPlugin.execute({
+    context: ctx(),
+    node: { id: "sink", plugin: { category: "sink", id: "opensearch_output", version: "1.0.0" } },
+    inputs: { chunks: [{ text: "a", docId: "u", index: 0 }] },
+    config: { ...CFG },
+    secrets: {},
+    dataset: fakeTextDataset({ host: "os.test" })
+  });
+  const bulk = calls.find((c) => c.url.includes("/_bulk"))!;
+  const action = JSON.parse((bulk.body as string).trim().split("\n")[0]);
+  // No _id → OpenSearch auto-generates (the pre-existing default).
+  assert.equal(action.index._id, undefined);
+});
+
 test("opensearch_bm25_retriever issues multi_match with tenant filter", async (t) => {
   let body: any;
   stubFetch(t, (method, path, b) => {
@@ -228,6 +277,40 @@ test("opensearch_vector_retriever queries kNN and strips vector/tenant from payl
 ,
     dataset: fakeTextDataset({ host: "os.test" })
   });
+  assert.deepEqual(out.outputs.documents, [{ id: "p1", score: 0.8, text: "doc" }]);
+});
+
+test("opensearch_vector_retriever: queries the configured vectorField (issues-log #10)", async (t) => {
+  // The sink lets the operator name the vector field (e.g. "embed");
+  // the retriever must query the SAME field or kNN 400s. Previously the
+  // read side hardcoded "vector".
+  let knnBody: any;
+  stubFetch(t, (_method, path, body) => {
+    if (path.endsWith("/_search")) {
+      knnBody = JSON.parse(body as string);
+      return {
+        json: {
+          hits: {
+            total: { value: 1 },
+            hits: [{ _id: "p1", _score: 0.8, _source: { embed: [1, 0], tenantId: "t1", text: "doc" } }]
+          }
+        }
+      };
+    }
+    return { json: {} };
+  });
+  const out = await openSearchVectorRetrieverPlugin.execute({
+    context: ctx(),
+    node: { id: "r", plugin: { category: "retriever", id: "opensearch_vector_retriever", version: "1.0.0" } },
+    inputs: { queryVector: [1, 0] },
+    config: { ...CFG, vectorField: "embed", topK: 5 },
+    secrets: {},
+    dataset: fakeTextDataset({ host: "os.test" })
+  });
+  // The kNN query targets "embed", not "vector".
+  assert.ok(knnBody.query.knn.embed, "kNN query must target the configured field");
+  assert.equal(knnBody.query.knn.vector, undefined);
+  // And the "embed" field is stripped from the returned payload.
   assert.deepEqual(out.outputs.documents, [{ id: "p1", score: 0.8, text: "doc" }]);
 });
 

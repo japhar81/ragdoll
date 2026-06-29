@@ -261,7 +261,11 @@ export const openSearchInputPlugin: InProcessPlugin = {
     configSchema: {
       type: "object",
       properties: {
-        index: { type: "string", default: "default", description: "Index to read from." },
+        // NOTE: the index name is NOT a config field — it derives from
+        // the node's bound dataset (`pickBackendName(input, "keyword")`).
+        // Don't re-add an `index` knob here: it was a pre-dataset
+        // leftover that the executor ignored, so exposing it only
+        // misleads operators into thinking they can override the target.
         query: {
           type: "string",
           description: "Optional Lucene query_string. When unset, all documents are returned (match_all)."
@@ -334,10 +338,12 @@ export const openSearchOutputPlugin: InProcessPlugin = {
     configSchema: {
       type: "object",
       properties: {
-        index: { type: "string", default: "default", description: "Target index." },
+        // The target index derives from the bound dataset, NOT config —
+        // see the `index` note on opensearch_input.
         idField: {
           type: "string",
-          description: "Document field to use as the OpenSearch _id. Auto-generated when unset."
+          description:
+            "Field to use as the OpenSearch _id. Honored on BOTH input ports (documents AND chunks): the named field is read off each row. Auto-generated when unset (re-runs append rather than upsert). For chunks, point this at a field that's unique per chunk (e.g. a `id` your transform precomputed as `docId#chunkIndex`); a non-unique field collapses chunks onto one _id."
         },
         vectorField: {
           type: "string",
@@ -444,7 +450,14 @@ export const openSearchOutputPlugin: InProcessPlugin = {
           const v = acceptVector(vectors[i], `chunks[${i}]`);
           if (v) doc[vectorField] = v;
         }
-        docs.push({ id: chunk.id !== undefined ? String(chunk.id) : undefined, doc });
+        // Honor `idField` symmetrically with the documents path — the
+        // configSchema documents it for both ports, but the chunks
+        // branch used to ignore it and always auto-generate an _id,
+        // so every re-ingest appended a fresh row instead of upserting
+        // (issues log #7). Read the named field off the chunk; fall
+        // back to `chunk.id`, then auto-gen.
+        const id = idField ? chunk[idField] : chunk.id;
+        docs.push({ id: id !== undefined ? String(id) : undefined, doc });
       });
     }
 
@@ -530,7 +543,8 @@ export const openSearchBm25RetrieverPlugin: InProcessPlugin = {
     configSchema: {
       type: "object",
       properties: {
-        index: { type: "string", default: "default", description: "Index to search." },
+        // Index derives from the bound dataset, not config (see
+        // opensearch_input's `index` note).
         fields: {
           type: "array",
           items: { type: "string" },
@@ -615,7 +629,13 @@ export const openSearchVectorRetrieverPlugin: InProcessPlugin = {
     configSchema: {
       type: "object",
       properties: {
-        index: { type: "string", default: "default", description: "kNN index to query." },
+        // Index derives from the bound dataset (see opensearch_input).
+        vectorField: {
+          type: "string",
+          default: "vector",
+          description:
+            "The knn_vector field to query — MUST match the `vectorField` the sink wrote (opensearch_output/opensearch_upsert). Defaults to `vector`. A mismatch makes the index unreadable (kNN 400) — issues log #10."
+        },
         topK: { type: "integer", default: 5, description: "Number of nearest documents to return." },
         filter: {
           type: "object",
@@ -673,7 +693,11 @@ export const openSearchVectorRetrieverPlugin: InProcessPlugin = {
   async execute(input) {
     const { inputs, config, secrets, context } = input;
     const client = openSearchClientFrom(input, secrets);
-    const store = new OpenSearchVectorStore({ client });
+    // #10: the field the sink wrote is operator-configurable; the
+    // retriever must query the SAME field or kNN 400s. Default "vector"
+    // keeps every existing pipeline working unchanged.
+    const vectorField = config.vectorField ? String(config.vectorField) : "vector";
+    const store = new OpenSearchVectorStore({ client }, { vectorField });
     // OpenSearch's "index" is the same physical store name regardless of
     // whether it's used for vector or keyword reads; the dataset's
     // backendCollections.keyword wins, then vector (when the dataset is
@@ -731,10 +755,12 @@ export const openSearchHybridRetrieverPlugin: InProcessPlugin = {
     configSchema: {
       type: "object",
       properties: {
-        index: {
+        // Index derives from the bound dataset (see opensearch_input).
+        vectorField: {
           type: "string",
-          default: "default",
-          description: "Index holding both the text fields and a `vector` knn_vector field."
+          default: "vector",
+          description:
+            "The knn_vector field the kNN arm queries — MUST match the sink's `vectorField`. Defaults to `vector`. A mismatch silently degrades the hybrid to BM25-only (the kNN arm 400s) — issues log #10."
         },
         fields: {
           type: "array",
@@ -834,6 +860,8 @@ export const openSearchHybridRetrieverPlugin: InProcessPlugin = {
     const topK = Math.max(1, Number(config.topK ?? 5));
     const candidateK = Math.max(topK, Number(config.candidateK ?? Math.max(topK * 4, 20)));
     const fields = Array.isArray(config.fields) ? (config.fields as string[]) : ["text"];
+    // #10: the kNN arm must query whatever field the sink wrote.
+    const vectorField = config.vectorField ? String(config.vectorField) : "vector";
     const tenantField =
       config.tenantField === undefined ? "tenantId" : String(config.tenantField);
     const question = questionFrom(inputs);
@@ -884,7 +912,7 @@ export const openSearchHybridRetrieverPlugin: InProcessPlugin = {
           size: candidateK,
           query: {
             knn: {
-              vector: {
+              [vectorField]: {
                 vector: queryVector,
                 k: candidateK,
                 filter:
@@ -919,7 +947,8 @@ export const openSearchHybridRetrieverPlugin: InProcessPlugin = {
       }
     );
     const documents = fused.map((d) => {
-      const { vector: _v, ...rest } = d.source;
+      // Strip the (configurable) vector field from the payload.
+      const { [vectorField]: _v, ...rest } = d.source;
       return { id: d.id, score: d.score, ...rest };
     });
     return {
