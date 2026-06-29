@@ -1,4 +1,6 @@
-{{- if .Values.pythonPlugins.enabled }}
+{{- /* Standalone topology only — in sidecar mode each pod reaches its own
+   python-plugins over localhost, so no Service is needed. (issues-log #8) */ -}}
+{{- if and .Values.pythonPlugins.enabled (eq .Values.pythonPlugins.mode "standalone") }}
 apiVersion: v1
 kind: Service
 metadata:
