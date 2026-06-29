@@ -702,6 +702,7 @@ export function requirePermission(
 export * from "./password.ts";
 export * from "./oidc.ts";
 export * from "./saml.ts";
+export * from "./identity-provider.ts";
 export * from "./accounts.ts";
 export * from "./webhookTokens.ts";
 export * from "./sso-state.ts";

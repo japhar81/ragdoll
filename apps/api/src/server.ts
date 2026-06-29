@@ -27,11 +27,14 @@ import {
   PasswordService,
   InMemorySsoStateStore,
   createRedisSsoStateStore,
+  defaultIdentityProviderRegistry,
+  loadIdentityProviderModule,
   type PolicyEngine,
   type SsoStateStore
 } from "../../../packages/auth/src/index.ts";
 import {
   defaultCatalogRows,
+  loadAuthzEngine,
   type Role
 } from "../../../packages/authz/src/index.ts";
 import {
@@ -490,34 +493,88 @@ async function buildDeps(): Promise<{
     }
   }
 
-  // --- Authorizer: real Casbin when importable, else the equivalent
-  // dependency-free engine. Bound to the live policy store so role/grant
-  // edits (and revocations) take effect on the next request.
-  // In production we REQUIRE Casbin — a silent fallback would let a
-  // misconfigured deploy drift to a different decision engine without any
-  // signal in logs/alerts. Operators must intentionally opt out with
-  // RAGDOLL_AUTHZ_ALLOW_BUILTIN=1 (e.g. during a Casbin outage).
-  let engine: PolicyEngine;
+  // --- Authorizer (ADR 0035). A custom authorization provider from an
+  // external repo loads at boot from RAGDOLL_AUTHZ_PROVIDER (a module that
+  // exports a PolicyEngine or a factory). Unset → the built-in resolution:
+  // real Casbin when importable, else the equivalent dependency-free engine.
+  // Bound to the live policy store so role/grant edits (and revocations) take
+  // effect on the next request.
+  //
+  // In production we REQUIRE Casbin for the BUILT-IN path — a silent fallback
+  // would let a misconfigured deploy drift to a different decision engine with
+  // no signal. Operators opt out with RAGDOLL_AUTHZ_ALLOW_BUILTIN=1. A
+  // configured custom provider that fails to load is ALWAYS fatal (fail-closed)
+  // — never silently fall back to a different engine.
+  const builtinAuthzEngine = async (): Promise<{
+    engine: PolicyEngine;
+    source: string;
+  }> => {
+    try {
+      return { engine: await createCasbinEngine(), source: "casbin" };
+    } catch (e) {
+      const reason = e instanceof Error ? e.message : String(e);
+      if (isProd && process.env.RAGDOLL_AUTHZ_ALLOW_BUILTIN !== "1") {
+        throw new Error(
+          `Casbin authz engine failed to load in production: ${reason}. ` +
+            "Set RAGDOLL_AUTHZ_ALLOW_BUILTIN=1 to allow the dependency-free fallback."
+        );
+      }
+      logger.warn("authz_engine_fallback", {
+        engine: "builtin",
+        reason,
+        message:
+          "using built-in policy engine (Casbin unavailable). Decisions are equivalent but you lose Casbin-specific tooling."
+      });
+      return { engine: new BuiltinPolicyEngine(), source: "builtin" };
+    }
+  };
+  let authz: { engine: PolicyEngine; source: string };
   try {
-    engine = await createCasbinEngine();
-    logger.info("authz_engine", { engine: "casbin" });
+    authz = await loadAuthzEngine({
+      moduleUrl: process.env.RAGDOLL_AUTHZ_PROVIDER,
+      fallback: builtinAuthzEngine
+    });
   } catch (e) {
     const reason = e instanceof Error ? e.message : String(e);
-    if (isProd && process.env.RAGDOLL_AUTHZ_ALLOW_BUILTIN !== "1") {
+    // Re-throw the Casbin-in-prod guard untouched; wrap a custom-provider
+    // failure with a clearer message. Either way boot fails closed.
+    if (process.env.RAGDOLL_AUTHZ_PROVIDER) {
       throw new Error(
-        `Casbin authz engine failed to load in production: ${reason}. ` +
-          "Set RAGDOLL_AUTHZ_ALLOW_BUILTIN=1 to allow the dependency-free fallback."
+        `RAGDOLL_AUTHZ_PROVIDER failed to load: ${reason}. ` +
+          "Fix the module or unset it to use the built-in engine."
       );
     }
-    engine = new BuiltinPolicyEngine();
-    logger.warn("authz_engine_fallback", {
-      engine: "builtin",
-      reason,
-      message:
-        "using built-in policy engine (Casbin unavailable). Decisions are equivalent but you lose Casbin-specific tooling."
-    });
+    throw e;
   }
-  deps.authorizer = new Authorizer({ engine, store: rbacForAuthz });
+  logger.info("authz_engine", { engine: authz.source });
+  deps.authorizer = new Authorizer({ engine: authz.engine, store: rbacForAuthz });
+
+  // --- Identity-provider SPI (ADR 0035). Built-in OIDC + SAML by default;
+  // a custom identity provider from an external repo is loaded once at boot
+  // from RAGDOLL_IDENTITY_PROVIDER (a package name or module path) and may
+  // add a new kind (e.g. "ldap") or override the built-ins. Fail-closed in
+  // production: a configured-but-unloadable provider crashes boot rather
+  // than silently falling back to the built-ins.
+  const identityProviderRegistry = defaultIdentityProviderRegistry();
+  try {
+    const idpLoad = await loadIdentityProviderModule(
+      identityProviderRegistry,
+      process.env.RAGDOLL_IDENTITY_PROVIDER
+    );
+    if (idpLoad.loaded) {
+      logger.info("identity_provider_loaded", {
+        module: process.env.RAGDOLL_IDENTITY_PROVIDER,
+        kinds: idpLoad.kinds
+      });
+    }
+  } catch (e) {
+    const reason = e instanceof Error ? e.message : String(e);
+    throw new Error(
+      `RAGDOLL_IDENTITY_PROVIDER failed to load: ${reason}. ` +
+        "Fix the module or unset it to use the built-in OIDC/SAML providers."
+    );
+  }
+  deps.identityProviderRegistry = identityProviderRegistry;
 
   await bootstrapAccessControl(rbacForAuthz, usersForBootstrap, logger);
 
