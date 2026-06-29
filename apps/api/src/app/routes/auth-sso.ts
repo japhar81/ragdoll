@@ -11,13 +11,12 @@
  * 0005 has the full reasoning.
  */
 import {
-  OidcProvider,
-  SamlProvider,
   randomToken,
   AccountDisabledError,
   InMemorySsoStateStore,
   type AccountService,
   type SsoIdentity,
+  type SsoProviderInstance,
   type SsoStateStore
 } from "../../../../../packages/auth/src/index.ts";
 import type {
@@ -47,7 +46,10 @@ interface SsoServices {
   deps: AppDeps;
   accounts?: AccountService;
   identityProviders: IdentityProviderRepository;
-  buildSsoProvider: (row: IdentityProviderRow) => OidcProvider | SamlProvider;
+  /** Build a protocol-agnostic SSO handler from an IdP row — backed by the
+   *  IdentityProviderRegistry (built-in OIDC/SAML, plus any custom provider
+   *  loaded via RAGDOLL_IDENTITY_PROVIDER). */
+  buildSsoProvider: (row: IdentityProviderRow) => SsoProviderInstance;
   /** Optional Redis-backed (or otherwise injected) store. When omitted,
    *  falls back to an InMemorySsoStateStore so single-pod / test paths
    *  keep working unchanged. */
@@ -91,11 +93,7 @@ export function registerAuthSsoRoutes(
       { slug: row.slug, nonce, redirectUri, at: Date.now() },
       SSO_STATE_TTL_MS
     );
-    if (provider instanceof OidcProvider) {
-      const url = await provider.authorizationUrl({ redirectUri, state, nonce });
-      return { status: 302, body: undefined, headers: { location: url } };
-    }
-    const url = await (provider as SamlProvider).loginRedirectUrl(state);
+    const url = await provider.start({ redirectUri, state, nonce });
     return { status: 302, body: undefined, headers: { location: url } };
   });
 
@@ -117,22 +115,21 @@ export function registerAuthSsoRoutes(
     await ssoStates.delete(state);
     const row = await identityProviders.findBySlug(pending.slug);
     if (!row || !row.enabled) return error(404, "provider_not_found");
+    // Protocol-agnostic: a malformed callback that carries neither an
+    // authorization code nor a SAMLResponse is a clear 400; a provider that
+    // gets the wrong one of the two throws and maps to 401 below.
+    if (!code && !samlBody?.SAMLResponse) {
+      return error(400, "missing_credentials");
+    }
     const provider = buildSsoProvider(row);
     let identity: SsoIdentity;
     try {
-      if (provider instanceof OidcProvider) {
-        if (!code) return error(400, "missing_code");
-        identity = await provider.handleCallback({
-          code,
-          redirectUri: pending.redirectUri,
-          expectedNonce: pending.nonce
-        });
-      } else {
-        if (!samlBody?.SAMLResponse) return error(400, "missing_saml_response");
-        identity = await (provider as SamlProvider).validatePostResponse({
-          SAMLResponse: samlBody.SAMLResponse
-        });
-      }
+      identity = await provider.callback({
+        code,
+        redirectUri: pending.redirectUri,
+        expectedNonce: pending.nonce,
+        samlResponse: samlBody?.SAMLResponse
+      });
     } catch (e) {
       deps.logger.error("sso_validation_failed", {
         slug: pending.slug,

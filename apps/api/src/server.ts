@@ -27,6 +27,8 @@ import {
   PasswordService,
   InMemorySsoStateStore,
   createRedisSsoStateStore,
+  defaultIdentityProviderRegistry,
+  loadIdentityProviderModule,
   type PolicyEngine,
   type SsoStateStore
 } from "../../../packages/auth/src/index.ts";
@@ -518,6 +520,33 @@ async function buildDeps(): Promise<{
     });
   }
   deps.authorizer = new Authorizer({ engine, store: rbacForAuthz });
+
+  // --- Identity-provider SPI (ADR 0035). Built-in OIDC + SAML by default;
+  // a custom identity provider from an external repo is loaded once at boot
+  // from RAGDOLL_IDENTITY_PROVIDER (a package name or module path) and may
+  // add a new kind (e.g. "ldap") or override the built-ins. Fail-closed in
+  // production: a configured-but-unloadable provider crashes boot rather
+  // than silently falling back to the built-ins.
+  const identityProviderRegistry = defaultIdentityProviderRegistry();
+  try {
+    const idpLoad = await loadIdentityProviderModule(
+      identityProviderRegistry,
+      process.env.RAGDOLL_IDENTITY_PROVIDER
+    );
+    if (idpLoad.loaded) {
+      logger.info("identity_provider_loaded", {
+        module: process.env.RAGDOLL_IDENTITY_PROVIDER,
+        kinds: idpLoad.kinds
+      });
+    }
+  } catch (e) {
+    const reason = e instanceof Error ? e.message : String(e);
+    throw new Error(
+      `RAGDOLL_IDENTITY_PROVIDER failed to load: ${reason}. ` +
+        "Fix the module or unset it to use the built-in OIDC/SAML providers."
+    );
+  }
+  deps.identityProviderRegistry = identityProviderRegistry;
 
   await bootstrapAccessControl(rbacForAuthz, usersForBootstrap, logger);
 

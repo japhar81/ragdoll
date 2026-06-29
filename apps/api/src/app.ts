@@ -28,14 +28,15 @@ import {
   AccountService,
   SessionTokenService,
   PasswordService,
-  OidcProvider,
-  SamlProvider,
+  defaultIdentityProviderRegistry,
   randomToken,
   SignupDisabledError,
   AccountDisabledError,
   EmailInUseError,
   WebhookTokenService,
   InvalidWebhookTokenError,
+  type IdentityProviderRegistry,
+  type SsoProviderInstance,
   type SsoIdentity,
   type Permission,
   type Principal,
@@ -562,31 +563,19 @@ export function createApp(deps: AppDeps): App {
   // Pure helpers + projections live in ./app/projections.ts +
   // ./app/rbac-helpers.ts. `effectiveCatalog` needs the rbacPolicies repo;
   // bind it once here so the inline routes can call it without args.
-  // `buildSsoProvider` is closure-internal because OidcProvider /
-  // SamlProvider are constructed per IdP row at call time.
   const effectiveCatalog = (): Promise<Map<string, Set<string>>> =>
     effectiveCatalogFn(rbacPolicies);
-  function buildSsoProvider(
-    row: IdentityProviderRow
-  ): OidcProvider | SamlProvider {
-    const c = row.config as Record<string, unknown>;
-    if (row.kind === "oidc") {
-      return new OidcProvider({
-        issuer: String(c.issuer ?? ""),
-        clientId: String(c.clientId ?? ""),
-        clientSecret: String(c.clientSecret ?? ""),
-        scopes: typeof c.scopes === "string" ? c.scopes : undefined
-      });
-    }
-    return new SamlProvider({
-      entryPoint: String(c.entryPoint ?? ""),
-      issuer: String(c.issuer ?? ""),
-      callbackUrl: String(c.callbackUrl ?? ""),
-      idpCert: String(c.idpCert ?? ""),
-      emailAttribute:
-        typeof c.emailAttribute === "string" ? c.emailAttribute : undefined,
-      nameAttribute:
-        typeof c.nameAttribute === "string" ? c.nameAttribute : undefined
+  // Identity-provider SPI (ADR 0035). The registry holds the built-in OIDC +
+  // SAML providers by default; server.ts may load a custom provider from
+  // RAGDOLL_IDENTITY_PROVIDER and pass its registry in via deps. Resolution
+  // is by `row.kind`, so a custom provider can add a new kind (e.g. "ldap")
+  // or override oidc/saml without touching the routes.
+  const identityProviderRegistry: IdentityProviderRegistry =
+    deps.identityProviderRegistry ?? defaultIdentityProviderRegistry();
+  function buildSsoProvider(row: IdentityProviderRow): SsoProviderInstance {
+    return identityProviderRegistry.build({
+      kind: row.kind,
+      config: (row.config as Record<string, unknown>) ?? {}
     });
   }
 

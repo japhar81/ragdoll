@@ -56,7 +56,10 @@ import type {
   SessionTokenService
 } from "../../../../packages/auth/src/index.ts";
 import type { ChangeBus } from "../../../../packages/events/src/index.ts";
-import type { SsoStateStore } from "../../../../packages/auth/src/index.ts";
+import type {
+  SsoStateStore,
+  IdentityProviderRegistry
+} from "../../../../packages/auth/src/index.ts";
 
 /**
  * The shared queue contract specifies `QueueJob.type` includes `"run_pipeline"`
@@ -232,6 +235,14 @@ export interface AppDeps {
    * in-process Map (single-replica + tests). See ADR 0005.
    */
   ssoStateStore?: SsoStateStore;
+  /**
+   * Identity-provider registry (ADR 0035). Holds the built-in OIDC + SAML
+   * providers; server.ts loads a custom provider from
+   * RAGDOLL_IDENTITY_PROVIDER and passes the populated registry here. When
+   * omitted, the app builds a default registry (built-ins only) — keeps
+   * tests + minimal embeds working unchanged.
+   */
+  identityProviderRegistry?: IdentityProviderRegistry;
 }
 
 export interface App {
