@@ -30,7 +30,14 @@ import {
 } from "./leader-election.ts";
 import { createPostgresSystemSweeps } from "./systemSweeps.ts";
 import { startOllamaWarmer } from "./ollama-warmer.ts";
-import { loadRegistries } from "../../../packages/plugin-loader/src/index.ts";
+import {
+  loadRegistries,
+  loadPluginRegistryWithStore,
+  DbPluginSourceStore,
+  pushSidecarSources,
+  registerSidecarGitPlugins
+} from "../../../packages/plugin-loader/src/index.ts";
+import type { PluginRegistry } from "../../../packages/plugin-sdk/src/index.ts";
 import { createVectorStore } from "../../../packages/vector/src/index.ts";
 import {
   createTracer,
@@ -75,7 +82,16 @@ interface BuiltDeps {
 
 async function buildDeps(): Promise<BuiltDeps> {
   const logger = getLogger();
-  const { plugins, providers } = loadRegistries();
+  // `providers` is always the static set. `plugins` STARTS as the
+  // static in-tree-builtins + hardcoded externals; in the Postgres
+  // branch below it is REPLACED with a store-backed registry so the
+  // worker can actually execute external (git-sourced) plugins — the
+  // API registers them but the worker is what validates + dispatches.
+  // (issues-log #9: the worker was only ever loading the static
+  // registry, so external plugins were registerable-but-not-executable.)
+  const staticRegistries = loadRegistries();
+  const providers = staticRegistries.providers;
+  let plugins: PluginRegistry = staticRegistries.plugins;
   const tracer = await createTracer({ enabled: process.env.OTEL_ENABLED !== "false" });
   const meter = getMeter();
   const vectorStore = createVectorStore({
@@ -105,6 +121,34 @@ async function buildDeps(): Promise<BuiltDeps> {
     const pool = await db.createPool({
       connectionString: process.env.DATABASE_URL
     });
+    // issues-log #9: build the plugin registry from the SAME
+    // plugin_sources store the API uses, so external (git-sourced)
+    // plugins — worker-host TS AND sidecar-host Python — are EXECUTABLE
+    // here, not just registerable in the API's palette. Without this
+    // the worker only had the static builtins + hardcoded externals and
+    // failed every external-plugin run with "plugin <id> is not
+    // registered". Mirrors the API's boot sequence
+    // (apps/api/src/server.ts): build from the store, push the
+    // sidecar-host rows, discover the git-loaded sidecar plugins. All
+    // best-effort — a sidecar that's down leaves the worker-host
+    // plugins intact.
+    try {
+      const sourceStore = new DbPluginSourceStore(pool);
+      const { holder } = await loadPluginRegistryWithStore({ store: sourceStore });
+      const push = await pushSidecarSources(sourceStore);
+      if (push.pushed) {
+        logger.info("worker sidecar_sources_pushed", {
+          sources: push.report?.sources?.length ?? 0
+        });
+      }
+      await registerSidecarGitPlugins(holder);
+      plugins = holder;
+      logger.info("worker plugin registry built from plugin_sources store");
+    } catch (e) {
+      logger.warn("worker store-backed plugin load failed; using static registry", {
+        error: e instanceof Error ? e.message : String(e)
+      });
+    }
     store = new db.PostgresExecutionStore(pool);
     ingestStateRepository = new db.PostgresIngestStateRepository(pool);
     repositories = {
