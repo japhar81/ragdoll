@@ -291,6 +291,56 @@ export class BuiltinPolicyEngine implements PolicyEngine {
   }
 }
 
+/** What a custom authorization-provider module may default-export: a
+ *  {@link PolicyEngine} instance, or a (sync/async) factory that builds one. */
+export type AuthzProviderModuleExport =
+  | PolicyEngine
+  | (() => PolicyEngine | Promise<PolicyEngine>);
+
+function isPolicyEngine(v: unknown): v is PolicyEngine {
+  return (
+    typeof v === "object" &&
+    v !== null &&
+    typeof (v as PolicyEngine).prepare === "function"
+  );
+}
+
+async function resolveAuthzExport(exported: unknown): Promise<PolicyEngine> {
+  if (isPolicyEngine(exported)) return exported;
+  if (typeof exported === "function") {
+    const built = await (
+      exported as () => PolicyEngine | Promise<PolicyEngine>
+    )();
+    if (isPolicyEngine(built)) return built;
+  }
+  throw new Error(
+    "authz provider module export is not a PolicyEngine or a factory returning one"
+  );
+}
+
+/**
+ * Resolve the authorization {@link PolicyEngine} at boot (ADR 0035). When
+ * `moduleUrl` (RAGDOLL_AUTHZ_PROVIDER — a package name or module path) is set,
+ * import it and use its PolicyEngine — fail-closed, a bad module throws and
+ * the caller crashes boot rather than silently using a different engine.
+ * Otherwise call `fallback`, the built-in Casbin-then-BuiltinPolicyEngine
+ * resolution. `importer` is injectable for tests. The engine is a vetted
+ * singleton loaded once, not runtime-fetched code.
+ */
+export async function loadAuthzEngine(opts: {
+  moduleUrl?: string;
+  fallback: () => Promise<{ engine: PolicyEngine; source: string }>;
+  importer?: (spec: string) => Promise<unknown>;
+}): Promise<{ engine: PolicyEngine; source: string }> {
+  const { moduleUrl, fallback, importer = (spec) => import(spec) } = opts;
+  if (!moduleUrl) return fallback();
+  const mod = (await importer(moduleUrl)) as { default?: unknown };
+  const exported =
+    mod && typeof mod === "object" && "default" in mod ? mod.default : mod;
+  const engine = await resolveAuthzExport(exported);
+  return { engine, source: moduleUrl };
+}
+
 /**
  * The Casbin model. Domains are scope strings; `scopeCovers` is registered as
  * the named domain-matching function for `g`, giving hierarchical inheritance.
