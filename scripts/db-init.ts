@@ -35,6 +35,15 @@ async function main(): Promise<void> {
 
   const pool = await createPool({ connectionString: databaseUrl });
   try {
+    // issues-log #2: heal libc collation-version drift before anything
+    // touches indexes. A postgres-data volume that crossed an image
+    // rebuild with a different glibc keeps its original
+    // `datcollversion` stamp; once the running libc diverges, the
+    // server returns SQLSTATE 01000 ("collation version mismatch") on
+    // every handshake — which blocks JDBC IDE clients. No-op once the
+    // versions agree, so it's safe on every boot.
+    await refreshCollationIfDrifted(pool);
+
     const migrationsDir = defaultMigrationsDir();
     const migration = await runMigrations(pool, migrationsDir);
     log("migrations_applied", {
@@ -62,6 +71,82 @@ async function main(): Promise<void> {
     });
   } finally {
     await pool.end().catch(() => undefined);
+  }
+}
+
+/**
+ * Detect + heal glibc collation-version drift across the databases this
+ * deployment touches (`ragdoll`, plus the cluster-default `template1` /
+ * `postgres` so a future `createdb` inherits the corrected stamp).
+ *
+ * For each database whose recorded `datcollversion` no longer matches
+ * the version the running OS provides, REINDEX it (rebuild indexes that
+ * were sorted under the old collation — only meaningful for the
+ * connected `ragdoll` db) then `ALTER DATABASE ... REFRESH COLLATION
+ * VERSION` to clear the stamp + the handshake warning. Best-effort and
+ * idempotent: a no-op when versions agree, and a per-database failure
+ * (e.g. not owner of `postgres`) is logged but never fatal — the
+ * `ragdoll` db is the one that matters.
+ */
+async function refreshCollationIfDrifted(
+  pool: Awaited<ReturnType<typeof createPool>>
+): Promise<void> {
+  let rows: Array<{
+    datname: string;
+    datcollversion: string | null;
+    actual: string | null;
+  }>;
+  try {
+    const res = await pool.query<{
+      datname: string;
+      datcollversion: string | null;
+      actual: string | null;
+    }>(
+      `SELECT datname,
+              datcollversion,
+              pg_database_collation_actual_version(oid) AS actual
+         FROM pg_database
+        WHERE datname IN ('ragdoll', 'template1', 'postgres')`
+    );
+    rows = res.rows;
+  } catch (error) {
+    // `pg_database_collation_actual_version` is Postgres 15+. Older
+    // servers don't expose it → there's nothing we can detect here.
+    log("collation_check_skipped", {
+      reason: error instanceof Error ? error.message : String(error)
+    });
+    return;
+  }
+
+  for (const row of rows) {
+    const drifted =
+      row.actual != null &&
+      row.datcollversion != null &&
+      row.actual !== row.datcollversion;
+    if (!drifted) continue;
+    log("collation_drift_detected", {
+      db: row.datname,
+      recorded: row.datcollversion,
+      actual: row.actual
+    });
+    try {
+      // REINDEX only the connected db (REINDEX DATABASE targets the
+      // current connection). template1/postgres just get the stamp
+      // refreshed — they hold no app indexes worth rebuilding here.
+      if (row.datname === "ragdoll") {
+        await pool.query("REINDEX DATABASE ragdoll");
+      }
+      // datname is whitelisted by the IN clause above → safe to inline.
+      await pool.query(
+        `ALTER DATABASE ${row.datname} REFRESH COLLATION VERSION`
+      );
+      log("collation_refreshed", { db: row.datname });
+    } catch (error) {
+      log("collation_refresh_failed", {
+        db: row.datname,
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
   }
 }
 

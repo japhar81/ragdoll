@@ -68,10 +68,17 @@ def _fake_site_seam():
             "metadata": {"title": page["title"]},
             "links": page["links"],
         }
-        if cfg["extract"] == "markdown":
-            out["markdown"] = page["markdown"]
-        else:
+        mode = cfg["extract"]
+        if mode == "html":
+            # Raw page source — synthesized from the fixture markdown so the
+            # html path has distinct, recognizable content.
+            out["html"] = page.get(
+                "html", f"<html><body>{page['markdown']}</body></html>"
+            )
+        elif mode == "text":
             out["text"] = page["markdown"]
+        else:
+            out["markdown"] = page["markdown"]
         return out
 
     return fake_run
@@ -200,6 +207,35 @@ def test_bfs_envelope_shape_unchanged(client, monkeypatch):
     assert data["metadata"]["crawler"] == "crawl4ai"
     for doc in data["outputs"]["documents"]:
         assert set(doc.keys()) == {"url", "title", "markdown", "metadata"}
+
+
+def test_bfs_extract_html_emits_raw_source(client, monkeypatch):
+    """extract:'html' carries the raw page source under a `html` key (and
+    neither `markdown` nor `text`)."""
+    data = _crawl(
+        client,
+        monkeypatch,
+        {"url": SEED, "maxPages": 3, "maxDepth": 1, "extract": "html"},
+    )
+    docs = data["outputs"]["documents"]
+    assert len(docs) >= 1
+    for doc in docs:
+        assert set(doc.keys()) == {"url", "title", "html", "metadata"}
+        assert doc["html"].startswith("<html>")
+        assert "markdown" not in doc
+        assert "text" not in doc
+
+
+def test_extract_rejects_unknown_mode(client, monkeypatch):
+    """An unsupported extract mode is a clean validation error, not a crash."""
+    monkeypatch.setattr(c4a, "run_crawl4ai", _fake_site_seam())
+    monkeypatch.setattr(safety, "system_resolver", _resolver)
+    body = make_request_body(
+        "crawl4ai_crawler", {"url": SEED, "extract": "pdf"}
+    )
+    r = client.post("/execute", json=body)
+    assert r.status_code == 200
+    assert "error" in r.json()
 
 
 def test_bfs_demo_seed_yields_five(client, monkeypatch):

@@ -51,8 +51,10 @@ def _resolve_config(config: Dict[str, Any]) -> Dict[str, Any]:
         raise ValueError("crawl4ai_crawler requires config.url or config.urls")
 
     extract = cfg.get("extract", "markdown")
-    if extract not in ("markdown", "text"):
-        raise ValueError("config.extract must be 'markdown' or 'text'")
+    if extract not in ("markdown", "text", "html"):
+        raise ValueError(
+            "config.extract must be 'markdown', 'text', or 'html'"
+        )
 
     cfg["_urls"] = urls
     cfg["extract"] = extract
@@ -117,10 +119,14 @@ def _extract_links(page: Dict[str, Any], base_url: str) -> List[str]:
 async def run_crawl4ai(url: str, cfg: Dict[str, Any]) -> Dict[str, Any]:
     """Fetch a *single* ``url`` using crawl4ai's AsyncWebCrawler.
 
-    Returns one raw page dict: ``{"url","title","markdown"/"text","metadata",
-    "links"}``. ``links`` is whatever crawl4ai exposed for the page (the BFS
-    loop normalizes/filters it). This is the single seam tests replace; a test
-    can return a different fake page per URL to simulate a site graph.
+    Returns one raw page dict: ``{"url","title","markdown"/"text"/"html",
+    "metadata","links"}``. The content key matches ``cfg["extract"]`` —
+    ``"html"`` carries crawl4ai's RAW page source (``result.html``)
+    untouched, for callers that want to parse/store the original markup
+    rather than the markdown/cleaned-text projections. ``links`` is
+    whatever crawl4ai exposed for the page (the BFS loop normalizes/filters
+    it). This is the single seam tests replace; a test can return a
+    different fake page per URL to simulate a site graph.
     """
     # Lazy import: keeps pytest collection offline and browser-free.
     from crawl4ai import AsyncWebCrawler  # type: ignore
@@ -130,12 +136,18 @@ async def run_crawl4ai(url: str, cfg: Dict[str, Any]) -> Dict[str, Any]:
     async with AsyncWebCrawler(verbose=False) as crawler:
         result = await crawler.arun(url=url)
 
-    md = getattr(result, "markdown", "") or ""
-    text = (
-        getattr(result, "cleaned_html", "")
-        or getattr(result, "text", "")
-        or ""
-    )
+    # Per-mode content. "html" is the unmodified source crawl4ai fetched;
+    # "text" prefers the cleaned_html projection; "markdown" the rendered
+    # markdown. We only attach the requested one so the document stays lean.
+    content_by_mode = {
+        "markdown": getattr(result, "markdown", "") or "",
+        "text": (
+            getattr(result, "cleaned_html", "")
+            or getattr(result, "text", "")
+            or ""
+        ),
+        "html": getattr(result, "html", "") or "",
+    }
     meta = getattr(result, "metadata", {}) or {}
     title = meta.get("title") if isinstance(meta, dict) else None
     page: Dict[str, Any] = {
@@ -144,9 +156,7 @@ async def run_crawl4ai(url: str, cfg: Dict[str, Any]) -> Dict[str, Any]:
         "metadata": meta if isinstance(meta, dict) else {},
         "links": getattr(result, "links", None),
     }
-    page["markdown" if extract == "markdown" else "text"] = (
-        md if extract == "markdown" else text
-    )
+    page[extract] = content_by_mode[extract]
     return page
 
 
@@ -206,10 +216,9 @@ async def _bfs_crawl(
             "title": page.get("title", "") or "",
             "metadata": page.get("metadata", {}) or {},
         }
-        if extract == "markdown":
-            doc["markdown"] = page.get("markdown", "") or ""
-        else:
-            doc["text"] = page.get("text", "") or ""
+        # Attach the requested projection under its own key ("markdown",
+        # "text", or "html" — the latter being the raw page source).
+        doc[extract] = page.get(extract, "") or ""
         documents.append(doc)
 
         if depth >= max_depth or len(documents) >= max_pages:

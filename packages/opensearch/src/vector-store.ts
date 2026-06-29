@@ -19,7 +19,12 @@ const SPACE_TYPE: Record<DistanceMetric, string> = {
   euclidean: "l2"
 };
 
-const VECTOR_FIELD = "vector";
+/** Default vector field name. The sinks (opensearch_output /
+ *  opensearch_upsert) let the operator name the field via
+ *  `vectorField`; the read side must query the SAME field or kNN
+ *  returns a 400. This default keeps every existing caller — which
+ *  never passed a field — reading/writing `"vector"` unchanged. */
+const DEFAULT_VECTOR_FIELD = "vector";
 
 function filterClauses(filter?: Record<string, unknown>): Array<Record<string, unknown>> {
   if (!filter) return [];
@@ -35,9 +40,14 @@ function filterClauses(filter?: Record<string, unknown>): Array<Record<string, u
  */
 export class OpenSearchVectorStore implements VectorStore {
   private readonly client: OpenSearchClient;
+  private readonly vectorField: string;
 
-  constructor(config: OpenSearchClientConfig | { client: OpenSearchClient }) {
+  constructor(
+    config: OpenSearchClientConfig | { client: OpenSearchClient },
+    opts?: { vectorField?: string }
+  ) {
     this.client = "client" in config ? config.client : new OpenSearchClient(config);
+    this.vectorField = opts?.vectorField ?? DEFAULT_VECTOR_FIELD;
   }
 
   async ensureCollection(name: string, config: CollectionConfig): Promise<void> {
@@ -45,7 +55,7 @@ export class OpenSearchVectorStore implements VectorStore {
       settings: { index: { knn: true } },
       mappings: {
         properties: {
-          [VECTOR_FIELD]: {
+          [this.vectorField]: {
             type: "knn_vector",
             dimension: config.dimensions,
             method: {
@@ -67,7 +77,7 @@ export class OpenSearchVectorStore implements VectorStore {
       points.map((point) => ({
         id: point.id,
         doc: {
-          [VECTOR_FIELD]: point.vector,
+          [this.vectorField]: point.vector,
           tenantId: point.tenantId,
           ...(point.payload ?? {})
         }
@@ -92,7 +102,7 @@ export class OpenSearchVectorStore implements VectorStore {
       size: k,
       query: {
         knn: {
-          [VECTOR_FIELD]: {
+          [this.vectorField]: {
             vector: query.vector,
             k,
             filter: { bool: { must: filter } }
@@ -101,7 +111,7 @@ export class OpenSearchVectorStore implements VectorStore {
       }
     });
     return hits.map((hit) => {
-      const { [VECTOR_FIELD]: _vector, tenantId: _tenantId, ...payload } = hit.source;
+      const { [this.vectorField]: _vector, tenantId: _tenantId, ...payload } = hit.source;
       return { id: hit.id, score: hit.score, payload };
     });
   }
