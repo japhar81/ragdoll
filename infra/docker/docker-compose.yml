@@ -318,7 +318,11 @@ services:
       # crawl4ai_crawler / scrapy_spider plugins so they appear in the
       # builder palette. api only lists/validates them — it does not need
       # the (slow) python-plugins build to be healthy to start.
-      PYTHON_PLUGIN_URL: http://python-plugins:8000
+      # A single free-standing sidecar by default. Override with a
+      # comma-separated list to fan a plugin-source reload out to several
+      # sidecars (issues-log #8) — e.g. the docker-compose.python-scale.yml
+      # overlay, or `PYTHON_PLUGIN_URL=http://python-plugins:8000,http://python-plugins-2:8000`.
+      PYTHON_PLUGIN_URL: ${PYTHON_PLUGIN_URL:-http://python-plugins:8000}
       PYTHON_PLUGIN_TIMEOUT_MS: "300000"
       # PLUGIN-ARCH-2: must match the sidecar's token for the
       # plugin_sources push (POST /admin/reload) to be accepted.
@@ -392,7 +396,11 @@ services:
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
       OTEL_SERVICE_NAME: ragdoll-worker
       OTEL_RESOURCE_ATTRIBUTES: "service.namespace=ragdoll,deployment.environment=local,service.instance.id=worker-1"
-      PYTHON_PLUGIN_URL: http://python-plugins:8000
+      # A single free-standing sidecar by default. Override with a
+      # comma-separated list to fan a plugin-source reload out to several
+      # sidecars (issues-log #8) — e.g. the docker-compose.python-scale.yml
+      # overlay, or `PYTHON_PLUGIN_URL=http://python-plugins:8000,http://python-plugins-2:8000`.
+      PYTHON_PLUGIN_URL: ${PYTHON_PLUGIN_URL:-http://python-plugins:8000}
       PYTHON_PLUGIN_TIMEOUT_MS: "300000"
     volumes:
       - "${CODEBASE_PATH:-../..}:/workspace:ro"
@@ -440,7 +448,11 @@ services:
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
       OTEL_SERVICE_NAME: ragdoll-worker
       OTEL_RESOURCE_ATTRIBUTES: "service.namespace=ragdoll,deployment.environment=local,service.instance.id=worker-2"
-      PYTHON_PLUGIN_URL: http://python-plugins:8000
+      # A single free-standing sidecar by default. Override with a
+      # comma-separated list to fan a plugin-source reload out to several
+      # sidecars (issues-log #8) — e.g. the docker-compose.python-scale.yml
+      # overlay, or `PYTHON_PLUGIN_URL=http://python-plugins:8000,http://python-plugins-2:8000`.
+      PYTHON_PLUGIN_URL: ${PYTHON_PLUGIN_URL:-http://python-plugins:8000}
       PYTHON_PLUGIN_TIMEOUT_MS: "300000"
     volumes:
       - "${CODEBASE_PATH:-../..}:/workspace:ro"
