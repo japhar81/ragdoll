@@ -86,7 +86,7 @@ const CRAWL4AI_MANIFEST: PluginManifest = {
   version: "1.0.0",
   category: "datasource",
   description:
-    "Crawls one or more URLs via the Crawl4AI engine and emits markdown/text documents for ingestion.",
+    "Crawls one or more URLs via the Crawl4AI engine and emits markdown, cleaned-text, or raw-HTML documents for ingestion.",
   configSchema: {
     type: "object",
     properties: {
@@ -121,9 +121,10 @@ const CRAWL4AI_MANIFEST: PluginManifest = {
       },
       extract: {
         type: "string",
-        enum: ["markdown", "text"],
+        enum: ["markdown", "text", "html"],
         default: "markdown",
-        description: "Content extraction format for fetched pages."
+        description:
+          "Content format for fetched pages: 'markdown' (rendered), 'text' (cleaned), or 'html' (raw page source)."
       },
       timeoutMs: {
         type: "integer",
@@ -144,7 +145,7 @@ const CRAWL4AI_MANIFEST: PluginManifest = {
     additionalProperties: false
   },
   outputPorts: [
-    { name: "documents", description: "Array of crawled documents with markdown/text content + source URL." }
+    { name: "documents", description: "Array of crawled documents with markdown/text/html content + source URL." }
   ],
   capabilities: ["ingestion"],
   ui: {

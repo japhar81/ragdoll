@@ -79,7 +79,11 @@ test("external crawler plugins registered when PYTHON_PLUGIN_URL is set", async 
     assert.equal(c4Schema?.properties?.sameDomainOnly?.default, true);
     assert.equal(c4Schema?.properties?.timeoutMs?.default, 60000);
     assert.equal(c4Schema?.properties?.allowPrivateNetworks?.default, false);
-    assert.deepEqual(c4Schema?.properties?.extract?.enum, ["markdown", "text"]);
+    assert.deepEqual(c4Schema?.properties?.extract?.enum, [
+      "markdown",
+      "text",
+      "html"
+    ]);
     assert.equal(c4Schema?.properties?.extract?.default, "markdown");
     assert.equal(crawl4ai?.manifest.category, "datasource");
     assert.deepEqual(crawl4ai?.manifest.capabilities, ["ingestion"]);
