@@ -529,6 +529,52 @@ served).
 - Signature verification for sidecar git plugins (the TS side has
   it; the Python side trusts the internal/trusted model for now).
 
+## Amendment — sidecar topology + reload fan-out (issues-log #8)
+
+`pushSidecarSources` originally POSTed `/admin/reload` to a single
+`PYTHON_PLUGIN_URL`. Behind a load-balancing Service (or any setup
+with more than one sidecar instance) that reached exactly ONE
+replica; the rest kept serving the old git-loaded set. The sidecar's
+loaded plugins are per-process in-memory state, so a partial reload
+silently diverges the fleet.
+
+Fix — make the loader **target-aware** and let each platform shape
+the target list to its topology:
+
+- `sidecarTargets()` parses `PYTHON_PLUGIN_URL` as a single URL OR a
+  comma/whitespace list (slash-stripped, deduped). The reload primitive.
+- `pushSidecarSources` fans `/admin/reload` out to EVERY target
+  concurrently and aggregates: `pushed` is true if at least one
+  accepted, with a per-target summary (`targets[]`) and a
+  `stale: <url>` reason when some were unreachable. A source row is
+  marked green only when it loaded on every REACHABLE target (a down
+  replica is infra — surfaced via `reason`/`targets`, not a false
+  source-load failure). `registerSidecarGitPlugins` /
+  `registerExternalPlugins` use the first reachable target (instances
+  are identical after a reload).
+
+Topology:
+
+- **k8s (`pythonPlugins.mode: sidecar`, default)** — python-plugins
+  is a co-located CONTAINER in every api + worker pod (shared
+  `ragdoll.pythonPluginsContainer` helper). `PYTHON_PLUGIN_URL` is
+  `http://localhost:PORT`, so each compute process reloads + calls
+  its OWN sidecar — the fan-out problem is gone by construction and
+  the sidecar scales 1:1 with api/worker. `mode: standalone` keeps
+  the legacy shared Deployment + ClusterIP Service (pin `replicas: 1`;
+  a reload can't address individual pods behind a ClusterIP).
+- **docker** — the single free-standing `python-plugins` stays the
+  dev default, but `PYTHON_PLUGIN_URL` is overridable and the
+  `docker-compose.python-scale.yml` overlay runs a second sidecar and
+  lists both, so a reload fans out to all.
+
+Verified: `sidecarTargets` parsing; reload fans out to two stub
+sidecars; partial fan-out (one down) still pushes + flags the stale
+target; `helm template` in both modes (sidecar → one container per
+api/worker pod + localhost URL + no standalone resources; standalone →
+shared Deployment+Service + Service-DNS URL); `docker compose config`
+on the scale overlay (second sidecar + dual-URL on all compute services).
+
 ## References
 
 - `packages/plugin-loader/src/sources.ts` — source store + types.
