@@ -188,6 +188,23 @@ web:
 # ---------------------------------------------------------------------------
 pythonPlugins:
   enabled: true
+  # Topology (issues-log #8):
+  #   sidecar    — (default) run python-plugins as a co-located sidecar
+  #                CONTAINER inside every api + worker pod. Each compute
+  #                process talks to its own sidecar on localhost, so a
+  #                plugin-source reload it pushes reaches the exact instance
+  #                that serves its calls. Scales 1:1 with api/worker and
+  #                needs no cross-replica fan-out — the structurally correct
+  #                fix for "reload reached only one replica behind a Service".
+  #                `replicas` is ignored in this mode (one sidecar per pod).
+  #   standalone — legacy: one shared python-plugins Deployment + ClusterIP
+  #                Service that all api/worker pods call. Simpler/lighter, but
+  #                a reload only reaches ONE replica through the load-balancing
+  #                Service, so keep `replicas: 1` (documented limitation). Use
+  #                this only if you can't afford a sidecar per pod.
+  mode: sidecar
+  # Only used when mode=standalone. Keep at 1: the reload fan-out can't
+  # address individual pods behind a ClusterIP (see `mode` above).
   replicas: 1
   port: 8000
   image:

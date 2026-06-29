@@ -1,4 +1,8 @@
-{{- if .Values.pythonPlugins.enabled }}
+{{- /* Standalone topology only: a shared python-plugins Deployment + Service
+   that all api/worker pods call. In the default `sidecar` mode the
+   container is injected per-pod (see api/worker deployments) and this file
+   renders nothing. (issues-log #8) */ -}}
+{{- if and .Values.pythonPlugins.enabled (eq .Values.pythonPlugins.mode "standalone") }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -31,36 +35,5 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       containers:
-        - name: python-plugins
-          image: "{{ .Values.pythonPlugins.image.repository }}:{{ .Values.pythonPlugins.image.tag }}"
-          imagePullPolicy: {{ .Values.pythonPlugins.image.pullPolicy }}
-          {{- with .Values.containerSecurityContext }}
-          securityContext:
-            {{- toYaml . | nindent 12 }}
-          {{- end }}
-          ports:
-            - containerPort: {{ .Values.pythonPlugins.port }}
-          env:
-            - name: PORT
-              value: "{{ .Values.pythonPlugins.port }}"
-          readinessProbe:
-            httpGet:
-              path: /healthz
-              port: {{ .Values.pythonPlugins.port }}
-            # Chromium-bearing image is slow to come up.
-            initialDelaySeconds: 20
-            periodSeconds: 10
-          livenessProbe:
-            httpGet:
-              path: /healthz
-              port: {{ .Values.pythonPlugins.port }}
-            initialDelaySeconds: 30
-            periodSeconds: 15
-          resources:
-            requests:
-              cpu: {{ .Values.pythonPlugins.resources.requests.cpu }}
-              memory: {{ .Values.pythonPlugins.resources.requests.memory }}
-            limits:
-              cpu: {{ .Values.pythonPlugins.resources.limits.cpu | quote }}
-              memory: {{ .Values.pythonPlugins.resources.limits.memory }}
+        {{- include "ragdoll.pythonPluginsContainer" . | nindent 8 }}
 {{- end }}

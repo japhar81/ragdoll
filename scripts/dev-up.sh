@@ -12,4 +12,6 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 # shellcheck source=./_compose.sh
 source "$(dirname "$0")/_compose.sh"
+# Warn early if a Podman machine is too small for the stack (OpenSearch OOM).
+ragdoll_preflight_podman_memory
 exec "${COMPOSE[@]}" up --build "$@"

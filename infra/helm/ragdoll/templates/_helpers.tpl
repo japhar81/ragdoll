@@ -206,11 +206,63 @@ Args: . (top-level chart values context).
   value: {{ .Values.prometheus.port | quote }}
 {{- end }}
 {{- if .Values.pythonPlugins.enabled }}
+{{- if eq .Values.pythonPlugins.mode "sidecar" }}
+# Per-pod sidecar: talk to the python-plugins container co-located in THIS
+# pod over localhost. A reload pushed from here reaches the exact instance
+# that serves this process's plugin calls — no cross-replica fan-out. (#8)
+- name: PYTHON_PLUGIN_URL
+  value: "http://localhost:{{ .Values.pythonPlugins.port }}"
+{{- else }}
+# Standalone: the shared python-plugins Service (one instance — keep
+# pythonPlugins.replicas at 1; a reload can't fan out behind a ClusterIP).
 - name: PYTHON_PLUGIN_URL
   value: "http://{{ .Release.Name }}-python-plugins:{{ .Values.pythonPlugins.port }}"
+{{- end }}
 - name: PYTHON_PLUGIN_TIMEOUT_MS
   value: {{ .Values.pythonPlugins.timeoutMs | quote }}
 {{- end }}
+{{- end -}}
+
+{{/*
+The python-plugins container spec, shared by the standalone Deployment
+AND the per-pod sidecar injected into api/worker pods (pythonPlugins.mode
+== "sidecar"). Extracted so the two render IDENTICAL containers — image,
+probes, resources. Caller nindents it under a `containers:` list, e.g.
+  {{- include "ragdoll.pythonPluginsContainer" . | nindent 8 }}
+*/}}
+{{- define "ragdoll.pythonPluginsContainer" -}}
+- name: python-plugins
+  image: "{{ .Values.pythonPlugins.image.repository }}:{{ .Values.pythonPlugins.image.tag }}"
+  imagePullPolicy: {{ .Values.pythonPlugins.image.pullPolicy }}
+  {{- with .Values.containerSecurityContext }}
+  securityContext:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  ports:
+    - containerPort: {{ .Values.pythonPlugins.port }}
+  env:
+    - name: PORT
+      value: "{{ .Values.pythonPlugins.port }}"
+  readinessProbe:
+    httpGet:
+      path: /healthz
+      port: {{ .Values.pythonPlugins.port }}
+    # Chromium-bearing image is slow to come up.
+    initialDelaySeconds: 20
+    periodSeconds: 10
+  livenessProbe:
+    httpGet:
+      path: /healthz
+      port: {{ .Values.pythonPlugins.port }}
+    initialDelaySeconds: 30
+    periodSeconds: 15
+  resources:
+    requests:
+      cpu: {{ .Values.pythonPlugins.resources.requests.cpu }}
+      memory: {{ .Values.pythonPlugins.resources.requests.memory }}
+    limits:
+      cpu: {{ .Values.pythonPlugins.resources.limits.cpu | quote }}
+      memory: {{ .Values.pythonPlugins.resources.limits.memory }}
 {{- end -}}
 
 {{/*

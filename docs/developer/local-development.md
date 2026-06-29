@@ -148,6 +148,23 @@ internal — it is reachable in-network at `http://python-plugins:8000` and
 is not published to the host (uncomment the `ports:` block in
 `docker-compose.yml` to debug it directly).
 
+> **Running more than one sidecar.** `PYTHON_PLUGIN_URL` accepts a
+> comma-separated list, and RAGdoll fans a plugin-source reload out to
+> every instance (issues-log #8). Layer the
+> `docker-compose.python-scale.yml` overlay to run a second sidecar and
+> wire both:
+>
+> ```bash
+> docker compose -f infra/docker/docker-compose.yml \
+>                -f infra/docker/docker-compose.python-scale.yml up --build
+> ```
+>
+> In k8s the sidecar is co-located per pod instead (Helm
+> `pythonPlugins.mode: sidecar`, the default): each api/worker pod runs
+> its own `python-plugins` container and reaches it on `localhost`, so a
+> reload always lands on the instance that serves that pod's calls. Set
+> `pythonPlugins.mode: standalone` for the legacy shared Deployment.
+
 Crawl a public site via the builder: open `http://localhost:8088`, add a
 **Crawl4AI Crawler** datasource node, set `url`
 (e.g. `https://example.com`), keep `sameDomainOnly` and the default

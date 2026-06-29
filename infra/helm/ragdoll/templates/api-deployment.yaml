@@ -111,3 +111,9 @@ spec:
             limits:
               cpu: {{ .Values.api.resources.limits.cpu | quote }}
               memory: {{ .Values.api.resources.limits.memory }}
+{{- if and .Values.pythonPlugins.enabled (eq .Values.pythonPlugins.mode "sidecar") }}
+        # Per-pod python-plugins sidecar (issues-log #8): this api pod reaches
+        # it over localhost, so a plugin-source reload it pushes lands on the
+        # exact instance that serves its calls — no cross-replica fan-out.
+        {{- include "ragdoll.pythonPluginsContainer" . | nindent 8 }}
+{{- end }}

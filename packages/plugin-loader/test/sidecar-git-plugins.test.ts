@@ -16,6 +16,7 @@ import {
   registerSidecarGitPlugins,
   applyExternalPlugins,
   pushSidecarSources,
+  sidecarTargets,
   buildPluginRegistry,
   InMemoryPluginSourceStore,
   __clearPluginCacheForTests,
@@ -311,6 +312,83 @@ test("pushSidecarSources: sidecar unreachable → not pushed, reason surfaced, n
     assert.equal(result.pushed, false);
     assert.match(result.reason ?? "", /unreachable/);
   });
+});
+
+test("sidecarTargets: parses a single URL or a comma/space list, strips slashes + dedupes", () => {
+  assert.deepEqual(sidecarTargets({ PYTHON_PLUGIN_URL: undefined }), []);
+  assert.deepEqual(sidecarTargets({ PYTHON_PLUGIN_URL: "http://pp:8000/" }), [
+    "http://pp:8000"
+  ]);
+  assert.deepEqual(
+    sidecarTargets({
+      PYTHON_PLUGIN_URL: "http://a:8000, http://b:8000/ ,  http://a:8000"
+    }),
+    ["http://a:8000", "http://b:8000"]
+  );
+});
+
+test("pushSidecarSources: fans out to EVERY target in a comma-separated PYTHON_PLUGIN_URL (issues-log #8)", async () => {
+  const a = await startReloadStub();
+  const b = await startReloadStub();
+  const store = new InMemoryPluginSourceStore([sidecarRow("py_a")]);
+  try {
+    await withEnv(
+      { PYTHON_PLUGIN_URL: `${a.baseUrl}, ${b.baseUrl}` },
+      async () => {
+        const result = await pushSidecarSources(store);
+        assert.equal(result.pushed, true);
+        // BOTH sidecars received the reload — the fan-out that a single
+        // load-balanced Service URL could never guarantee.
+        assert.deepEqual(
+          (a.lastBody() as { sources: Array<{ id: string }> }).sources.map(
+            (s) => s.id
+          ),
+          ["py_a"]
+        );
+        assert.deepEqual(
+          (b.lastBody() as { sources: Array<{ id: string }> }).sources.map(
+            (s) => s.id
+          ),
+          ["py_a"]
+        );
+        assert.equal(result.targets?.length, 2);
+        assert.ok(result.targets?.every((t) => t.ok));
+        // Loaded on ALL targets → store row marked ok.
+        const row = await store.get!("py_a");
+        assert.equal(row?.lastLoadOk, true);
+      }
+    );
+  } finally {
+    await a.close();
+    await b.close();
+  }
+});
+
+test("pushSidecarSources: partial fan-out (one target down) still pushes, flags the stale target", async () => {
+  const up = await startReloadStub();
+  const store = new InMemoryPluginSourceStore([sidecarRow("py_a")]);
+  try {
+    await withEnv(
+      { PYTHON_PLUGIN_URL: `${up.baseUrl}, http://127.0.0.1:1` },
+      async () => {
+        const result = await pushSidecarSources(store);
+        // At least one target took it → still a successful push...
+        assert.equal(result.pushed, true);
+        // ...but the down target is reported so a stale replica is visible.
+        assert.match(result.reason ?? "", /stale/);
+        const down = result.targets?.find((t) => !t.ok);
+        assert.ok(down, "expected the unreachable target in the summary");
+        assert.match(down?.reason ?? "", /unreachable/);
+        // The source loaded fine on every REACHABLE target, so its row is
+        // green — a down replica is an infra issue surfaced via `reason` /
+        // `targets`, not a source-load failure.
+        const row = await store.get!("py_a");
+        assert.equal(row?.lastLoadOk, true);
+      }
+    );
+  } finally {
+    await up.close();
+  }
 });
 
 test("buildPluginRegistry: host:sidecar rows are NOT loaded in-process (they're pushed to the sidecar instead)", async () => {
