@@ -8,7 +8,7 @@ packages = [{ include = "ragdoll_plugin_py" }]
 
 [tool.poetry.dependencies]
 python = "^3.11"
-connectrpc = "^0.10.0"
+connectrpc = ">=0.10,<0.12"
 # grpcio-tools (used by scripts/gen-proto.sh) emits 6.x-pinned gencode; the
 # runtime must be >= that. Range bounded only by major to leave room for
 # point upgrades without churn — connectrpc itself just wants >=5.28.
