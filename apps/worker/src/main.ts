@@ -6,12 +6,15 @@
  *                          (control-plane lookups still use in-memory repos
  *                          unless a future Postgres variant is wired); else
  *                          a fully in-memory execution store.
- *   - REDIS_URL set     -> BullMQ consumer bound to `createWorker` handlers;
- *                          else the InMemoryQueue (process exits after a
- *                          readiness log — useful for smoke checks).
+ *   - NATS_URL set      -> NATS JetStream consumer bound to `createWorker`
+ *                          handlers + a JetStream producer queue; else the
+ *                          InMemoryQueue (useful for smoke checks / tests).
+ *   - REDIS_URL set     -> Redis-backed scheduler leader-election lease (and
+ *                          the change bus / SSO state store); else
+ *                          AlwaysLeader. Independent of the queue transport.
  *
  * This module is only imported by `index.ts`'s `import.meta.url` guard, so the
- * offline test suite never loads bullmq / ioredis / pg.
+ * offline test suite never loads the NATS client / ioredis / pg.
  */
 
 import { InMemoryQueue } from "./index.ts";
@@ -263,20 +266,33 @@ export async function main(): Promise<void> {
   const worker = createWorker(deps);
 
   // The scheduler enqueues `run_pipeline` jobs onto whichever queue the worker
-  // consumes (BullMQ when REDIS_URL is set, else the in-memory queue) so the
-  // SAME worker process picks them up. Single active scheduler instance
+  // consumes (NATS JetStream when NATS_URL is set, else the in-memory queue)
+  // so the SAME worker process picks them up. Single active scheduler instance
   // assumed — see the leader-election caveat in ./scheduler.ts.
-  let stopScheduler: (() => void) | undefined;
+  //
+  // Transport selection is now TWO independent axes (they used to be one
+  // REDIS_URL switch):
+  //   - NATS_URL  → the JOB queue + consumer (JetStream). Else InMemoryQueue.
+  //   - REDIS_URL → the scheduler's leader-election lease (+ the change bus /
+  //                 SSO state store wired earlier). Else AlwaysLeader.
+  // So production sets BOTH; the queue moved off Redis/BullMQ but Redis still
+  // backs leader election + fan-out.
+  const natsUrl = process.env.NATS_URL;
+  const redisUrl = process.env.REDIS_URL;
 
-  if (process.env.REDIS_URL) {
-    const { startBullMqConsumer, BullMqQueue } = await import("./bullmq.ts");
-    // Start the Ollama warmer FIRST so we can gate the BullMQ consumer
-    // on the warmer's readiness promise. Without this gate, the worker
-    // would happily pick up a `run_pipeline` job while `ollama-pull` is
-    // still fetching weights — the first /api/embed comes back 404
-    // ("model not found") and the pipeline crashes. The warmer polls
-    // /api/generate (chat) and /api/embed (embedding-only) until each
-    // model responds 2xx, then resolves `ready`. The dequeue waits.
+  let queue: QueuePort;
+  let stopConsumer: (() => Promise<void>) | undefined;
+  let stopWarmer: (() => void) | undefined;
+
+  if (natsUrl) {
+    const { startNatsConsumer, NatsJetStreamQueue } = await import("./nats.ts");
+    // Start the Ollama warmer FIRST so we can gate the consumer on the
+    // warmer's readiness promise. Without this gate, the worker would
+    // happily pick up a `run_pipeline` job while `ollama-pull` is still
+    // fetching weights — the first /api/embed comes back 404 ("model not
+    // found") and the pipeline crashes. The warmer polls /api/generate
+    // (chat) and /api/embed (embedding-only) until each model responds 2xx,
+    // then resolves `ready`. The dequeue waits.
     const warmModels = (process.env.OLLAMA_WARM_MODELS ?? "")
       .split(",")
       .map((s) => s.trim())
@@ -290,6 +306,7 @@ export async function main(): Promise<void> {
       ),
       logger
     });
+    stopWarmer = () => warmer.stop();
     if (warmModels.length > 0) {
       logger.info("ollama_warmer_started", { models: warmModels });
       try {
@@ -305,100 +322,27 @@ export async function main(): Promise<void> {
         });
       }
     }
-    const consumer = await startBullMqConsumer(worker, {
-      redisUrl: process.env.REDIS_URL,
+    const consumer = await startNatsConsumer(worker, {
+      natsUrl,
       queueName: process.env.WORKER_QUEUE_NAME,
       concurrency: Number(process.env.WORKER_CONCURRENCY ?? 4),
       logger
     });
-    logger.info("worker consuming BullMQ queue", {
-      queue: process.env.WORKER_QUEUE_NAME ?? "ragdoll-jobs"
-    });
-    const queue: QueuePort = new BullMqQueue({
-      redisUrl: process.env.REDIS_URL,
+    stopConsumer = () => consumer.close();
+    queue = new NatsJetStreamQueue({
+      natsUrl,
       queueName: process.env.WORKER_QUEUE_NAME
     });
-    // Every worker pod creates its own scheduler timer, BUT only the
-    // holder of the Redis-backed lease actually enqueues. Failover is
-    // automatic: if the current leader pauses or dies, its lease (10s
-    // TTL, renewed every ~3s) expires and the next pod's acquire
-    // succeeds on the next poll. The follower deployment that used to
-    // gate the scheduler with WORKER_SCHEDULER_ENABLED=false is gone —
-    // workers are interchangeable now.
-    //
-    // WORKER_SCHEDULER_ENABLED is preserved as an emergency kill-switch
-    // (e.g. a stuck schedule needs to be silenced cluster-wide while
-    // operators investigate). Default `true`. Setting to `false` on a
-    // single pod is harmless (it just won't fire even if it would have
-    // held the lease); setting on every pod stops scheduling.
-    const schedulerEnabled =
-      (process.env.WORKER_SCHEDULER_ENABLED ?? "true").toLowerCase() !== "false";
-    let stopLeader: (() => Promise<void>) | undefined;
-    if (schedulerEnabled) {
-      // We're inside `if (process.env.REDIS_URL)` so REDIS_URL is set;
-      // the in-memory-queue branch below uses AlwaysLeader instead.
-      const leaderElection: LeaderElection = new RedisLeaderElection({
-        redisUrl: process.env.REDIS_URL!,
-        logger
-      });
-      stopLeader = leaderElection.start();
-      const scheduler = createScheduler({
-        schedules,
-        queue,
-        logger,
-        leaderElection
-      });
-      stopScheduler = scheduler.start(
-        Number(process.env.SCHEDULER_INTERVAL_MS ?? 60000)
-      );
-      logger.info("scheduler started with redis leader election", {
-        leaseKey: "ragdoll:scheduler:leader"
-      });
-    } else {
-      logger.info(
-        "scheduler disabled on this pod (WORKER_SCHEDULER_ENABLED=false; emergency kill-switch)"
-      );
-    }
-    const shutdown = async (): Promise<void> => {
-      logger.info("worker shutting down");
-      stopScheduler?.();
-      // Release the scheduler lease promptly so a peer can take over
-      // on the next poll instead of waiting for the TTL to expire.
-      // Best-effort: the Lua-fenced release no-ops if we already lost
-      // ownership.
-      await stopLeader?.().catch(() => undefined);
-      warmer.stop();
-      await consumer.close();
-      // Flush metric + log batches before the process dies so the last
-      // few seconds of telemetry actually reach the collector.
-      await stopMetrics().catch(() => undefined);
-      await stopLogs().catch(() => undefined);
-      await stopTraces().catch(() => undefined);
-      process.exit(0);
-    };
-    process.on("SIGINT", shutdown);
-    process.on("SIGTERM", shutdown);
-  } else {
-    // No Redis: there is no external transport to consume. Expose an
-    // InMemoryQueue (mainly used by tests / single-process embedding) and log
-    // readiness. The worker remains importable + usable in-process. The
-    // scheduler enqueues onto the same in-memory queue.
-    const queue = new InMemoryQueue();
-    // No Redis → no contention to resolve, so AlwaysLeader is correct
-    // (single in-memory process is by definition the only candidate).
-    const leaderElection = new AlwaysLeader();
-    leaderElection.start();
-    const scheduler = createScheduler({
-      schedules,
-      queue,
-      logger,
-      leaderElection
+    logger.info("worker consuming NATS JetStream queue", {
+      queue: process.env.WORKER_QUEUE_NAME ?? "ragdoll-jobs"
     });
-    stopScheduler = scheduler.start(
-      Number(process.env.SCHEDULER_INTERVAL_MS ?? 60000)
-    );
-    void stopScheduler;
-    logger.info("worker ready (in-memory queue; set REDIS_URL for BullMQ)", {
+  } else {
+    // No NATS: there is no external transport to consume. Expose an
+    // InMemoryQueue (mainly used by tests / single-process embedding). The
+    // worker remains importable + usable in-process; the scheduler enqueues
+    // onto the same in-memory queue.
+    queue = new InMemoryQueue();
+    logger.info("worker ready (in-memory queue; set NATS_URL for JetStream)", {
       handlers: [
         "run_pipeline",
         "ingest_datasource",
@@ -412,4 +356,61 @@ export async function main(): Promise<void> {
       scheduler: "started"
     });
   }
+
+  // Every worker pod creates its own scheduler timer, BUT only the holder of
+  // the Redis-backed lease actually enqueues. Failover is automatic: if the
+  // current leader pauses or dies, its lease (10s TTL, renewed every ~3s)
+  // expires and the next pod's acquire succeeds on the next poll. Workers are
+  // interchangeable. Without REDIS_URL there's no contention to resolve, so
+  // AlwaysLeader is correct (a single process is by definition the only
+  // candidate).
+  //
+  // WORKER_SCHEDULER_ENABLED is preserved as an emergency kill-switch (e.g. a
+  // stuck schedule needs silencing cluster-wide while operators investigate).
+  // Default `true`. Setting `false` on one pod is harmless; on every pod it
+  // stops scheduling.
+  const schedulerEnabled =
+    (process.env.WORKER_SCHEDULER_ENABLED ?? "true").toLowerCase() !== "false";
+  let stopScheduler: (() => void) | undefined;
+  let stopLeader: (() => Promise<void>) | undefined;
+  if (schedulerEnabled) {
+    let leaderElection: LeaderElection;
+    if (redisUrl) {
+      leaderElection = new RedisLeaderElection({ redisUrl, logger });
+      stopLeader = leaderElection.start();
+      logger.info("scheduler started with redis leader election", {
+        leaseKey: "ragdoll:scheduler:leader"
+      });
+    } else {
+      leaderElection = new AlwaysLeader();
+      leaderElection.start();
+    }
+    const scheduler = createScheduler({ schedules, queue, logger, leaderElection });
+    stopScheduler = scheduler.start(
+      Number(process.env.SCHEDULER_INTERVAL_MS ?? 60000)
+    );
+  } else {
+    logger.info(
+      "scheduler disabled on this pod (WORKER_SCHEDULER_ENABLED=false; emergency kill-switch)"
+    );
+  }
+
+  const shutdown = async (): Promise<void> => {
+    logger.info("worker shutting down");
+    stopScheduler?.();
+    // Release the scheduler lease promptly so a peer can take over on the
+    // next poll instead of waiting for the TTL. Best-effort: the Lua-fenced
+    // release no-ops if we already lost ownership.
+    await stopLeader?.().catch(() => undefined);
+    stopWarmer?.();
+    await stopConsumer?.();
+    // Flush metric + log batches before the process dies so the last few
+    // seconds of telemetry actually reach the collector.
+    await stopMetrics().catch(() => undefined);
+    await stopLogs().catch(() => undefined);
+    await stopTraces().catch(() => undefined);
+    process.exit(0);
+  };
+  process.on("SIGINT", shutdown);
+  process.on("SIGTERM", shutdown);
 }

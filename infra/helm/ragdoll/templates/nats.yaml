@@ -1,0 +1,141 @@
+{{- if .Values.bundlednats.enabled }}
+{{/*
+Bundled NATS + JetStream — the RAGdoll job queue (replaced BullMQ/Redis;
+ADR 0004). Hand-rolled single-replica Deployment + Service + (optional) PVC,
+same shape as the bundled Qdrant.
+
+  - Single replica with `strategy: Recreate` so an upgrade can't race two
+    nats-servers against the same JetStream file store.
+  - Persistence ON by default — a queued job is source of truth until a
+    worker acks it; losing the store on a pod restart drops in-flight work.
+  - `-js` enables JetStream; `-sd /data` is the store dir (the PVC mount);
+    `-m 8222` is the monitoring port the probes hit (/healthz).
+  - No auth (cluster-internal Service). For production-scale NATS
+    (clustering, auth, mirrored streams) point at the official NATS chart:
+    set `bundlednats.enabled: false` and `nats.url` to the external server.
+*/}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-nats
+  labels:
+    app: {{ .Release.Name }}-nats
+    {{- include "ragdoll.commonLabels" . | nindent 4 }}
+  {{- with (include "ragdoll.commonAnnotations" . | trim) }}
+  annotations:
+    {{- . | nindent 4 }}
+  {{- end }}
+spec:
+  selector:
+    app: {{ .Release.Name }}-nats
+  ports:
+    - name: client
+      port: 4222
+      targetPort: 4222
+    - name: monitor
+      port: 8222
+      targetPort: 8222
+{{- if .Values.bundlednats.persistence.enabled }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ .Release.Name }}-nats
+  labels:
+    app: {{ .Release.Name }}-nats
+    {{- include "ragdoll.commonLabels" . | nindent 4 }}
+  {{- with (include "ragdoll.commonAnnotations" . | trim) }}
+  annotations:
+    {{- . | nindent 4 }}
+  {{- end }}
+spec:
+  accessModes:
+    {{- toYaml .Values.bundlednats.persistence.accessModes | nindent 4 }}
+  resources:
+    requests:
+      storage: {{ .Values.bundlednats.persistence.size }}
+  {{- with .Values.bundlednats.persistence.storageClassName }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+{{- end }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-nats
+  labels:
+    app: {{ .Release.Name }}-nats
+    {{- include "ragdoll.commonLabels" . | nindent 4 }}
+  {{- with (include "ragdoll.commonAnnotations" . | trim) }}
+  annotations:
+    {{- . | nindent 4 }}
+  {{- end }}
+spec:
+  replicas: 1
+  strategy:
+    # Recreate — a second nats-server on the same JetStream PVC corrupts the
+    # store. Single-writer guarantee enforced at the strategy level.
+    type: Recreate
+  selector:
+    matchLabels:
+      app: {{ .Release.Name }}-nats
+  template:
+    metadata:
+      labels:
+        app: {{ .Release.Name }}-nats
+        {{- include "ragdoll.commonLabels" . | nindent 8 }}
+      {{- with (include "ragdoll.commonAnnotations" . | trim) }}
+      annotations:
+        {{- . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "ragdoll.serviceAccountName" . }}
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: nats
+          image: "{{ .Values.bundlednats.image.repository }}:{{ .Values.bundlednats.image.tag }}"
+          imagePullPolicy: {{ .Values.bundlednats.image.pullPolicy }}
+          {{- with .Values.containerSecurityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          args: ["-js", "-sd", "/data", "-m", "8222"]
+          ports:
+            - name: client
+              containerPort: 4222
+            - name: monitor
+              containerPort: 8222
+          volumeMounts:
+            {{- if .Values.bundlednats.persistence.enabled }}
+            - name: store
+              mountPath: /data
+            {{- end }}
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8222
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8222
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          resources:
+            requests:
+              cpu: {{ .Values.bundlednats.resources.requests.cpu }}
+              memory: {{ .Values.bundlednats.resources.requests.memory }}
+            limits:
+              cpu: {{ .Values.bundlednats.resources.limits.cpu | quote }}
+              memory: {{ .Values.bundlednats.resources.limits.memory }}
+      volumes:
+        {{- if .Values.bundlednats.persistence.enabled }}
+        - name: store
+          persistentVolumeClaim:
+            claimName: {{ .Release.Name }}-nats
+        {{- end }}
+{{- end }}

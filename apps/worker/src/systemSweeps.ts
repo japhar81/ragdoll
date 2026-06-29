@@ -10,7 +10,7 @@
  *     `executions`, `usage_records`, and `audit_logs` that exceed any
  *     active `max_count` or `max_age_days` cap.
  *
- * Sized to run inside a single BullMQ job so the scheduler can call it on
+ * Sized to run inside a single queue job so the scheduler can call it on
  * cadence and the worker's concurrency pool absorbs it alongside live
  * pipeline runs.
  */

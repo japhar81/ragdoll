@@ -52,6 +52,17 @@ redis://{{ $host }}:6379
 {{- end -}}
 {{- end -}}
 
+{{/* NATS_URL pointing at the bundled NATS service (the job queue). Empty
+     when neither bundled NATS nor an external nats.url is configured — the
+     worker/api then fall back to the in-process queue. */}}
+{{- define "ragdoll.natsUrl" -}}
+{{- if .Values.bundlednats.enabled -}}
+nats://{{ .Release.Name }}-nats:4222
+{{- else -}}
+{{ .Values.nats.url }}
+{{- end -}}
+{{- end -}}
+
 {{/* QDRANT_URL when the bundled Qdrant is on. */}}
 {{- define "ragdoll.qdrantUrl" -}}
 {{- if .Values.bundledqdrant.enabled -}}
@@ -165,6 +176,14 @@ Args: . (top-level chart values context).
 {{- define "ragdoll.commonBackendEnv" -}}
 - name: QDRANT_URL
   value: {{ include "ragdoll.qdrantUrl" . | quote }}
+{{- $nats := include "ragdoll.natsUrl" . -}}
+{{- if $nats }}
+# Job queue (NATS JetStream — replaced BullMQ/Redis). api enqueues, the
+# worker consumes. Empty → in-process queue (single-pod only). Redis still
+# backs the change bus + scheduler leader-election lease (separate URLs).
+- name: NATS_URL
+  value: {{ $nats | quote }}
+{{- end }}
 {{- $os := include "ragdoll.opensearchUrl" . -}}
 {{- if $os }}
 - name: OPENSEARCH_URL

@@ -214,18 +214,22 @@ async function buildDeps(): Promise<{
   let pluginSourceStore: import(
     "../../../packages/plugin-loader/src/index.ts"
   ).PluginSourceStore | undefined;
-  // When REDIS_URL is set, enqueue onto the SAME BullMQ queue the separate
-  // worker container consumes (both default to "ragdoll-jobs"); otherwise an
-  // in-process queue. bullmq/ioredis are lazy-imported so `npm test` stays
-  // install-free.
+  // When NATS_URL is set, enqueue onto the SAME JetStream work-queue the
+  // separate worker container consumes (both default to "ragdoll-jobs");
+  // otherwise an in-process queue. The NATS client is lazy-imported so
+  // `npm test` stays install-free. (Redis still backs the change bus / SSO
+  // state store above — only the JOB queue moved to NATS.)
+  const natsUrl = process.env.NATS_URL;
   let queue: QueuePort;
-  if (redisUrl) {
-    const { BullMqQueue } = await import("../../../apps/worker/src/bullmq.ts");
-    queue = new BullMqQueue({
-      redisUrl,
+  if (natsUrl) {
+    const { NatsJetStreamQueue } = await import(
+      "../../../apps/worker/src/nats.ts"
+    );
+    queue = new NatsJetStreamQueue({
+      natsUrl,
       queueName: process.env.WORKER_QUEUE_NAME
     });
-    logger.info("api using BullMQ queue", {
+    logger.info("api using NATS JetStream queue", {
       queue: process.env.WORKER_QUEUE_NAME ?? "ragdoll-jobs"
     });
   } else {
