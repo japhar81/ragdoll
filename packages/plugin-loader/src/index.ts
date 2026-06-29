@@ -243,8 +243,47 @@ const SCRAPY_MANIFEST: PluginManifest = {
  * them — they're a runtime capability of the python-plugins sidecar,
  * not a git-loadable source.
  */
+/**
+ * Parse `PYTHON_PLUGIN_URL` into the list of python-plugins sidecar base
+ * URLs. Accepts a single URL (`http://python-plugins:8000`) OR a
+ * comma/whitespace-separated list (`http://pp-1:8000, http://pp-2:8000`).
+ * Trailing slashes stripped, blanks dropped, order preserved, duplicates
+ * removed. Unset/empty → `[]`.
+ *
+ * This is what makes the loader topology-agnostic and fixes the reload
+ * fan-out bug (issues-log #8):
+ *   - k8s per-pod sidecar:  `PYTHON_PLUGIN_URL=http://localhost:8000`
+ *     — one target, the pod's own co-located sidecar. Reload is local;
+ *     no cross-pod fan-out needed (each compute process owns its sidecar).
+ *   - docker, N free-standing sidecars: a comma-list of every instance.
+ *     Reload fans out to EVERY target so all stay in sync; any can then
+ *     serve execution.
+ *
+ * `pushSidecarSources` fans out to every target; `registerExternalPlugins`
+ * / `registerSidecarGitPlugins` use the first reachable one (after a reload
+ * the instances are identical).
+ */
+export function sidecarTargets(
+  env: { PYTHON_PLUGIN_URL?: string } = process.env
+): string[] {
+  const raw = env.PYTHON_PLUGIN_URL;
+  if (!raw) return [];
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const part of raw.split(/[,\s]+/)) {
+    const url = part.trim().replace(/\/+$/, "");
+    if (!url || seen.has(url)) continue;
+    seen.add(url);
+    out.push(url);
+  }
+  return out;
+}
+
 export function registerExternalPlugins(registry: PluginRegistry): void {
-  const baseUrl = process.env.PYTHON_PLUGIN_URL;
+  // First target serves execution. In the per-pod-sidecar topology this is
+  // the pod's own localhost sidecar; with N docker sidecars they're
+  // identical after a reload, so the first is as good as any.
+  const baseUrl = sidecarTargets()[0];
   if (!baseUrl) return;
   const timeoutMs = Number(process.env.PYTHON_PLUGIN_TIMEOUT_MS ?? 300000);
   // cartography_crawl gets a longer timeout because real cloud crawls
@@ -302,26 +341,37 @@ export function registerExternalPlugins(registry: PluginRegistry): void {
 export async function registerSidecarGitPlugins(
   registry: PluginRegistry
 ): Promise<void> {
-  const baseUrl = process.env.PYTHON_PLUGIN_URL;
-  if (!baseUrl) return;
+  const targets = sidecarTargets();
+  if (!targets.length) return;
   const timeoutMs = Number(process.env.PYTHON_PLUGIN_TIMEOUT_MS ?? 300000);
+  // After a reload every target serves the SAME git-loaded set, so the
+  // first that answers /manifests is authoritative. We try each in order
+  // and stop at the first OK response; the plugins we register point at
+  // that same target for execution (baseUrl below). A target that 404s
+  // (older image) or is unreachable is skipped, not fatal.
+  let baseUrl: string | undefined;
   let payload: { plugins?: SidecarManifestRow[] } | undefined;
-  try {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 10_000);
+  for (const target of targets) {
     try {
-      const res = await fetch(`${baseUrl.replace(/\/+$/, "")}/manifests`, {
-        signal: controller.signal
-      });
-      if (!res.ok) return;
-      payload = (await res.json()) as { plugins?: SidecarManifestRow[] };
-    } finally {
-      clearTimeout(timer);
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 10_000);
+      try {
+        const res = await fetch(`${target}/manifests`, {
+          signal: controller.signal
+        });
+        if (!res.ok) continue;
+        payload = (await res.json()) as { plugins?: SidecarManifestRow[] };
+        baseUrl = target;
+        break;
+      } finally {
+        clearTimeout(timer);
+      }
+    } catch {
+      // This target unreachable / bad JSON → try the next one.
+      continue;
     }
-  } catch {
-    // Sidecar unreachable / no /manifests endpoint / bad JSON → no-op.
-    return;
   }
+  if (!baseUrl) return;
   for (const row of payload?.plugins ?? []) {
     if (!row || typeof row.id !== "string") continue;
     // Use the sidecar-reported manifest when present; otherwise
@@ -422,6 +472,19 @@ export interface SidecarPushResult {
       pluginIds?: string[];
     }>;
   };
+  /** Per-target fan-out outcome (issues-log #8). One entry per sidecar
+   *  base URL in `PYTHON_PLUGIN_URL`. `pushed` is true when AT LEAST one
+   *  target accepted the reload; inspect this to spot a partially-stale
+   *  fleet (some targets unreachable). Single-target deployments get a
+   *  one-element array. */
+  targets?: Array<{ url: string; ok: boolean; reason?: string }>;
+}
+
+interface SidecarPushOne {
+  url: string;
+  ok: boolean;
+  reason?: string;
+  report?: SidecarPushResult["report"];
 }
 
 /**
@@ -444,8 +507,8 @@ export interface SidecarPushResult {
 export async function pushSidecarSources(
   store: PluginSourceStore
 ): Promise<SidecarPushResult> {
-  const baseUrl = process.env.PYTHON_PLUGIN_URL;
-  if (!baseUrl) return { pushed: false, reason: "no PYTHON_PLUGIN_URL" };
+  const targets = sidecarTargets();
+  if (!targets.length) return { pushed: false, reason: "no PYTHON_PLUGIN_URL" };
   const rows = (await store.list({ enabledOnly: false })).filter(
     (s) => s.host === "sidecar"
   );
@@ -463,47 +526,105 @@ export async function pushSidecarSources(
   const headers: Record<string, string> = { "content-type": "application/json" };
   const token = process.env.RAGDOLL_SIDECAR_ADMIN_TOKEN;
   if (token) headers["x-ragdoll-admin-token"] = token;
+
+  // Fan out to EVERY target so all sidecar instances load the same set —
+  // a reload that reached only one replica (behind a load-balancing Service)
+  // left the rest stale. (issues-log #8.) Concurrent: one slow/unreachable
+  // target doesn't serialise the others.
+  const outcomes = await Promise.all(
+    targets.map((url) => pushSidecarOne(url, sources, headers))
+  );
+
+  const ok = outcomes.filter((o) => o.ok);
+  const targetSummary = outcomes.map((o) => ({
+    url: o.url,
+    ok: o.ok,
+    ...(o.reason ? { reason: o.reason } : {})
+  }));
+
+  if (ok.length === 0) {
+    return {
+      pushed: false,
+      reason: outcomes.map((o) => `${o.url}: ${o.reason}`).join("; "),
+      targets: targetSummary
+    };
+  }
+
+  // Mark each pushed row's load result on the store ONCE (the store is
+  // shared; every reachable target loaded the same sources). A source is
+  // recorded ok only if it loaded on ALL reachable targets — a divergent
+  // target surfaces as a not-loaded mark rather than a false green.
+  const report = ok[0].report;
+  for (const s of report?.sources ?? []) {
+    const loadedEverywhere = ok.every((o) =>
+      (o.report?.sources ?? []).some(
+        (rs) => rs.id === s.id && rs.status === "loaded"
+      )
+    );
+    const firstError = ok
+      .flatMap((o) => o.report?.sources ?? [])
+      .find((rs) => rs.id === s.id && rs.status !== "loaded");
+    try {
+      await store.markLoadResult({
+        id: s.id,
+        commitSha: s.commitSha ?? null,
+        fetchedAt: new Date().toISOString(),
+        ok: loadedEverywhere,
+        error: loadedEverywhere ? null : firstError?.error ?? s.error ?? null
+      });
+    } catch {
+      /* courtesy only */
+    }
+  }
+
+  // pushed:true if at least one target took it; a partial failure is
+  // surfaced via `reason` + `targets` without failing the whole refresh.
+  const failed = outcomes.filter((o) => !o.ok);
+  return {
+    pushed: true,
+    report,
+    targets: targetSummary,
+    ...(failed.length
+      ? {
+          reason: `${ok.length}/${outcomes.length} sidecar targets reloaded; stale: ${failed
+            .map((o) => `${o.url} (${o.reason})`)
+            .join(", ")}`
+        }
+      : {})
+  };
+}
+
+/** POST the source set to a single sidecar's `/admin/reload`. Never
+ *  throws — an unreachable/erroring target resolves to `{ ok: false }`
+ *  so the fan-out in {@link pushSidecarSources} can aggregate. */
+async function pushSidecarOne(
+  url: string,
+  sources: Array<Record<string, unknown>>,
+  headers: Record<string, string>
+): Promise<SidecarPushOne> {
   try {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 60_000);
     try {
-      const res = await fetch(`${baseUrl.replace(/\/+$/, "")}/admin/reload`, {
+      const res = await fetch(`${url}/admin/reload`, {
         method: "POST",
         headers,
         body: JSON.stringify({ sources }),
         signal: controller.signal
       });
       if (!res.ok) {
-        return {
-          pushed: false,
-          reason: `sidecar /admin/reload returned ${res.status}`
-        };
+        return { url, ok: false, reason: `/admin/reload returned ${res.status}` };
       }
       const report = (await res.json()) as SidecarPushResult["report"];
-      // Mark each pushed row's load result on the store so the catalog
-      // shows the sidecar's outcome (status / sha / error) the same way
-      // worker-host rows are marked.
-      for (const s of report?.sources ?? []) {
-        try {
-          await store.markLoadResult({
-            id: s.id,
-            commitSha: s.commitSha ?? null,
-            fetchedAt: new Date().toISOString(),
-            ok: s.status === "loaded",
-            error: s.error ?? null
-          });
-        } catch {
-          /* courtesy only */
-        }
-      }
-      return { pushed: true, report };
+      return { url, ok: true, report };
     } finally {
       clearTimeout(timer);
     }
   } catch (e) {
     return {
-      pushed: false,
-      reason: `sidecar unreachable: ${e instanceof Error ? e.message : String(e)}`
+      url,
+      ok: false,
+      reason: `unreachable: ${e instanceof Error ? e.message : String(e)}`
     };
   }
 }
