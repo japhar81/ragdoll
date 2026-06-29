@@ -6,6 +6,12 @@
 #     --build-arg NGINX_BASE_IMAGE=registry.internal/nginx-unprivileged:1.27-alpine \
 #     ...
 # Defaults keep the upstream images so unconfigured builds Just Work.
+#
+# NGINX_BASE_IMAGE must be >= 1.27.3: the runtime-agnostic DNS resolver
+# (NGINX_ENTRYPOINT_LOCAL_RESOLVERS below) relies on the image's built-in
+# /docker-entrypoint.d/15-local-resolvers.envsh, added in nginx 1.27.3. On an
+# older base the env var is a no-op, ${NGINX_LOCAL_RESOLVERS} renders empty,
+# and nginx fails to start (emerg) — fail-loud, but the cause isn't obvious.
 ARG NODE_BASE_IMAGE=node:22-alpine
 ARG NGINX_BASE_IMAGE=nginxinc/nginx-unprivileged:1.27-alpine
 
