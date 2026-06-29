@@ -18,16 +18,22 @@ server {
     root /usr/share/nginx/html;
     index index.html;
 
-    # Docker's embedded DNS resolver (same address in every container on
-    # a user-defined compose network). Required so the variable
-    # proxy_pass below RE-RESOLVES `api` per request instead of caching
-    # the IP at worker startup. Without this + a variable, `make refresh`
-    # (which recreates the api container with a NEW IP) leaves nginx
-    # pointed at the dead old IP → every /api request 502s until web is
-    # restarted. (issues #4) Compose-only: the k8s/helm path uses a
-    # separate templated ConfigMap whose `api` is a stable Service
-    # ClusterIP, so it needs no resolver.
-    resolver 127.0.0.11 valid=10s ipv6=off;
+    # Per-request DNS re-resolution of `api` (issues #4): the variable
+    # proxy_pass below needs an nginx `resolver`, and nginx's resolver does
+    # NOT read /etc/resolv.conf — it queries the literal address given.
+    # `${NGINX_LOCAL_RESOLVERS}` is substituted at container start from the
+    # container's OWN /etc/resolv.conf nameserver(s) by the nginx image's
+    # built-in 15-local-resolvers.envsh entrypoint step (enabled via
+    # NGINX_ENTRYPOINT_LOCAL_RESOLVERS=1 in web.Dockerfile), so this works on
+    # Docker (127.0.0.11), Podman (the network DNS, e.g. 10.89.x.1), and any
+    # other runtime — instead of hard-coding Docker's embedded-DNS address,
+    # which 502'd everywhere else (issues #12). This is why nginx.conf ships
+    # as an `*.template`: the entrypoint's envsubst fills the var in.
+    # `valid=10s` re-resolves periodically so a `make refresh` that recreates
+    # the api container (NEW IP) is picked up without a `web` restart.
+    # Compose-only: the k8s/helm path uses a templated ConfigMap whose `api`
+    # is a stable Service ClusterIP, so it needs no resolver.
+    resolver ${NGINX_LOCAL_RESOLVERS} valid=10s ipv6=off;
     set $api_upstream http://api:3001;
 
     # Reverse-proxy control-plane endpoints to the api service so the SPA can

@@ -100,7 +100,7 @@ The web app is a React Router SPA on real paths — `/pipelines`, `/users`,
 on every screen, and any URL is a shareable bookmark. Deep-linking while
 signed out shows the login page at that URL; after sign-in you land back on
 the requested view (no redirect dance needed — the URL is never touched on
-the login screen). Nginx (`infra/docker/nginx.conf`) already does the SPA
+the login screen). Nginx (`infra/docker/nginx.conf.template`) already does the SPA
 `try_files` fallback so unknown paths serve `index.html` and the router
 resolves them.
 
