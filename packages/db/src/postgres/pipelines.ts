@@ -105,10 +105,16 @@ export class PostgresPipelineDeploymentRepository
   ): Promise<T.PipelineDeploymentRow | undefined> {
     return (
       await this.queryRows(
+        // ORDER BY deployed_at DESC so that even if duplicate active
+        // rows exist (pre-026 global deploys, or a row that races the
+        // NULLS-NOT-DISTINCT constraint), we always resolve the MOST
+        // RECENT deployment rather than an arbitrary one — the bug
+        // behind issues-log #6. (See migration 026.)
         `SELECT * FROM pipeline_deployments
          WHERE pipeline_id = $1 AND environment = $2
            AND tenant_id IS NOT DISTINCT FROM $3
            AND status = 'active'
+         ORDER BY deployed_at DESC, id DESC
          LIMIT 1`,
         [pipelineId, environment, tenantId ?? null]
       )

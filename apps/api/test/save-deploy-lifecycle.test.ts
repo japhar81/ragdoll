@@ -226,3 +226,82 @@ test("DELETE /api/tenants/:id/environments/:envId also drops every deployment re
     );
   }
 });
+
+// ---------------------------------------------------------------------------
+// (c) issues-log #6: a GLOBAL (no-tenant) redeploy must swap the version
+//     in place — exactly ONE active deployment, pointing at the latest
+//     version. The Postgres path regressed because a plain UNIQUE
+//     (pipeline_id, environment, tenant_id) treats NULL tenant_ids as
+//     DISTINCT, so `ON CONFLICT` never fired for global deploys and each
+//     redeploy INSERTed a duplicate active row — `getActiveDeployment`
+//     then resolved an arbitrary (often stale) one. Migration 026
+//     rebuilds the constraint as NULLS NOT DISTINCT; this test locks in
+//     the invariant both repositories must honor.
+// ---------------------------------------------------------------------------
+
+test("a global redeploy swaps the version in place (one active row at the latest version) — issues-log #6", async () => {
+  const harness = buildHarness();
+  const pipe = await harness.request({
+    method: "POST",
+    path: "/api/pipelines",
+    headers: ADMIN,
+    body: { slug: "global-redeploy", name: "global-redeploy" }
+  });
+  assert.equal(pipe.status, 201);
+  const id = pipe.body.pipeline.id;
+
+  // Save v1, then deploy it GLOBALLY (no tenantId → tenant_id NULL).
+  const v1 = await harness.request({
+    method: "POST",
+    path: `/api/pipelines/${id}/save`,
+    headers: ADMIN,
+    body: { spec: echoSpec("v1") }
+  });
+  assert.equal(v1.status, 201);
+  const deploy1 = await harness.request({
+    method: "POST",
+    path: `/api/pipelines/${id}/deployments`,
+    headers: ADMIN,
+    body: { version: v1.body.versionLabel, environment: "dev" }
+  });
+  assert.equal(deploy1.status, 201);
+
+  // Save a DIFFERENT spec → mints v2, then redeploy globally to the same env.
+  const v2 = await harness.request({
+    method: "POST",
+    path: `/api/pipelines/${id}/save`,
+    headers: ADMIN,
+    body: { spec: echoSpec("v2") }
+  });
+  assert.equal(v2.status, 201);
+  assert.notEqual(v2.body.version.id, v1.body.version.id);
+  const deploy2 = await harness.request({
+    method: "POST",
+    path: `/api/pipelines/${id}/deployments`,
+    headers: ADMIN,
+    body: { version: v2.body.versionLabel, environment: "dev" }
+  });
+  assert.equal(deploy2.status, 201);
+
+  // Exactly one active dev deployment, pointing at v2 — not two rows, and
+  // not the stale v1.
+  const list = await harness.request({
+    method: "GET",
+    path: `/api/pipelines/${id}/deployments`,
+    headers: ADMIN
+  });
+  const dev = (
+    list.body.deployments as Array<{
+      environment: string;
+      tenantId: string | null;
+      status: string;
+      pipelineVersionId: string;
+    }>
+  ).filter((d) => d.environment === "dev" && (d.tenantId ?? null) === null && d.status === "active");
+  assert.equal(dev.length, 1, "a global redeploy must not leave a duplicate active row");
+  assert.equal(
+    dev[0].pipelineVersionId,
+    v2.body.version.id,
+    "the surviving deployment must point at the latest deployed version"
+  );
+});
