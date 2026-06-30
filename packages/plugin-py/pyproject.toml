@@ -23,7 +23,7 @@ otel = ["opentelemetry-api"]
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.2.0"
-pytest-asyncio = "^0.23.0"
+pytest-asyncio = ">=0.23,<1.5"
 
 [build-system]
 requires = ["poetry-core>=1.9.0"]
