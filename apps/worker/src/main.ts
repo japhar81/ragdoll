@@ -32,6 +32,7 @@ import {
   webhookDeliveryPlugin,
   gateWebhookPlugin
 } from "./platform-webhooks.ts";
+import { sidecarHookFromEnv } from "./platform-sidecar.ts";
 import {
   loadPlatformPlugins,
   PlatformEventDispatcher
@@ -303,6 +304,9 @@ export async function main(): Promise<void> {
       // Synchronous gate webhooks (pre) — can veto execution.start/finish.
       registry.register(gateWebhookPlugin(deps.eventSubscriptions, logger));
     }
+    // Operator-configured out-of-process hook sidecar (RAGDOLL_HOOK_SIDECAR_URL).
+    const sidecar = sidecarHookFromEnv(logger);
+    if (sidecar) registry.register(sidecar);
     const dispatcher = new PlatformEventDispatcher(registry, { logger });
     platformStream = createPlatformEventStream({
       natsUrl: process.env.NATS_URL,

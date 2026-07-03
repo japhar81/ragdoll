@@ -11,6 +11,7 @@ import Fastify from "fastify";
 import { createApp, type AppDeps } from "./app.ts";
 import { createPlatformEventStream } from "../../worker/src/platform-events.ts";
 import { gateWebhookPlugin } from "../../worker/src/platform-webhooks.ts";
+import { sidecarHookFromEnv } from "../../worker/src/platform-sidecar.ts";
 import {
   loadPlatformPlugins,
   PlatformEventDispatcher
@@ -607,6 +608,9 @@ async function buildDeps(): Promise<{
         gateWebhookPlugin(deps.eventSubscriptions, logger)
       );
     }
+    // Operator-configured out-of-process hook sidecar (pre lane on the API).
+    const sidecar = sidecarHookFromEnv(logger);
+    if (sidecar) platformRegistry.register(sidecar);
     deps.platformDispatcher = new PlatformEventDispatcher(platformRegistry, {
       logger
     });

@@ -21,6 +21,14 @@ Every matching `post` event is POSTed to `url`, signed
 `X-Ragdoll-Signature: sha256=<HMAC-SHA256(secret, body)>`. Scoped to your
 tenant. `events` are globs: `"*"`, `"secret.*"`, `"execution.finish"`.
 
+**Gate webhooks (veto):** add `"pre"` to `phases` and the webhook becomes a
+synchronous gate — respond `200 {"allow": false, "reason": "..."}` to veto the
+operation (→ 4xx). Fail-open: a down/erroring gate never wedges the tenant.
+
+**DLQ + replay:** a delivery that exhausts its retries is dead-lettered.
+`GET /api/event-subscriptions/failures` lists them; `POST
+/api/event-subscriptions/failures/:id/replay` re-delivers.
+
 ## 2. In-process plugin (operator, can veto/mutate)
 
 Ship a module and point `RAGDOLL_PLATFORM_PLUGINS` at it (comma-list of
@@ -77,3 +85,18 @@ export default plugin; // or PlatformPlugin[], or (registry) => void
   `mutate` composes into the next hook (only catalog-allowed fields apply).
 - In-process modules are **operator-trust** (boot-imported, not runtime-
   fetched); webhooks are the per-tenant-safe tier.
+
+## 3. Out-of-process hook sidecar (operator, full pre-contract)
+
+Set `RAGDOLL_HOOK_SIDECAR_URL` and RAGdoll forwards every event to that URL
+(HMAC-signed with `RAGDOLL_HOOK_SIDECAR_SECRET`). Unlike webhooks it supports
+the full pre-contract — the sidecar responds to a `pre` POST
+(`x-ragdoll-phase: pre`) with:
+
+```json
+{ "decision": "continue" | "deny" | "fail" | "mutate", "reason": "...", "status": 423, "patch": { "output": {} } }
+```
+
+`post` events are fire-and-forget. Fail-open by default
+(`RAGDOLL_HOOK_SIDECAR_FAIL_CLOSED=1` to invert). Lets hook code run in any
+language, isolated from the RAGdoll process.
