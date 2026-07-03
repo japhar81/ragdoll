@@ -624,7 +624,14 @@ export function createApp(deps: AppDeps): App {
   registerUsersRoutes({ route }, { audit, users, passwords, rbacPolicies, authorizer });
   registerRolesRoutes({ route }, { audit, rbacPolicies, roleCatalog, authorizer });
   registerIdentityProvidersRoutes({ route }, { audit, identityProviders });
-  registerEventSubscriptionRoutes({ route }, { audit, eventSubscriptions: deps.eventSubscriptions });
+  registerEventSubscriptionRoutes(
+    { route },
+    {
+      audit,
+      eventSubscriptions: deps.eventSubscriptions,
+      webhookFailures: deps.webhookFailures
+    }
+  );
   registerAuthSettingsRoutes({ route }, { audit, authSettings });
 
   // ---- router -------------------------------------------------------------

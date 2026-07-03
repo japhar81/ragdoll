@@ -728,6 +728,31 @@ export interface EventSubscriptionRepository
   listByTenant(tenantId?: UUID | null): Promise<EventSubscriptionRow[]>;
 }
 
+/** Dead-lettered webhook delivery (ADR 0036) — a delivery that exhausted its
+ *  retries, kept for inspection + replay. */
+export interface WebhookDeliveryFailureRow {
+  id: UUID;
+  tenantId?: UUID | null;
+  subscriptionId?: UUID | null;
+  eventName: string;
+  url: string;
+  /** The full PlatformEvent (as JSON) to re-deliver on replay. */
+  event: Record<string, unknown>;
+  lastError?: string | null;
+  attempts: number;
+  failedAt: string;
+  replayedAt?: string | null;
+}
+
+export interface WebhookDeliveryFailureRepository
+  extends CrudRepository<WebhookDeliveryFailureRow> {
+  /** Failures for a tenant (unreplayed first), or all when `tenantId` is
+   *  undefined. */
+  listByTenant(tenantId?: UUID | null): Promise<WebhookDeliveryFailureRow[]>;
+  /** Stamp a successful replay. */
+  markReplayed(id: UUID, at: string): Promise<void>;
+}
+
 /** The Casbin `p`/`g` policy store. Used by @ragdoll/authz. */
 export interface RbacPolicyRepository {
   /** Every role -> permission edge (the editable permission catalog). */

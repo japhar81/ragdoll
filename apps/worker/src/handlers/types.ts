@@ -40,6 +40,7 @@ import type {
   ConnectionRepository,
   UsageRecordRepository,
   EventSubscriptionRepository,
+  WebhookDeliveryFailureRepository,
   PipelineRepository,
   PipelineActivationRepository,
   DatasetRepository,
@@ -183,6 +184,8 @@ export interface WorkerDeps {
    * webhook-delivery platform plugin the worker registers at boot.
    */
   eventSubscriptions?: EventSubscriptionRepository;
+  /** Dead-letter store for exhausted webhook deliveries (ADR 0036 DLQ). */
+  webhookFailures?: WebhookDeliveryFailureRepository;
   /**
    * Optional Authorizer. When provided AND a job payload carries an
    * `enqueuedBy` block, the worker re-checks the enqueuer's grants at

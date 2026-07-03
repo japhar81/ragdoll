@@ -9,9 +9,13 @@ import { createHmac } from "node:crypto";
 import type { AddressInfo } from "node:net";
 import {
   webhookDeliveryPlugin,
-  gateWebhookPlugin
+  gateWebhookPlugin,
+  deliverToSubscription
 } from "../src/platform-webhooks.ts";
-import { InMemoryEventSubscriptionRepository } from "../../../packages/db/src/index.ts";
+import {
+  InMemoryEventSubscriptionRepository,
+  InMemoryWebhookDeliveryFailureRepository
+} from "../../../packages/db/src/index.ts";
 import type { MutationEvent } from "../../../packages/platform-plugins/src/index.ts";
 
 function captureServer(): Promise<{
@@ -109,6 +113,48 @@ test("does not deliver a non-matching event or another tenant's event", async ()
     await plugin.on!(mutation("pipeline.deploy", "t1"), {}); // wrong event
     await plugin.on!(mutation("secret.delete", "t2"), {}); // wrong tenant
     assert.equal(srv.received.length, 0);
+  } finally {
+    await srv.close();
+  }
+});
+
+// ---- DLQ (dead-letter + replay) ------------------------------------------
+
+test("a delivery that exhausts retries is captured in the DLQ", async () => {
+  const repo = new InMemoryEventSubscriptionRepository();
+  const dlq = new InMemoryWebhookDeliveryFailureRepository();
+  await repo.create({
+    id: "sub1",
+    tenantId: "t1",
+    events: ["secret.*"],
+    phases: ["post"],
+    url: "http://127.0.0.1:9/hook", // discard port → connection refused
+    secret: null,
+    active: true,
+    createdAt: "x",
+    updatedAt: "x"
+  });
+  await webhookDeliveryPlugin(repo, undefined, dlq).on!(
+    mutation("secret.delete", "t1"),
+    {}
+  );
+  const failures = await dlq.listByTenant("t1");
+  assert.equal(failures.length, 1);
+  assert.equal(failures[0].eventName, "secret.delete");
+  assert.equal(failures[0].subscriptionId, "sub1");
+  assert.ok(failures[0].attempts >= 1);
+  assert.ok(failures[0].lastError);
+});
+
+test("deliverToSubscription (replay path) succeeds against a 2xx target", async () => {
+  const srv = await captureServer();
+  try {
+    const result = await deliverToSubscription(
+      { url: srv.url, secret: "k" },
+      mutation("secret.delete", "t1")
+    );
+    assert.equal(result.ok, true);
+    assert.equal(srv.received.length, 1);
   } finally {
     await srv.close();
   }

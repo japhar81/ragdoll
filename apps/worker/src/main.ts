@@ -123,6 +123,7 @@ async function buildDeps(): Promise<BuiltDeps> {
   // Webhook subscriptions (ADR 0036 Phase 1c) — read by the built-in
   // webhook-delivery platform plugin.
   let eventSubscriptions: db.EventSubscriptionRepository;
+  let webhookFailures: db.WebhookDeliveryFailureRepository;
   // Mirror runtime usage into the control-plane UsageRecordRepository ONLY in
   // the in-memory wiring. PostgresExecutionStore.recordUsage already writes
   // the shared usage_records table that a Postgres UsageRecordRepository
@@ -168,6 +169,7 @@ async function buildDeps(): Promise<BuiltDeps> {
     store = new db.PostgresExecutionStore(pool);
     ingestStateRepository = new db.PostgresIngestStateRepository(pool);
     eventSubscriptions = new db.PostgresEventSubscriptionRepository(pool);
+    webhookFailures = new db.PostgresWebhookDeliveryFailureRepository(pool);
     repositories = {
       pipelineVersions: new db.PostgresPipelineVersionRepository(pool),
       configDefinitions: new db.PostgresConfigDefinitionRepository(pool),
@@ -230,6 +232,7 @@ async function buildDeps(): Promise<BuiltDeps> {
     };
     schedules = new InMemoryScheduleRepository();
     eventSubscriptions = new db.InMemoryEventSubscriptionRepository();
+    webhookFailures = new db.InMemoryWebhookDeliveryFailureRepository();
     secretProvider = new DatabaseEncryptedSecretProvider(
       new InMemorySecretRepository(),
       new StaticKeyProvider(process.env.SECRET_ENCRYPTION_KEY ?? "dev-secret")
@@ -265,7 +268,8 @@ async function buildDeps(): Promise<BuiltDeps> {
       ingestStateRepository,
       changeBus,
       systemSweeps,
-      eventSubscriptions
+      eventSubscriptions,
+      webhookFailures
     },
     schedules
   };
@@ -293,7 +297,9 @@ export async function main(): Promise<void> {
     // Built-in: per-tenant webhook delivery (ADR 0036 Phase 1c). Registered
     // programmatically (not via RAGDOLL_PLATFORM_PLUGINS) so it's always on.
     if (deps.eventSubscriptions) {
-      registry.register(webhookDeliveryPlugin(deps.eventSubscriptions, logger));
+      registry.register(
+        webhookDeliveryPlugin(deps.eventSubscriptions, logger, deps.webhookFailures)
+      );
       // Synchronous gate webhooks (pre) — can veto execution.start/finish.
       registry.register(gateWebhookPlugin(deps.eventSubscriptions, logger));
     }

@@ -61,6 +61,7 @@ export {
   InMemoryUserIdentityRepository,
   InMemoryIdentityProviderRepository,
   InMemoryEventSubscriptionRepository,
+  InMemoryWebhookDeliveryFailureRepository,
   InMemoryRbacPolicyRepository,
   InMemoryAuthSettingsRepository,
   InMemoryWebhookTriggerRepository
