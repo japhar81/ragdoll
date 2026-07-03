@@ -10,6 +10,7 @@ import { randomUUID } from "node:crypto";
 import Fastify from "fastify";
 import { createApp, type AppDeps } from "./app.ts";
 import { createPlatformEventStream } from "../../worker/src/platform-events.ts";
+import { gateWebhookPlugin } from "../../worker/src/platform-webhooks.ts";
 import {
   loadPlatformPlugins,
   PlatformEventDispatcher
@@ -595,6 +596,13 @@ async function buildDeps(): Promise<{
   try {
     const { registry: platformRegistry, loaded: platformModules } =
       await loadPlatformPlugins();
+    // Built-in: synchronous gate webhooks run in the API's PRE lane so a
+    // per-tenant webhook can veto a mutation / execution.accept (→ 4xx).
+    if (deps.eventSubscriptions) {
+      platformRegistry.register(
+        gateWebhookPlugin(deps.eventSubscriptions, logger)
+      );
+    }
     deps.platformDispatcher = new PlatformEventDispatcher(platformRegistry, {
       logger
     });

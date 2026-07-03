@@ -28,7 +28,10 @@ import {
 import { createScheduler } from "./scheduler.ts";
 import { createPlatformEventStream } from "./platform-events.ts";
 import { lifecycleHooksFrom } from "./platform-lifecycle.ts";
-import { webhookDeliveryPlugin } from "./platform-webhooks.ts";
+import {
+  webhookDeliveryPlugin,
+  gateWebhookPlugin
+} from "./platform-webhooks.ts";
 import {
   loadPlatformPlugins,
   PlatformEventDispatcher
@@ -291,6 +294,8 @@ export async function main(): Promise<void> {
     // programmatically (not via RAGDOLL_PLATFORM_PLUGINS) so it's always on.
     if (deps.eventSubscriptions) {
       registry.register(webhookDeliveryPlugin(deps.eventSubscriptions, logger));
+      // Synchronous gate webhooks (pre) — can veto execution.start/finish.
+      registry.register(gateWebhookPlugin(deps.eventSubscriptions, logger));
     }
     const dispatcher = new PlatformEventDispatcher(registry, { logger });
     platformStream = createPlatformEventStream({
