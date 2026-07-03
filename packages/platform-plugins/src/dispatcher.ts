@@ -106,6 +106,25 @@ function withTimeout<T>(
   });
 }
 
+/**
+ * Fire-and-forget sink for `post` events. The host wires this to the durable
+ * NATS stream (production) or straight to a dispatcher (single-process / tests
+ * via {@link inProcessEmitter}). Emitters MUST NOT throw — a broken event
+ * pipeline can never break the operation that produced the event.
+ */
+export type PlatformEmitter = (event: PlatformEvent) => void;
+
+/** An emitter that delivers straight to a local dispatcher (no transport) —
+ *  for the single-process worker / offline tests. */
+export function inProcessEmitter(
+  dispatcher: PlatformEventDispatcher,
+  onError?: (e: unknown) => void
+): PlatformEmitter {
+  return (event) => {
+    void dispatcher.deliver(event).catch((e) => onError?.(e));
+  };
+}
+
 export class PlatformEventDispatcher {
   private readonly registry: PlatformPluginRegistry;
   private readonly opts: DispatcherOptions;
