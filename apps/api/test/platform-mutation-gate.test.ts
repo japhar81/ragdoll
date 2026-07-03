@@ -64,3 +64,24 @@ test("a glob subscription (pipeline.*) gates every pipeline mutation", async () 
   assert.equal(res.status, 451);
   assert.match(res.body.message, /pipeline\.create/);
 });
+
+test("execution.accept gate vetoes a run before it is enqueued (4xx)", async () => {
+  // Deny only execution.accept, so creating the pipeline still succeeds.
+  const harness = buildHarness({ platformDispatcher: denyDispatcher(["execution.accept"]) });
+  const created = await harness.request({
+    method: "POST",
+    path: "/api/pipelines",
+    headers: ADMIN,
+    body: { slug: "acc", name: "acc" }
+  });
+  assert.equal(created.status, 201);
+  const run = await harness.request({
+    method: "POST",
+    path: `/api/pipelines/${created.body.pipeline.id}/run`,
+    headers: { ...ADMIN, "x-tenant-id": "11111111-1111-1111-1111-111111111111" },
+    body: {}
+  });
+  assert.equal(run.status, 451);
+  assert.equal(run.body.error, "blocked_by_platform_plugin");
+  assert.match(run.body.message, /execution\.accept/);
+});
