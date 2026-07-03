@@ -32,6 +32,7 @@ import type {
   UserRepository,
   UserIdentityRepository,
   IdentityProviderRepository,
+  EventSubscriptionRepository,
   RbacPolicyRepository,
   AuthSettingsRepository,
   RoleRepository,
@@ -261,6 +262,11 @@ export interface AppDeps {
    * same RAGDOLL_PLATFORM_PLUGINS registry as the worker. Omitted in tests.
    */
   platformDispatcher?: PlatformEventDispatcher;
+  /**
+   * Webhook subscriptions (ADR 0036 Phase 1c). Backs the
+   * /api/event-subscriptions management routes. Omitted → routes 501.
+   */
+  eventSubscriptions?: EventSubscriptionRepository;
 }
 
 export interface App {

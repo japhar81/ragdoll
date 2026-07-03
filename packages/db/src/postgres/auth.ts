@@ -233,6 +233,43 @@ export class PostgresIdentityProviderRepository
   }
 }
 
+export class PostgresEventSubscriptionRepository
+  extends PostgresCrudRepository<T.EventSubscriptionRow>
+  implements T.EventSubscriptionRepository
+{
+  constructor(pool: PoolLike) {
+    // events/phases are text[] (not JSONB), so no json columns to declare.
+    super(pool, "event_subscriptions", "event_subscription", []);
+  }
+  async listActiveForTenant(
+    tenantId: string | null
+  ): Promise<T.EventSubscriptionRow[]> {
+    const r = await this.pool.query<Record<string, unknown>>(
+      `SELECT * FROM event_subscriptions
+        WHERE active = true
+          AND (tenant_id IS NOT DISTINCT FROM $1 OR tenant_id IS NULL)`,
+      [tenantId]
+    );
+    return r.rows.map((row) => rowFromDb<T.EventSubscriptionRow>(row));
+  }
+  async listByTenant(
+    tenantId?: string | null
+  ): Promise<T.EventSubscriptionRow[]> {
+    if (tenantId === undefined) {
+      const r = await this.pool.query<Record<string, unknown>>(
+        `SELECT * FROM event_subscriptions ORDER BY created_at DESC`
+      );
+      return r.rows.map((row) => rowFromDb<T.EventSubscriptionRow>(row));
+    }
+    const r = await this.pool.query<Record<string, unknown>>(
+      `SELECT * FROM event_subscriptions
+        WHERE tenant_id IS NOT DISTINCT FROM $1 ORDER BY created_at DESC`,
+      [tenantId]
+    );
+    return r.rows.map((row) => rowFromDb<T.EventSubscriptionRow>(row));
+  }
+}
+
 
 export class PostgresRbacPolicyRepository implements T.RbacPolicyRepository {
   private pool: PoolLike;

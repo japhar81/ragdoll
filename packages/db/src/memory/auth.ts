@@ -166,6 +166,31 @@ export class InMemoryIdentityProviderRepository
   }
 }
 
+export class InMemoryEventSubscriptionRepository
+  extends InMemoryCrudRepository<T.EventSubscriptionRow>
+  implements T.EventSubscriptionRepository
+{
+  constructor() {
+    super("event_subscription");
+  }
+  async listActiveForTenant(
+    tenantId: string | null
+  ): Promise<T.EventSubscriptionRow[]> {
+    return (await this.list()).filter(
+      (row) =>
+        row.active &&
+        ((row.tenantId ?? null) === tenantId || (row.tenantId ?? null) === null)
+    );
+  }
+  async listByTenant(
+    tenantId?: string | null
+  ): Promise<T.EventSubscriptionRow[]> {
+    const all = await this.list();
+    if (tenantId === undefined) return all;
+    return all.filter((row) => (row.tenantId ?? null) === (tenantId ?? null));
+  }
+}
+
 
 export class InMemoryRbacPolicyRepository implements T.RbacPolicyRepository {
   private rolePerms: T.RbacRolePermissionRow[] = [];

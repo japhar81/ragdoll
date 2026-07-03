@@ -699,6 +699,35 @@ export interface IdentityProviderRepository
   listEnabled(): Promise<IdentityProviderRow[]>;
 }
 
+/** Platform-plugin webhook subscription (ADR 0036 Phase 1c). */
+export interface EventSubscriptionRow {
+  id: UUID;
+  /** null = platform-scoped (sees every event); non-null = that tenant only. */
+  tenantId?: UUID | null;
+  /** Event-name glob patterns: "secret.*", "execution.failure", "*". */
+  events: string[];
+  /** Phases to deliver (only "post" is delivered today). */
+  phases: string[];
+  url: string;
+  /** HMAC-SHA256 signing key (X-Ragdoll-Signature). */
+  secret?: string | null;
+  active: boolean;
+  description?: string | null;
+  createdBy?: UUID | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface EventSubscriptionRepository
+  extends CrudRepository<EventSubscriptionRow> {
+  /** Active subscriptions in `tenantId`'s delivery scope: the tenant's own
+   *  rows PLUS platform-scoped (tenant_id IS NULL) rows. */
+  listActiveForTenant(tenantId: UUID | null): Promise<EventSubscriptionRow[]>;
+  /** Management listing: rows for a tenant, or every row when `tenantId` is
+   *  undefined. */
+  listByTenant(tenantId?: UUID | null): Promise<EventSubscriptionRow[]>;
+}
+
 /** The Casbin `p`/`g` policy store. Used by @ragdoll/authz. */
 export interface RbacPolicyRepository {
   /** Every role -> permission edge (the editable permission catalog). */

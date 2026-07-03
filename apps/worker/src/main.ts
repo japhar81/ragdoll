@@ -28,6 +28,7 @@ import {
 import { createScheduler } from "./scheduler.ts";
 import { createPlatformEventStream } from "./platform-events.ts";
 import { lifecycleHooksFrom } from "./platform-lifecycle.ts";
+import { webhookDeliveryPlugin } from "./platform-webhooks.ts";
 import {
   loadPlatformPlugins,
   PlatformEventDispatcher
@@ -116,6 +117,9 @@ async function buildDeps(): Promise<BuiltDeps> {
   let store: ExecutionStore;
   let schedules: ScheduleRepository;
   let ingestStateRepository: IngestStateRepository | undefined;
+  // Webhook subscriptions (ADR 0036 Phase 1c) — read by the built-in
+  // webhook-delivery platform plugin.
+  let eventSubscriptions: db.EventSubscriptionRepository;
   // Mirror runtime usage into the control-plane UsageRecordRepository ONLY in
   // the in-memory wiring. PostgresExecutionStore.recordUsage already writes
   // the shared usage_records table that a Postgres UsageRecordRepository
@@ -160,6 +164,7 @@ async function buildDeps(): Promise<BuiltDeps> {
     }
     store = new db.PostgresExecutionStore(pool);
     ingestStateRepository = new db.PostgresIngestStateRepository(pool);
+    eventSubscriptions = new db.PostgresEventSubscriptionRepository(pool);
     repositories = {
       pipelineVersions: new db.PostgresPipelineVersionRepository(pool),
       configDefinitions: new db.PostgresConfigDefinitionRepository(pool),
@@ -221,6 +226,7 @@ async function buildDeps(): Promise<BuiltDeps> {
       environments: new db.InMemoryEnvironmentRepository()
     };
     schedules = new InMemoryScheduleRepository();
+    eventSubscriptions = new db.InMemoryEventSubscriptionRepository();
     secretProvider = new DatabaseEncryptedSecretProvider(
       new InMemorySecretRepository(),
       new StaticKeyProvider(process.env.SECRET_ENCRYPTION_KEY ?? "dev-secret")
@@ -255,7 +261,8 @@ async function buildDeps(): Promise<BuiltDeps> {
       mirrorUsageToRepository,
       ingestStateRepository,
       changeBus,
-      systemSweeps
+      systemSweeps,
+      eventSubscriptions
     },
     schedules
   };
@@ -280,6 +287,11 @@ export async function main(): Promise<void> {
   let platformStream: ReturnType<typeof createPlatformEventStream> | undefined;
   try {
     const { registry, loaded } = await loadPlatformPlugins();
+    // Built-in: per-tenant webhook delivery (ADR 0036 Phase 1c). Registered
+    // programmatically (not via RAGDOLL_PLATFORM_PLUGINS) so it's always on.
+    if (deps.eventSubscriptions) {
+      registry.register(webhookDeliveryPlugin(deps.eventSubscriptions, logger));
+    }
     const dispatcher = new PlatformEventDispatcher(registry, { logger });
     platformStream = createPlatformEventStream({
       natsUrl: process.env.NATS_URL,

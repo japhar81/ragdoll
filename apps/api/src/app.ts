@@ -244,6 +244,7 @@ import { registerAuthSsoRoutes } from "./app/routes/auth-sso.ts";
 import { registerUsersRoutes } from "./app/routes/users.ts";
 import { registerRolesRoutes } from "./app/routes/roles.ts";
 import { registerIdentityProvidersRoutes } from "./app/routes/identity-providers.ts";
+import { registerEventSubscriptionRoutes } from "./app/routes/event-subscriptions.ts";
 import { registerAuthSettingsRoutes } from "./app/routes/auth-settings.ts";
 
 // `Handler` + `Route` + `RouteContext` close over `Principal` (per-request
@@ -618,6 +619,7 @@ export function createApp(deps: AppDeps): App {
   registerUsersRoutes({ route }, { audit, users, passwords, rbacPolicies, authorizer });
   registerRolesRoutes({ route }, { audit, rbacPolicies, roleCatalog, authorizer });
   registerIdentityProvidersRoutes({ route }, { audit, identityProviders });
+  registerEventSubscriptionRoutes({ route }, { audit, eventSubscriptions: deps.eventSubscriptions });
   registerAuthSettingsRoutes({ route }, { audit, authSettings });
 
   // ---- router -------------------------------------------------------------

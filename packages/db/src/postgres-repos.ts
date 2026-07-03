@@ -61,6 +61,7 @@ export {
   PostgresRoleRepository,
   PostgresUserIdentityRepository,
   PostgresIdentityProviderRepository,
+  PostgresEventSubscriptionRepository,
   PostgresRbacPolicyRepository,
   PostgresAuthSettingsRepository,
   PostgresWebhookTriggerRepository

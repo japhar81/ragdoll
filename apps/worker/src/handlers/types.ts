@@ -39,6 +39,7 @@ import type {
   VectorCollectionRepository,
   ConnectionRepository,
   UsageRecordRepository,
+  EventSubscriptionRepository,
   PipelineRepository,
   PipelineActivationRepository,
   DatasetRepository,
@@ -177,6 +178,11 @@ export interface WorkerDeps {
    * from its platform-plugin dispatcher; omitted in tests.
    */
   executionLifecycle?: ExecutionLifecycleHooks;
+  /**
+   * Webhook subscriptions (ADR 0036 Phase 1c). Read by the built-in
+   * webhook-delivery platform plugin the worker registers at boot.
+   */
+  eventSubscriptions?: EventSubscriptionRepository;
   /**
    * Optional Authorizer. When provided AND a job payload carries an
    * `enqueuedBy` block, the worker re-checks the enqueuer's grants at
