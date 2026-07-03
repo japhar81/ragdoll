@@ -26,6 +26,7 @@ import type {
   StructuredLogger
 } from "../../../../packages/observability/src/index.ts";
 import type { ChangeBus } from "../../../../packages/events/src/index.ts";
+import type { PlatformEmitter } from "../../../../packages/platform-plugins/src/index.ts";
 import type { PrincipalType } from "../../../../packages/auth/src/index.ts";
 import type { Authorizer } from "../../../../packages/authz/src/index.ts";
 import type {
@@ -161,6 +162,13 @@ export interface WorkerDeps {
    * — the wrapper is bypassed and no broadcasts occur.
    */
   changeBus?: ChangeBus;
+  /**
+   * Optional platform-plugin emitter (ADR 0036). When provided, the
+   * PublishingExecutionStore also emits the `execution.*` lifecycle
+   * PlatformEvents onto the durable platform stream. Omitted in tests /
+   * when no platform plugins are configured.
+   */
+  platformEmitter?: PlatformEmitter;
   /**
    * Optional Authorizer. When provided AND a job payload carries an
    * `enqueuedBy` block, the worker re-checks the enqueuer's grants at

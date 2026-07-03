@@ -21,6 +21,10 @@ import type { UsageRecord } from "../../../../packages/core/src/index.ts";
 import type { ChangeBus } from "../../../../packages/events/src/index.ts";
 import type { StructuredLogger } from "../../../../packages/observability/src/index.ts";
 import type { UsageRecordRepository } from "../../../../packages/db/src/index.ts";
+import type {
+  PlatformEmitter,
+  PlatformEvent
+} from "../../../../packages/platform-plugins/src/index.ts";
 
 /**
  * ExecutionStore decorator that mirrors every lifecycle write onto a
@@ -32,6 +36,13 @@ export class PublishingExecutionStore implements ExecutionStore {
   private inner: ExecutionStore;
   private bus: ChangeBus;
   private logger?: StructuredLogger;
+  /**
+   * Optional platform-plugin emitter (ADR 0036). Fires the richer
+   * `execution.start / finish / success / failure / denied / cancelled`
+   * lifecycle events onto the durable platform stream, in ADDITION to the
+   * ephemeral change-bus broadcast above. Fire-and-forget; never throws.
+   */
+  private emit?: PlatformEmitter;
   /**
    * Node records carry neither tenant nor actor; the parent execution does.
    * Cache both from `start()` so node events can be scoped correctly and
@@ -46,11 +57,38 @@ export class PublishingExecutionStore implements ExecutionStore {
   constructor(
     inner: ExecutionStore,
     bus: ChangeBus,
-    logger?: StructuredLogger
+    logger?: StructuredLogger,
+    emit?: PlatformEmitter
   ) {
     this.inner = inner;
     this.bus = bus;
     this.logger = logger;
+    this.emit = emit;
+  }
+
+  /** Build + emit a `post` execution PlatformEvent (best-effort). */
+  private emitExecution(
+    event: string,
+    record: ExecutionRecord,
+    actorId: string | null
+  ): void {
+    if (!this.emit) return;
+    const platformEvent: PlatformEvent = {
+      id: randomUUID(),
+      correlationId: record.executionId,
+      event,
+      phase: "post",
+      category: "execution",
+      at: new Date().toISOString(),
+      actor: { id: actorId ?? "system", tenantId: record.tenantId },
+      tenantId: record.tenantId ?? null,
+      target: { type: "execution", id: record.executionId },
+      executionId: record.executionId,
+      pipelineId: record.pipelineId,
+      versionId: record.pipelineVersionId,
+      status: record.status
+    };
+    this.emit(platformEvent);
   }
 
   private async fire(
@@ -98,6 +136,8 @@ export class PublishingExecutionStore implements ExecutionStore {
         startedAt: record.startedAt
       }
     );
+    // Platform-plugin lifecycle: the run has started (post).
+    this.emitExecution("execution.start", record, actorId);
   }
 
   async complete(record: ExecutionRecord): Promise<void> {
@@ -123,6 +163,22 @@ export class PublishingExecutionStore implements ExecutionStore {
         completedAt: record.completedAt
       }
     );
+    // Platform-plugin lifecycle: the run finished — `execution.finish` (post)
+    // fires for every terminal status, plus the outcome-specialized event so
+    // a hook can subscribe to just `execution.failure`, etc.
+    const actorId = record.actorId ?? meta?.actorId ?? null;
+    this.emitExecution("execution.finish", record, actorId);
+    const outcome =
+      record.status === "succeeded"
+        ? "execution.success"
+        : record.status === "failed"
+          ? "execution.failure"
+          : record.status === "denied"
+            ? "execution.denied"
+            : record.status === "cancelled"
+              ? "execution.cancelled"
+              : undefined;
+    if (outcome) this.emitExecution(outcome, record, actorId);
     this.metaByExecution.delete(record.executionId);
   }
 
@@ -159,7 +215,32 @@ export class PublishingExecutionStore implements ExecutionStore {
   }
 
   async recordUsage(record: UsageRecord): Promise<void> {
-    return this.inner.recordUsage(record);
+    await this.inner.recordUsage(record);
+    if (this.emit) {
+      this.emit({
+        id: randomUUID(),
+        correlationId: record.executionId ?? record.pipelineId,
+        event: "usage.recorded",
+        phase: "post",
+        category: "usage",
+        at: new Date().toISOString(),
+        actor: { id: "system", tenantId: record.tenantId },
+        tenantId: record.tenantId ?? null,
+        target: { type: "execution", id: record.executionId ?? record.pipelineId },
+        executionId: record.executionId,
+        pipelineId: record.pipelineId,
+        usage: {
+          provider: record.provider,
+          model: record.model,
+          inputTokens: record.inputTokens,
+          outputTokens: record.outputTokens,
+          embeddingTokens: record.embeddingTokens,
+          estimatedCostUsd: record.estimatedCostUsd,
+          latencyMs: record.latencyMs,
+          success: record.success
+        }
+      });
+    }
   }
 }
 

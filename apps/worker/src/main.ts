@@ -26,6 +26,11 @@ import {
   type ChangeBus
 } from "../../../packages/events/src/index.ts";
 import { createScheduler } from "./scheduler.ts";
+import { createPlatformEventStream } from "./platform-events.ts";
+import {
+  loadPlatformPlugins,
+  PlatformEventDispatcher
+} from "../../../packages/platform-plugins/src/index.ts";
 import {
   AlwaysLeader,
   RedisLeaderElection,
@@ -263,6 +268,39 @@ export async function main(): Promise<void> {
   const stopMetrics = await wireOtelMetrics({ instrumentationName: "ragdoll-worker" });
   const logger = getLogger();
   const { deps, schedules } = await buildDeps();
+
+  // --- Platform plugins (ADR 0036). Load operator-installed hook modules
+  // (RAGDOLL_PLATFORM_PLUGINS), build the dispatcher + durable event stream,
+  // and run the shared post-consumer HERE in the worker so hook code executes
+  // off the API request path. The emitter is threaded into the execution
+  // decorator so `execution.*` lifecycle events flow to hooks. NATS-backed
+  // when NATS_URL is set, else in-process (single-worker / smoke).
+  let stopPlatformConsumer: (() => Promise<void>) | undefined;
+  let platformStream: ReturnType<typeof createPlatformEventStream> | undefined;
+  try {
+    const { registry, loaded } = await loadPlatformPlugins();
+    const dispatcher = new PlatformEventDispatcher(registry, { logger });
+    platformStream = createPlatformEventStream({
+      natsUrl: process.env.NATS_URL,
+      logger
+    });
+    const consumer = await platformStream.startConsumer(dispatcher);
+    stopPlatformConsumer = () => consumer.close();
+    deps.platformEmitter = (event) => platformStream!.publish(event);
+    logger.info("platform_plugins_ready", {
+      plugins: registry.list().map((p) => p.name),
+      modules: loaded,
+      transport: process.env.NATS_URL ? "nats" : "in-process"
+    });
+  } catch (e) {
+    // A broken platform-plugin module must not take the worker down; log and
+    // continue without hooks (fail-open at the fleet level — a single bad
+    // hook module shouldn't halt all job processing).
+    logger.error("platform_plugins_load_failed", {
+      error: e instanceof Error ? e.message : String(e)
+    });
+  }
+
   const worker = createWorker(deps);
 
   // The scheduler enqueues `run_pipeline` jobs onto whichever queue the worker
@@ -404,6 +442,8 @@ export async function main(): Promise<void> {
     await stopLeader?.().catch(() => undefined);
     stopWarmer?.();
     await stopConsumer?.();
+    await stopPlatformConsumer?.().catch(() => undefined);
+    await platformStream?.close().catch(() => undefined);
     // Flush metric + log batches before the process dies so the last few
     // seconds of telemetry actually reach the collector.
     await stopMetrics().catch(() => undefined);

@@ -60,6 +60,7 @@ import type {
   SsoStateStore,
   IdentityProviderRegistry
 } from "../../../../packages/auth/src/index.ts";
+import type { PlatformEmitter } from "../../../../packages/platform-plugins/src/index.ts";
 
 /**
  * The shared queue contract specifies `QueueJob.type` includes `"run_pipeline"`
@@ -243,6 +244,13 @@ export interface AppDeps {
    * tests + minimal embeds working unchanged.
    */
   identityProviderRegistry?: IdentityProviderRegistry;
+  /**
+   * Platform-plugin emitter (ADR 0036). When set, `audit()` emits each of the
+   * 72 audited mutations as a durable `post` PlatformEvent so hooks can trap
+   * any action. Omitted in tests → no emission. Publish-only on the API; the
+   * worker runs the consumer that executes hook code.
+   */
+  platformEmitter?: PlatformEmitter;
 }
 
 export interface App {
