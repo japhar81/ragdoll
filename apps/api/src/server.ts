@@ -9,6 +9,7 @@
 import { randomUUID } from "node:crypto";
 import Fastify from "fastify";
 import { createApp, type AppDeps } from "./app.ts";
+import { createPlatformEventStream } from "../../worker/src/platform-events.ts";
 import { handleMcpRequest } from "./mcp.ts";
 import { mountWebsocket } from "./websocket.ts";
 import {
@@ -575,6 +576,13 @@ async function buildDeps(): Promise<{
     );
   }
   deps.identityProviderRegistry = identityProviderRegistry;
+
+  // Platform-plugin emission (ADR 0036). Publish-only on the API — the worker
+  // runs the consumer that executes hook code, so arbitrary hook logic stays
+  // off the API request path. audit() emits each mutation as a durable
+  // PlatformEvent. NATS-backed when NATS_URL is set, else in-process no-op.
+  const platformEventStream = createPlatformEventStream({ natsUrl, logger });
+  deps.platformEmitter = (event) => platformEventStream.publish(event);
 
   await bootstrapAccessControl(rbacForAuthz, usersForBootstrap, logger);
 

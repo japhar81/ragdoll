@@ -416,6 +416,30 @@ export function createApp(deps: AppDeps): App {
         error: e instanceof Error ? e.message : String(e)
       });
     }
+    // Platform-plugin emission (ADR 0036): the SAME mutation, as a durable
+    // `post` PlatformEvent, so hooks can trap any audited action. Fire-and-
+    // forget; the emitter never throws. (pre-lane interception of mutations
+    // is Phase 2.)
+    deps.platformEmitter?.({
+      id: randomUUID(),
+      correlationId:
+        headerValue(ctx.request.headers, "x-request-id") ?? targetId,
+      event: action,
+      phase: "post",
+      category: "mutation",
+      at,
+      actor: { id: actorId ?? "system", type: ctx.principal.type, tenantId: tenantId ?? undefined },
+      tenantId,
+      target: { type: targetType, id: targetId },
+      ...(SENSITIVE_ACTIONS[action]
+        ? { requiredPermission: SENSITIVE_ACTIONS[action] }
+        : {}),
+      requestId: headerValue(ctx.request.headers, "x-request-id") ?? undefined,
+      sourceIp: clientIp(ctx.request.headers) ?? undefined,
+      userAgent: headerValue(ctx.request.headers, "user-agent") ?? undefined,
+      before: before === undefined ? undefined : redactValue(before),
+      after: after === undefined ? undefined : redactValue(after)
+    });
   }
 
   /** Tenant scope from explicit header, falling back to the principal. */

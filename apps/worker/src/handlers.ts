@@ -167,7 +167,7 @@ export function createWorker(deps: WorkerDeps): Worker {
     ? new UsageMirroringExecutionStore(deps.store, deps.repositories.usageRecords)
     : deps.store;
   const runtimeStore: ExecutionStore = deps.changeBus
-    ? new PublishingExecutionStore(usageMirrored, deps.changeBus, deps.logger)
+    ? new PublishingExecutionStore(usageMirrored, deps.changeBus, deps.logger, deps.platformEmitter)
     : usageMirrored;
 
   // Phase 5+: hand off to the shared buildDatasetResolver in
