@@ -2833,6 +2833,77 @@ paths:
       responses:
         "204": { description: Deleted }
         "403": { $ref: "#/components/responses/Forbidden" }
+  /api/event-subscriptions:
+    get:
+      summary: >-
+        List the caller tenant's platform-event webhook subscriptions;
+        signing secret redacted (permission config:edit_tenant). ADR 0036.
+      responses:
+        "200": { description: "{ subscriptions }" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "501": { description: Subscriptions not configured (no repository) }
+    post:
+      summary: >-
+        Create a webhook subscription. A subscription with `pre` in its
+        phases is a SYNCHRONOUS gate that can veto the matching operation
+        (respond 200 {allow:false}); `post` phases are durable observers
+        delivered from the event stream, HMAC-signed (config:edit_tenant).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [events, url]
+              properties:
+                events:
+                  type: array
+                  items: { type: string }
+                  description: 'event-name globs, e.g. "secret.*", "execution.failure", "*"'
+                phases:
+                  type: array
+                  items: { type: string, enum: [pre, post] }
+                  default: [post]
+                url: { type: string, format: uri }
+                secret: { type: string, description: HMAC-SHA256 signing key (write-only) }
+                description: { type: string }
+                active: { type: boolean, default: true }
+      responses:
+        "201": { description: "{ subscription }" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { description: events (non-empty string[]) + http(s) url required }
+        "501": { description: Subscriptions not configured }
+  /api/event-subscriptions/{id}:
+    delete:
+      summary: Delete a webhook subscription (config:edit_tenant; own tenant only).
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        "204": { description: Deleted }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /api/event-subscriptions/failures:
+    get:
+      summary: >-
+        List dead-lettered webhook deliveries (deliveries that exhausted
+        their retries), for inspection + replay (config:edit_tenant).
+      responses:
+        "200": { description: "{ failures }" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "501": { description: DLQ not configured }
+  /api/event-subscriptions/failures/{id}/replay:
+    post:
+      summary: >-
+        Re-deliver a dead-lettered webhook (via the live subscription's
+        url+secret, else the captured url); marks it replayed on success
+        (config:edit_tenant).
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        "200": { description: "{ replayed: true }" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "502": { description: Replay delivery failed }
   /api/pipelines/{id}/triggers:
     get:
       summary: List webhook triggers for a pipeline (pipeline:run @ scope).

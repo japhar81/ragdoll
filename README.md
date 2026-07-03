@@ -45,6 +45,11 @@ run with **zero install**.
 - Runtime `DagExecutor` with tenant context, redaction, retries, usage
   capture, real deadline and cancellation handling, and OpenTelemetry
   spans.
+- Pluggable identity (auth/SSO) + authorization providers, and global
+  platform-plugin hooks (pre/post lifecycle interceptors + webhooks + an
+  out-of-process hook sidecar) — ADR 0035, 0036. See
+  `docs/developer/platform-plugins.md` and
+  `docs/developer/custom-identity-and-authz-providers.md`.
 
 **Auth, RBAC, and triggers** (ADR 0011, 0012)
 
@@ -67,7 +72,7 @@ run with **zero install**.
   redacted), executions, audit, usage, plugins, providers, schedules,
   webhook triggers, and MCP. Postgres + migrations when `DATABASE_URL`
   is set; full in-memory mode otherwise.
-- Async worker with a `QueuePort`, in-memory and BullMQ adapters;
+- Async worker with a `QueuePort`, in-memory and NATS JetStream adapters;
   handlers for run, ingest, reindex, evaluate, batch, tenant deletion,
   model refresh, and plugin health.
 - Vector store abstraction with in-memory and Qdrant adapters and
@@ -120,7 +125,7 @@ run with **zero install**.
 **Platform sweepers** (ADR 0019, migration 012)
 
 - Two un-deletable schedules ship with the platform and run through
-  the same BullMQ concurrency pool as pipeline runs:
+  the same queue concurrency pool as pipeline runs:
   - `stale_exec_sweep` (every 5 min) — fails executions exceeding
     their `spec.metadata.timeoutMs` (or the 60-min platform default
     when unset).
@@ -208,7 +213,7 @@ npm run load:soak     # 5 VUs for 10 min (DURATION=30m to extend)
 npm run load:trend    # sustained 10rps for 5 min + per-bucket drift table
 
 # Worker variants — same scenarios, but POST /run + poll until terminal so
-# BullMQ workers do the work and the Worker scale-out dashboard populates.
+# NATS JetStream workers do the work and the Worker scale-out dashboard populates.
 npm run load:worker   # smoke against the queue+worker path
 npm run load:worker:steady
 npm run load:worker:spike
@@ -301,8 +306,8 @@ The wrapper invokes `apps/cli/src/index.ts` directly via Node's
   audit logs, deployments, executions, and usage.
 - Qdrant is the default vector adapter; isolation defaults to
   collection-per-tenant-pipeline with a mandatory tenant payload filter.
-- Redis/BullMQ is the default async queue, behind a `QueuePort`
-  interface.
+- NATS JetStream is the default async queue, behind a `QueuePort`
+  interface (Redis backs only the scheduler lease + change bus + SSO).
 - OpenTelemetry is lazy and optional, so the test suite stays
   install-free. The full Grafana LGTM stack ships in the local compose
   but app code degrades to a no-op tracer / meter / logger if the

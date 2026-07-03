@@ -237,18 +237,33 @@ migrations automatically when `DATABASE_URL` is set.
 
 - `RAGDOLL_ENV` — `production` disables the dev auth fallback.
 - `DATABASE_URL` — enables Postgres repositories and migrations.
-- `REDIS_URL` — enables the BullMQ queue/consumer.
+- `NATS_URL` — the job queue (NATS JetStream — replaced BullMQ; ADR 0004).
+  Also carries the durable platform-event stream (ADR 0036). Unset → an
+  in-process queue (single-process / tests).
+- `REDIS_URL` — the scheduler leader-election lease, the `/api/events` change
+  bus, and the SSO state store (NOT the queue anymore). Unset → single-process
+  fallbacks.
 - `SECRET_ENCRYPTION_KEY` — key for the AES-256-GCM secret provider.
 - `SESSION_SECRET` — HMAC key for session tokens.
 - `QDRANT_URL`, `QDRANT_API_KEY` — select and authenticate the Qdrant adapter.
 - `OTEL_ENABLED` — set to `false` to force the no-op tracer.
 - `WORKER_QUEUE_NAME`, `WORKER_CONCURRENCY`, `WORKER_MAX_RETRIES` — worker
   tuning.
-- `PYTHON_PLUGIN_URL` — base URL of the Python crawler sidecar. When set,
-  `@ragdoll/plugin-loader` registers the external `crawl4ai_crawler` /
-  `scrapy_spider` plugins (no-op when unset).
+- `PYTHON_PLUGIN_URL` — base URL(s) of the Python crawler sidecar (comma-list
+  for several — issues-log #8). When set, `@ragdoll/plugin-loader` registers
+  the external `crawl4ai_crawler` / `scrapy_spider` plugins (no-op when unset).
 - `PYTHON_PLUGIN_TIMEOUT_MS` — external plugin execute/health timeout
   (default `300000`; crawls are slow).
+- **Pluggable providers (ADR 0035)** — `RAGDOLL_IDENTITY_PROVIDER` /
+  `RAGDOLL_AUTHZ_PROVIDER`: module specifiers for a custom identity (auth/SSO)
+  or authorization (PolicyEngine) provider, imported at boot (unset → built-in
+  OIDC/SAML + Casbin/builtin). `RAGDOLL_AUTHZ_ALLOW_BUILTIN=1` permits the
+  dependency-free authz fallback in production.
+- **Platform plugins (ADR 0036)** — `RAGDOLL_PLATFORM_PLUGINS`: comma-list of
+  in-process hook modules (imported at boot). `RAGDOLL_HOOK_SIDECAR_URL` +
+  `RAGDOLL_HOOK_SIDECAR_SECRET` + `RAGDOLL_HOOK_SIDECAR_FAIL_CLOSED`: an
+  out-of-process hook sidecar (HTTP/JSON). See
+  [platform-plugins.md](./platform-plugins.md).
 - `PORT`, `HOST` — API bind address.
 
 ## API smoke checks
