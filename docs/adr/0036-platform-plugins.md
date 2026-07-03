@@ -84,9 +84,17 @@ action is trappable immediately).
 
 1. **(done)** core ABI (`@ragdoll/platform-plugins`) + durable transport +
    emit from all three funnels (post observers).
-2. pre-lane interception wired at `audit()` (4xx), `enqueuePipelineRun()`
-   (accept gate), and `DagExecutor` (start.pre / finish.pre).
-3. webhook `observe` sink + `gate` webhooks + DLQ/replay + author SDK/docs.
+2. **(done)** pre-lane interception: `DagExecutor` `execution.start` (veto /
+   mutate input) + `execution.finish` (mutate output / force-fail) via a
+   decoupled `ExecutionLifecycleHooks`; `execution.accept` gate in
+   `enqueuePipelineRun` (veto → 4xx); mutation vetoes wired into the secret
+   routes (other mutation routes adopt the same `interceptMutation` one-liner).
+3. **(done — 1c)** per-tenant webhook `observe` sink (`event_subscriptions`
+   table + built-in webhook-delivery plugin, HMAC-signed, bounded retry) +
+   `/api/event-subscriptions` CRUD.
+4. **(future)** synchronous `gate` webhooks; DLQ + replay tooling; a
+   sidecar/connect-rpc hook host; adopting `interceptMutation` on the
+   remaining mutation routes.
 
 ## References
 
