@@ -60,7 +60,10 @@ import type {
   SsoStateStore,
   IdentityProviderRegistry
 } from "../../../../packages/auth/src/index.ts";
-import type { PlatformEmitter } from "../../../../packages/platform-plugins/src/index.ts";
+import type {
+  PlatformEmitter,
+  PlatformEventDispatcher
+} from "../../../../packages/platform-plugins/src/index.ts";
 
 /**
  * The shared queue contract specifies `QueueJob.type` includes `"run_pipeline"`
@@ -251,6 +254,13 @@ export interface AppDeps {
    * worker runs the consumer that executes hook code.
    */
   platformEmitter?: PlatformEmitter;
+  /**
+   * Platform-plugin dispatcher (ADR 0036 pre-lane). When set, the API runs
+   * synchronous `before()` interceptors at `execution.accept` (enqueue gate →
+   * 4xx / mutate) and at mutation chokepoints (veto → 4xx). Loaded from the
+   * same RAGDOLL_PLATFORM_PLUGINS registry as the worker. Omitted in tests.
+   */
+  platformDispatcher?: PlatformEventDispatcher;
 }
 
 export interface App {

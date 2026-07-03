@@ -222,6 +222,7 @@ export function createWorker(deps: WorkerDeps): Worker {
       ingestStateRepository: deps.ingestStateRepository,
       datasetResolver,
       externalConnectionResolver,
+      lifecycle: deps.executionLifecycle,
       maxRetries: deps.maxRetries ?? 1,
       tracer
     });

@@ -27,6 +27,7 @@ import type {
 } from "../../../../packages/observability/src/index.ts";
 import type { ChangeBus } from "../../../../packages/events/src/index.ts";
 import type { PlatformEmitter } from "../../../../packages/platform-plugins/src/index.ts";
+import type { ExecutionLifecycleHooks } from "../../../../packages/runtime/src/index.ts";
 import type { PrincipalType } from "../../../../packages/auth/src/index.ts";
 import type { Authorizer } from "../../../../packages/authz/src/index.ts";
 import type {
@@ -169,6 +170,13 @@ export interface WorkerDeps {
    * when no platform plugins are configured.
    */
   platformEmitter?: PlatformEmitter;
+  /**
+   * Optional execution-lifecycle interceptors (ADR 0036 pre-lane). When set,
+   * the DagExecutor runs `execution.start` / `execution.finish` PRE hooks
+   * (veto / mutate input / rewrite output / force-fail). Built by the worker
+   * from its platform-plugin dispatcher; omitted in tests.
+   */
+  executionLifecycle?: ExecutionLifecycleHooks;
   /**
    * Optional Authorizer. When provided AND a job payload carries an
    * `enqueuedBy` block, the worker re-checks the enqueuer's grants at

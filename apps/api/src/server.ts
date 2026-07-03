@@ -10,6 +10,10 @@ import { randomUUID } from "node:crypto";
 import Fastify from "fastify";
 import { createApp, type AppDeps } from "./app.ts";
 import { createPlatformEventStream } from "../../worker/src/platform-events.ts";
+import {
+  loadPlatformPlugins,
+  PlatformEventDispatcher
+} from "../../../packages/platform-plugins/src/index.ts";
 import { handleMcpRequest } from "./mcp.ts";
 import { mountWebsocket } from "./websocket.ts";
 import {
@@ -577,12 +581,31 @@ async function buildDeps(): Promise<{
   }
   deps.identityProviderRegistry = identityProviderRegistry;
 
-  // Platform-plugin emission (ADR 0036). Publish-only on the API — the worker
-  // runs the consumer that executes hook code, so arbitrary hook logic stays
-  // off the API request path. audit() emits each mutation as a durable
-  // PlatformEvent. NATS-backed when NATS_URL is set, else in-process no-op.
+  // Platform-plugin emission + interception (ADR 0036). Emission is
+  // publish-only on the API — the worker runs the OBSERVER consumer, so
+  // arbitrary post-hook logic stays off the API request path. But the API
+  // loads the same RAGDOLL_PLATFORM_PLUGINS registry to run synchronous PRE
+  // interceptors inline: `execution.accept` (enqueue gate) + mutation vetoes.
   const platformEventStream = createPlatformEventStream({ natsUrl, logger });
   deps.platformEmitter = (event) => platformEventStream.publish(event);
+  try {
+    const { registry: platformRegistry, loaded: platformModules } =
+      await loadPlatformPlugins();
+    deps.platformDispatcher = new PlatformEventDispatcher(platformRegistry, {
+      logger
+    });
+    if (platformModules.length) {
+      logger.info("platform_plugins_loaded", {
+        modules: platformModules,
+        plugins: platformRegistry.list().map((p) => p.name)
+      });
+    }
+  } catch (e) {
+    // A broken module must not take the API down; run without interceptors.
+    logger.error("platform_plugins_load_failed", {
+      error: e instanceof Error ? e.message : String(e)
+    });
+  }
 
   await bootstrapAccessControl(rbacForAuthz, usersForBootstrap, logger);
 

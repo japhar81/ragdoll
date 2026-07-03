@@ -111,7 +111,8 @@ export function registerPipelineRunsRoutes(
       pipeline,
       environment,
       activationLabel,
-      input: body.input
+      input: body.input,
+      ctx
     });
     if (!outcome.ok) return outcome.response;
     await audit(ctx, "pipeline.run", "execution", outcome.executionId, undefined, {

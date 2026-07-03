@@ -27,6 +27,7 @@ import {
 } from "../../../packages/events/src/index.ts";
 import { createScheduler } from "./scheduler.ts";
 import { createPlatformEventStream } from "./platform-events.ts";
+import { lifecycleHooksFrom } from "./platform-lifecycle.ts";
 import {
   loadPlatformPlugins,
   PlatformEventDispatcher
@@ -287,6 +288,9 @@ export async function main(): Promise<void> {
     const consumer = await platformStream.startConsumer(dispatcher);
     stopPlatformConsumer = () => consumer.close();
     deps.platformEmitter = (event) => platformStream!.publish(event);
+    // Pre-lane (ADR 0036): the SAME dispatcher drives the synchronous
+    // execution.start / execution.finish interceptors inside DagExecutor.
+    deps.executionLifecycle = lifecycleHooksFrom(dispatcher);
     logger.info("platform_plugins_ready", {
       plugins: registry.list().map((p) => p.name),
       modules: loaded,

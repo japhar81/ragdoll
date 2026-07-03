@@ -42,6 +42,8 @@ import type {
 } from "../../../../packages/plugin-sdk/src/index.ts";
 import type { QueueJob } from "../../../worker/src/index.ts";
 import { error, nowIso, isObject } from "./http-utils.ts";
+import { interceptAccept } from "./platform-intercept.ts";
+import type { RouteContext } from "./routes/types.ts";
 import { resolveDeployedVersion } from "./spec-helpers.ts";
 import type { AppDeps, AppResponse, ApiQueueJob } from "./types.ts";
 
@@ -80,7 +82,23 @@ export async function enqueuePipelineRun(args: {
   environment: string;
   activationLabel?: string;
   input: unknown;
+  /** Route context — enables the `execution.accept` PRE gate (ADR 0036):
+   *  a platform plugin can veto the run before it's enqueued (→ 4xx) or
+   *  rewrite the accepted input/environment. Omitted → no accept gate. */
+  ctx?: RouteContext;
 }): Promise<EnqueueRunResult> {
+  // execution.accept (pre): runs BEFORE anything is resolved/enqueued.
+  if (args.ctx && args.deps.platformDispatcher) {
+    const run = {
+      pipelineId: args.pipeline.id,
+      tenantId: args.tenantId,
+      environment: args.environment,
+      input: args.input
+    };
+    const blocked = await interceptAccept(args.deps, args.ctx, run);
+    if (blocked) return { ok: false, response: blocked };
+    args = { ...args, environment: run.environment, input: run.input };
+  }
   const {
     deps,
     pipelineActivations,
