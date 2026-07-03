@@ -191,6 +191,32 @@ export class InMemoryEventSubscriptionRepository
   }
 }
 
+export class InMemoryWebhookDeliveryFailureRepository
+  extends InMemoryCrudRepository<T.WebhookDeliveryFailureRow>
+  implements T.WebhookDeliveryFailureRepository
+{
+  constructor() {
+    super("webhook_delivery_failure");
+  }
+  async listByTenant(
+    tenantId?: string | null
+  ): Promise<T.WebhookDeliveryFailureRow[]> {
+    const all = await this.list();
+    const scoped =
+      tenantId === undefined
+        ? all
+        : all.filter((r) => (r.tenantId ?? null) === (tenantId ?? null));
+    // unreplayed first, then newest
+    return scoped.sort((a, b) => {
+      if (!!a.replayedAt !== !!b.replayedAt) return a.replayedAt ? 1 : -1;
+      return b.failedAt.localeCompare(a.failedAt);
+    });
+  }
+  async markReplayed(id: string, at: string): Promise<void> {
+    await this.update(id, { replayedAt: at } as Partial<T.WebhookDeliveryFailureRow>);
+  }
+}
+
 
 export class InMemoryRbacPolicyRepository implements T.RbacPolicyRepository {
   private rolePerms: T.RbacRolePermissionRow[] = [];

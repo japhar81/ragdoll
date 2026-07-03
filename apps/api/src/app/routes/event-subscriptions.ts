@@ -9,14 +9,18 @@ import { randomUUID } from "node:crypto";
 import { enforce } from "../../../../../packages/auth/src/index.ts";
 import type {
   EventSubscriptionRow,
-  EventSubscriptionRepository
+  EventSubscriptionRepository,
+  WebhookDeliveryFailureRepository
 } from "../../../../../packages/db/src/index.ts";
+import type { PlatformEvent } from "../../../../../packages/platform-plugins/src/index.ts";
+import { deliverToSubscription } from "../../../../worker/src/platform-webhooks.ts";
 import { ok, error, isObject, nowIso } from "../http-utils.ts";
 import type { RouteRegistry, AuditWriter } from "./types.ts";
 
 interface EventSubscriptionServices {
   audit: AuditWriter;
   eventSubscriptions?: EventSubscriptionRepository;
+  webhookFailures?: WebhookDeliveryFailureRepository;
 }
 
 /** Redact the signing secret on read (present-or-not is all a caller sees). */
@@ -49,7 +53,69 @@ export function registerEventSubscriptionRoutes(
   api: RouteRegistry,
   svc: EventSubscriptionServices
 ): void {
-  const { audit, eventSubscriptions } = svc;
+  const { audit, eventSubscriptions, webhookFailures } = svc;
+
+  // ---- dead-letter queue (ADR 0036) --------------------------------------
+  // Registered BEFORE the ":id" routes so "/failures" isn't captured as an id.
+
+  api.route("GET", "/api/event-subscriptions/failures", async (ctx) => {
+    enforce(ctx.principal, "config:edit_tenant", {
+      tenantId: ctx.principal.tenantId
+    });
+    if (!webhookFailures) return error(501, "not_configured");
+    const rows = await webhookFailures.listByTenant(ctx.principal.tenantId ?? null);
+    return ok({
+      failures: rows.map((f) => ({
+        id: f.id,
+        subscriptionId: f.subscriptionId ?? null,
+        eventName: f.eventName,
+        url: f.url,
+        lastError: f.lastError ?? null,
+        attempts: f.attempts,
+        failedAt: f.failedAt,
+        replayedAt: f.replayedAt ?? null
+      }))
+    });
+  });
+
+  api.route(
+    "POST",
+    "/api/event-subscriptions/failures/:id/replay",
+    async (ctx) => {
+      enforce(ctx.principal, "config:edit_tenant", {
+        tenantId: ctx.principal.tenantId
+      });
+      if (!webhookFailures) return error(501, "not_configured");
+      const failure = await webhookFailures.get(ctx.params.id);
+      if (
+        !failure ||
+        (failure.tenantId ?? null) !== (ctx.principal.tenantId ?? null)
+      ) {
+        return error(404, "not_found");
+      }
+      // Prefer the live subscription's URL + signing secret; fall back to the
+      // captured URL (unsigned) if the subscription was since deleted.
+      const sub = failure.subscriptionId
+        ? await eventSubscriptions?.get(failure.subscriptionId)
+        : undefined;
+      const target = sub
+        ? { url: sub.url, secret: sub.secret }
+        : { url: failure.url };
+      const result = await deliverToSubscription(
+        target,
+        failure.event as unknown as PlatformEvent
+      );
+      if (!result.ok) {
+        return error(502, "replay_failed", { message: result.error });
+      }
+      await webhookFailures.markReplayed(failure.id, nowIso());
+      await audit(ctx, "webhook_delivery.replay", "webhook_delivery_failure", failure.id, undefined, {
+        eventName: failure.eventName,
+        url: target.url
+      });
+      return ok({ replayed: true });
+    }
+  );
 
   api.route("GET", "/api/event-subscriptions", async (ctx) => {
     enforce(ctx.principal, "config:edit_tenant", {

@@ -245,6 +245,8 @@ import { registerUsersRoutes } from "./app/routes/users.ts";
 import { registerRolesRoutes } from "./app/routes/roles.ts";
 import { registerIdentityProvidersRoutes } from "./app/routes/identity-providers.ts";
 import { registerEventSubscriptionRoutes } from "./app/routes/event-subscriptions.ts";
+import { interceptMutation } from "./app/platform-intercept.ts";
+import { MUTATION_ROUTES } from "./app/mutation-catalog.ts";
 import { registerAuthSettingsRoutes } from "./app/routes/auth-settings.ts";
 
 // `Handler` + `Route` + `RouteContext` close over `Principal` (per-request
@@ -256,6 +258,9 @@ interface Route {
   method: string;
   /** Pattern segments; `:name` captures a path param. */
   segments: string[];
+  /** Original pattern string (e.g. "/api/tenants/:id") — key for the
+   *  mutation-gate catalog (ADR 0036). */
+  pattern: string;
   handler: Handler;
 }
 interface RouteContext {
@@ -268,7 +273,7 @@ interface RouteContext {
 export function createApp(deps: AppDeps): App {
   const routes: Route[] = [];
   const route = (method: string, pattern: string, handler: Handler): void => {
-    routes.push({ method, segments: compile(pattern), handler });
+    routes.push({ method, segments: compile(pattern), pattern, handler });
   };
 
   // Resolve optional Wave-B repositories to concrete instances once. Harnesses
@@ -619,7 +624,14 @@ export function createApp(deps: AppDeps): App {
   registerUsersRoutes({ route }, { audit, users, passwords, rbacPolicies, authorizer });
   registerRolesRoutes({ route }, { audit, rbacPolicies, roleCatalog, authorizer });
   registerIdentityProvidersRoutes({ route }, { audit, identityProviders });
-  registerEventSubscriptionRoutes({ route }, { audit, eventSubscriptions: deps.eventSubscriptions });
+  registerEventSubscriptionRoutes(
+    { route },
+    {
+      audit,
+      eventSubscriptions: deps.eventSubscriptions,
+      webhookFailures: deps.webhookFailures
+    }
+  );
   registerAuthSettingsRoutes({ route }, { audit, authSettings });
 
   // ---- router -------------------------------------------------------------
@@ -751,13 +763,30 @@ export function createApp(deps: AppDeps): App {
       }
     }
 
+    const ctx = { request, params, principal, deps };
+
+    // ADR 0036 mutation PRE gate: for any catalogued mutating route, run the
+    // platform-plugin interceptors (in-process `before` hooks + gate webhooks)
+    // BEFORE the handler mutates. A veto short-circuits with a 4xx. One place
+    // covers every resource mutation — see mutation-catalog.ts.
+    if (deps.platformDispatcher && !isPublic) {
+      const mut = MUTATION_ROUTES[`${matched.method} ${matched.pattern}`];
+      if (mut) {
+        const targetId = (mut.idParam ? params[mut.idParam] : "") ?? "";
+        const blocked = await interceptMutation(
+          deps,
+          ctx,
+          mut.action,
+          mut.targetType,
+          targetId,
+          undefined
+        );
+        if (blocked) return blocked;
+      }
+    }
+
     try {
-      const response = await matched.handler({
-        request,
-        params,
-        principal,
-        deps
-      });
+      const response = await matched.handler(ctx);
       return response;
     } catch (e) {
       if (e instanceof AuthorizationError) {

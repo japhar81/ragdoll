@@ -92,9 +92,15 @@ action is trappable immediately).
 3. **(done — 1c)** per-tenant webhook `observe` sink (`event_subscriptions`
    table + built-in webhook-delivery plugin, HMAC-signed, bounded retry) +
    `/api/event-subscriptions` CRUD.
-4. **(future)** synchronous `gate` webhooks; DLQ + replay tooling; a
-   sidecar/connect-rpc hook host; adopting `interceptMutation` on the
-   remaining mutation routes.
+4. **(done)** synchronous `gate` webhooks (a `pre`-phase subscription vetoes
+   via a built-in `before` plugin, fail-open); webhook DLQ + replay
+   (`webhook_delivery_failures` + `/failures` list + `/failures/:id/replay`);
+   an operator-configured out-of-process hook sidecar
+   (`RAGDOLL_HOOK_SIDECAR_URL`, full pre-contract over HTTP/JSON); and a
+   central router mutation-gate (`mutation-catalog.ts`) covering ALL resource
+   mutations in one place.
+5. **(future)** a structured connect-rpc transport for the hook sidecar;
+   broadcast (per-replica) observers; automatic DLQ retry with backoff.
 
 ## References
 

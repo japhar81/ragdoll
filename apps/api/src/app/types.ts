@@ -33,6 +33,7 @@ import type {
   UserIdentityRepository,
   IdentityProviderRepository,
   EventSubscriptionRepository,
+  WebhookDeliveryFailureRepository,
   RbacPolicyRepository,
   AuthSettingsRepository,
   RoleRepository,
@@ -267,6 +268,8 @@ export interface AppDeps {
    * /api/event-subscriptions management routes. Omitted → routes 501.
    */
   eventSubscriptions?: EventSubscriptionRepository;
+  /** Dead-letter store for webhook deliveries (ADR 0036 DLQ). */
+  webhookFailures?: WebhookDeliveryFailureRepository;
 }
 
 export interface App {

@@ -270,6 +270,41 @@ export class PostgresEventSubscriptionRepository
   }
 }
 
+export class PostgresWebhookDeliveryFailureRepository
+  extends PostgresCrudRepository<T.WebhookDeliveryFailureRow>
+  implements T.WebhookDeliveryFailureRepository
+{
+  constructor(pool: PoolLike) {
+    super(pool, "webhook_delivery_failures", "webhook_delivery_failure", [
+      "event"
+    ]);
+  }
+  async listByTenant(
+    tenantId?: string | null
+  ): Promise<T.WebhookDeliveryFailureRow[]> {
+    if (tenantId === undefined) {
+      const r = await this.pool.query<Record<string, unknown>>(
+        `SELECT * FROM webhook_delivery_failures
+          ORDER BY replayed_at NULLS FIRST, failed_at DESC`
+      );
+      return r.rows.map((row) => rowFromDb<T.WebhookDeliveryFailureRow>(row));
+    }
+    const r = await this.pool.query<Record<string, unknown>>(
+      `SELECT * FROM webhook_delivery_failures
+        WHERE tenant_id IS NOT DISTINCT FROM $1
+        ORDER BY replayed_at NULLS FIRST, failed_at DESC`,
+      [tenantId]
+    );
+    return r.rows.map((row) => rowFromDb<T.WebhookDeliveryFailureRow>(row));
+  }
+  async markReplayed(id: string, at: string): Promise<void> {
+    await this.pool.query(
+      `UPDATE webhook_delivery_failures SET replayed_at = $2 WHERE id = $1`,
+      [id, at]
+    );
+  }
+}
+
 
 export class PostgresRbacPolicyRepository implements T.RbacPolicyRepository {
   private pool: PoolLike;

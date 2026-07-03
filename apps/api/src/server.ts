@@ -10,6 +10,8 @@ import { randomUUID } from "node:crypto";
 import Fastify from "fastify";
 import { createApp, type AppDeps } from "./app.ts";
 import { createPlatformEventStream } from "../../worker/src/platform-events.ts";
+import { gateWebhookPlugin } from "../../worker/src/platform-webhooks.ts";
+import { sidecarHookFromEnv } from "../../worker/src/platform-sidecar.ts";
 import {
   loadPlatformPlugins,
   PlatformEventDispatcher
@@ -74,6 +76,7 @@ import {
   PostgresUserIdentityRepository,
   PostgresIdentityProviderRepository,
   PostgresEventSubscriptionRepository,
+  PostgresWebhookDeliveryFailureRepository,
   PostgresRbacPolicyRepository,
   PostgresAuthSettingsRepository,
   PostgresRoleRepository,
@@ -83,6 +86,7 @@ import {
   InMemoryUserIdentityRepository,
   InMemoryIdentityProviderRepository,
   InMemoryEventSubscriptionRepository,
+  InMemoryWebhookDeliveryFailureRepository,
   InMemoryRbacPolicyRepository,
   InMemoryAuthSettingsRepository,
   InMemoryRoleRepository,
@@ -337,6 +341,7 @@ async function buildDeps(): Promise<{
       userIdentities: new PostgresUserIdentityRepository(pool),
       identityProviders: new PostgresIdentityProviderRepository(pool),
       eventSubscriptions: new PostgresEventSubscriptionRepository(pool),
+      webhookFailures: new PostgresWebhookDeliveryFailureRepository(pool),
       rbacPolicies,
       authSettings: new PostgresAuthSettingsRepository(pool),
       roles: new PostgresRoleRepository(pool),
@@ -413,6 +418,7 @@ async function buildDeps(): Promise<{
       userIdentities: new InMemoryUserIdentityRepository(),
       identityProviders: new InMemoryIdentityProviderRepository(),
       eventSubscriptions: new InMemoryEventSubscriptionRepository(),
+      webhookFailures: new InMemoryWebhookDeliveryFailureRepository(),
       rbacPolicies,
       authSettings: new InMemoryAuthSettingsRepository(),
       roles: new InMemoryRoleRepository(),
@@ -595,6 +601,16 @@ async function buildDeps(): Promise<{
   try {
     const { registry: platformRegistry, loaded: platformModules } =
       await loadPlatformPlugins();
+    // Built-in: synchronous gate webhooks run in the API's PRE lane so a
+    // per-tenant webhook can veto a mutation / execution.accept (→ 4xx).
+    if (deps.eventSubscriptions) {
+      platformRegistry.register(
+        gateWebhookPlugin(deps.eventSubscriptions, logger)
+      );
+    }
+    // Operator-configured out-of-process hook sidecar (pre lane on the API).
+    const sidecar = sidecarHookFromEnv(logger);
+    if (sidecar) platformRegistry.register(sidecar);
     deps.platformDispatcher = new PlatformEventDispatcher(platformRegistry, {
       logger
     });
