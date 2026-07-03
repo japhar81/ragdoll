@@ -127,6 +127,9 @@ export interface BuildOptions {
    *  what gets published. When omitted createApp uses its in-process fallback
    *  (invisible to the test). */
   changeBus?: ChangeBus;
+  /** Inject a platform-plugin dispatcher so a test can exercise the PRE-lane
+   *  mutation gate (ADR 0036). */
+  platformDispatcher?: AppDeps["platformDispatcher"];
 }
 
 export function buildHarness(options: BuildOptions = {}): Harness {
@@ -203,6 +206,7 @@ export function buildHarness(options: BuildOptions = {}): Harness {
     auth,
     apiKeys,
     changeBus: options.changeBus,
+    platformDispatcher: options.platformDispatcher,
     queue,
     secretProvider: new DatabaseEncryptedSecretProvider(
       new InMemorySecretRepository(),

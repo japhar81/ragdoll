@@ -10,7 +10,6 @@ import { enforce } from "../../../../../packages/auth/src/index.ts";
 import type { SecretRef } from "../../../../../packages/core/src/index.ts";
 import { ok, error, isObject } from "../http-utils.ts";
 import { buildSecretRef } from "../spec-helpers.ts";
-import { interceptMutation } from "../platform-intercept.ts";
 import type { AppDeps } from "../types.ts";
 import type { RouteContext, RouteRegistry, AuditWriter } from "./types.ts";
 
@@ -54,15 +53,6 @@ export function registerSecretsRoutes(
     }
     const ref = buildSecretRef(body, tenantScope(ctx));
     enforce(ctx.principal, "secret:manage_tenant", { tenantId: ref.tenantId });
-    const createBlocked = await interceptMutation(
-      deps,
-      ctx,
-      "secret.create",
-      "secret",
-      body.key,
-      undefined
-    );
-    if (createBlocked) return createBlocked;
     const record = await deps.secretProvider.put(
       ref,
       body.value,
@@ -95,15 +85,6 @@ export function registerSecretsRoutes(
     }
     const ref = buildSecretRef(body, tenantScope(ctx));
     enforce(ctx.principal, "secret:manage_tenant", { tenantId: ref.tenantId });
-    const rotateBlocked = await interceptMutation(
-      deps,
-      ctx,
-      "secret.rotate",
-      "secret",
-      ctx.params.id,
-      undefined
-    );
-    if (rotateBlocked) return rotateBlocked;
     const record = await deps.secretProvider.put(
       ref,
       body.value,
@@ -128,15 +109,6 @@ export function registerSecretsRoutes(
     }
     const ref = buildSecretRef(body, tenantScope(ctx));
     enforce(ctx.principal, "secret:manage_tenant", { tenantId: ref.tenantId });
-    const deleteBlocked = await interceptMutation(
-      deps,
-      ctx,
-      "secret.delete",
-      "secret",
-      ctx.params.id,
-      { ref }
-    );
-    if (deleteBlocked) return deleteBlocked;
     await deps.secretProvider.delete(ref, ref.tenantId);
     await audit(ctx, "secret.delete", "secret", ctx.params.id, { ref }, undefined);
     return { status: 204, body: undefined, headers: {} };
