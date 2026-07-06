@@ -8,9 +8,9 @@
     "./author": "./src/author.ts"
   },
   "dependencies": {
-    "@bufbuild/protobuf": "^2.12.0",
-    "@connectrpc/connect": "^2.1.1",
-    "@connectrpc/connect-node": "^2.1.1",
+    "@bufbuild/protobuf": "^2.12.1",
+    "@connectrpc/connect": "^2.1.2",
+    "@connectrpc/connect-node": "^2.1.2",
     "@ragdoll/proto-gen": "*"
   }
 }
