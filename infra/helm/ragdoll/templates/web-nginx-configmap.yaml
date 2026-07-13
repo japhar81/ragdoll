@@ -10,7 +10,25 @@ metadata:
     {{- . | nindent 4 }}
   {{- end }}
 data:
-  default.conf: |
+  # Keyed `.template` (NOT `default.conf`) and mounted into
+  # /etc/nginx/templates/ — never /etc/nginx/conf.d/.
+  #
+  # The web image ships its nginx config as an *.template so the official
+  # entrypoint can substitute ${NGINX_LOCAL_RESOLVERS} at boot (issues #12).
+  # That entrypoint step (20-envsubst-on-templates.sh) RENDERS
+  # /etc/nginx/templates/*.template → /etc/nginx/conf.d/. A ConfigMap
+  # subPath-mounted onto /etc/nginx/conf.d/default.conf is a read-only bind
+  # mount sitting on the entrypoint's write target, so nginx dies at boot with
+  #   "can't create /etc/nginx/conf.d/default.conf: Read-only file system".
+  # Mounting as the *source* template instead leaves the destination writable.
+  #
+  # The `$http_upgrade` / `$host` / `$uri` … below are nginx RUNTIME variables
+  # and must survive envsubst. They do, because the image pins
+  # NGINX_ENVSUBST_FILTER=NGINX_LOCAL_RESOLVERS (re-asserted in the Deployment
+  # env for defense-in-depth), which restricts substitution to that single
+  # name. Without that filter envsubst would blank every `$…` here and nginx
+  # would boot a silently broken config.
+  default.conf.template: |
     # Map the client's `Upgrade` header to the upstream `Connection` value
     # so WebSocket upgrades for `/api/events` are forwarded rather than
     # swallowed. Regular HTTP requests (where `$http_upgrade` is empty)

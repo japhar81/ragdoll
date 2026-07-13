@@ -12,10 +12,15 @@ appVersion: "0.1.0"
 # `helm install` stands up a complete, working stack with no external
 # dependencies beyond the cluster itself.
 #
-# Pulled from the publicly-accessible `bitnamicharts` OCI registry
-# (open-source legacy charts still mirrored after Bitnami's
-# subscription move). Run `helm dependency update infra/helm/ragdoll`
-# once before install/upgrade to pull tarballs into charts/.
+# The resolved tarballs are VENDORED under charts/ and committed, so the
+# chart installs from a bare git clone with no `helm dependency update`
+# step (git-sourced deploys — Argo/Flux/Harness — never run one, and a
+# chart whose charts/ dir is absent fails to render: "found in Chart.yaml,
+# but missing in charts/ directory"). It also pins us against Bitnami
+# culling old versions from the registry below.
+#
+# To bump: `helm dependency update infra/helm/ragdoll`, re-render, commit
+# the new tarballs + Chart.lock together.
 #
 # Pinned to specific minor versions verified to work with our value
 # overrides; bumps land via a single helm dep update + a test render.

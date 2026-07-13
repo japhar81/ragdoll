@@ -28,8 +28,9 @@
 #       --set secrets.create=false
 #     → fully BYO; you provide the Secret with every URL pre-wired.
 #
-# Run `helm dependency update infra/helm/ragdoll` ONCE before the
-# first install to pull the Bitnami subchart tarballs.
+# The Bitnami subchart tarballs are VENDORED under charts/ — no
+# `helm dependency update` is needed, and the chart renders straight from
+# a git clone. Re-run it (and commit) only to bump a subchart version.
 # ============================================================================
 
 # ---------------------------------------------------------------------------
@@ -55,6 +56,33 @@
 # ---------------------------------------------------------------------------
 commonLabels: {}
 commonAnnotations: {}
+
+# ---------------------------------------------------------------------------
+# Values shared with the Bitnami subcharts (bundledpostgres / bundledredis /
+# bundledopensearch).
+#
+# `allowInsecureImages` is REQUIRED, not optional. Bitnami's charts ship an
+# image-verification guard that hard-FAILS the render when `image.repository`
+# is not the stock `bitnami/*`:
+#
+#   ERROR: Original containers have been substituted for unrecognized ones …
+#   Unrecognized images: docker.io/bitnamilegacy/postgresql:…
+#
+# We repoint every bundled image at `bitnamilegacy/*` (the still-free mirror of
+# the pre-paywall catalog — see the bundled* blocks below), which trips exactly
+# that guard. Without this flag `helm install`/`template` fails outright and NO
+# bundled backend renders — no Postgres StatefulSet, so the wait-for-postgres
+# init container and the db-init migration Job never run, and api/worker never
+# start. The "insecure" name is Bitnami's, and refers only to using images
+# outside their verified catalog; bitnamilegacy is Broadcom's own mirror.
+#
+# Drop this flag if (and only if) you repoint the bundled images at your own
+# registry mirror of the stock bitnami/* names, or you BYO every backend
+# (bundled*.enabled: false), in which case no subchart renders at all.
+# ---------------------------------------------------------------------------
+global:
+  security:
+    allowInsecureImages: true
 
 image:
   repository: ragdoll
