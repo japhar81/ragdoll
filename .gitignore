@@ -30,8 +30,19 @@ npm-debug.log*
 .test-output/
 tests/playwright/.test-output/
 
-# Helm chart subchart tarballs — pulled by 'helm dependency update'
-infra/helm/*/charts/
+# Helm subchart tarballs are VENDORED (committed), not ignored.
+#
+# They used to be ignored here and pulled by `helm dependency update`. That
+# broke every git-sourced deploy (Argo/Flux/Harness/`git clone && helm install`):
+# the clone has no charts/ dir, so helm aborts with
+#   "found in Chart.yaml, but missing in charts/ directory: postgresql, redis,
+#    opensearch"
+# …and the bundled Postgres/Redis/OpenSearch simply never exist.
+#
+# Vendoring also pins us against Bitnami culling old chart versions from
+# oci://registry-1.docker.io/bitnamicharts — a `helm dependency build` of the
+# versions in Chart.lock is not guaranteed to resolve any more. ~290KB total.
+# Refresh deliberately: `helm dependency update infra/helm/ragdoll` + commit.
 
 # Scratch spike for the connect-rpc transport investigation (not part of
 # the shipping codebase; FINDINGS.md content was moved to docs/adr/).

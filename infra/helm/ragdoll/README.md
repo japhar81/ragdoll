@@ -11,17 +11,19 @@ Bring your own backend at any time by flipping the corresponding
 
 ## Install
 
-```sh
-# 1. Pull the Bitnami legacy subcharts (postgres, redis, opensearch).
-#    Re-run only when bumping chart versions.
-helm dependency update infra/helm/ragdoll
+The Bitnami subchart tarballs (postgres, redis, opensearch) are **vendored**
+under `charts/` — no `helm dependency update` step, and the chart installs
+straight from a git clone (Argo/Flux/Harness included). Only re-run
+`helm dependency update infra/helm/ragdoll` (and commit the result) when
+deliberately bumping a subchart version.
 
-# 2. Install. With defaults, this also provisions a fully running
+```sh
+# 1. Install. With defaults, this also provisions a fully running
 #    Postgres + Redis + Qdrant — nothing else to configure.
 helm install ragdoll infra/helm/ragdoll \
   --namespace ragdoll --create-namespace
 
-# 3. The NOTES.txt from the install prints the bootstrap admin
+# 2. The NOTES.txt from the install prints the bootstrap admin
 #    credentials (random per install, preserved across upgrades).
 kubectl -n ragdoll get secret ragdoll-ragdoll-secrets \
   -o jsonpath='{.data.BOOTSTRAP_ADMIN_PASSWORD}' | base64 -d ; echo
