@@ -9,6 +9,6 @@
     "./plugin": "./src/plugin_pb.ts"
   },
   "dependencies": {
-    "@bufbuild/protobuf": "^2.12.0"
+    "@bufbuild/protobuf": "^2.12.1"
   }
 }
