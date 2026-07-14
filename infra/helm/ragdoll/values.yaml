@@ -84,6 +84,32 @@ global:
   security:
     allowInsecureImages: true
 
+# ---------------------------------------------------------------------------
+# Plugin cache — a writable volume mounted into api + worker (both run the
+# plugin loader).
+#
+# The loader clones each plugin source (git:// and file:// alike) here and
+# runs `npm ci` in it when the source has a package.json. npm ALSO needs a
+# writable cache, which it derives from $HOME — and under OpenShift's
+# restricted SCC the assigned uid (e.g. 1000680000) has no /etc/passwd entry,
+# so $HOME is `/` and npm dies with `EACCES … mkdir /.npm`. The loader pins
+# its npm cache under this same path, so this one volume covers both.
+#
+# Keep `enabled: true` unless you're mounting your own volume at the same
+# path; disabling it falls back to the container's writable layer at
+# /tmp/ragdoll-plugin-cache, which works only when
+# containerSecurityContext.readOnlyRootFilesystem is false.
+# ---------------------------------------------------------------------------
+pluginCache:
+  enabled: true
+  path: /var/cache/ragdoll/plugins
+  # Bump if your plugins pull heavy dependency trees — this caps the emptyDir
+  # AND every npm-installed node_modules underneath it.
+  sizeLimit: 2Gi
+  # "" = node disk (default). "Memory" = tmpfs (fast, but counts against the
+  # pod's memory limit — raise api/worker memory limits to match sizeLimit).
+  medium: ""
+
 image:
   repository: ragdoll
   tag: latest

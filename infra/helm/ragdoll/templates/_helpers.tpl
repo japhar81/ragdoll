@@ -243,6 +243,49 @@ Args: . (top-level chart values context).
 {{- end -}}
 
 {{/*
+Plugin cache: env + volumeMount + volume, shared by api and worker (both run
+the plugin loader).
+
+The loader clones every plugin source (git:// AND file://) into
+RAGDOLL_PLUGIN_CACHE_DIR and runs `npm ci` there for any source with a
+package.json. Two things must be writable: the working copies, and npm's own
+cache — which npm derives from $HOME. Under OpenShift's restricted SCC the
+assigned uid has no /etc/passwd entry, so $HOME is `/` and npm dies with
+"EACCES mkdir /.npm". The loader now pins its npm cache under
+RAGDOLL_PLUGIN_CACHE_DIR, so mounting ONE writable volume there fixes both.
+
+Backing it with an emptyDir (rather than leaning on the container's writable
+layer) means the cache is a real, size-capped volume, survives
+`readOnlyRootFilesystem: true`, and is scrubbed on pod restart — a fresh clone
++ install per pod, which is what the content-addressed cache expects anyway.
+Set pluginCache.medium: Memory for a tmpfs.
+*/}}
+{{- define "ragdoll.pluginCacheEnv" -}}
+{{- if .Values.pluginCache.enabled }}
+- name: RAGDOLL_PLUGIN_CACHE_DIR
+  value: {{ .Values.pluginCache.path | quote }}
+{{- end }}
+{{- end -}}
+
+{{- define "ragdoll.pluginCacheMount" -}}
+{{- if .Values.pluginCache.enabled }}
+- name: plugin-cache
+  mountPath: {{ .Values.pluginCache.path | quote }}
+{{- end }}
+{{- end -}}
+
+{{- define "ragdoll.pluginCacheVolume" -}}
+{{- if .Values.pluginCache.enabled }}
+- name: plugin-cache
+  emptyDir:
+    {{- with .Values.pluginCache.medium }}
+    medium: {{ . | quote }}
+    {{- end }}
+    sizeLimit: {{ .Values.pluginCache.sizeLimit | quote }}
+{{- end }}
+{{- end -}}
+
+{{/*
 The python-plugins container spec, shared by the standalone Deployment
 AND the per-pod sidecar injected into api/worker pods (pythonPlugins.mode
 == "sidecar"). Extracted so the two render IDENTICAL containers — image,
