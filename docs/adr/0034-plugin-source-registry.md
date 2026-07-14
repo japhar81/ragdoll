@@ -374,6 +374,11 @@ source at a `file:///path/to/bare-repo.git` URL. git supports it
 natively; the lifecycle's existing resolve → fetch → import →
 scan → register path covers it without a code branch.
 
+> For the operator-facing walkthrough — baking the repo into the
+> image with buildah, the group-0 permissions an arbitrary-UID SCC
+> needs, and registering the source — see
+> [Plugins on OpenShift / OKD](../admin/kubernetes-deployment.md#plugins-on-openshift--okd).
+
 One non-obvious correctness concern needed handling:
 
 **`git clone --no-hardlinks` is load-bearing for `file://`.**
