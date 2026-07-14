@@ -92,6 +92,9 @@ spec:
               value: {{ .Values.api.bootstrapAdmin.password | quote }}
             {{- end }}
             {{- include "ragdoll.commonBackendEnv" . | nindent 12 }}
+            {{- include "ragdoll.pluginCacheEnv" . | nindent 12 }}
+          volumeMounts:
+            {{- include "ragdoll.pluginCacheMount" . | nindent 12 }}
           readinessProbe:
             httpGet:
               path: /readyz
@@ -117,3 +120,5 @@ spec:
         # exact instance that serves its calls — no cross-replica fan-out.
         {{- include "ragdoll.pythonPluginsContainer" . | nindent 8 }}
 {{- end }}
+      volumes:
+        {{- include "ragdoll.pluginCacheVolume" . | nindent 8 }}

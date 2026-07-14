@@ -213,6 +213,161 @@ egress (block RFC1918 / metadata IPs, allow only intended
 crawl egress). Defense in depth: the application guard plus network
 egress controls, not either alone.
 
+## Plugins on OpenShift / OKD
+
+Two ways to get custom plugin code into a cluster:
+
+- **`git://` (or `https://`) source** — the loader clones from your internal
+  git server at a pinned ref. Nothing to bake into the image. Preferred when
+  the cluster can reach your git server.
+- **`file://` source** — the plugin repo is baked into the api/worker image at
+  build time and the loader clones it from the local filesystem. Use this in
+  air-gapped clusters, or where the pods must not egress to git.
+
+Both are the same code path: **a plugin source is always a git repo.** The
+loader runs `git ls-remote` to resolve `ref` → sha, then clones that sha into
+a content-addressed cache. This is the single biggest gotcha with `file://` —
+a plain directory of `.ts` files is **not** enough. The path must contain a
+`.git` dir and the ref must exist in it.
+
+The repo layout the loader expects, with `subpath: "plugins"`:
+
+```
+custom-plugins/            <- git repo root (file:///opt/ragdoll-plugins)
+└── plugins/               <- `subpath`; scanned for plugin modules
+    ├── index.ts           <- exports `manifest` + `execute`
+    └── package.json       <- optional; if present, deps are installed here
+```
+
+Give that `package.json` a `"type": "module"` — without it Node reparses each
+`.ts` module and logs a `MODULE_TYPELESS_PACKAGE_JSON` warning per load:
+
+```json
+{ "name": "custom-plugins", "version": "1.0.0", "type": "module",
+  "dependencies": { "ms": "^2.1.3" } }
+```
+
+### 1. Bake the repo into the image
+
+OpenShift's restricted SCC runs the container as an **arbitrary UID** (e.g.
+`1000680000`) that is *not* in `/etc/passwd`, but **is** in group `0`. So
+anything the pod must read has to be group-`0` readable — that's the whole
+trick, and it's why the `chgrp -R 0` / `chmod -R g=u` pair below is not
+optional.
+
+```dockerfile
+# Containerfile.custom — your image, FROM the RAGdoll image (api and worker
+# share one image; they differ only in the command the chart runs).
+FROM registry.example.com/ragdoll:0.2.0
+
+# Copy the plugin repo INCLUDING its .git dir — the loader clones from it.
+# (A `git clone --bare` of your repo also works and is smaller; point the
+# file:// URL at the bare repo path.)
+COPY ./custom-plugins /opt/ragdoll-plugins
+
+# Arbitrary-UID readability: group 0 gets whatever the owner has. This is the
+# load-bearing step — without it the assigned UID cannot read the repo.
+RUN chgrp -R 0 /opt/ragdoll-plugins && \
+    chmod -R g=u /opt/ragdoll-plugins
+```
+
+Build with buildah/podman, push to your internal registry, and point
+`image.repository` (+ `image.tag`) at it in values. The chart runs the same
+image for api and worker, so one build covers both.
+
+The plugin working copies and npm's cache are **not** written to
+`/opt/ragdoll-plugins` — that directory stays read-only. They go to the
+plugin-cache volume (below), so group-`0` **read** access is all you need.
+
+### 2. The plugin cache volume (already on by default)
+
+`npm ci`/`npm install` runs for any plugin with a `package.json`. npm derives
+its cache from `$HOME`, and an arbitrary UID with no passwd entry gets
+`$HOME=/` — so npm tries to `mkdir /.npm` on the root filesystem and dies with
+`EACCES`. The loader therefore pins its npm cache *under the plugin cache
+root*, and the chart mounts a writable volume there for both api and worker:
+
+```yaml
+pluginCache:
+  enabled: true                        # default
+  path: /var/cache/ragdoll/plugins     # RAGDOLL_PLUGIN_CACHE_DIR
+  sizeLimit: 2Gi                       # caps the clone + every node_modules
+  medium: ""                           # "Memory" for a tmpfs
+```
+
+This is the default, so **there is nothing to configure** — it is called out
+only because it is what makes `readOnlyRootFilesystem: true` viable, and
+because raising `sizeLimit` is the fix if a plugin with a heavy dependency
+tree fills the volume. Do not set `NPM_CONFIG_CACHE` yourself unless you have
+a reason to; the loader picks a writable location on its own.
+
+### 3. Register the source
+
+`file://` takes an absolute path — note the three slashes (`file://` + `/opt`):
+
+```sh
+curl -sS -X POST https://ragdoll.example.com/api/plugins/sources \
+  -H "authorization: Bearer $TOKEN" \
+  -H 'content-type: application/json' \
+  -d '{
+        "id": "custom",
+        "gitUrl": "file:///opt/ragdoll-plugins",
+        "ref": "main",
+        "subpath": "plugins",
+        "displayName": "Custom plugins",
+        "host": "worker"
+      }'
+```
+
+- `ref` — branch, tag, or commit-ish. Must exist in the baked repo. If you
+  bake a detached checkout with no branch, pin `ref` to the **commit sha**.
+- `subpath` — directory inside the repo to scan; omit for the repo root.
+- `host` — `worker` for TypeScript plugins (in-process), `sidecar` for Python
+  ones (pushed to the python-plugins sidecar).
+
+The same source can be created from the UI (Plugins → Sources), which is why
+`file://` shows up as an option there.
+
+Then refresh (or restart the pods) and confirm the source loaded:
+
+```sh
+curl -sS https://ragdoll.example.com/api/plugins/sources \
+  -H "authorization: Bearer $TOKEN" |
+  jq '.sources[] | {id, status, pluginCount, errorStage, error}'
+```
+
+`status` is `loaded` / `failed`; on a failure `errorStage` names the stage that
+broke it — `resolve`, `clone`, `install`, `verify`, or `import` — which is
+usually enough to tell a bad `ref` (`resolve`) from a dependency problem
+(`install`) without reading any logs.
+
+### Troubleshooting
+
+| Symptom | Cause |
+| --- | --- |
+| `npm error code EACCES … mkdir /.npm` | Pre-`0.2.0` image. The loader now pins the npm cache under `RAGDOLL_PLUGIN_CACHE_DIR`; upgrade. Only shows up for plugins that actually have dependencies. |
+| `ref "main" not found on file:///opt/...` | The baked path isn't a git repo (no `.git`), or the branch wasn't included in the copy. Bake the repo, not just the files. |
+| `Permission denied` reading `/opt/ragdoll-plugins` | Missing the `chgrp -R 0` + `chmod -R g=u` step — the assigned UID reaches the files only through group `0`. |
+| Install fails with `ENOSPC` | `pluginCache.sizeLimit` too small for the dependency tree; raise it. |
+| Plugin loads but `import` fails with `ERR_MODULE_NOT_FOUND` | The plugin has a dependency but no `package.json` in the scanned `subpath`, so no install ran. |
+
+### A note on `runAsNonRoot` (vanilla Kubernetes)
+
+The RAGdoll images declare no `USER`, so they would run as root if the runtime
+let them. On OpenShift this is a non-issue — the SCC assigns an arbitrary
+non-root UID and `containerSecurityContext.runAsNonRoot: true` is satisfied.
+On **vanilla Kubernetes** nothing assigns one, so the kubelet refuses the pod
+(*"container has runAsNonRoot and image will run as root"*). Pin a UID there:
+
+```yaml
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1001        # any non-zero UID; not needed on OpenShift/OKD
+```
+
+If you bake your own image (above), setting `USER 1001` in it has the same
+effect and is the cleaner fix.
+
 ## Scaling notes
 
 - Scale API horizontally behind an ingress.

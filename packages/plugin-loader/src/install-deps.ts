@@ -31,8 +31,39 @@
  */
 
 import { spawn } from "node:child_process";
-import { stat, writeFile } from "node:fs/promises";
+import { mkdir, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { defaultCacheDir } from "./git-fetcher.ts";
+
+/**
+ * Where npm keeps its cache (and its `_logs`) for OUR installs.
+ *
+ * npm derives the cache from `$HOME` (`$HOME/.npm`). Under an arbitrary-UID
+ * runtime — OpenShift's restricted SCC assigns e.g. uid 1000680000 with no
+ * /etc/passwd entry — `$HOME` resolves to `/`, so npm tries to mkdir `/.npm`
+ * on the (root-owned) filesystem root and dies:
+ *
+ *   npm error code EACCES / syscall mkdir / path /.npm
+ *
+ * That has nothing to do with the plugin source: it bites every plugin with a
+ * package.json, file:// or git://. Pin the cache next to the plugin working
+ * copies instead — that root is somewhere we already clone into, so it is
+ * writable by construction, and one env var (RAGDOLL_PLUGIN_CACHE_DIR) keeps
+ * cache + working copies on the same volume.
+ *
+ * Honors an operator-set NPM_CONFIG_CACHE verbatim.
+ *
+ * Deliberately does NOT read the lowercase `npm_config_cache`: npm injects
+ * that into every process it spawns (`npm start`, `npm test`, …) and sets it
+ * to npm's OWN $HOME-derived default — i.e. exactly the `/.npm` we are here to
+ * avoid. Honoring it would silently reintroduce this bug for anyone who
+ * launches the worker through an npm script. The uppercase name is the one an
+ * operator actually sets (container env); the lowercase one is npm talking to
+ * itself, and we override it on the way down.
+ */
+export function npmCacheDir(): string {
+  return process.env.NPM_CONFIG_CACHE ?? join(defaultCacheDir(), ".npm");
+}
 
 /** Default install timeout — 5 minutes covers everything but a
  *  pathologically slow registry. Env-overridable so an operator on
@@ -123,9 +154,21 @@ export async function ensureDependenciesInstalled(
 
   const timeoutMs = opts.timeoutMs ?? DEFAULT_INSTALL_TIMEOUT_MS;
   const spawnFn = opts.spawn ?? spawn;
+  // Create the cache dir up-front. npm would create it itself, but only if it
+  // can — pre-creating it turns a would-be EACCES deep inside npm into a plain
+  // InstallError naming the directory we tried to use.
+  const cacheDir = npmCacheDir();
+  try {
+    await mkdir(cacheDir, { recursive: true });
+  } catch (e) {
+    throw new InstallError(
+      `npm cache dir ${cacheDir} is not creatable: ${(e as Error).message}. ` +
+        `Set RAGDOLL_PLUGIN_CACHE_DIR (or NPM_CONFIG_CACHE) to a writable path.`
+    );
+  }
   // stderr is captured by runNpm but only emitted on failure (the
   // throw path) so a chatty install doesn't pollute the trace.
-  await runNpm({ argv, cwd: workingCopy, timeoutMs, spawn: spawnFn });
+  await runNpm({ argv, cwd: workingCopy, timeoutMs, spawn: spawnFn, cacheDir });
 
   // 4. Drop the marker LAST. A crash mid-install leaves no marker,
   //    so the next refresh retries cleanly.
@@ -158,6 +201,8 @@ interface RunNpmArgs {
   cwd: string;
   timeoutMs: number;
   spawn: typeof spawn;
+  /** Writable npm cache — see `npmCacheDir()`. */
+  cacheDir: string;
 }
 
 function runNpm(args: RunNpmArgs): Promise<string> {
@@ -173,6 +218,15 @@ function runNpm(args: RunNpmArgs): Promise<string> {
         // ENV vars (which we honor). This is belt-and-braces; the
         // sidecar / worker images are minimal.
         NPM_CONFIG_USERCONFIG: process.env.NPM_CONFIG_USERCONFIG ?? "",
+        // Never let npm derive its cache from $HOME. Under an arbitrary-UID
+        // runtime (OpenShift restricted SCC) the uid has no passwd entry, so
+        // $HOME is `/` and npm dies with EACCES trying to mkdir /.npm. Both
+        // vars are set because npm reads either casing, and HOME is pinned
+        // too so anything else npm resolves relative to it (notably _logs)
+        // also lands somewhere writable rather than on `/`.
+        NPM_CONFIG_CACHE: args.cacheDir,
+        npm_config_cache: args.cacheDir,
+        HOME: args.cacheDir,
         // Refuse the install loud when the registry isn't reachable
         // rather than retrying forever inside the child.
         NPM_CONFIG_FETCH_RETRIES: "1",
