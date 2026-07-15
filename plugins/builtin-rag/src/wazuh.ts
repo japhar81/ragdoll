@@ -52,7 +52,9 @@ import type {
 } from "../../../packages/plugin-sdk/src/index.ts";
 import {
   defineConnectionDriverPlugin,
-  acquireClient
+  acquireClient,
+  TokenSource,
+  type MintedToken
 } from "../../../packages/external-connections/src/index.ts";
 import type { ResolvedExternalConnection } from "../../../packages/external-connections/src/index.ts";
 
@@ -224,51 +226,63 @@ export interface WazuhHandle {
   slug: string;
   /** Whether the server's certificate is verified. Surfaced in diagnostics. */
   verifyTls: boolean;
-  /** Current bearer token. Set lazily by `ensureToken`; refreshed on 401. */
-  token: string | null;
-  /** Token expiry timestamp (epoch ms). Refresh proactively just before
-   *  this fires so an in-flight request doesn't 401 mid-pull. */
-  tokenExpiresAt: number | null;
+  /** Bearer-token lifecycle: mint on first use, refresh before expiry,
+   *  single-flight, invalidate-on-401. The connection manager caches this
+   *  whole handle per `connection.id`; the token clock lives in here. */
+  tokens: TokenSource;
+  /** Create-time credential snapshot. The token (server-API) path goes through
+   *  `tokens`; the indexer path (`indexerSearch`) needs the raw Basic creds
+   *  directly, because the Wazuh indexer / OpenSearch does NOT honor the
+   *  server-API JWT. */
   credentials: WazuhCredentials;
-  /** Exposed for tests to read; production callers use `request()`. */
+  /** Force a token refresh (invalidate + re-mint). Manual re-auth / test seam;
+   *  production callers use `request()`. */
   authenticate: () => Promise<void>;
   request: <T = unknown>(path: string) => Promise<T>;
 }
 
-/** Default token lifetime when the server doesn't report `exp`. Wazuh
- *  defaults to 900s (15 min) — we refresh a minute early. */
-const TOKEN_DEFAULT_TTL_MS = 14 * 60 * 1000;
+/** Wazuh's server-API tokens default to 900s (15 min). We report the full TTL
+ *  to the TokenSource and let its skew handle refreshing early — no baked-in
+ *  early-refresh here, to avoid double-counting the skew. */
+const TOKEN_DEFAULT_TTL_MS = 15 * 60 * 1000;
 
 interface AuthenticateResponse {
   data?: { token?: string };
 }
 
-async function authenticateOnce(handle: WazuhHandle): Promise<void> {
-  const fetcher = getFetch();
-  const url = `${handle.baseUrl}/security/user/authenticate`;
-  const headers: Record<string, string> = { accept: "application/json" };
-  if (handle.credentials.kind === "basic") {
-    const b64 = Buffer.from(
-      `${handle.credentials.username}:${handle.credentials.password}`,
-      "utf8"
-    ).toString("base64");
-    headers.authorization = `Basic ${b64}`;
-  } else {
-    // Static token — skip the authenticate hop entirely.
-    handle.token = handle.credentials.token;
-    handle.tokenExpiresAt = null; // operator owns rotation
-    return;
+/**
+ * Mint a Wazuh bearer token from resolved credentials — the `mint` callback
+ * the handle's {@link TokenSource} runs (under single-flight) on first use and
+ * every refresh. A static-token secret returns `expiresAt: null` (operator
+ * owns rotation) and skips the authenticate hop; basic creds do the
+ * `POST /security/user/authenticate` exchange and report the full TTL, letting
+ * the TokenSource apply its own refresh skew.
+ */
+async function mintWazuhToken(args: {
+  baseUrl: string;
+  slug: string;
+  verifyTls: boolean;
+  credentials: WazuhCredentials;
+}): Promise<MintedToken> {
+  if (args.credentials.kind === "token") {
+    return { token: args.credentials.token, expiresAt: null };
   }
+  const fetcher = getFetch();
+  const url = `${args.baseUrl}/security/user/authenticate`;
+  const b64 = Buffer.from(
+    `${args.credentials.username}:${args.credentials.password}`,
+    "utf8"
+  ).toString("base64");
   const res = await fetcher(url, {
     method: "POST",
-    headers,
-    rejectUnauthorized: handle.verifyTls
+    headers: { accept: "application/json", authorization: `Basic ${b64}` },
+    rejectUnauthorized: args.verifyTls
   });
   if (!res.ok) {
     // Pull a short error body for the trace — never log creds.
     const body = await safeReadShortBody(res);
     throw new Error(
-      `wazuh: authenticate ${res.status} on connection "${handle.slug}": ${body}`
+      `wazuh: authenticate ${res.status} on connection "${args.slug}": ${body}`
     );
   }
   const json = (await res.json()) as AuthenticateResponse;
@@ -278,8 +292,7 @@ async function authenticateOnce(handle: WazuhHandle): Promise<void> {
       `wazuh: authenticate succeeded but no token in response.data.token`
     );
   }
-  handle.token = token;
-  handle.tokenExpiresAt = Date.now() + TOKEN_DEFAULT_TTL_MS;
+  return { token, expiresAt: Date.now() + TOKEN_DEFAULT_TTL_MS };
 }
 
 async function safeReadShortBody(res: {
@@ -293,47 +306,26 @@ async function safeReadShortBody(res: {
   }
 }
 
-async function ensureToken(handle: WazuhHandle): Promise<void> {
-  const now = Date.now();
-  if (
-    handle.token &&
-    (handle.tokenExpiresAt === null || handle.tokenExpiresAt > now)
-  ) {
-    return;
-  }
-  await handle.authenticate();
-}
-
 /**
- * Authenticated GET against the server API. Refreshes on 401 ONCE,
- * then re-tries (covers the "token expired while we held it" race).
- * Returns the parsed JSON body; throws on non-2xx (with a short
- * snippet of the body for the trace).
+ * Authenticated GET against the server API. `tokens.get()` supplies a valid
+ * bearer (minting/refreshing transparently); a 401 means the token died
+ * between our clock and the server's, so invalidate + retry ONCE. Returns the
+ * parsed JSON body; throws on non-2xx (with a short snippet for the trace).
  */
 async function authedRequest<T>(handle: WazuhHandle, path: string): Promise<T> {
-  await ensureToken(handle);
   const fetcher = getFetch();
   const url = `${handle.baseUrl}${path.startsWith("/") ? path : `/${path}`}`;
-  const headers: Record<string, string> = {
-    accept: "application/json",
-    authorization: `Bearer ${handle.token}`
-  };
-  let res = await fetcher(url, {
-    method: "GET",
-    headers,
-    rejectUnauthorized: handle.verifyTls
-  });
-  if (res.status === 401) {
-    // Token expired between our local check and the server's check.
-    // Re-authenticate ONCE and retry; if it 401s again, bubble up.
-    handle.token = null;
-    await handle.authenticate();
-    headers.authorization = `Bearer ${handle.token}`;
-    res = await fetcher(url, {
+  const doGet = async (token: string) =>
+    fetcher(url, {
       method: "GET",
-      headers,
+      headers: { accept: "application/json", authorization: `Bearer ${token}` },
       rejectUnauthorized: handle.verifyTls
     });
+
+  let res = await doGet(await handle.tokens.get());
+  if (res.status === 401) {
+    handle.tokens.invalidate();
+    res = await doGet(await handle.tokens.get());
   }
   if (!res.ok) {
     const body = await safeReadShortBody(res);
@@ -351,33 +343,45 @@ export const wazuhConnectionDriver = defineConnectionDriverPlugin<WazuhHandle>({
   driver: {
     async create(conn) {
       const opts = (conn.options ?? {}) as WazuhConnectionOptions;
-      const credentials = parseWazuhSecret(conn.secret);
       const baseUrl = buildWazuhBaseUrl(opts);
       const verifyTls = opts.verifyTls !== false; // default true
+      // Fail fast if there's no usable secret at all, rather than deferring the
+      // error to the first request. Snapshot for the indexer (Basic) path.
+      const credentials = parseWazuhSecret(conn.secret);
+      // Dynamic credential source: re-resolve the STORED secret from the
+      // cascade on every mint when the resolver provided the seam, so a
+      // rotated Wazuh password/token is picked up without recreating the
+      // connection; fall back to the frozen `conn.secret` otherwise.
+      const resolveSecret =
+        conn.resolveSecret ?? (async () => conn.secret);
+      const tokens = new TokenSource({
+        mint: async () =>
+          mintWazuhToken({
+            baseUrl,
+            slug: conn.slug,
+            verifyTls,
+            credentials: parseWazuhSecret(await resolveSecret())
+          })
+      });
       const handle: WazuhHandle = {
         baseUrl,
         slug: conn.slug,
         verifyTls,
-        token: null,
-        tokenExpiresAt: null,
+        tokens,
         credentials,
-        // Bound back to the handle so the test harness can call
-        // handle.authenticate() directly to exercise the JWT flow.
+        // Force a fresh token (test seam / manual re-auth).
         authenticate: async () => {
-          // Re-bind `handle` inside the closure so `this` isn't needed.
-          await authenticateOnce(handle);
+          tokens.invalidate();
+          await tokens.get();
         },
         request: async <T,>(p: string) => authedRequest<T>(handle, p)
       };
       return handle;
     },
     async dispose(client) {
-      // Drop the token — there's no server-side logout endpoint that
-      // helps here (Wazuh tokens expire on their own); we just clear
-      // local state so a stale token from a previous client never
-      // shows up in a new request.
-      client.token = null;
-      client.tokenExpiresAt = null;
+      // No server-side logout helps (Wazuh tokens expire on their own); just
+      // drop local token state so nothing stale carries into a new client.
+      client.tokens.clear();
     },
     async probe(client) {
       // The cheapest call that exercises both auth + reachability:
