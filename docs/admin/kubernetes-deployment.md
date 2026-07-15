@@ -350,6 +350,7 @@ usually enough to tell a bad `ref` (`resolve`) from a dependency problem
 | `Permission denied` reading `/opt/ragdoll-plugins` | Missing the `chgrp -R 0` + `chmod -R g=u` step — the assigned UID reaches the files only through group `0`. |
 | Install fails with `ENOSPC` | `pluginCache.sizeLimit` too small for the dependency tree; raise it. |
 | Plugin loads but `import` fails with `ERR_MODULE_NOT_FOUND` | The plugin has a dependency but no `package.json` in the scanned `subpath`, so no install ran. |
+| `Directory import '…' is not supported` at `import` stage | Pre-`0.2.0` image: a `subpath` pointing at a directory wasn't resolved to an entry file. Upgrade. The loader now resolves `<subpath>/` to its `package.json` main/exports, then `index.js`/`index.ts`. Ensure the scanned directory actually has one of those. |
 
 ### A note on `runAsNonRoot` (vanilla Kubernetes)
 
