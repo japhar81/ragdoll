@@ -161,6 +161,52 @@ internal core as the fallback path until those pipelines opt in.
 - One more thing for operators to learn — but it's symmetric with
   datasets, so the conceptual load is bounded.
 
+## Amendment — identity-protected connections (token lifecycle)
+
+The original abstraction resolves a connection's credential **once** at
+`resolve()` time and caches the client **forever** keyed by `connection.id`.
+That fits a database DSN (a static string) but not an identity-protected
+service, whose usable credential is a short-lived token minted from a stored
+secret (OAuth client_secret / refresh_token / basic creds) and refreshed
+before it expires.
+
+Rather than teach the manager about expiry, we keep it dumb and push the token
+lifecycle **into the driver's client**, with two small additive seams:
+
+1. **`ResolvedExternalConnection.resolveSecret?`** — an optional closure the
+   resolver attaches for rows with a `secretRefKey`, which re-runs the **same**
+   cascade on demand. A driver calls it inside its token refresh so a rotated
+   stored secret is picked up without recreating the connection. Static/DB
+   drivers ignore it and use the frozen `secret`. In-process only — a closure
+   can't cross the Connect transport to an external driver.
+
+2. **`TokenSource`** (`packages/external-connections/src/token-source.ts`) — the
+   reusable token cache a driver composes: a `mint(audience)` callback plus
+   `get(audience?)` / `invalidate(audience?)` / `clear()`. It owns single-flight
+   minting (concurrent `get()`s share one exchange — no IdP stampede),
+   proactive refresh with skew clamped to ≤ half the TTL, invalidate-on-401,
+   and **per-`(connection, audience)`** isolation so one connection can hold
+   distinct tokens for distinct downstream audiences. Single-audience drivers
+   pass nothing and get the degenerate per-connection cache.
+
+This was **extraction, not invention**: the `wazuh` driver already hand-rolled
+token/expiry/401-retry inside its client handle, proving the abstraction
+stretched. It is now the first `TokenSource` consumer (and the reference for
+the next), which also closed the single-flight gap its hand-rolled version had.
+
+Two adjacent fixes rode along: `acquireClient` now single-flights `create()`
+(concurrent first-acquires shared one build), and `closeClient` disposes via
+the driver that **built** the client (matched by the stored kind) instead of
+walking every registered driver's `dispose` — harmless for stateless pools,
+wrong for a client whose `dispose` tears down token state.
+
+**Not covered:** this is *outbound* service auth (RAGdoll authenticating to a
+downstream service). It is deliberately separate from the *inbound*
+`IdentityProvider` / SSO plugin (ADR 0035) — same word "identity", opposite
+direction — so the two config surfaces don't blur. External (sidecar)
+identity drivers, which can't receive the `resolveSecret` closure over Connect,
+are deferred: they resolve credentials on their own side.
+
 ## Alternatives considered
 
 1. **Keep the per-family internal core forever.** Works fine while

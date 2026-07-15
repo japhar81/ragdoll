@@ -24,6 +24,11 @@ import type { ConnectionRepository, ConnectionRow } from "../../db/src/types.ts"
 import { type SecretProvider, resolveConnectionSecret } from "../../secrets/src/index.ts";
 
 export type { ConnectionRow, ConnectionRepository };
+export {
+  TokenSource,
+  type MintedToken,
+  type TokenSourceOptions
+} from "./token-source.ts";
 
 /**
  * The shape handed to a plugin at execute time. Carries the row,
@@ -39,6 +44,20 @@ export interface ResolvedExternalConnection {
    *  driver may still construct a client from `options` alone for
    *  no-auth or env-defaulting backends. */
   secret?: string;
+  /**
+   * Re-resolve the connection's STORED secret from the cascade on demand.
+   * Attached by {@link ExternalConnectionResolver} for rows with a
+   * `secretRefKey`; `undefined` for secretless rows and for connections built
+   * by hand (tests). This is the "dynamically resolve credentials" seam: an
+   * identity-protected driver calls it inside its token refresh so a rotated
+   * client_secret / refresh_token is picked up WITHOUT a process restart,
+   * whereas `secret` is the value frozen at resolve() time. Static/DB drivers
+   * ignore it and use `secret`.
+   *
+   * In-process only — a closure cannot cross the Connect transport to an
+   * external (sidecar) driver; those resolve credentials on their own side.
+   */
+  resolveSecret?: () => Promise<string | undefined>;
   options: Record<string, unknown>;
   /** Diagnostic — how the slug was resolved through the cascade. */
   cascadeReason: "global" | "tenant" | "environment";
@@ -71,12 +90,19 @@ export class ExternalConnectionResolver {
     // use a tenant credential — see `resolveConnectionSecret`. An
     // unresolved secret still surfaces the connection row; the driver
     // factory decides whether to fail.
+    // Same cascade args are reused by the on-demand resolver below so a
+    // dynamic re-resolution (token refresh) walks the identical scope path as
+    // the initial resolve — a rotated stored secret is picked up in place.
+    const secretRefKey = row.secretRefKey;
+    const cascade = {
+      tenantId: row.tenantId ?? args.tenantId ?? undefined,
+      environment: args.environmentId ?? undefined
+    };
     let secret: string | undefined;
-    if (row.secretRefKey) {
+    if (secretRefKey) {
       secret = await resolveConnectionSecret(this.secrets, {
-        key: row.secretRefKey,
-        tenantId: row.tenantId ?? args.tenantId ?? undefined,
-        environment: args.environmentId ?? undefined
+        key: secretRefKey,
+        ...cascade
       });
     }
     return {
@@ -84,6 +110,10 @@ export class ExternalConnectionResolver {
       slug: row.slug,
       kind: row.kind,
       secret,
+      resolveSecret: secretRefKey
+        ? () =>
+            resolveConnectionSecret(this.secrets, { key: secretRefKey, ...cascade })
+        : undefined,
       options: row.config ?? {},
       cascadeReason:
         row.scope === "environment"
@@ -178,7 +208,13 @@ interface DriverEntry {
 }
 
 const drivers = new Map<string, DriverEntry>();
-const clientCache = new Map<string, unknown>();
+/** connection.id → the cached client AND the kind that built it. Storing the
+ *  kind is what lets `closeClient` dispose via the RIGHT driver (see below). */
+const clientCache = new Map<string, { kind: string; client: unknown }>();
+/** connection.id → in-flight `create()`, so two concurrent acquires for the
+ *  same connection share one build instead of racing to construct (and leak)
+ *  two pools / two token sources. */
+const clientInflight = new Map<string, Promise<unknown>>();
 
 const DEFAULT_MANIFEST: ConnectionDriverManifest = {
   displayName: "(unnamed)",
@@ -245,16 +281,36 @@ export async function acquireClient<T = unknown>(
   connection: ResolvedExternalConnection
 ): Promise<T> {
   const cached = clientCache.get(connection.id);
-  if (cached !== undefined) return cached as T;
-  const entry = drivers.get(connection.kind);
-  if (!entry) {
-    throw new Error(
-      `no driver registered for connection kind "${connection.kind}" — call registerConnectionDriver() in the plugin module`
-    );
+  if (cached !== undefined) return cached.client as T;
+  // Single-flight: coalesce concurrent first-acquires for the same connection
+  // onto one create() so we don't build (and cache-clobber, and leak) two
+  // clients. Matters most for token drivers, whose create() opens an IdP
+  // session.
+  let pending = clientInflight.get(connection.id);
+  if (!pending) {
+    const entry = drivers.get(connection.kind);
+    if (!entry) {
+      throw new Error(
+        `no driver registered for connection kind "${connection.kind}" — call registerConnectionDriver() in the plugin module`
+      );
+    }
+    const kind = connection.kind;
+    pending = entry.driver.create(connection).then((client) => {
+      clientCache.set(connection.id, { kind, client });
+      return client;
+    });
+    clientInflight.set(connection.id, pending);
+    // Clear the in-flight slot on settle (success OR failure) so a failed
+    // create() doesn't wedge the connection permanently uncacheable.
+    void pending
+      .catch(() => undefined)
+      .finally(() => {
+        if (clientInflight.get(connection.id) === pending) {
+          clientInflight.delete(connection.id);
+        }
+      });
   }
-  const client = await entry.driver.create(connection);
-  clientCache.set(connection.id, client);
-  return client as T;
+  return (await pending) as T;
 }
 
 /**
@@ -263,28 +319,27 @@ export async function acquireClient<T = unknown>(
  * shutdown.
  */
 export async function closeClient(connectionId: string): Promise<void> {
-  const client = clientCache.get(connectionId);
-  if (client === undefined) return;
+  const cached = clientCache.get(connectionId);
+  if (cached === undefined) return;
   clientCache.delete(connectionId);
-  // Find the driver by walking registrations — connection.kind isn't
-  // stored separately in the cache; the registry is small so this is cheap.
-  for (const entry of drivers.values()) {
-    if (entry.driver.dispose) {
-      try {
-        await entry.driver.dispose(client);
-      } catch {
-        /* best-effort */
-      }
+  // Dispose via the driver that BUILT this client (matched by the stored
+  // kind), not every registered driver. Calling a sibling driver's dispose on
+  // a client it never created is at best a no-op and at worst destructive —
+  // e.g. cancelling the wrong token source's refresh state.
+  const entry = drivers.get(cached.kind);
+  if (entry?.driver.dispose) {
+    try {
+      await entry.driver.dispose(cached.client);
+    } catch {
+      /* best-effort */
     }
   }
 }
 
 /** Drop every cached client + driver. Test helper. */
 export function resetConnectionRegistry(): void {
-  for (const client of clientCache.values()) {
-    void client;
-  }
   clientCache.clear();
+  clientInflight.clear();
   drivers.clear();
 }
 

@@ -278,6 +278,58 @@ test("driver: 401 mid-flight triggers ONE refresh + retry", async () => {
   );
 });
 
+test("driver: resolveSecret is re-run on refresh → a rotated password is used", async () => {
+  // The headline of the identity-connection work: the driver derives its token
+  // from the STORED secret via the cascade on every mint, so rotating the
+  // Wazuh password takes effect on the next refresh with no reconnect.
+  const authBasics: (string | undefined)[] = [];
+  let agentHits = 0;
+  await withFakeFetch(
+    [
+      {
+        matches: (url) => url.endsWith("/security/user/authenticate"),
+        respond: () => ({ status: 200, body: { data: { token: "tok" } } })
+      },
+      {
+        matches: (url) => url.includes("/agents"),
+        respond: () => {
+          agentHits += 1;
+          // Force one refresh so a second mint (with the rotated secret) runs.
+          return agentHits === 1
+            ? { status: 401, body: { error: "expired" } }
+            : { status: 200, body: { data: { affected_items: [] } } };
+        }
+      }
+    ],
+    async (calls) => {
+      // resolveSecret hands back a DIFFERENT password each call, simulating an
+      // operator rotating the managed secret between the two mints.
+      let version = 0;
+      const conn: ResolvedExternalConnection = {
+        ...fakeWazuhConn(),
+        secret: '{"username":"admin","password":"old"}',
+        resolveSecret: async () =>
+          `{"username":"admin","password":"v${++version}"}`
+      };
+      const handle = (await wazuhConnectionDriver.driver.create(
+        conn
+      )) as WazuhHandle;
+      await handle.request("/agents?limit=1");
+
+      // Decode the Basic header sent on each authenticate call.
+      for (const c of calls) {
+        if (c.url.endsWith("/authenticate")) {
+          const b64 = (c.headers?.authorization ?? "").replace("Basic ", "");
+          authBasics.push(Buffer.from(b64, "base64").toString("utf8"));
+        }
+      }
+      // Two mints, each with the freshly-resolved (rotated) password — never
+      // the frozen `conn.secret`.
+      assert.deepEqual(authBasics, ["admin:v1", "admin:v2"]);
+    }
+  );
+});
+
 test("driver: persistent 401 after a refresh surfaces as an error (no infinite loop)", async () => {
   await withFakeFetch(
     [
