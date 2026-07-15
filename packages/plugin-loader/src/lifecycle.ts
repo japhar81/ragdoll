@@ -30,7 +30,8 @@
  */
 
 import { pathToFileURL } from "node:url";
-import { resolve as resolvePath } from "node:path";
+import { resolve as resolvePath, extname } from "node:path";
+import { readFile, stat } from "node:fs/promises";
 import {
   PluginRegistry,
   type InProcessPlugin,
@@ -363,10 +364,26 @@ export async function loadSource(
   }
 
   // -------------------------- import
+  // A git source's `importTarget` is `<workingCopy>/<subpath>`, which is a
+  // DIRECTORY whenever `subpath` is empty or names a folder (the common case —
+  // "point me at the plugins dir"). Node's ESM loader has no directory-import
+  // fallback (unlike CJS's implicit `/index.js`), so `import(dir)` throws
+  // "Directory import '…' is not supported". Resolve the directory to an
+  // explicit entry file first. Built-in/local targets already carry a `.ts`
+  // extension and short-circuit; the `__memory__` test seam is passed through.
+  let resolvedTarget: string;
+  try {
+    resolvedTarget = await resolveEntryPoint(importTarget);
+  } catch (e) {
+    return failed(source, "import", (e as Error).message, loadedAt, {
+      ref: source.ref,
+      commitSha
+    });
+  }
   let moduleNs: Record<string, unknown>;
   try {
     const importFn = opts.importFn ?? realImport;
-    moduleNs = await importFn(toImportSpecifier(importTarget));
+    moduleNs = await importFn(toImportSpecifier(resolvedTarget));
   } catch (e) {
     return failed(source, "import", (e as Error).message, loadedAt, {
       ref: source.ref,
@@ -496,6 +513,97 @@ function toImportSpecifier(absPath: string): string {
   // Test seam: `__memory__/...` is recognised by the stub importer.
   if (absPath.startsWith("__memory__/")) return absPath;
   return pathToFileURL(absPath).href;
+}
+
+/** Extensions Node's ESM loader imports directly. If `importTarget` already
+ *  ends in one, it names a file — use it verbatim (a source can set e.g.
+ *  `subpath: "dist/plugin.js"`). */
+const ENTRY_EXTENSIONS = new Set([
+  ".js",
+  ".mjs",
+  ".cjs",
+  ".ts",
+  ".mts",
+  ".cts"
+]);
+
+/** Ordered filenames tried when a directory has no usable package.json
+ *  entry. `.js` before `.ts` mirrors a built-then-shipped plugin; `.ts`
+ *  covers the TS-native runtime and in-tree fixtures. */
+const INDEX_CANDIDATES = ["index.js", "index.mjs", "index.ts"];
+
+/**
+ * Turn `importTarget` into an explicit file path Node's ESM loader accepts.
+ *
+ * Node ESM has no directory-import fallback, so a git source pointed at a
+ * directory (empty/foldered `subpath`) must be resolved to a real file:
+ *
+ *   1. Already a recognised file extension → return as-is.
+ *   2. `__memory__/…` test seam → return as-is (the stub importer owns it).
+ *   3. Directory: `package.json` `exports["."]` (string, or the
+ *      import/module/default condition) then `main`, then index.{js,mjs,ts}.
+ *      The first candidate that exists on disk wins — a `main` that points at
+ *      an unbuilt `dist/` is skipped rather than trusted blindly.
+ *   4. Nothing found → throw; surfaces as `failed{stage:'import'}`.
+ */
+async function resolveEntryPoint(importTarget: string): Promise<string> {
+  if (importTarget.startsWith("__memory__/")) return importTarget;
+  if (ENTRY_EXTENSIONS.has(extname(importTarget))) return importTarget;
+
+  const candidates: string[] = [];
+  try {
+    const pkgRaw = await readFile(
+      resolvePath(importTarget, "package.json"),
+      "utf8"
+    );
+    const pkg = JSON.parse(pkgRaw) as { main?: unknown; exports?: unknown };
+    const fromExports = entryFromExports(pkg.exports);
+    if (fromExports) candidates.push(resolvePath(importTarget, fromExports));
+    if (typeof pkg.main === "string" && pkg.main.trim()) {
+      candidates.push(resolvePath(importTarget, pkg.main));
+    }
+  } catch {
+    // No package.json, or malformed JSON — fall through to the index probes.
+  }
+  for (const name of INDEX_CANDIDATES) {
+    candidates.push(resolvePath(importTarget, name));
+  }
+
+  for (const candidate of candidates) {
+    if (await isFile(candidate)) return candidate;
+  }
+  throw new Error(
+    `no ESM entry point under ${importTarget}: expected a package.json ` +
+      `main/exports target or one of ${INDEX_CANDIDATES.join(", ")}. ` +
+      `Point the source's subpath at the directory that holds the plugin ` +
+      `module, or name the file directly (e.g. subpath: "dist/plugin.js").`
+  );
+}
+
+/** Extract a single entry path from a package.json `exports` field. Handles
+ *  the string form and the `"."` subpath — as a string, or a conditions map
+ *  (import/module/default). Deliberately shallow: nested condition trees and
+ *  wildcard patterns aren't plugin entry points. */
+function entryFromExports(exp: unknown): string | undefined {
+  if (typeof exp === "string") return exp;
+  if (!exp || typeof exp !== "object") return undefined;
+  const dot = (exp as Record<string, unknown>)["."];
+  if (typeof dot === "string") return dot;
+  if (dot && typeof dot === "object") {
+    for (const cond of ["import", "module", "default"]) {
+      const v = (dot as Record<string, unknown>)[cond];
+      if (typeof v === "string") return v;
+    }
+  }
+  return undefined;
+}
+
+async function isFile(p: string): Promise<boolean> {
+  try {
+    return (await stat(p)).isFile();
+  } catch {
+    return false;
+  }
 }
 
 // In-tree module-path helpers. Resolved relative to THIS file so the
