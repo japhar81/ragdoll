@@ -1045,6 +1045,11 @@ export const pipelineCallPlugin: InProcessPlugin = {
           type: "string",
           description: "Slug of the target pipeline."
         },
+        pipelineVersion: {
+          type: "string",
+          description:
+            "Pin a specific version of the target (reproducible dependency). Omit to follow the target's active deployment in the resolved environment."
+        },
         environment: {
           type: "string",
           description: "Environment to invoke the target in. Defaults to the caller's env."
@@ -1082,11 +1087,19 @@ export const pipelineCallPlugin: InProcessPlugin = {
       throw new Error("pipeline_call: pipelineSlug is required");
     }
     const environment = config.environment ? String(config.environment) : undefined;
+    // Optional version pin — reproducible module dependency. Omit → follow the
+    // target's active deployment.
+    const version = config.pipelineVersion ? String(config.pipelineVersion) : undefined;
     // The caller's `input` port becomes the nested pipeline's input;
     // fall back to the whole inputs object so flow-style wiring also
     // works ("just pass everything I got").
     const subInput = inputs.input ?? inputs;
-    const result = await runPipelineByRef({ slug, input: subInput, environment });
+    const result = await runPipelineByRef({
+      slug,
+      input: subInput,
+      environment,
+      ...(version ? { version } : {})
+    });
     return { outputs: { output: result.output } };
   }
 };

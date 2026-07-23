@@ -41,6 +41,7 @@ import type {
   DatasetResolver
 } from "../../../../packages/plugin-sdk/src/index.ts";
 import type { QueueJob } from "../../../worker/src/index.ts";
+import AjvImport from "ajv";
 import { error, nowIso, isObject } from "./http-utils.ts";
 import { interceptAccept } from "./platform-intercept.ts";
 import type { RouteContext } from "./routes/types.ts";
@@ -54,6 +55,52 @@ import type { AppDeps, AppResponse, ApiQueueJob } from "./types.ts";
  * → answer-shaper) and trips fast on accidental cycles.
  */
 export const MAX_SYNC_DEPTH = 8;
+
+// Lazy, cached JSON-Schema validator for module signatures. ajv is compiled
+// once per distinct schema (keyed by identity) so repeated pipeline_call hops
+// don't recompile. Kept local to the runner — signatures are the only
+// JSON-Schema validation on this path.
+//
+// ajv v8 is CJS exporting both `module.exports = Ajv` and `.default = Ajv`; the
+// default-import binding differs across module-interop settings, so normalize
+// and type it minimally to avoid importing ajv's own (interop-sensitive) types.
+type AjvValidate = ((value: unknown) => boolean) & {
+  errors?: Array<{ instancePath?: string; message?: string }> | null;
+};
+type AjvLike = { compile: (schema: unknown) => AjvValidate };
+const AjvCtor = ((AjvImport as unknown as { default?: unknown }).default ??
+  AjvImport) as new (opts?: Record<string, unknown>) => AjvLike;
+let ajvInstance: AjvLike | undefined;
+const compiledSchemas = new WeakMap<object, AjvValidate>();
+
+/**
+ * Validate `value` against a JSON-Schema `schema`. Returns `undefined` when
+ * valid, or a short human-readable error string (first few failures) otherwise.
+ * A malformed schema is treated as "no contract" (returns undefined) rather
+ * than blocking the call — a bad signature shouldn't take down every caller.
+ */
+function validateAgainstSchema(
+  value: unknown,
+  schema: Record<string, unknown>
+): string | undefined {
+  try {
+    if (!ajvInstance) {
+      ajvInstance = new AjvCtor({ allErrors: true, strict: false });
+    }
+    let validate = compiledSchemas.get(schema);
+    if (!validate) {
+      validate = ajvInstance.compile(schema);
+      compiledSchemas.set(schema, validate);
+    }
+    if (validate(value)) return undefined;
+    return (validate.errors ?? [])
+      .slice(0, 3)
+      .map((e) => `${e.instancePath || "(root)"} ${e.message}`)
+      .join("; ");
+  } catch {
+    return undefined; // malformed schema → don't block the call
+  }
+}
 
 export type EnqueueRunOk = {
   ok: true;
@@ -289,6 +336,9 @@ export async function runSyncPipeline(args: {
   deadlineMs?: number;
   /** Slugs already on the call stack — propagated by nested invocations. */
   callStack?: string[];
+  /** Parent execution id when this run was invoked as a step by another
+   *  pipeline (`pipeline_call`). Threads the call-tree edge into the store. */
+  parentExecutionId?: string;
   /** Token-streaming callback for streaming-capable plugins. */
   onToken?: (event: { nodeId: string; token: string }) => void;
 }): Promise<{ executionId: string; output: Record<string, unknown> }> {
@@ -352,17 +402,44 @@ export async function runSyncPipeline(args: {
     slug: string;
     input: unknown;
     environment?: string;
+    version?: string;
   }): Promise<{ output: Record<string, unknown> }> => {
     const target = await deps.pipelines.findBySlug(sub.slug);
     if (!target) {
       throw new Error(`pipeline_call: unknown pipeline slug "${sub.slug}"`);
     }
     const subEnv = sub.environment ?? environment;
-    const subVersion = await resolveDeployedVersion(deps, target.id, subEnv, tenantId);
-    if (!subVersion) {
-      throw new Error(
-        `pipeline_call: pipeline "${sub.slug}" has no active deployment in ${subEnv}`
-      );
+    // Version resolution: a pinned `version` makes the callee a REPRODUCIBLE
+    // dependency (it can't shift under the caller on redeploy); no pin follows
+    // the target's active deployment, resolved fresh at call time.
+    let subVersion: PipelineVersionRow | undefined;
+    if (sub.version) {
+      subVersion = await deps.pipelineVersions.findByVersion(target.id, sub.version);
+      if (!subVersion) {
+        throw new Error(
+          `pipeline_call: pipeline "${sub.slug}" has no version "${sub.version}"`
+        );
+      }
+    } else {
+      subVersion = await resolveDeployedVersion(deps, target.id, subEnv, tenantId);
+      if (!subVersion) {
+        throw new Error(
+          `pipeline_call: pipeline "${sub.slug}" has no active deployment in ${subEnv}`
+        );
+      }
+    }
+    // Module signature: if the callee declares an input contract, validate the
+    // payload against it BEFORE running, so a breaking change to the callee's
+    // I/O fails loudly at the call site instead of corrupting downstream data.
+    const subSpec = subVersion.spec as PipelineSpec;
+    const inputSchema = subSpec.spec?.signature?.input;
+    if (inputSchema) {
+      const err = validateAgainstSchema(sub.input, inputSchema);
+      if (err) {
+        throw new Error(
+          `pipeline_call: input does not match "${sub.slug}"${sub.version ? `@${sub.version}` : ""} signature: ${err}`
+        );
+      }
     }
     const nested = await runSyncPipeline({
       deps,
@@ -374,8 +451,20 @@ export async function runSyncPipeline(args: {
       input: sub.input,
       actorId: args.actorId,
       requestId: args.requestId,
-      callStack: [...callStack, pipeline.slug]
+      callStack: [...callStack, pipeline.slug],
+      parentExecutionId: executionId
     });
+    // Symmetric guard on the way out — a callee that violates its own declared
+    // output contract is a bug in the callee, surfaced at the boundary.
+    const outputSchema = subSpec.spec?.signature?.output;
+    if (outputSchema) {
+      const err = validateAgainstSchema(nested.output, outputSchema);
+      if (err) {
+        throw new Error(
+          `pipeline_call: "${sub.slug}" output violates its declared signature: ${err}`
+        );
+      }
+    }
     return { output: nested.output };
   };
   // ADR-0021: external connection resolver, lazy-built so test paths
@@ -406,7 +495,8 @@ export async function runSyncPipeline(args: {
       environment,
       resolvedConfig,
       actor: args.actorId ? { id: args.actorId, type: "user" } : undefined,
-      deadline: args.deadlineMs ? new Date(args.deadlineMs) : undefined
+      deadline: args.deadlineMs ? new Date(args.deadlineMs) : undefined,
+      parentExecutionId: args.parentExecutionId ?? null
     },
     input: (isObject(input) ? input : {}) as Record<string, unknown>
   });

@@ -166,6 +166,22 @@ export interface PipelineSpec {
     nodes: PipelineNode[];
     edges: PipelineEdge[];
     /**
+     * Optional module signature — the typed contract a pipeline exposes when
+     * it is invoked as a step by another pipeline (`pipeline_call`) or over
+     * MCP. `input` / `output` are JSON-Schema objects validated at call time,
+     * so a breaking change to a callee's I/O surfaces as a clear error at the
+     * call site instead of a downstream data corruption. Absent → the callee
+     * is an untyped black box (current behavior); present → it's a checked
+     * dependency. Author-declared for now; a future pass can derive/merge it
+     * from the I/O nodes.
+     */
+    signature?: {
+      /** JSON Schema for the payload handed to the pipeline's input node. */
+      input?: Record<string, unknown>;
+      /** JSON Schema for the pipeline's terminal output. */
+      output?: Record<string, unknown>;
+    };
+    /**
      * ADR-0023: Pipeline-level binding declarations. Each entry names a
      * binding the pipeline references; nodes consume them via
      * `node.binding: <id>`. This is the canonical shape for the
@@ -365,6 +381,13 @@ export interface RuntimeContext {
   resolvedConfig: ResolvedConfig;
   deadline?: Date;
   signal?: AbortSignal;
+  /**
+   * Set when this execution was invoked as a step by another pipeline
+   * (`pipeline_call`). Carries the PARENT execution's id so the store can
+   * record the call edge and the UI can render a run's call tree. `null` /
+   * absent for a top-level run.
+   */
+  parentExecutionId?: string | null;
   /**
    * Defense-in-depth permission check, populated by the worker when it has
    * both an authorizer wired AND an `enqueuedBy` block on the job. Called

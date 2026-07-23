@@ -132,6 +132,9 @@ export interface BuildOptions {
   /** Inject a platform-plugin dispatcher so a test can exercise the PRE-lane
    *  mutation gate (ADR 0036). */
   platformDispatcher?: AppDeps["platformDispatcher"];
+  /** Extra in-process plugins to register alongside `fake_echo` (e.g. the
+   *  real `pipeline_call` plugin for module-composition tests). */
+  extraPlugins?: InProcessPlugin[];
 }
 
 export function buildHarness(options: BuildOptions = {}): Harness {
@@ -141,6 +144,9 @@ export function buildHarness(options: BuildOptions = {}): Harness {
     manifest: fakeEchoPlugin.manifest,
     implementation: fakeEchoPlugin
   });
+  for (const p of options.extraPlugins ?? []) {
+    pluginRegistry.register({ mode: "in_process", manifest: p.manifest, implementation: p });
+  }
   const pluginRegistryHolderForDeps = new pluginLoaderForTests.PluginRegistryHolder(
     pluginRegistry,
     []

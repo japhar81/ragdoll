@@ -469,6 +469,12 @@ export interface PluginExecutionInput {
     slug: string;
     input: unknown;
     environment?: string;
+    /**
+     * Pin the callee to a specific pipeline version (reproducible module
+     * dependency). Omit to follow the target's active deployment in the
+     * resolved environment (the callee can change under you on redeploy).
+     */
+    version?: string;
   }) => Promise<{ output: Record<string, unknown> }>;
   /**
    * Optional token sink for streaming LLM plugins (Phase 13 follow-up).
