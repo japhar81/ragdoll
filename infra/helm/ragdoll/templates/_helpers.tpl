@@ -66,7 +66,7 @@ nats://{{ .Release.Name }}-nats:4222
 {{/* QDRANT_URL when the bundled Qdrant is on. */}}
 {{- define "ragdoll.qdrantUrl" -}}
 {{- if .Values.bundledqdrant.enabled -}}
-http://ragdoll-qdrant:6333
+http://{{ .Release.Name }}-qdrant:6333
 {{- else -}}
 {{ .Values.qdrant.url }}
 {{- end -}}
@@ -84,7 +84,7 @@ http://{{ .Release.Name }}-bundledopensearch:9200
 {{/* OLLAMA_BASE_URL — bundled service when enabled, override otherwise. */}}
 {{- define "ragdoll.ollamaBaseUrl" -}}
 {{- if .Values.bundledollama.enabled -}}
-http://ragdoll-ollama:{{ .Values.bundledollama.port }}
+http://{{ .Release.Name }}-ollama:{{ .Values.bundledollama.port }}
 {{- else -}}
 {{ .Values.ollama.baseUrl }}
 {{- end -}}
@@ -93,7 +93,7 @@ http://ragdoll-ollama:{{ .Values.bundledollama.port }}
 {{/* DGRAPH_URL — bundled service when enabled, override otherwise. */}}
 {{- define "ragdoll.dgraphUrl" -}}
 {{- if .Values.bundleddgraph.enabled -}}
-http://ragdoll-dgraph:{{ .Values.bundleddgraph.httpPort }}
+http://{{ .Release.Name }}-dgraph:{{ .Values.bundleddgraph.httpPort }}
 {{- else -}}
 {{ .Values.dgraph.url }}
 {{- end -}}

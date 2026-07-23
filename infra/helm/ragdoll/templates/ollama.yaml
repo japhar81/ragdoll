@@ -25,9 +25,9 @@ false` and `ollama.baseUrl` accordingly.
 apiVersion: v1
 kind: Service
 metadata:
-  name: ragdoll-ollama
+  name: {{ .Release.Name }}-ollama
   labels:
-    app: ragdoll-ollama
+    app: {{ .Release.Name }}-ollama
     {{- include "ragdoll.commonLabels" . | nindent 4 }}
   {{- with (include "ragdoll.commonAnnotations" . | trim) }}
   annotations:
@@ -35,7 +35,7 @@ metadata:
   {{- end }}
 spec:
   selector:
-    app: ragdoll-ollama
+    app: {{ .Release.Name }}-ollama
   ports:
     - name: http
       port: {{ .Values.bundledollama.port }}
@@ -45,9 +45,9 @@ spec:
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: ragdoll-ollama
+  name: {{ .Release.Name }}-ollama
   labels:
-    app: ragdoll-ollama
+    app: {{ .Release.Name }}-ollama
     {{- include "ragdoll.commonLabels" . | nindent 4 }}
   {{- with (include "ragdoll.commonAnnotations" . | trim) }}
   annotations:
@@ -67,9 +67,9 @@ spec:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: ragdoll-ollama
+  name: {{ .Release.Name }}-ollama
   labels:
-    app: ragdoll-ollama
+    app: {{ .Release.Name }}-ollama
     {{- include "ragdoll.commonLabels" . | nindent 4 }}
   {{- with (include "ragdoll.commonAnnotations" . | trim) }}
   annotations:
@@ -81,11 +81,11 @@ spec:
     type: Recreate
   selector:
     matchLabels:
-      app: ragdoll-ollama
+      app: {{ .Release.Name }}-ollama
   template:
     metadata:
       labels:
-        app: ragdoll-ollama
+        app: {{ .Release.Name }}-ollama
         {{- include "ragdoll.commonLabels" . | nindent 8 }}
       {{- with (include "ragdoll.commonAnnotations" . | trim) }}
       annotations:
@@ -125,7 +125,7 @@ spec:
           # serving. postStart runs detached so it doesn't block pod
           # readiness; pulls land on the PVC so subsequent pod restarts
           # find them cached. Output goes to /tmp/preload.log inside
-          # the pod for triage (`oc exec ragdoll-ollama -- cat /tmp/preload.log`).
+          # the pod for triage (`oc exec {{ $.Release.Name }}-ollama -- cat /tmp/preload.log`).
           lifecycle:
             postStart:
               exec:
@@ -176,6 +176,6 @@ spec:
         {{- if .Values.bundledollama.persistence.enabled }}
         - name: models
           persistentVolumeClaim:
-            claimName: ragdoll-ollama
+            claimName: {{ .Release.Name }}-ollama
         {{- end }}
 {{- end }}

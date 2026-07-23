@@ -5,7 +5,7 @@ Status of bundled backends
 ────────────────────────────────────────────────────────────────────────────
 {{ if .Values.bundledpostgres.enabled }}  Postgres   → bundled  ({{ .Release.Name }}-bundledpostgres:5432){{ else }}  Postgres   → BYO     (configure DATABASE_URL on Secret {{ include "ragdoll.secretName" . }}){{ end }}
 {{ if .Values.bundledredis.enabled    }}  Redis      → bundled  ({{ .Release.Name }}-bundledredis-master:6379){{ else }}  Redis      → BYO     (configure REDIS_URL on Secret {{ include "ragdoll.secretName" . }}){{ end }}
-{{ if .Values.bundledqdrant.enabled   }}  Qdrant     → bundled  (ragdoll-qdrant:6333){{ else }}  Qdrant     → BYO     ({{ .Values.qdrant.url }}){{ end }}
+{{ if .Values.bundledqdrant.enabled   }}  Qdrant     → bundled  ({{ .Release.Name }}-qdrant:6333){{ else }}  Qdrant     → BYO     ({{ .Values.qdrant.url }}){{ end }}
 {{ if .Values.bundledopensearch.enabled }}  OpenSearch → bundled  ({{ .Release.Name }}-bundledopensearch:9200){{ else }}  OpenSearch → disabled (set bundledopensearch.enabled=true OR opensearch.url){{ end }}
 
 ────────────────────────────────────────────────────────────────────────────
@@ -70,7 +70,7 @@ No external entrypoint is configured. Either:
       helm upgrade {{ .Release.Name }} <chart> --set openshift.route.enabled=true
 
   • Port-forward locally for quick testing:
-      kubectl -n {{ .Release.Namespace }} port-forward svc/ragdoll-web 8080:80
+      kubectl -n {{ .Release.Namespace }} port-forward svc/{{ .Release.Name }}-web 8080:80
       open http://localhost:8080
 {{- end }}
 

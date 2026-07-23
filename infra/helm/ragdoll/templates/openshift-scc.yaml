@@ -17,7 +17,7 @@
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
-  name: ragdoll-use-scc
+  name: {{ .Release.Name }}-use-scc
   labels:
     app: ragdoll
     {{- include "ragdoll.commonLabels" . | nindent 4 }}
@@ -35,7 +35,7 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: ragdoll-use-scc
+  name: {{ .Release.Name }}-use-scc
   labels:
     app: ragdoll
     {{- include "ragdoll.commonLabels" . | nindent 4 }}
@@ -46,7 +46,7 @@ metadata:
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
-  name: ragdoll-use-scc
+  name: {{ .Release.Name }}-use-scc
 subjects:
   - kind: ServiceAccount
     name: {{ include "ragdoll.serviceAccountName" . }}

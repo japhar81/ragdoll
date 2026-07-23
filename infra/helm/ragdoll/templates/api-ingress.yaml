@@ -8,7 +8,7 @@
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
-  name: ragdoll-api
+  name: {{ .Release.Name }}-api
   {{- with .Values.apiIngress.annotations }}
   annotations:
     {{- toYaml . | nindent 4 }}
@@ -37,7 +37,7 @@ spec:
                 # land here. WebSocket upgrade for /api/events works
                 # because most controllers honour the Upgrade /
                 # Connection headers by default.
-                name: ragdoll-api
+                name: {{ $.Release.Name }}-api
                 port:
                   number: 80
           {{- end }}

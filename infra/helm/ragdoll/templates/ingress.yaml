@@ -2,9 +2,9 @@
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
-  name: ragdoll
+  name: {{ .Release.Name }}
   labels:
-    app: ragdoll-web
+    app: {{ .Release.Name }}-web
     {{- include "ragdoll.commonLabels" . | nindent 4 }}
   annotations:
     {{- with .Values.ingress.annotations }}
@@ -32,11 +32,11 @@ spec:
             backend:
               service:
                 # All public traffic terminates at the web (nginx) Service;
-                # nginx reverse-proxies /api → ragdoll-api internally so the
+                # nginx reverse-proxies /api → {{ $.Release.Name }}-api internally so the
                 # ingress only needs one backend. WebSocket upgrades for
                 # /api/events are honoured because the web container's
                 # nginx config sets the Upgrade/Connection headers.
-                name: ragdoll-web
+                name: {{ $.Release.Name }}-web
                 port:
                   number: 80
           {{- end }}

@@ -13,9 +13,9 @@ Service). Removed automatically when prometheus.enabled is false.
 apiVersion: v1
 kind: Service
 metadata:
-  name: ragdoll-worker
+  name: {{ .Release.Name }}-worker
   labels:
-    app: ragdoll-worker
+    app: {{ .Release.Name }}-worker
     prometheus-scrape: "true"
     {{- include "ragdoll.commonLabels" . | nindent 4 }}
   {{- with (include "ragdoll.commonAnnotations" . | trim) }}
@@ -25,7 +25,7 @@ metadata:
 spec:
   clusterIP: None
   selector:
-    app: ragdoll-worker
+    app: {{ .Release.Name }}-worker
   ports:
     - name: metrics
       port: {{ .Values.prometheus.port }}

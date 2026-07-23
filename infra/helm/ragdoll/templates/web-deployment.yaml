@@ -1,9 +1,9 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: ragdoll-web
+  name: {{ .Release.Name }}-web
   labels:
-    app: ragdoll-web
+    app: {{ .Release.Name }}-web
     {{- include "ragdoll.commonLabels" . | nindent 4 }}
   {{- with (include "ragdoll.commonAnnotations" . | trim) }}
   annotations:
@@ -15,11 +15,11 @@ spec:
   {{- end }}
   selector:
     matchLabels:
-      app: ragdoll-web
+      app: {{ .Release.Name }}-web
   template:
     metadata:
       labels:
-        app: ragdoll-web
+        app: {{ .Release.Name }}-web
         {{- include "ragdoll.commonLabels" . | nindent 8 }}
       annotations:
         # Roll the web pods whenever the nginx config changes (changing

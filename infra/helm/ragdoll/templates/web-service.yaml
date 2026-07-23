@@ -1,9 +1,9 @@
 apiVersion: v1
 kind: Service
 metadata:
-  name: ragdoll-web
+  name: {{ .Release.Name }}-web
   labels:
-    app: ragdoll-web
+    app: {{ .Release.Name }}-web
     {{- include "ragdoll.commonLabels" . | nindent 4 }}
   {{- with (include "ragdoll.commonAnnotations" . | trim) }}
   annotations:
@@ -11,7 +11,7 @@ metadata:
   {{- end }}
 spec:
   selector:
-    app: ragdoll-web
+    app: {{ .Release.Name }}-web
   ports:
     - name: http
       port: 80

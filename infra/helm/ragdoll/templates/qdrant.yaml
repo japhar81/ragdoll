@@ -21,9 +21,9 @@ and `qdrant.url` to the external service.
 apiVersion: v1
 kind: Service
 metadata:
-  name: ragdoll-qdrant
+  name: {{ .Release.Name }}-qdrant
   labels:
-    app: ragdoll-qdrant
+    app: {{ .Release.Name }}-qdrant
     {{- include "ragdoll.commonLabels" . | nindent 4 }}
   {{- with (include "ragdoll.commonAnnotations" . | trim) }}
   annotations:
@@ -31,7 +31,7 @@ metadata:
   {{- end }}
 spec:
   selector:
-    app: ragdoll-qdrant
+    app: {{ .Release.Name }}-qdrant
   ports:
     - name: http
       port: 6333
@@ -44,9 +44,9 @@ spec:
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: ragdoll-qdrant
+  name: {{ .Release.Name }}-qdrant
   labels:
-    app: ragdoll-qdrant
+    app: {{ .Release.Name }}-qdrant
     {{- include "ragdoll.commonLabels" . | nindent 4 }}
   {{- with (include "ragdoll.commonAnnotations" . | trim) }}
   annotations:
@@ -66,9 +66,9 @@ spec:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: ragdoll-qdrant
+  name: {{ .Release.Name }}-qdrant
   labels:
-    app: ragdoll-qdrant
+    app: {{ .Release.Name }}-qdrant
     {{- include "ragdoll.commonLabels" . | nindent 4 }}
   {{- with (include "ragdoll.commonAnnotations" . | trim) }}
   annotations:
@@ -83,11 +83,11 @@ spec:
     type: Recreate
   selector:
     matchLabels:
-      app: ragdoll-qdrant
+      app: {{ .Release.Name }}-qdrant
   template:
     metadata:
       labels:
-        app: ragdoll-qdrant
+        app: {{ .Release.Name }}-qdrant
         {{- include "ragdoll.commonLabels" . | nindent 8 }}
       {{- with (include "ragdoll.commonAnnotations" . | trim) }}
       annotations:
@@ -166,6 +166,6 @@ spec:
         {{- if .Values.bundledqdrant.persistence.enabled }}
         - name: storage
           persistentVolumeClaim:
-            claimName: ragdoll-qdrant
+            claimName: {{ .Release.Name }}-qdrant
         {{- end }}
 {{- end }}

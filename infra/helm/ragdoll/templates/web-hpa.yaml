@@ -5,9 +5,9 @@
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
-  name: ragdoll-web
+  name: {{ .Release.Name }}-web
   labels:
-    app: ragdoll-web
+    app: {{ .Release.Name }}-web
     {{- include "ragdoll.commonLabels" . | nindent 4 }}
   {{- with (include "ragdoll.commonAnnotations" . | trim) }}
   annotations:
@@ -17,7 +17,7 @@ spec:
   scaleTargetRef:
     apiVersion: apps/v1
     kind: Deployment
-    name: ragdoll-web
+    name: {{ .Release.Name }}-web
   minReplicas: {{ .Values.web.autoscaling.minReplicas }}
   maxReplicas: {{ .Values.web.autoscaling.maxReplicas }}
   metrics:
