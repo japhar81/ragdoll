@@ -22,9 +22,9 @@ official chart instead.
 apiVersion: v1
 kind: Service
 metadata:
-  name: ragdoll-dgraph
+  name: {{ .Release.Name }}-dgraph
   labels:
-    app: ragdoll-dgraph
+    app: {{ .Release.Name }}-dgraph
     {{- include "ragdoll.commonLabels" . | nindent 4 }}
   {{- with (include "ragdoll.commonAnnotations" . | trim) }}
   annotations:
@@ -32,7 +32,7 @@ metadata:
   {{- end }}
 spec:
   selector:
-    app: ragdoll-dgraph
+    app: {{ .Release.Name }}-dgraph
   ports:
     - name: http
       port: {{ .Values.bundleddgraph.httpPort }}
@@ -42,9 +42,9 @@ spec:
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: ragdoll-dgraph
+  name: {{ .Release.Name }}-dgraph
   labels:
-    app: ragdoll-dgraph
+    app: {{ .Release.Name }}-dgraph
     {{- include "ragdoll.commonLabels" . | nindent 4 }}
   {{- with (include "ragdoll.commonAnnotations" . | trim) }}
   annotations:
@@ -64,9 +64,9 @@ spec:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: ragdoll-dgraph
+  name: {{ .Release.Name }}-dgraph
   labels:
-    app: ragdoll-dgraph
+    app: {{ .Release.Name }}-dgraph
     {{- include "ragdoll.commonLabels" . | nindent 4 }}
   {{- with (include "ragdoll.commonAnnotations" . | trim) }}
   annotations:
@@ -78,11 +78,11 @@ spec:
     type: Recreate
   selector:
     matchLabels:
-      app: ragdoll-dgraph
+      app: {{ .Release.Name }}-dgraph
   template:
     metadata:
       labels:
-        app: ragdoll-dgraph
+        app: {{ .Release.Name }}-dgraph
         {{- include "ragdoll.commonLabels" . | nindent 8 }}
       {{- with (include "ragdoll.commonAnnotations" . | trim) }}
       annotations:
@@ -138,6 +138,6 @@ spec:
         {{- if .Values.bundleddgraph.persistence.enabled }}
         - name: data
           persistentVolumeClaim:
-            claimName: ragdoll-dgraph
+            claimName: {{ .Release.Name }}-dgraph
         {{- end }}
 {{- end }}

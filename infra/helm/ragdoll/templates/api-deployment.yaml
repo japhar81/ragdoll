@@ -1,9 +1,9 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: ragdoll-api
+  name: {{ .Release.Name }}-api
   labels:
-    app: ragdoll-api
+    app: {{ .Release.Name }}-api
     {{- include "ragdoll.commonLabels" . | nindent 4 }}
   {{- with (include "ragdoll.commonAnnotations" . | trim) }}
   annotations:
@@ -18,11 +18,11 @@ spec:
   {{- end }}
   selector:
     matchLabels:
-      app: ragdoll-api
+      app: {{ .Release.Name }}-api
   template:
     metadata:
       labels:
-        app: ragdoll-api
+        app: {{ .Release.Name }}-api
         {{- include "ragdoll.commonLabels" . | nindent 8 }}
       {{- with (include "ragdoll.commonAnnotations" . | trim) }}
       annotations:
@@ -71,7 +71,7 @@ spec:
             - name: RAGDOLL_ENV
               value: {{ .Values.api.env | quote }}
             - name: OTEL_SERVICE_NAME
-              value: "ragdoll-api"
+              value: "{{ .Release.Name }}-api"
             # SSO-callback / email-link base URL. Override per-env via
             # values.yaml; this is the URL the operator's browser sees.
             - name: WEB_BASE_URL

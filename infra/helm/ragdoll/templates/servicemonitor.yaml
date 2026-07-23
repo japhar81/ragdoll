@@ -27,7 +27,7 @@ Services when prometheus.enabled).
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:
-  name: ragdoll
+  name: {{ .Release.Name }}
   labels:
     app: ragdoll
     {{- include "ragdoll.commonLabels" . | nindent 4 }}

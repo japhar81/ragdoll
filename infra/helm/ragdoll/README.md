@@ -9,6 +9,27 @@ required, no Secret to pre-apply.
 Bring your own backend at any time by flipping the corresponding
 `bundled<X>.enabled: false`; everything else keeps working.
 
+## Multiple releases in one namespace
+
+Every resource is prefixed with the **release name** (`<release>-api`,
+`<release>-web`, `<release>-worker`, `<release>-qdrant`, …) and every Service
+selector / Deployment selector is scoped to that release, so two releases can
+coexist in a single namespace without colliding or cross-selecting each other's
+pods:
+
+```sh
+helm install rag-blue ./infra/helm/ragdoll -n shared
+helm install rag-green ./infra/helm/ragdoll -n shared   # no collisions
+```
+
+> **Upgrade note.** With the conventional release name `ragdoll`
+> (`helm install ragdoll …`) every rendered name is **unchanged** from earlier
+> chart versions — an in-place upgrade is a no-op rename. If you installed under
+> a *different* release name on an older chart (which hard-coded `ragdoll-*`
+> regardless of release), this upgrade **renames** the workloads to
+> `<release>-*`; Kubernetes will recreate them (brief downtime). Pin the old
+> names with `--set` overrides, or accept the recreate.
+
 ## Install
 
 The Bitnami subchart tarballs (postgres, redis, opensearch) are **vendored**

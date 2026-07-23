@@ -20,7 +20,7 @@ metadata:
     {{- . | nindent 4 }}
     {{- end }}
   labels:
-    app: ragdoll-db-init
+    app: {{ .Release.Name }}-db-init
     {{- include "ragdoll.commonLabels" . | nindent 4 }}
 spec:
   backoffLimit: 2
@@ -31,7 +31,7 @@ spec:
   template:
     metadata:
       labels:
-        app: ragdoll-db-init
+        app: {{ .Release.Name }}-db-init
         {{- include "ragdoll.commonLabels" . | nindent 8 }}
     spec:
       serviceAccountName: {{ include "ragdoll.serviceAccountName" . }}
