@@ -378,10 +378,14 @@ export function createApp(deps: AppDeps): App {
     targetType: string,
     targetId: string,
     before: unknown,
-    after: unknown
+    after: unknown,
+    tenantIdOverride?: string | null
   ): Promise<void> {
     const at = nowIso();
-    const tenantId = ctx.principal.tenantId ?? null;
+    // `undefined` → derive from the principal; explicit `null` → global scope
+    // (see AuditWriter — used by tenant.delete so the row survives the tenant).
+    const tenantId =
+      tenantIdOverride !== undefined ? tenantIdOverride : ctx.principal.tenantId ?? null;
     const actorId = ctx.principal.id ?? null;
     await deps.auditLogs.append({
       actorId,
