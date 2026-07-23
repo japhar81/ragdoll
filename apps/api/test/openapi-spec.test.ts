@@ -141,6 +141,32 @@ test("every operation declares responses, and path params are declared", () => {
   assert.deepEqual(problems, [], problems.join("\n"));
 });
 
+test("every success response documents a body schema (204 excepted)", () => {
+  // A bare `description:` renders as an empty Responses box in Swagger UI —
+  // the caller can't see the shape they'll get back. Every 2xx must declare
+  // `content` (or $ref a shared response that does). 204 = No Content, which
+  // correctly has no body.
+  const missing: string[] = [];
+  for (const [p, item] of Object.entries(spec.paths ?? {})) {
+    for (const method of HTTP_METHODS) {
+      const op = item[method] as { responses?: Record<string, unknown> } | undefined;
+      if (!op?.responses) continue;
+      for (const [code, raw] of Object.entries(op.responses)) {
+        if (!code.startsWith("2") || code === "204") continue;
+        const r = raw as { $ref?: string; content?: unknown };
+        if (!r.$ref && !r.content) {
+          missing.push(`${method.toUpperCase()} ${p} -> ${code}`);
+        }
+      }
+    }
+  }
+  assert.deepEqual(
+    missing,
+    [],
+    `2xx responses with no body schema (add content.application/json.schema):\n${missing.join("\n")}`
+  );
+});
+
 test("operationIds (where present) are unique", () => {
   const seen = new Map<string, string>();
   const dupes: string[] = [];
