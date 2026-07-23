@@ -490,6 +490,38 @@ test("DELETE /api/tenants/:id?force=true cascades — tenant gone, grants gone",
   );
 });
 
+test("DELETE /api/tenants/:id?force=true records tenant.delete at GLOBAL scope, even when the request is scoped to that tenant", async () => {
+  // Regression: the handler deletes the tenant (cascading its audit_logs) then
+  // writes the tenant.delete audit row. When the request was scoped to that
+  // tenant (x-tenant-id header), the row inherited the now-deleted tenant_id
+  // and violated audit_logs.tenant_id FK — a 500 on Postgres (InMemory has no
+  // FK, which is why this slipped through). The fix audits at null/global scope.
+  const harness = buildHarness();
+  const t = await harness.request({
+    method: "POST",
+    path: "/api/tenants",
+    headers: ADMIN,
+    body: { slug: "cd-scoped-del", name: "cd-scoped-del" }
+  });
+  const tenantId = t.body.tenant.id as string;
+
+  // Delete SCOPED INTO the tenant being removed (the trigger condition).
+  const out = await harness.request({
+    method: "DELETE",
+    path: `/api/tenants/${tenantId}`,
+    headers: { ...ADMIN, "x-tenant-id": tenantId },
+    query: { force: "true" }
+  });
+  assert.equal(out.status, 204);
+
+  // The tenant.delete audit row must be global (tenantId null), so it neither
+  // FK-violates nor gets cascade-deleted with the tenant.
+  const rows = await harness.deps.auditLogs.list({});
+  const del = rows.find((r) => r.action === "tenant.delete" && r.targetId === tenantId);
+  assert.ok(del, "tenant.delete audit row was written");
+  assert.equal(del?.tenantId ?? null, null, "tenant.delete audited at global scope");
+});
+
 // ---------------------------------------------------------------------------
 // Generic 404 + force-doesn't-mask-not-found
 // ---------------------------------------------------------------------------

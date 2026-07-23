@@ -301,13 +301,18 @@ export function registerTenantsRoutes(
       await rbacPolicies.removeGrant(g.id);
     }
     await deps.tenants.delete(tenantId);
+    // Audit at GLOBAL scope (tenantId = null): the tenant this request was
+    // scoped to no longer exists, so a tenant-scoped audit row would violate
+    // the audit_logs.tenant_id FK (and be cascade-deleted with the tenant).
+    // A "tenant deleted" event belongs at the platform level anyway.
     await audit(
       ctx,
       "tenant.delete",
       "tenant",
       tenantId,
       { ...before, cascaded: depCounts },
-      undefined
+      undefined,
+      null
     );
     return { status: 204, body: undefined, headers: {} };
   });

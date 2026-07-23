@@ -32,5 +32,13 @@ export type AuditWriter = (
   targetType: string,
   targetId: string,
   before: unknown,
-  after: unknown
+  after: unknown,
+  /**
+   * Override the audited tenant scope. Omit → derive from `ctx.principal`
+   * (the norm). Pass `null` to record the event at GLOBAL scope — required
+   * when the audited action removes the very tenant the request is scoped to
+   * (`tenant.delete`), because a tenant-scoped audit row both violates the
+   * `audit_logs.tenant_id` FK and would be cascade-deleted with the tenant.
+   */
+  tenantIdOverride?: string | null
 ) => Promise<void>;
