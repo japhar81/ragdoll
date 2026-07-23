@@ -819,7 +819,6 @@ paths:
         "204": { description: Deleted }
         "404": { $ref: "#/components/responses/NotFound" }
         "409": { $ref: "#/components/responses/HasDependents" }
-        "409": { $ref: "#/components/responses/Conflict" }
   /api/pipelines/{pipeline_id}/folder:
     parameters:
       - $ref: "#/components/parameters/PipelineRef"
@@ -2131,6 +2130,31 @@ paths:
         in: path
         required: true
         schema: { type: string }
+    put:
+      summary: >-
+        Update an environment's name / description / production flag
+        (config:edit_global). Only the provided fields change.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string }
+                description: { type: [string, "null"] }
+                isProduction: { type: boolean }
+      responses:
+        "200":
+          description: The updated environment.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  environment: { type: object }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
     delete:
       summary: >-
         Remove an environment. Refuses when active deployments still
@@ -2170,6 +2194,37 @@ paths:
                       lastSyncError: { type: [string, "null"] }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
+    put:
+      summary: >-
+        Connect or update the tenant's git storage (config:edit_tenant).
+        Mints a data-encryption key on first config, reuses it on edits.
+        The `authSecretId` references a managed secret; no raw credential
+        is stored on this row.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [remoteUrl, branch, pathPrefix, authMethod, authSecretId]
+              properties:
+                remoteUrl: { type: string }
+                branch: { type: string }
+                pathPrefix: { type: string }
+                authMethod: { type: string, enum: [https, ssh] }
+                authSecretId: { type: string }
+      responses:
+        "200":
+          description: The stored git config (wrapped DEK never returned).
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  config: { type: object }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
     delete:
       summary: Disconnect the tenant from its git storage. Local cache stays.
       responses:
@@ -2871,7 +2926,7 @@ paths:
       responses:
         "201": { description: "{ subscription }" }
         "403": { $ref: "#/components/responses/Forbidden" }
-        "422": { description: events (non-empty string[]) + http(s) url required }
+        "422": { description: "events (non-empty string[]) + http(s) url required" }
         "501": { description: Subscriptions not configured }
   /api/event-subscriptions/{id}:
     delete:

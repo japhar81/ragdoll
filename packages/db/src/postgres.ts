@@ -103,8 +103,8 @@ export class PostgresExecutionStore implements ExecutionStore {
   async start(record: ExecutionRecord): Promise<void> {
     await this.pool.query(
       `INSERT INTO executions
-         (execution_id, tenant_id, pipeline_id, pipeline_version_id, environment, status, input_redacted, started_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+         (execution_id, tenant_id, pipeline_id, pipeline_version_id, environment, status, input_redacted, started_at, parent_execution_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
        ON CONFLICT (execution_id) DO UPDATE SET
          status = EXCLUDED.status,
          input_redacted = EXCLUDED.input_redacted`,
@@ -122,7 +122,8 @@ export class PostgresExecutionStore implements ExecutionStore {
         record.environment,
         record.status,
         stringifyForTrace(record.input),
-        record.startedAt
+        record.startedAt,
+        record.parentExecutionId ?? null
       ]
     );
   }
@@ -368,7 +369,8 @@ function rowToExecutionRecord(
     completedAt: toIso(row.completed_at),
     input: row.input_redacted ?? undefined,
     output: row.output_redacted ?? undefined,
-    error: (row.error as string | null) ?? undefined
+    error: (row.error as string | null) ?? undefined,
+    parentExecutionId: (row.parent_execution_id as string | null) ?? null
   };
 }
 
