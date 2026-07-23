@@ -598,6 +598,318 @@ components:
           description: Null = keep forever; integer = age in days at which a janitor sweep deletes rows.
         updatedAt: { type: string }
         updatedBy: { type: [string, "null"] }
+
+    # --- Core resources (response shapes) -----------------------------------
+    # Added so every 2xx documents a body instead of a bare description.
+    # Shapes mirror the repository row types in packages/db/src/types.ts.
+
+    Tenant:
+      type: object
+      description: An isolation boundary. Every pipeline run, secret, and dataset resolves within one tenant.
+      required: [id, slug, name, status, createdAt, updatedAt]
+      properties:
+        id: { type: string, format: uuid }
+        slug: { type: string }
+        name: { type: string }
+        status: { type: string }
+        metadata: { type: object, additionalProperties: true }
+        storageMode: { type: string, enum: [db, git] }
+        createdAt: { type: string }
+        updatedAt: { type: string }
+
+    Pipeline:
+      type: object
+      description: A pipeline's mutable header. The DAG itself lives on its versions.
+      required: [id, slug, name, createdAt, updatedAt]
+      properties:
+        id: { type: string, format: uuid }
+        slug: { type: string }
+        name: { type: string }
+        description: { type: [string, "null"] }
+        labels: { type: object, additionalProperties: { type: string } }
+        folderId: { type: [string, "null"], format: uuid }
+        latestVersionId: { type: [string, "null"], format: uuid }
+        createdBy: { type: [string, "null"], format: uuid }
+        createdAt: { type: string }
+        updatedAt: { type: string }
+
+    PipelineDeployment:
+      type: object
+      description: Binds one pipeline version to an environment (optionally per tenant).
+      required: [id, pipelineId, pipelineVersionId, environment, status, deployedAt]
+      properties:
+        id: { type: string, format: uuid }
+        pipelineId: { type: string, format: uuid }
+        pipelineVersionId: { type: string, format: uuid }
+        environment: { type: string }
+        tenantId: { type: [string, "null"], format: uuid }
+        status: { type: string }
+        deployedBy: { type: [string, "null"], format: uuid }
+        deployedAt: { type: string }
+
+    Execution:
+      type: object
+      description: One pipeline run. `parentExecutionId` is set when the run was invoked as a step by another pipeline (pipeline_call).
+      required: [executionId, tenantId, pipelineId, pipelineVersionId, environment, status, startedAt]
+      properties:
+        executionId: { type: string }
+        tenantId: { type: string, format: uuid }
+        pipelineId: { type: string, format: uuid }
+        pipelineVersionId: { type: string, format: uuid }
+        environment: { type: string }
+        status: { type: string, enum: [running, succeeded, failed, cancelled, denied] }
+        startedAt: { type: string }
+        completedAt: { type: string }
+        input: {}
+        output: {}
+        error: { type: string }
+        actorId: { type: [string, "null"], format: uuid }
+        parentExecutionId:
+          type: [string, "null"]
+          description: Parent run's executionId when invoked as a step; null for a top-level run.
+
+    ExecutionNode:
+      type: object
+      description: Per-node record within an execution's trace.
+      required: [executionId, nodeId, status, startedAt]
+      properties:
+        executionId: { type: string }
+        nodeId: { type: string }
+        status: { type: string, enum: [running, succeeded, failed, skipped] }
+        startedAt: { type: string }
+        completedAt: { type: string }
+        latencyMs: { type: integer }
+
+    User:
+      type: object
+      required: [id, email, status, createdAt, updatedAt]
+      properties:
+        id: { type: string, format: uuid }
+        email: { type: string, format: email }
+        displayName: { type: [string, "null"] }
+        status: { type: string }
+        createdAt: { type: string }
+        updatedAt: { type: string }
+
+    Role:
+      type: object
+      required: [id, name]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        description: { type: [string, "null"] }
+
+    Grant:
+      type: object
+      description: Binds a user to a role at a scope (`g` global, `t/<tenantId>`, `t/<tenantId>/e/<env>`, …).
+      required: [id, userId, role, scope, createdAt]
+      properties:
+        id: { type: string, format: uuid }
+        userId: { type: string, format: uuid }
+        role: { type: string }
+        scope: { type: string }
+        createdAt: { type: string }
+
+    SecretMetadata:
+      type: object
+      description: Secret METADATA only — the value is never returned by any read endpoint.
+      required: [id, key, scope]
+      properties:
+        id: { type: string, format: uuid }
+        key: { type: string }
+        scope: { type: string, enum: [global, tenant, environment] }
+        tenantId: { type: [string, "null"], format: uuid }
+        environment: { type: [string, "null"] }
+        version: { type: integer }
+        createdAt: { type: string }
+        updatedAt: { type: string }
+
+    AuditLog:
+      type: object
+      required: [id, action, targetType, targetId, createdAt]
+      properties:
+        id: { type: string, format: uuid }
+        actorId: { type: [string, "null"], format: uuid }
+        tenantId: { type: [string, "null"], format: uuid }
+        pipelineId: { type: [string, "null"], format: uuid }
+        action: { type: string }
+        targetType: { type: string }
+        targetId: { type: string }
+        beforeRedacted: {}
+        afterRedacted: {}
+        requestId: { type: [string, "null"] }
+        sourceIp: { type: [string, "null"] }
+        userAgent: { type: [string, "null"] }
+        createdAt: { type: string }
+
+    UsageRecord:
+      type: object
+      required: [id, tenantId, inputTokens, outputTokens, embeddingTokens, estimatedCostUsd, success, createdAt]
+      properties:
+        id: { type: string, format: uuid }
+        tenantId: { type: string, format: uuid }
+        pipelineId: { type: [string, "null"], format: uuid }
+        executionId: { type: [string, "null"] }
+        provider: { type: [string, "null"] }
+        model: { type: [string, "null"] }
+        inputTokens: { type: integer }
+        outputTokens: { type: integer }
+        embeddingTokens: { type: integer }
+        estimatedCostUsd: { type: number }
+        latencyMs: { type: [integer, "null"] }
+        success: { type: boolean }
+        createdAt: { type: string }
+
+    ConfigDefinition:
+      type: object
+      description: Declares a config key — its type, where it may be set, and how it validates.
+      required: [key, type, allowedScopes]
+      properties:
+        key: { type: string }
+        type: { type: string }
+        defaultValue: {}
+        allowedScopes: { type: array, items: { type: string } }
+        required: { type: boolean }
+        secret: { type: boolean }
+        sensitive: { type: boolean }
+        overridable: { type: boolean }
+        inherited: { type: boolean }
+        nullable: { type: boolean }
+        tenantOverridable: { type: boolean }
+        runtimeOverridable: { type: boolean }
+        validation: { type: object, additionalProperties: true }
+
+    ConfigValue:
+      type: object
+      description: A config value bound at one scope. Values for `secret` definitions are redacted on read.
+      required: [id, key, scope]
+      properties:
+        id: { type: string, format: uuid }
+        key: { type: string }
+        value: {}
+        scope: { type: string }
+        scopeId: { type: [string, "null"] }
+        locked: { type: boolean }
+        createdBy: { type: [string, "null"], format: uuid }
+        createdAt: { type: string }
+        updatedAt: { type: string }
+
+    IdentityProvider:
+      type: object
+      description: A configured SSO provider (inbound auth). Secrets inside `config` are redacted on read.
+      required: [id, slug, kind, displayName, enabled]
+      properties:
+        id: { type: string, format: uuid }
+        slug: { type: string }
+        kind: { type: string }
+        displayName: { type: string }
+        enabled: { type: boolean }
+        config: { type: object, additionalProperties: true }
+        createdAt: { type: string }
+        updatedAt: { type: string }
+
+    EventSubscription:
+      type: object
+      description: A webhook subscription to platform events (ADR 0036). `secret` is write-only and never returned.
+      required: [id, events, phases, url, active]
+      properties:
+        id: { type: string, format: uuid }
+        tenantId: { type: [string, "null"], format: uuid }
+        events: { type: array, items: { type: string } }
+        phases: { type: array, items: { type: string, enum: [pre, post] } }
+        url: { type: string, format: uri }
+        active: { type: boolean }
+        description: { type: [string, "null"] }
+        createdBy: { type: [string, "null"], format: uuid }
+        createdAt: { type: string }
+
+    WebhookDeliveryFailure:
+      type: object
+      description: A dead-lettered webhook delivery, retained for inspection + replay.
+      required: [id, eventName, url, attempts, failedAt]
+      properties:
+        id: { type: string, format: uuid }
+        tenantId: { type: [string, "null"], format: uuid }
+        subscriptionId: { type: [string, "null"], format: uuid }
+        eventName: { type: string }
+        url: { type: string, format: uri }
+        event: { type: object, additionalProperties: true }
+        lastError: { type: [string, "null"] }
+        attempts: { type: integer }
+        failedAt: { type: string }
+        replayedAt: { type: [string, "null"] }
+
+    PipelineTrigger:
+      type: object
+      description: A webhook trigger. The token is returned ONCE at creation; only its prefix + hash are stored.
+      required: [id, tenantId, pipelineId, environment, name, prefix, enabled]
+      properties:
+        id: { type: string, format: uuid }
+        tenantId: { type: string, format: uuid }
+        pipelineId: { type: string, format: uuid }
+        environment: { type: string }
+        activationLabel: { type: [string, "null"] }
+        name: { type: string }
+        prefix: { type: string }
+        enabled: { type: boolean }
+        createdBy: { type: [string, "null"], format: uuid }
+        createdAt: { type: string }
+
+    ExecutionAccepted:
+      type: object
+      description: Async run acknowledgement — the run is queued, poll `/api/executions/{id}` for terminal state.
+      required: [executionId, pipelineId]
+      properties:
+        executionId: { type: string }
+        jobId: { type: string }
+        pipelineId: { type: string, format: uuid }
+        pipelineVersionId: { type: string, format: uuid }
+        version: { type: string }
+        environment: { type: string }
+        status: { type: string }
+        resolvedVia: { type: string }
+        activationLabel: { type: string }
+
+    PipelineValidationResult:
+      type: object
+      description: "Spec validation outcome. `valid: false` carries the per-issue list."
+      required: [valid]
+      properties:
+        valid: { type: boolean }
+        errors:
+          type: array
+          items:
+            type: object
+            properties:
+              message: { type: string }
+              path: { type: string }
+              nodeId: { type: string }
+
+    AuthSettings:
+      type: object
+      required: [signupMode]
+      properties:
+        signupMode: { type: string, enum: [admin_only, open_default_role, open_no_access] }
+        defaultRole: { type: [string, "null"] }
+
+    Principal:
+      type: object
+      description: The resolved caller identity + effective permissions for this request.
+      properties:
+        id: { type: string }
+        type: { type: string, enum: [user, service, api_key] }
+        tenantId: { type: [string, "null"], format: uuid }
+        roles: { type: array, items: { type: string } }
+
+    Provider:
+      type: object
+      description: A registered LLM / embedding provider.
+      required: [id]
+      properties:
+        id: { type: string }
+        displayName: { type: string }
+        kinds: { type: array, items: { type: string } }
+
   securitySchemes:
     bearerAuth:
       type: http
@@ -615,25 +927,54 @@ paths:
       summary: Liveness probe (public, unauthenticated)
       security: []
       responses:
-        "200": { description: Alive }
+        "200":
+          description: "Alive"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string }
   /readyz:
     get:
       summary: Readiness probe (public, unauthenticated)
       security: []
       responses:
-        "200": { description: Ready }
+        "200":
+          description: "Ready"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string }
+                  checks: { type: object, additionalProperties: true }
 
   /api/tenants:
     get:
       summary: List tenants (platform_admin sees all; others see own tenant)
       responses:
-        "200": { description: Tenant list }
+        "200":
+          description: "Tenant list"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  tenants: { type: array, items: { $ref: "#/components/schemas/Tenant" } }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
     post:
       summary: Create tenant
       responses:
-        "201": { description: Created }
+        "201":
+          description: "Created"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  tenant: { $ref: "#/components/schemas/Tenant" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "409": { $ref: "#/components/responses/Conflict" }
@@ -647,13 +988,27 @@ paths:
     get:
       summary: Get tenant
       responses:
-        "200": { description: Tenant }
+        "200":
+          description: "Tenant"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  tenant: { $ref: "#/components/schemas/Tenant" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
     put:
       summary: Update tenant
       responses:
-        "200": { description: Updated }
+        "200":
+          description: "Updated"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  tenant: { $ref: "#/components/schemas/Tenant" }
         "404": { $ref: "#/components/responses/NotFound" }
         "422": { $ref: "#/components/responses/ValidationFailed" }
     delete:
@@ -676,7 +1031,14 @@ paths:
     get:
       summary: List pipelines
       responses:
-        "200": { description: Pipeline list }
+        "200":
+          description: "Pipeline list"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  pipelines: { type: array, items: { $ref: "#/components/schemas/Pipeline" } }
         "401": { $ref: "#/components/responses/Unauthorized" }
     post:
       summary: Create pipeline (optionally inside a folder)
@@ -700,6 +1062,12 @@ paths:
           description: >-
             Created. The pipeline response now also carries folderId and
             latestVersionId (both null until set via /folder or /save).
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  pipeline: { $ref: "#/components/schemas/Pipeline" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
         "409": { $ref: "#/components/responses/Conflict" }
@@ -716,13 +1084,27 @@ paths:
     get:
       summary: Get pipeline (by id or slug)
       responses:
-        "200": { description: Pipeline }
+        "200":
+          description: "Pipeline"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  pipeline: { $ref: "#/components/schemas/Pipeline" }
         "400": { $ref: "#/components/responses/InvalidIdentifier" }
         "404": { $ref: "#/components/responses/PipelineNotFound" }
     put:
       summary: Update pipeline (by id or slug)
       responses:
-        "200": { description: Updated }
+        "200":
+          description: "Updated"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  pipeline: { $ref: "#/components/schemas/Pipeline" }
         "400": { $ref: "#/components/responses/InvalidIdentifier" }
         "404": { $ref: "#/components/responses/PipelineNotFound" }
     delete:
@@ -834,7 +1216,14 @@ paths:
               properties:
                 folderId: { type: [string, "null"] }
       responses:
-        "200": { description: Pipeline (with updated folderId) }
+        "200":
+          description: "Pipeline (with updated folderId)"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  pipeline: { $ref: "#/components/schemas/Pipeline" }
         "400": { $ref: "#/components/responses/InvalidIdentifier" }
         "404": { $ref: "#/components/responses/PipelineNotFound" }
         "422": { $ref: "#/components/responses/ValidationFailed" }
@@ -851,7 +1240,12 @@ paths:
         dataset's connection is a different kind) at validate time
         instead of at run time.
       responses:
-        "200": { description: PipelineValidationResult }
+        "200":
+          description: "PipelineValidationResult"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PipelineValidationResult"
         "422": { $ref: "#/components/responses/ValidationFailed" }
   /api/pipelines/{pipeline_id}/validation:
     parameters:
@@ -877,6 +1271,17 @@ paths:
             { pipelineId, pipelineSlug, version, versionId, valid, errors,
             warnings, requiredSecrets, requiredConfig, missingPlugins,
             datasetSlots }
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  pipelineId: { type: string, format: uuid }
+                  pipelineSlug: { type: string }
+                  version: { type: string }
+                  versionId: { type: string, format: uuid }
+                  valid: { type: boolean }
+                  errors: { type: array, items: { type: object, additionalProperties: true } }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404":
@@ -914,8 +1319,22 @@ paths:
         version returns 409 immutable_version. (Back-compat route; new clients
         should prefer POST /save for auto-versioned saves.)
       responses:
-        "201": { description: Draft created / version published }
-        "200": { description: Idempotent republish or draft re-save }
+        "201":
+          description: "Draft created / version published"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  version: { $ref: "#/components/schemas/PipelineVersion" }
+        "200":
+          description: "Idempotent republish or draft re-save"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  version: { $ref: "#/components/schemas/PipelineVersion" }
         "400": { $ref: "#/components/responses/InvalidIdentifier" }
         "404": { $ref: "#/components/responses/PipelineNotFound" }
         "409": { $ref: "#/components/responses/Conflict" }
@@ -1063,7 +1482,14 @@ paths:
     post:
       summary: Archive a pipeline version (pipeline by id or slug)
       responses:
-        "200": { description: Archived version }
+        "200":
+          description: "Archived version"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  version: { $ref: "#/components/schemas/PipelineVersion" }
         "400": { $ref: "#/components/responses/InvalidIdentifier" }
         "404": { $ref: "#/components/responses/PipelineNotFound" }
   /api/pipelines/{pipeline_id}/versions/{version}/export:
@@ -1079,7 +1505,14 @@ paths:
     get:
       summary: Export a version spec as json or yaml (pipeline by id or slug)
       responses:
-        "200": { description: Serialized spec }
+        "200":
+          description: "Serialized spec"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  spec: { type: object, additionalProperties: true }
         "400": { $ref: "#/components/responses/InvalidIdentifier" }
         "404": { $ref: "#/components/responses/PipelineNotFound" }
   /api/pipelines/{pipeline_id}/deployments:
@@ -1088,13 +1521,27 @@ paths:
     get:
       summary: List deployments (pipeline by id or slug)
       responses:
-        "200": { description: Deployment list }
+        "200":
+          description: "Deployment list"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  deployments: { type: array, items: { $ref: "#/components/schemas/PipelineDeployment" } }
         "400": { $ref: "#/components/responses/InvalidIdentifier" }
         "404": { $ref: "#/components/responses/PipelineNotFound" }
     post:
       summary: Deploy a published version (optionally tenant-scoped; pipeline by id or slug)
       responses:
-        "201": { description: Deployment created }
+        "201":
+          description: "Deployment created"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  deployment: { $ref: "#/components/schemas/PipelineDeployment" }
         "400": { $ref: "#/components/responses/InvalidIdentifier" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/PipelineNotFound" }
@@ -1180,6 +1627,10 @@ paths:
             pipelineVersionId, version, status:"accepted", resolvedVia
             ("activation" | "deployment"), and activationLabel when resolved
             via an activation.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ExecutionAccepted"
         "400": { $ref: "#/components/responses/InvalidIdentifier" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/PipelineNotFound" }
@@ -1191,7 +1642,14 @@ paths:
     post:
       summary: Enqueue an ingest_datasource job for the deployed version (pipeline by id or slug)
       responses:
-        "202": { description: Ingestion accepted (jobId) }
+        "202":
+          description: "Ingestion accepted (jobId)"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  jobId: { type: string }
         "400": { $ref: "#/components/responses/InvalidIdentifier" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/PipelineNotFound" }
@@ -1289,7 +1747,14 @@ paths:
         Create a Dataset at one of three scopes (global / tenant /
         environment). Caller needs `dataset:admin` at the target scope.
       responses:
-        "201": { description: Created }
+        "201":
+          description: "Created"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  dataset: { $ref: "#/components/schemas/Dataset" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "409": { $ref: "#/components/responses/Conflict" }
@@ -1315,7 +1780,14 @@ paths:
         bindings) or toggle archived. Caller needs `dataset:admin` at
         the dataset's scope.
       responses:
-        "200": { description: Updated }
+        "200":
+          description: "Updated"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  dataset: { $ref: "#/components/schemas/Dataset" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
         "422": { $ref: "#/components/responses/ValidationFailed" }
@@ -1362,7 +1834,14 @@ paths:
         Cut a new version. First version auto-pins `currentVersionId`
         and creates the `stable` alias.
       responses:
-        "201": { description: Version created }
+        "201":
+          description: "Version created"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  version: { $ref: "#/components/schemas/DatasetVersion" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
   /api/datasets/{id}/aliases/{alias}:
@@ -1380,7 +1859,14 @@ paths:
         Atomically retarget an alias to a different version of the
         same dataset (canary rollout).
       responses:
-        "200": { description: Alias retargeted }
+        "200":
+          description: "Alias retargeted"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  alias: { $ref: "#/components/schemas/DatasetAlias" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
         "422": { $ref: "#/components/responses/ValidationFailed" }
@@ -1509,7 +1995,14 @@ paths:
         Update a Connection's metadata / config / secret pointer /
         SSRF allowlist. Caller needs `connection:admin` at the row's scope.
       responses:
-        "200": { description: Updated }
+        "200":
+          description: "Updated"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  connection: { $ref: "#/components/schemas/Connection" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
         "422": { $ref: "#/components/responses/ValidationFailed" }
@@ -1609,7 +2102,14 @@ paths:
     patch:
       summary: Update an override's `datasetSlug` / `datasetAlias`.
       responses:
-        "200": { description: Updated }
+        "200":
+          description: "Updated"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  binding: { $ref: "#/components/schemas/DatasetBindingOverride" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
         "422": { $ref: "#/components/responses/ValidationFailed" }
@@ -1663,7 +2163,16 @@ paths:
                 pipelineId: { type: string }
                 environment: { type: string, default: dev }
       responses:
-        "201": { description: "Association created (enabled true)" }
+        "201":
+          description: "Association created (enabled true)"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  tenantId: { type: string, format: uuid }
+                  pipelineId: { type: string, format: uuid }
+                  enabled: { type: boolean }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
         "422": { $ref: "#/components/responses/ValidationFailed" }
@@ -1690,7 +2199,16 @@ paths:
                 enabled: { type: boolean }
                 environment: { type: string, default: dev }
       responses:
-        "200": { description: Association updated }
+        "200":
+          description: "Association updated"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  tenantId: { type: string, format: uuid }
+                  pipelineId: { type: string, format: uuid }
+                  enabled: { type: boolean }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
         "422": { $ref: "#/components/responses/ValidationFailed" }
@@ -1921,7 +2439,14 @@ paths:
     get:
       summary: List config definitions
       responses:
-        "200": { description: Definition list }
+        "200":
+          description: "Definition list"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  definitions: { type: array, items: { $ref: "#/components/schemas/ConfigDefinition" } }
   /api/config/definitions/{key}:
     put:
       summary: Upsert a config definition
@@ -1931,8 +2456,22 @@ paths:
           required: true
           schema: { type: string }
       responses:
-        "200": { description: Updated }
-        "201": { description: Created }
+        "200":
+          description: "Updated"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  definition: { $ref: "#/components/schemas/ConfigDefinition" }
+        "201":
+          description: "Created"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  definition: { $ref: "#/components/schemas/ConfigDefinition" }
         "422": { $ref: "#/components/responses/ValidationFailed" }
     delete:
       summary: Delete a config definition
@@ -1967,13 +2506,27 @@ paths:
           description: camelCase alias of scope_id.
           schema: { type: string }
       responses:
-        "200": { description: Config value list }
+        "200":
+          description: "Config value list"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  values: { type: array, items: { $ref: "#/components/schemas/ConfigValue" } }
     post:
       summary: >-
         Upsert a config value. The required permission is chosen from the scope
         (config:edit_global / config:edit_tenant / config:edit_pipeline).
       responses:
-        "201": { description: Upserted (value redacted in response) }
+        "201":
+          description: "Upserted (value redacted in response)"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  value: { $ref: "#/components/schemas/ConfigValue" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "422": { $ref: "#/components/responses/ValidationFailed" }
   /api/config/values/{id}:
@@ -2007,7 +2560,16 @@ paths:
           required: true
           schema: { type: string }
       responses:
-        "200": { description: ResolvedConfig with explanations + violations }
+        "200":
+          description: "ResolvedConfig with explanations + violations"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  values: { type: object, additionalProperties: true }
+                  explanations: { type: object, additionalProperties: true }
+                  violations: { type: array, items: { type: object, additionalProperties: true } }
         "403": { $ref: "#/components/responses/Forbidden" }
         "422": { $ref: "#/components/responses/ValidationFailed" }
 
@@ -2015,12 +2577,26 @@ paths:
     get:
       summary: List secret metadata only (value always REDACTED)
       responses:
-        "200": { description: Redacted secret metadata }
+        "200":
+          description: "Redacted secret metadata"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  secrets: { type: array, items: { $ref: "#/components/schemas/SecretMetadata" } }
         "403": { $ref: "#/components/responses/Forbidden" }
     post:
       summary: Create a secret via DatabaseEncryptedSecretProvider
       responses:
-        "201": { description: Created (value REDACTED, never plaintext) }
+        "201":
+          description: "Created (value REDACTED"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  secret: { $ref: "#/components/schemas/SecretMetadata" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "422": { $ref: "#/components/responses/ValidationFailed" }
   /api/secrets/{id}:
@@ -2032,7 +2608,14 @@ paths:
     put:
       summary: Rotate a secret (returns new version, value REDACTED)
       responses:
-        "200": { description: Rotated }
+        "200":
+          description: "Rotated"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  secret: { $ref: "#/components/schemas/SecretMetadata" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "422": { $ref: "#/components/responses/ValidationFailed" }
     delete:
@@ -2046,7 +2629,14 @@ paths:
     get:
       summary: List executions (tenant-scoped for non platform_admin)
       responses:
-        "200": { description: Execution list }
+        "200":
+          description: "Execution list"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  executions: { type: array, items: { $ref: "#/components/schemas/Execution" } }
   /api/executions/{execution_id}:
     get:
       summary: Get an execution
@@ -2056,7 +2646,14 @@ paths:
           required: true
           schema: { type: string }
       responses:
-        "200": { description: Execution record }
+        "200":
+          description: "Execution record"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  execution: { $ref: "#/components/schemas/Execution" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
   /api/executions/{execution_id}/trace:
@@ -2068,7 +2665,15 @@ paths:
           required: true
           schema: { type: string }
       responses:
-        "200": { description: Trace events }
+        "200":
+          description: "Trace events"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  execution: { $ref: "#/components/schemas/Execution" }
+                  nodes: { type: array, items: { $ref: "#/components/schemas/ExecutionNode" } }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
 
@@ -2294,7 +2899,14 @@ paths:
               properties:
                 retentionDays: { type: [integer, "null"], minimum: 1 }
       responses:
-        "200": { description: Updated }
+        "200":
+          description: "Updated"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  setting: { $ref: "#/components/schemas/RetentionSetting" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
         "422": { $ref: "#/components/responses/ValidationFailed" }
@@ -2310,7 +2922,15 @@ paths:
           in: query
           schema: { type: integer }
       responses:
-        "200": { description: Audit log list }
+        "200":
+          description: "Audit log list"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  logs: { type: array, items: { $ref: "#/components/schemas/AuditLog" } }
+                  nextCursor: { type: [string, "null"] }
         "403": { $ref: "#/components/responses/Forbidden" }
   /api/usage:
     get:
@@ -2323,7 +2943,15 @@ paths:
           in: query
           schema: { type: string }
       responses:
-        "200": { description: Usage summary }
+        "200":
+          description: "Usage summary"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  records: { type: array, items: { $ref: "#/components/schemas/UsageRecord" } }
+                  totals: { type: object, additionalProperties: true }
   /api/plugins:
     get:
       summary: List plugins from the loaded plugin registry
@@ -2477,7 +3105,14 @@ paths:
         ids (`builtin`, `sample-text`) refused — they're safety-net
         rows.
       responses:
-        "200": { description: Deleted }
+        "200":
+          description: "Deleted"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  deleted: { type: boolean }
         "400": { description: Reserved id }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
@@ -2506,7 +3141,14 @@ paths:
     get:
       summary: List providers from the loaded provider registry
       responses:
-        "200": { description: Provider list }
+        "200":
+          description: "Provider list"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  providers: { type: array, items: { $ref: "#/components/schemas/Provider" } }
   /api/providers/{id}/models:
     get:
       summary: List a provider's model catalog
@@ -2516,7 +3158,14 @@ paths:
           required: true
           schema: { type: string }
       responses:
-        "200": { description: Model catalog }
+        "200":
+          description: "Model catalog"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  models: { type: array, items: { type: object, additionalProperties: true } }
         "404": { $ref: "#/components/responses/NotFound" }
 
   # --- Personal API keys (ADR-0017) ---
@@ -2598,7 +3247,15 @@ paths:
                 email: { type: string }
                 password: { type: string }
       responses:
-        "200": { description: "{ token, user }" }
+        "200":
+          description: "{ token, user }"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  token: { type: string }
+                  user: { $ref: "#/components/schemas/User" }
         "401": { description: Invalid credentials }
         "403": { description: Account disabled }
   /api/auth/signup:
@@ -2619,7 +3276,15 @@ paths:
                 password: { type: string }
                 displayName: { type: string }
       responses:
-        "201": { description: "{ token, user }" }
+        "201":
+          description: "{ token, user }"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  token: { type: string }
+                  user: { $ref: "#/components/schemas/User" }
         "403": { description: Signup disabled }
         "409": { description: Email already in use }
         "422": { description: Weak password }
@@ -2632,7 +3297,17 @@ paths:
     get:
       summary: Current principal, linked user, scoped grants, and effective permissions.
       responses:
-        "200": { description: "{ principal, user, grants, permissions }" }
+        "200":
+          description: "{ principal, user, grants, permissions }"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  principal: { $ref: "#/components/schemas/Principal" }
+                  user: { $ref: "#/components/schemas/User" }
+                  grants: { type: array, items: { $ref: "#/components/schemas/Grant" } }
+                  permissions: { type: array, items: { type: string } }
         "401": { $ref: "#/components/responses/Unauthorized" }
     patch:
       summary: >-
@@ -2649,7 +3324,14 @@ paths:
                 displayName: { type: string }
                 preferences: { type: object }
       responses:
-        "200": { description: Updated }
+        "200":
+          description: "Updated"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  user: { $ref: "#/components/schemas/User" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { description: "API-key principals have no editable profile" }
         "422": { $ref: "#/components/responses/ValidationFailed" }
@@ -2678,7 +3360,14 @@ paths:
       summary: Enabled SSO providers for the login page (public).
       security: []
       responses:
-        "200": { description: "{ providers: [{ slug, kind, displayName }] }" }
+        "200":
+          description: "{ providers: [{ slug, kind, displayName }] }"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  providers: { type: array, items: { type: object, properties: { slug: { type: string }, kind: { type: string }, displayName: { type: string } } } }
   /api/auth/sso/{slug}/start:
     get:
       summary: Begin SSO (302 to the IdP). Public.
@@ -2711,7 +3400,14 @@ paths:
     get:
       summary: Read instance auth settings (permission auth:settings).
       responses:
-        "200": { description: "{ settings: { signupMode, defaultRole } }" }
+        "200":
+          description: "{ settings: { signupMode, defaultRole } }"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  settings: { $ref: "#/components/schemas/AuthSettings" }
         "403": { $ref: "#/components/responses/Forbidden" }
     put:
       summary: Update signup mode / default role (permission auth:settings).
@@ -2728,13 +3424,27 @@ paths:
                   enum: [admin_only, open_default_role, open_no_access]
                 defaultRole: { type: string, nullable: true }
       responses:
-        "200": { description: Updated settings }
+        "200":
+          description: "Updated settings"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  settings: { $ref: "#/components/schemas/AuthSettings" }
         "403": { $ref: "#/components/responses/Forbidden" }
   /api/users:
     get:
       summary: List users (permission user:manage).
       responses:
-        "200": { description: "{ users }" }
+        "200":
+          description: "{ users }"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  users: { type: array, items: { $ref: "#/components/schemas/User" } }
         "403": { $ref: "#/components/responses/Forbidden" }
     post:
       summary: Provision a user (permission user:manage). Omit password for SSO-only.
@@ -2751,7 +3461,14 @@ paths:
                 displayName: { type: string }
                 status: { type: string, enum: [active, disabled] }
       responses:
-        "201": { description: Created user }
+        "201":
+          description: "Created user"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  user: { $ref: "#/components/schemas/User" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "409": { description: Email exists }
   /api/users/{id}:
@@ -2760,7 +3477,14 @@ paths:
       parameters:
         - { name: id, in: path, required: true, schema: { type: string } }
       responses:
-        "200": { description: Updated user }
+        "200":
+          description: "Updated user"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  user: { $ref: "#/components/schemas/User" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
     delete:
@@ -2776,7 +3500,14 @@ paths:
       parameters:
         - { name: id, in: path, required: true, schema: { type: string } }
       responses:
-        "200": { description: "{ grants }" }
+        "200":
+          description: "{ grants }"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  grants: { type: array, items: { $ref: "#/components/schemas/Grant" } }
         "403": { $ref: "#/components/responses/Forbidden" }
     post:
       summary: >-
@@ -2800,7 +3531,14 @@ paths:
                 environment: { type: string }
                 pipelineId: { type: string }
       responses:
-        "201": { description: Created grant }
+        "201":
+          description: "Created grant"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  grant: { $ref: "#/components/schemas/Grant" }
         "403": { $ref: "#/components/responses/Forbidden" }
   /api/users/{id}/grants/{grantId}:
     delete:
@@ -2816,12 +3554,27 @@ paths:
     get:
       summary: Roles, their permissions, and the full permission catalog (role:manage).
       responses:
-        "200": { description: "{ roles, allPermissions }" }
+        "200":
+          description: "{ roles, allPermissions }"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  roles: { type: array, items: { $ref: "#/components/schemas/Role" } }
+                  allPermissions: { type: array, items: { type: string } }
         "403": { $ref: "#/components/responses/Forbidden" }
     post:
       summary: Create a custom role (permission role:manage).
       responses:
-        "201": { description: Created role }
+        "201":
+          description: "Created role"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  role: { $ref: "#/components/schemas/Role" }
         "403": { $ref: "#/components/responses/Forbidden" }
   /api/roles/{name}/permissions:
     put:
@@ -2838,7 +3591,15 @@ paths:
               properties:
                 permissions: { type: array, items: { type: string } }
       responses:
-        "200": { description: Updated }
+        "200":
+          description: "Updated"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  role: { $ref: "#/components/schemas/Role" }
+                  permissions: { type: array, items: { type: string } }
         "403": { $ref: "#/components/responses/Forbidden" }
   /api/roles/{name}:
     delete:
@@ -2865,12 +3626,26 @@ paths:
     get:
       summary: List SSO connections; secrets redacted (permission idp:manage).
       responses:
-        "200": { description: "{ providers }" }
+        "200":
+          description: "{ providers }"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  providers: { type: array, items: { $ref: "#/components/schemas/IdentityProvider" } }
         "403": { $ref: "#/components/responses/Forbidden" }
     post:
       summary: Create an OIDC/SAML connection (permission idp:manage).
       responses:
-        "201": { description: Created }
+        "201":
+          description: "Created"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  provider: { $ref: "#/components/schemas/IdentityProvider" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "409": { description: Slug exists }
   /api/identity-providers/{id}:
@@ -2879,7 +3654,14 @@ paths:
       parameters:
         - { name: id, in: path, required: true, schema: { type: string } }
       responses:
-        "200": { description: Updated }
+        "200":
+          description: "Updated"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  provider: { $ref: "#/components/schemas/IdentityProvider" }
         "403": { $ref: "#/components/responses/Forbidden" }
     delete:
       summary: Delete a connection (permission idp:manage).
@@ -2894,7 +3676,14 @@ paths:
         List the caller tenant's platform-event webhook subscriptions;
         signing secret redacted (permission config:edit_tenant). ADR 0036.
       responses:
-        "200": { description: "{ subscriptions }" }
+        "200":
+          description: "{ subscriptions }"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  subscriptions: { type: array, items: { $ref: "#/components/schemas/EventSubscription" } }
         "403": { $ref: "#/components/responses/Forbidden" }
         "501": { description: Subscriptions not configured (no repository) }
     post:
@@ -2924,7 +3713,14 @@ paths:
                 description: { type: string }
                 active: { type: boolean, default: true }
       responses:
-        "201": { description: "{ subscription }" }
+        "201":
+          description: "{ subscription }"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  subscription: { $ref: "#/components/schemas/EventSubscription" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "422": { description: "events (non-empty string[]) + http(s) url required" }
         "501": { description: Subscriptions not configured }
@@ -2943,7 +3739,14 @@ paths:
         List dead-lettered webhook deliveries (deliveries that exhausted
         their retries), for inspection + replay (config:edit_tenant).
       responses:
-        "200": { description: "{ failures }" }
+        "200":
+          description: "{ failures }"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  failures: { type: array, items: { $ref: "#/components/schemas/WebhookDeliveryFailure" } }
         "403": { $ref: "#/components/responses/Forbidden" }
         "501": { description: DLQ not configured }
   /api/event-subscriptions/failures/{id}/replay:
@@ -2955,7 +3758,14 @@ paths:
       parameters:
         - { name: id, in: path, required: true, schema: { type: string } }
       responses:
-        "200": { description: "{ replayed: true }" }
+        "200":
+          description: "{ replayed: true }"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  replayed: { type: boolean }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
         "502": { description: Replay delivery failed }
@@ -2965,7 +3775,14 @@ paths:
       parameters:
         - { name: id, in: path, required: true, schema: { type: string } }
       responses:
-        "200": { description: "{ triggers }" }
+        "200":
+          description: "{ triggers }"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  triggers: { type: array, items: { $ref: "#/components/schemas/PipelineTrigger" } }
         "403": { $ref: "#/components/responses/Forbidden" }
     post:
       summary: >-
@@ -2988,6 +3805,14 @@ paths:
       responses:
         "201":
           description: "{ trigger, token, url }"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  trigger: { $ref: "#/components/schemas/PipelineTrigger" }
+                  token: { type: string, description: "Full token — returned ONCE, at creation." }
+                  url: { type: string, format: uri }
         "403": { $ref: "#/components/responses/Forbidden" }
   /api/triggers/{id}:
     delete:
@@ -3007,7 +3832,17 @@ paths:
       parameters:
         - { name: token, in: path, required: true, schema: { type: string } }
       responses:
-        "202": { description: "{ executionId, pipelineId, version, status }" }
+        "202":
+          description: "{ executionId, pipelineId, version, status }"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  executionId: { type: string }
+                  pipelineId: { type: string, format: uuid }
+                  version: { type: string }
+                  status: { type: string }
         "401": { description: Invalid / revoked / disabled token }
         "404": { $ref: "#/components/responses/NotFound" }
   /mcp:
@@ -3018,4 +3853,14 @@ paths:
         REST API surface; tool calls re-enter the same RBAC path as direct
         HTTP. Stateless (one server + transport per request).
       responses:
-        "200": { description: MCP response (JSON-RPC / SSE-style) }
+        "200":
+          description: "MCP response (JSON-RPC / SSE-style)"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  jsonrpc: { type: string }
+                  id: {}
+                  result: { type: object, additionalProperties: true }
+                  error: { type: object, additionalProperties: true }
