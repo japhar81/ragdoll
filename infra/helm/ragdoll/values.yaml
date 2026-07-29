@@ -303,6 +303,14 @@ nats:
   # NATS+JetStream (e.g. nats://my-nats:4222). The bundled NATS lives at
   # `nats://<release>-nats:4222` cluster-internally.
   url: ""
+  # Credentials for an auth-required external broker. Set as needed; they land
+  # in the generated Secret as NATS_USER / NATS_PASSWORD / NATS_TOKEN and the
+  # client reads them directly (no need to embed them in `url`). The bundled
+  # NATS runs without auth, so leave these empty when bundlednats.enabled=true.
+  # For JWT/nkey auth, mount a `.creds` file and set NATS_CREDS on the pod.
+  user: ""
+  password: ""
+  token: ""
 
 opensearch:
   # Used when bundledopensearch.enabled is false. The bundled

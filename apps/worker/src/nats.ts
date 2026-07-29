@@ -101,6 +101,121 @@ export interface NatsQueueOptions {
   /** Default attempts when a job doesn't carry its own. */
   attempts?: number;
   backoffMs?: number;
+  /** Logs a `nats_connect_failed` line when a connection attempt is rejected
+   *  (auth/reachability), so the failure lands in the log stream instead of
+   *  only surfacing lazily via /readyz's queue check. */
+  logger?: StructuredLogger;
+}
+
+// ---------------------------------------------------------------------------
+// Connection auth + resilience.
+// ---------------------------------------------------------------------------
+
+/** The credential env vars an operator sets as a Secret. Read here so they
+ *  don't have to be embedded in NATS_URL. */
+export interface NatsAuthEnv {
+  NATS_USER?: string;
+  NATS_PASSWORD?: string;
+  NATS_TOKEN?: string;
+  /** Path to a JWT/nkey `.creds` file (mounted from a Secret). */
+  NATS_CREDS?: string;
+}
+
+/** Minimal transport surface we depend on — lets tests inject a fake. */
+export interface NatsTransportLike {
+  connect: (opts: Record<string, unknown>) => Promise<unknown>;
+  credsAuthenticator?: (creds: Uint8Array) => unknown;
+}
+
+/**
+ * Layer NATS credentials from the environment onto base connect options.
+ * Pure + synchronous for the common cases (user/pass, token).
+ *
+ * Why this exists: the client used to pass only `{ servers }`, so operators who
+ * set NATS_USER / NATS_PASSWORD as separate Secret env vars (the natural thing)
+ * had them silently ignored — every auth-required server rejected the anonymous
+ * connection. Credentials already embedded in NATS_URL keep working; env values
+ * layer on top only when present.
+ */
+export function withNatsAuth(
+  base: Record<string, unknown>,
+  env: NatsAuthEnv = process.env
+): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...base };
+  const user = env.NATS_USER?.trim();
+  if (user) {
+    out.user = user;
+    // A password can legitimately contain leading/trailing whitespace — never
+    // trim it; only require that the variable is present.
+    if (env.NATS_PASSWORD != null) out.pass = env.NATS_PASSWORD;
+  }
+  const token = env.NATS_TOKEN?.trim();
+  if (token) out.token = token;
+  return out;
+}
+
+/**
+ * Connect to NATS with env-sourced credentials, logging (and rethrowing) on
+ * failure. NATS_CREDS (a JWT/nkey creds FILE) is resolved here since it needs
+ * an fs read + the authenticator. The error message (e.g.
+ * "AUTHORIZATION_VIOLATION") is logged; the credential itself never is.
+ */
+export async function connectNats(
+  transport: NatsTransportLike,
+  base: { servers: string; name: string },
+  deps: { logger?: StructuredLogger; env?: NatsAuthEnv } = {}
+): Promise<any> {
+  const env = deps.env ?? process.env;
+  const opts = withNatsAuth({ ...base }, env);
+  const credsPath = env.NATS_CREDS?.trim();
+  if (credsPath && transport.credsAuthenticator) {
+    const { readFileSync } = await import("node:fs");
+    opts.authenticator = transport.credsAuthenticator(
+      new TextEncoder().encode(readFileSync(credsPath, "utf8"))
+    );
+  }
+  try {
+    return await transport.connect(opts);
+  } catch (e) {
+    deps.logger?.warn?.("nats_connect_failed", {
+      client: base.name,
+      error: e instanceof Error ? e.message : String(e)
+    });
+    throw e;
+  }
+}
+
+/**
+ * A memoized async value that SELF-HEALS: if the underlying promise rejects,
+ * the cache is dropped so the next `get()` retries.
+ *
+ * Plain promise memoization (`this.p ??= factory()`) caches a REJECTION
+ * forever — a single failed NATS connect at boot would wedge the queue (and
+ * therefore /readyz) until the pod restarted, even after the server recovered.
+ * A successful value is cached normally; concurrent callers share one in-flight
+ * attempt.
+ */
+export class RetryableLazy<T> {
+  private promise?: Promise<T>;
+  private readonly factory: () => Promise<T>;
+  constructor(factory: () => Promise<T>) {
+    this.factory = factory;
+  }
+  get(): Promise<T> {
+    let p = this.promise;
+    if (!p) {
+      p = this.factory();
+      this.promise = p;
+      p.catch(() => {
+        if (this.promise === p) this.promise = undefined;
+      });
+    }
+    return p;
+  }
+  /** The cached promise if one exists, without creating it (for teardown). */
+  peek(): Promise<T> | undefined {
+    return this.promise;
+  }
 }
 
 /**
@@ -114,52 +229,50 @@ export interface NatsQueueOptions {
  */
 export class NatsJetStreamQueue implements QueuePort {
   private options: NatsQueueOptions;
-  private connPromise?: Promise<{ transport: AnyModule; js: AnyModule; nc: any }>;
-  private jsClientPromise?: Promise<any>;
-  private streamReady?: Promise<void>;
+  // Self-healing lazies: a failed connect (auth/reachability) drops the cache
+  // so the next call — e.g. the next /readyz probe — retries instead of
+  // replaying the rejection until the pod restarts.
+  private readonly connLazy: RetryableLazy<{ transport: AnyModule; js: AnyModule; nc: any }>;
+  private readonly jsClientLazy: RetryableLazy<any>;
+  private readonly streamLazy: RetryableLazy<void>;
 
   constructor(options: NatsQueueOptions) {
     this.options = options;
+    this.connLazy = new RetryableLazy(async () => {
+      const transport = (await import("@nats-io/transport-node")) as AnyModule;
+      const js = (await import("@nats-io/jetstream")) as AnyModule;
+      const nc = await connectNats(
+        transport as NatsTransportLike,
+        { servers: this.options.natsUrl, name: "ragdoll-producer" },
+        { logger: this.options.logger }
+      );
+      return { transport, js, nc };
+    });
+    this.jsClientLazy = new RetryableLazy(async () => {
+      const { js, nc } = await this.connLazy.get();
+      return js.jetstream(nc);
+    });
+    this.streamLazy = new RetryableLazy(async () => {
+      const { js, nc } = await this.connLazy.get();
+      const jsm = await js.jetstreamManager(nc);
+      await ensureJobStream(jsm, js, this.name);
+    });
   }
 
   private get name(): string {
     return this.options.queueName ?? DEFAULT_QUEUE_NAME;
   }
 
-  private async conn(): Promise<{ transport: AnyModule; js: AnyModule; nc: any }> {
-    if (!this.connPromise) {
-      this.connPromise = (async () => {
-        const transport = (await import("@nats-io/transport-node")) as AnyModule;
-        const js = (await import("@nats-io/jetstream")) as AnyModule;
-        const nc = await transport.connect({
-          servers: this.options.natsUrl,
-          name: "ragdoll-producer"
-        });
-        return { transport, js, nc };
-      })();
-    }
-    return this.connPromise;
+  private conn(): Promise<{ transport: AnyModule; js: AnyModule; nc: any }> {
+    return this.connLazy.get();
   }
 
-  private async jsClient(): Promise<any> {
-    if (!this.jsClientPromise) {
-      this.jsClientPromise = (async () => {
-        const { js, nc } = await this.conn();
-        return js.jetstream(nc);
-      })();
-    }
-    return this.jsClientPromise;
+  private jsClient(): Promise<any> {
+    return this.jsClientLazy.get();
   }
 
-  private async ensureStream(): Promise<void> {
-    if (!this.streamReady) {
-      this.streamReady = (async () => {
-        const { js, nc } = await this.conn();
-        const jsm = await js.jetstreamManager(nc);
-        await ensureJobStream(jsm, js, this.name);
-      })();
-    }
-    return this.streamReady;
+  private ensureStream(): Promise<void> {
+    return this.streamLazy.get();
   }
 
   async enqueue<T>(job: QueueJob<T>): Promise<void> {
@@ -204,9 +317,13 @@ export class NatsJetStreamQueue implements QueuePort {
   }
 
   async close(): Promise<void> {
-    if (this.connPromise) {
-      const { nc } = await this.connPromise;
+    const cached = this.connLazy.peek();
+    if (!cached) return; // never connected → nothing to drain
+    try {
+      const { nc } = await cached;
       await nc.drain().catch(() => undefined);
+    } catch {
+      /* connect had failed → no live connection to drain */
     }
   }
 }
@@ -233,10 +350,11 @@ export async function startNatsConsumer(
 ): Promise<{ close(): Promise<void> }> {
   const transport = (await import("@nats-io/transport-node")) as AnyModule;
   const js = (await import("@nats-io/jetstream")) as AnyModule;
-  const nc = await transport.connect({
-    servers: options.natsUrl,
-    name: "ragdoll-consumer"
-  });
+  const nc = await connectNats(
+    transport as NatsTransportLike,
+    { servers: options.natsUrl, name: "ragdoll-consumer" },
+    { logger: options.logger }
+  );
   const name = options.queueName ?? DEFAULT_QUEUE_NAME;
   const durable = options.durable ?? "ragdoll-workers";
   const concurrency = options.concurrency ?? 4;

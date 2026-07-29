@@ -400,7 +400,8 @@ export async function main(): Promise<void> {
     stopConsumer = () => consumer.close();
     queue = new NatsJetStreamQueue({
       natsUrl,
-      queueName: process.env.WORKER_QUEUE_NAME
+      queueName: process.env.WORKER_QUEUE_NAME,
+      logger
     });
     logger.info("worker consuming NATS JetStream queue", {
       queue: process.env.WORKER_QUEUE_NAME ?? "ragdoll-jobs"
