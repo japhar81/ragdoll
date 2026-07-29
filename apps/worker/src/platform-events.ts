@@ -17,6 +17,7 @@
  */
 
 import type { StructuredLogger } from "../../../packages/observability/src/index.ts";
+import { connectNats, RetryableLazy, type NatsTransportLike } from "./nats.ts";
 import type {
   PlatformEvent,
   PlatformEventDispatcher
@@ -71,68 +72,53 @@ class InProcessPlatformEventStream implements PlatformEventStream {
 class NatsPlatformEventStream implements PlatformEventStream {
   private natsUrl: string;
   private logger?: StructuredLogger;
-  private connPromise?: Promise<{ transport: AnyModule; js: AnyModule; nc: any }>;
-  private jsPromise?: Promise<any>;
-  private streamReady?: Promise<void>;
+  // Self-healing lazies (see RetryableLazy) — a failed connect drops the cache
+  // so a later publish/subscribe retries rather than replaying the rejection.
+  private readonly connLazy: RetryableLazy<{ transport: AnyModule; js: AnyModule; nc: any }>;
+  private readonly jsLazy: RetryableLazy<any>;
+  private readonly streamLazy: RetryableLazy<void>;
 
   constructor(natsUrl: string, logger?: StructuredLogger) {
     this.natsUrl = natsUrl;
     this.logger = logger;
-  }
-
-  private async conn(): Promise<{ transport: AnyModule; js: AnyModule; nc: any }> {
-    if (!this.connPromise) {
-      this.connPromise = (async () => {
-        const transport = (await import("@nats-io/transport-node")) as AnyModule;
-        const js = (await import("@nats-io/jetstream")) as AnyModule;
-        const nc = await transport.connect({
-          servers: this.natsUrl,
-          name: "ragdoll-platform-events"
-        });
-        return { transport, js, nc };
-      })();
-    }
-    return this.connPromise;
-  }
-
-  private async jsClient(): Promise<any> {
-    if (!this.jsPromise) {
-      this.jsPromise = (async () => {
-        const { js, nc } = await this.conn();
-        return js.jetstream(nc);
-      })();
-    }
-    return this.jsPromise;
-  }
-
-  private async ensureStream(): Promise<void> {
-    if (!this.streamReady) {
-      this.streamReady = (async () => {
-        const { js, nc } = await this.conn();
-        const jsm = await js.jetstreamManager(nc);
-        const config = {
-          name: STREAM,
-          subjects: [`${SUBJECT_ROOT}.>`],
-          retention: js.RetentionPolicy.Limits,
-          storage: js.StorageType.File,
-          max_age: RETENTION_MAX_AGE_MS * 1_000_000 // nanos
-        };
-        try {
-          await jsm.streams.add(config);
-        } catch {
-          await jsm.streams.update(STREAM, config).catch(() => undefined);
-        }
-      })();
-    }
-    return this.streamReady;
+    this.connLazy = new RetryableLazy(async () => {
+      const transport = (await import("@nats-io/transport-node")) as AnyModule;
+      const js = (await import("@nats-io/jetstream")) as AnyModule;
+      const nc = await connectNats(
+        transport as NatsTransportLike,
+        { servers: this.natsUrl, name: "ragdoll-platform-events" },
+        { logger: this.logger }
+      );
+      return { transport, js, nc };
+    });
+    this.jsLazy = new RetryableLazy(async () => {
+      const { js, nc } = await this.connLazy.get();
+      return js.jetstream(nc);
+    });
+    this.streamLazy = new RetryableLazy(async () => {
+      const { js, nc } = await this.connLazy.get();
+      const jsm = await js.jetstreamManager(nc);
+      const config = {
+        name: STREAM,
+        subjects: [`${SUBJECT_ROOT}.>`],
+        retention: js.RetentionPolicy.Limits,
+        storage: js.StorageType.File,
+        max_age: RETENTION_MAX_AGE_MS * 1_000_000 // nanos
+      };
+      try {
+        await jsm.streams.add(config);
+      } catch {
+        await jsm.streams.update(STREAM, config).catch(() => undefined);
+      }
+    });
   }
 
   publish(event: PlatformEvent): void {
     // Fire-and-forget: never block or throw on the operation's hot path.
     void (async () => {
       try {
-        await this.ensureStream();
-        const client = await this.jsClient();
+        await this.streamLazy.get();
+        const client = await this.jsLazy.get();
         const payload = new TextEncoder().encode(JSON.stringify(event));
         await client.publish(`${SUBJECT_ROOT}.${event.category}`, payload, {
           msgID: event.id
@@ -149,9 +135,9 @@ class NatsPlatformEventStream implements PlatformEventStream {
   async startConsumer(
     dispatcher: PlatformEventDispatcher
   ): Promise<{ close(): Promise<void> }> {
-    const { js, nc } = await this.conn();
+    const { js, nc } = await this.connLazy.get();
     const jsm = await js.jetstreamManager(nc);
-    await this.ensureStream();
+    await this.streamLazy.get();
     const consumerConfig = {
       durable_name: DURABLE,
       ack_policy: js.AckPolicy.Explicit,
@@ -163,7 +149,7 @@ class NatsPlatformEventStream implements PlatformEventStream {
     } catch {
       await jsm.consumers.update(STREAM, DURABLE, consumerConfig).catch(() => undefined);
     }
-    const client = await this.jsClient();
+    const client = await this.jsLazy.get();
     const consumer = await client.consumers.get(STREAM, DURABLE);
     const messages = await consumer.consume({ max_messages: 64 });
     const dec = new TextDecoder();
@@ -201,9 +187,13 @@ class NatsPlatformEventStream implements PlatformEventStream {
   }
 
   async close(): Promise<void> {
-    if (this.connPromise) {
-      const { nc } = await this.connPromise;
+    const cached = this.connLazy.peek();
+    if (!cached) return; // never connected → nothing to drain
+    try {
+      const { nc } = await cached;
       await nc.drain().catch(() => undefined);
+    } catch {
+      /* connect had failed → no live connection to drain */
     }
   }
 }

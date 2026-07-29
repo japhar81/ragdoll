@@ -241,7 +241,8 @@ async function buildDeps(): Promise<{
     );
     queue = new NatsJetStreamQueue({
       natsUrl,
-      queueName: process.env.WORKER_QUEUE_NAME
+      queueName: process.env.WORKER_QUEUE_NAME,
+      logger
     });
     logger.info("api using NATS JetStream queue", {
       queue: process.env.WORKER_QUEUE_NAME ?? "ragdoll-jobs"
