@@ -2,7 +2,7 @@ apiVersion: v2
 name: ragdoll
 description: Multi-tenant RAG pipeline platform
 type: application
-version: 0.3.0
+version: 0.3.1
 appVersion: "0.1.0"
 
 # Subchart dependencies. Each is gated on a `<alias>.enabled` flag in
