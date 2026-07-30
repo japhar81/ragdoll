@@ -35,8 +35,8 @@
  */
 
 import type { InProcessPlugin, PluginExecutionInput } from "../../../packages/plugin-sdk/src/index.ts";
-import { defineConnectionDriverPlugin, acquireClient } from "../../../packages/external-connections/src/index.ts";
-import type { ResolvedExternalConnection } from "../../../packages/external-connections/src/index.ts";
+import { defineConnectionDriverPlugin, acquireClient } from "../../../packages/connection-sdk/src/index.ts";
+import type { ResolvedExternalConnection } from "../../../packages/connection-sdk/src/index.ts";
 
 // ---------------------------------------------------------------------------
 // Connection driver (ADR-0024 manifest)
