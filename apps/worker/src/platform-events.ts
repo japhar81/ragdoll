@@ -27,7 +27,11 @@ import { inProcessEmitter } from "../../../packages/platform-plugins/src/index.t
 /* eslint-disable @typescript-eslint/no-explicit-any */
 type AnyModule = Record<string, any>;
 
-const STREAM = "ragdoll_events";
+// Stream name uses the hyphen convention shared by the jobs stream
+// (`ragdoll-jobs`) and every durable/consumer name — `ragdoll_events` was the
+// lone underscore. (Subjects are a separate namespace: `.` is their hierarchy
+// separator, so SUBJECT_ROOT stays dotted.)
+const STREAM = "ragdoll-events";
 const SUBJECT_ROOT = "ragdoll.events";
 const DURABLE = "platform-hooks";
 const RETENTION_MAX_AGE_MS = 24 * 60 * 60 * 1000; // 24h window (replay + late consumers)
