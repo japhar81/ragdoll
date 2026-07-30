@@ -352,7 +352,7 @@ export function assertLooksReadOnly(sql: string): void {
 // the same connection slug share one pool (per ADR-0023).
 // ===========================================================================
 
-import { defineConnectionDriverPlugin } from "../../../packages/external-connections/src/index.ts";
+import { defineConnectionDriverPlugin } from "../../../packages/connection-sdk/src/index.ts";
 
 export const postgresConnectionDriver = defineConnectionDriverPlugin({
   kind: "postgres",

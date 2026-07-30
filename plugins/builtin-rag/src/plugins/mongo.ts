@@ -33,7 +33,7 @@
  */
 
 import type { InProcessPlugin } from "../../../../packages/plugin-sdk/src/index.ts";
-import { defineConnectionDriverPlugin } from "../../../../packages/external-connections/src/index.ts";
+import { defineConnectionDriverPlugin } from "../../../../packages/connection-sdk/src/index.ts";
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 type MongoClient = any;
@@ -200,7 +200,7 @@ export const mongoFindPlugin: InProcessPlugin = {
   async execute(input) {
     requireMongoConnection(input, "mongo_find");
     const { acquireClient } = await import(
-      "../../../../packages/external-connections/src/index.ts"
+      "../../../../packages/connection-sdk/src/index.ts"
     );
     const client = await acquireClient<MongoClient>(input.connection);
     const db = dbFor(client, input.connection);
@@ -270,7 +270,7 @@ export const mongoInsertPlugin: InProcessPlugin = {
   async execute(input) {
     requireMongoConnection(input, "mongo_insert");
     const { acquireClient } = await import(
-      "../../../../packages/external-connections/src/index.ts"
+      "../../../../packages/connection-sdk/src/index.ts"
     );
     const client = await acquireClient<MongoClient>(input.connection);
     const db = dbFor(client, input.connection);
@@ -330,7 +330,7 @@ export const mongoDeletePlugin: InProcessPlugin = {
   async execute(input) {
     requireMongoConnection(input, "mongo_delete");
     const { acquireClient } = await import(
-      "../../../../packages/external-connections/src/index.ts"
+      "../../../../packages/connection-sdk/src/index.ts"
     );
     const client = await acquireClient<MongoClient>(input.connection);
     const db = dbFor(client, input.connection);
@@ -407,7 +407,7 @@ export const mongoAggregatePlugin: InProcessPlugin = {
   async execute(input) {
     requireMongoConnection(input, "mongo_aggregate");
     const { acquireClient } = await import(
-      "../../../../packages/external-connections/src/index.ts"
+      "../../../../packages/connection-sdk/src/index.ts"
     );
     const client = await acquireClient<MongoClient>(input.connection);
     const db = dbFor(client, input.connection);

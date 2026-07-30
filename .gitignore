@@ -49,3 +49,6 @@ tests/playwright/.test-output/
 spike-grpc/
 
 tests/load/k6/.last-run.ndjson
+
+# Built package artifacts (emitted by `npm run build`, shipped via npm publish)
+packages/*/dist/

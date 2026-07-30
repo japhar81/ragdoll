@@ -40,8 +40,8 @@ import type {
 import {
   defineConnectionDriverPlugin,
   acquireClient
-} from "../../../packages/external-connections/src/index.ts";
-import type { ResolvedExternalConnection } from "../../../packages/external-connections/src/index.ts";
+} from "../../../packages/connection-sdk/src/index.ts";
+import type { ResolvedExternalConnection } from "../../../packages/connection-sdk/src/index.ts";
 
 // ---------------------------------------------------------------------------
 // Test seam — fetch override (mirrors the wazuh / cartography pattern)

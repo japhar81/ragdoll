@@ -27,7 +27,7 @@
  */
 
 import type { InProcessPlugin } from "../../../../packages/plugin-sdk/src/index.ts";
-import { defineConnectionDriverPlugin } from "../../../../packages/external-connections/src/index.ts";
+import { defineConnectionDriverPlugin } from "../../../../packages/connection-sdk/src/index.ts";
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 type ClickHouseClient = any;
@@ -178,7 +178,7 @@ export const clickhouseQueryPlugin: InProcessPlugin = {
   async execute(input) {
     requireClickHouseConnection(input, "clickhouse_query");
     const { acquireClient } = await import(
-      "../../../../packages/external-connections/src/index.ts"
+      "../../../../packages/connection-sdk/src/index.ts"
     );
     const client = await acquireClient<ClickHouseClient>(input.connection);
     const sql = String(input.config.sql);
@@ -237,7 +237,7 @@ export const clickhouseInsertPlugin: InProcessPlugin = {
   async execute(input) {
     requireClickHouseConnection(input, "clickhouse_insert");
     const { acquireClient } = await import(
-      "../../../../packages/external-connections/src/index.ts"
+      "../../../../packages/connection-sdk/src/index.ts"
     );
     const client = await acquireClient<ClickHouseClient>(input.connection);
     const table = String(input.config.table);
@@ -303,7 +303,7 @@ export const clickhouseDeletePlugin: InProcessPlugin = {
   async execute(input) {
     requireClickHouseConnection(input, "clickhouse_delete");
     const { acquireClient } = await import(
-      "../../../../packages/external-connections/src/index.ts"
+      "../../../../packages/connection-sdk/src/index.ts"
     );
     const client = await acquireClient<ClickHouseClient>(input.connection);
     const table = String(input.config.table);

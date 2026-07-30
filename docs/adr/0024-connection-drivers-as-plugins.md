@@ -213,6 +213,23 @@ driver.
   thin manifest wrappers; the imperative registration API stays as a
   shim for one release.
 
+## Amendment — the authoring surface is a standalone SDK
+
+The driver authoring contract (`ConnectionDriver`, `ConnectionDriverManifest`,
+`defineConnectionDriverPlugin`, `isConnectionDriverPlugin`, the driver
+registry, `ResolvedExternalConnection`, and the `TokenSource` credential
+helper) now lives in a dependency-free package, **`@ragdoll/connection-sdk`**,
+so an external plugin can depend on just the contract.
+
+Previously all of this lived in `@ragdoll/external-connections` alongside
+`ExternalConnectionResolver`, which imports the platform's secret store
+(`@ragdoll/secrets`) and DB types. Publishing that to let outside authors write
+drivers would have dragged the entire secret-resolution runtime into every
+plugin. The split keeps the resolver (the only secrets consumer) internal to
+the platform; `@ragdoll/external-connections` re-exports the SDK so every
+in-tree import is unchanged. The SDK carries a `build` target (tsc → ESM +
+`.d.ts`) and is published to whatever private registry the operator uses.
+
 ## References
 
 - ADR 0019 — Plugin Contract v2.

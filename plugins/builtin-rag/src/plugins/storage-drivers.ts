@@ -28,7 +28,7 @@
  * Connections "test" button work off these registrations.
  */
 
-import { defineConnectionDriverPlugin } from "../../../../packages/external-connections/src/index.ts";
+import { defineConnectionDriverPlugin } from "../../../../packages/connection-sdk/src/index.ts";
 
 interface HttpEndpointOptions {
   host?: string;

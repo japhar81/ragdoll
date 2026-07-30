@@ -1,0 +1,27 @@
+{
+  "name": "@ragdoll/connection-sdk",
+  "version": "0.1.0",
+  "description": "Authoring SDK for RAGdoll connection drivers: driver types, defineConnectionDriverPlugin, the driver registry, and the TokenSource credential-lifecycle helper. Zero platform dependencies.",
+  "license": "MIT",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./token-source": {
+      "types": "./dist/token-source.d.ts",
+      "import": "./dist/token-source.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "prepublishOnly": "npm run build"
+  }
+}
