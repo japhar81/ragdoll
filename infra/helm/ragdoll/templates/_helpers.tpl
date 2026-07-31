@@ -41,6 +41,8 @@ provides it.
 {{- $pwd := .Values.bundledpostgres.auth.password -}}
 {{- $host := printf "%s-bundledpostgres" .Release.Name -}}
 postgres://{{ $user }}:{{ $pwd | urlquery }}@{{ $host }}:5432/{{ $db }}
+{{- else -}}
+{{ .Values.postgres.url }}
 {{- end -}}
 {{- end -}}
 
