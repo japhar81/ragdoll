@@ -293,6 +293,20 @@ pythonPlugins:
 # to BYO, point these URLs at your external service AND set
 # `secrets.create: false` so the chart uses your existing Secret.
 # ---------------------------------------------------------------------------
+postgres:
+  # RAGdoll's backing database. Used when bundledpostgres.enabled is false —
+  # point at your EXTERNAL Postgres as a full connection URL, e.g.
+  #   postgres://user:password@my-pg.example.com:5432/ragdoll
+  # It lands in the generated Secret as DATABASE_URL, and the db-init Job
+  # migrates the schema on install/upgrade exactly like the bundled DB.
+  # URL-encode any special characters in the password.
+  #
+  # Prefer NOT to put the password in values? Leave this empty, set
+  # `secrets.create: false`, and supply DATABASE_URL on your own Secret via
+  # `secrets.existingSecret`. Both routes work; this one is the convenience
+  # path for "here's my DSN".
+  url: ""
+
 qdrant:
   # Used when bundledqdrant.enabled is false. The bundled Qdrant lives
   # at `http://ragdoll-qdrant:6333` cluster-internally.

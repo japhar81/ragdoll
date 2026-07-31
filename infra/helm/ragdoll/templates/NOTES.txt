@@ -3,7 +3,7 @@ RAGdoll installed.
 ────────────────────────────────────────────────────────────────────────────
 Status of bundled backends
 ────────────────────────────────────────────────────────────────────────────
-{{ if .Values.bundledpostgres.enabled }}  Postgres   → bundled  ({{ .Release.Name }}-bundledpostgres:5432){{ else }}  Postgres   → BYO     (configure DATABASE_URL on Secret {{ include "ragdoll.secretName" . }}){{ end }}
+{{ if .Values.bundledpostgres.enabled }}  Postgres   → bundled  ({{ .Release.Name }}-bundledpostgres:5432){{ else if .Values.postgres.url }}  Postgres   → external ({{ regexReplaceAll "://[^@]+@" .Values.postgres.url "://***@" }}){{ else }}  Postgres   → BYO     (set postgres.url, OR configure DATABASE_URL on Secret {{ include "ragdoll.secretName" . }}){{ end }}
 {{ if .Values.bundledredis.enabled    }}  Redis      → bundled  ({{ .Release.Name }}-bundledredis-master:6379){{ else }}  Redis      → BYO     (configure REDIS_URL on Secret {{ include "ragdoll.secretName" . }}){{ end }}
 {{ if .Values.bundledqdrant.enabled   }}  Qdrant     → bundled  ({{ .Release.Name }}-qdrant:6333){{ else }}  Qdrant     → BYO     ({{ .Values.qdrant.url }}){{ end }}
 {{ if .Values.bundledopensearch.enabled }}  OpenSearch → bundled  ({{ .Release.Name }}-bundledopensearch:9200){{ else }}  OpenSearch → disabled (set bundledopensearch.enabled=true OR opensearch.url){{ end }}
@@ -92,4 +92,12 @@ Production reminders
    Bundled Redis runs without auth (cluster-internal Service only). If
    your cluster shares the namespace with untrusted workloads, enable
    `bundledredis.auth.enabled=true` and update REDIS_URL accordingly.
+{{- end }}
+{{- if and .Values.secrets.create (not .Values.bundledpostgres.enabled) (not .Values.postgres.url) }}
+
+⚠  No backing database is configured. Bundled Postgres is disabled and
+   `postgres.url` is empty, so the generated Secret has NO DATABASE_URL —
+   the api/worker will not boot. Either set `postgres.url` to your external
+   Postgres DSN, or set `secrets.create=false` and provide DATABASE_URL on
+   your own Secret via `secrets.existingSecret`.
 {{- end }}
