@@ -76,7 +76,7 @@
     "casbin": "^5.30.0",
     "commander": "^12.1.0",
     "croner": "^9.0.0",
-    "fast-xml-parser": "^4.5.1",
+    "fast-xml-parser": "^5.8.0",
     "fastify": "^5.2.0",
     "ioredis": "^5.5.0",
     "jmespath": "^0.16.0",
