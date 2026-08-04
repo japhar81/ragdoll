@@ -11,6 +11,6 @@
     "ragdoll": "node --experimental-strip-types src/index.ts"
   },
   "dependencies": {
-    "commander": "^12.1.0"
+    "commander": "^15.0.0"
   }
 }
