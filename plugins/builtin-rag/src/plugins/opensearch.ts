@@ -14,7 +14,8 @@ import {
   OpenSearchClient,
   OpenSearchError,
   OpenSearchVectorStore,
-  createOpenSearchClient
+  createOpenSearchClient,
+  awsSigV4FromSecrets
 } from "../../../../packages/opensearch/src/index.ts";
 import { pickBackendName, requireBackendConnection } from "../dataset-binding.ts";
 import { embedTexts } from "../helpers.ts";
@@ -71,7 +72,8 @@ function openSearchClientFrom(
     endpoint,
     username: secrets.username,
     password: secrets.password,
-    authorization: secrets.authorization
+    authorization: secrets.authorization,
+    aws: awsSigV4FromSecrets(secrets)
   });
   if (!client) {
     throw new Error(

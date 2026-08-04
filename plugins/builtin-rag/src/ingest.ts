@@ -18,7 +18,7 @@ import * as crypto from "node:crypto";
 import type { InProcessPlugin } from "../../../packages/plugin-sdk/src/index.ts";
 import { pickBackendName, requireBackendConnection } from "./dataset-binding.ts";
 import { createVectorStore } from "../../../packages/vector/src/index.ts";
-import { createOpenSearchClient } from "../../../packages/opensearch/src/index.ts";
+import { createOpenSearchClient, awsSigV4FromSecrets } from "../../../packages/opensearch/src/index.ts";
 
 // ===========================================================================
 // filesystem_source
@@ -1184,7 +1184,8 @@ export const opensearchDeletePlugin: InProcessPlugin = {
       endpoint,
       username: secrets.username,
       password: secrets.password,
-      authorization: secrets.authorization
+      authorization: secrets.authorization,
+      aws: awsSigV4FromSecrets(secrets)
     });
     if (!client) throw new Error("opensearch_delete: endpoint not configured");
     const index = String(pickBackendName(input, "keyword") ?? "default");

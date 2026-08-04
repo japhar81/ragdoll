@@ -33,7 +33,7 @@ import {
   type ChatMessage
 } from "../../../packages/providers/src/index.ts";
 import { createVectorStore, type VectorPoint } from "../../../packages/vector/src/index.ts";
-import { createOpenSearchClient } from "../../../packages/opensearch/src/index.ts";
+import { createOpenSearchClient, awsSigV4FromSecrets } from "../../../packages/opensearch/src/index.ts";
 import { pickBackendName } from "./dataset-binding.ts";
 import { validateAgainstSchema } from "./schema-validate.ts";
 
@@ -255,7 +255,8 @@ export const datasetSearchPlugin: InProcessPlugin = {
         (context.resolvedConfig.values["opensearch.url"]?.value as string | undefined),
       username: secrets.username,
       password: secrets.password,
-      authorization: secrets.authorization
+      authorization: secrets.authorization,
+      aws: awsSigV4FromSecrets(secrets)
     });
     if (!client) {
       throw new Error("dataset_search: OpenSearch endpoint not configured");
