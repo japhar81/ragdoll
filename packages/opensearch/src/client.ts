@@ -6,7 +6,22 @@
  * need (index admin, _bulk, _search, _delete_by_query) is tiny, a fetch shim
  * is trivially stubbable in offline unit tests, and it adds no install step to
  * a Docker-built monorepo whose deps are not present on dev machines.
+ *
+ * Auth is HTTP basic / an `Authorization` header, OR AWS SigV4 request signing
+ * (`config.aws`) for AWS OpenSearch Serverless (`aoss`) and IAM-secured managed
+ * domains (`es`). SigV4 stays dependency-free — the signer is `node:crypto` and
+ * the credential chain is `fetch`/`node:fs` (see `./aws-sigv4.ts`).
  */
+
+import {
+  signSigV4,
+  createAwsCredentialsProvider,
+  type AwsSigV4Config,
+  type AwsCredentialsProvider,
+  type CredentialResolverDeps
+} from "./aws-sigv4.ts";
+
+export type { AwsSigV4Config };
 
 export type FetchLike = (
   input: string,
@@ -36,8 +51,19 @@ export interface OpenSearchClientConfig {
   /** Base URL, e.g. `http://opensearch:9200`. */
   endpoint: string;
   auth?: OpenSearchAuth;
+  /**
+   * AWS SigV4 request signing — required for AWS OpenSearch Serverless
+   * (`service: "aoss"`) and IAM-secured managed domains (`service: "es"`).
+   * When set, every request is signed and `auth` is ignored. Credentials
+   * resolve from `aws.accessKeyId`/`secretAccessKey`, then the standard AWS
+   * env vars, then the ECS/EKS-Pod-Identity endpoint, then IRSA — or inject
+   * `aws.credentialsProvider`.
+   */
+  aws?: AwsSigV4Config;
   /** Injected for tests; defaults to `globalThis.fetch`. */
   fetchImpl?: FetchLike;
+  /** Injected for tests: the SigV4 credential-resolution environment. */
+  awsResolverDeps?: CredentialResolverDeps;
 }
 
 export class OpenSearchError extends Error {
@@ -67,6 +93,11 @@ export class OpenSearchClient {
   private readonly endpoint: string;
   private readonly auth?: OpenSearchAuth;
   private readonly fetchImpl: FetchLike;
+  private readonly sigv4?: {
+    provider: AwsCredentialsProvider;
+    region: string;
+    service: string;
+  };
 
   constructor(config: OpenSearchClientConfig) {
     if (!config.endpoint) {
@@ -79,6 +110,26 @@ export class OpenSearchClient {
       throw new OpenSearchError(0, "no fetch implementation available", undefined);
     }
     this.fetchImpl = f;
+    if (config.aws) {
+      const region =
+        config.aws.region ??
+        config.awsResolverDeps?.env?.AWS_REGION ??
+        process.env.AWS_REGION ??
+        process.env.AWS_DEFAULT_REGION;
+      if (!region) {
+        throw new OpenSearchError(
+          0,
+          "OpenSearch AWS SigV4 requires a region (set aws.region or AWS_REGION)",
+          undefined
+        );
+      }
+      this.sigv4 = {
+        provider: createAwsCredentialsProvider(config.aws, config.awsResolverDeps),
+        region,
+        // `es` = IAM-secured managed domain; `aoss` = OpenSearch Serverless.
+        service: config.aws.service ?? "es"
+      };
+    }
   }
 
   private headers(contentType = "application/json"): Record<string, string> {
@@ -101,16 +152,21 @@ export class OpenSearchClient {
   ): Promise<{ status: number; body: T }> {
     const url = `${this.endpoint}${path.startsWith("/") ? path : `/${path}`}`;
     const ndjson = opts.ndjson === true;
-    const res = await this.fetchImpl(url, {
-      method,
-      headers: this.headers(ndjson ? "application/x-ndjson" : "application/json"),
-      body:
-        body === undefined
-          ? undefined
-          : ndjson
-            ? (body as string)
-            : JSON.stringify(body)
-    });
+    const contentType = ndjson ? "application/x-ndjson" : "application/json";
+    const bodyStr =
+      body === undefined ? undefined : ndjson ? (body as string) : JSON.stringify(body);
+    const headers = this.sigv4
+      ? signSigV4({
+          method,
+          url,
+          region: this.sigv4.region,
+          service: this.sigv4.service,
+          credentials: await this.sigv4.provider(),
+          body: bodyStr,
+          contentType
+        }).headers
+      : this.headers(contentType);
+    const res = await this.fetchImpl(url, { method, headers, body: bodyStr });
     const text = await res.text();
     let parsed: unknown = undefined;
     if (text) {
@@ -315,17 +371,43 @@ export function createOpenSearchClient(opts: {
   username?: string;
   password?: string;
   authorization?: string;
+  /** AWS SigV4 signing (AWS OpenSearch Serverless / IAM-secured domains).
+   *  When set, takes precedence over username/password/authorization. */
+  aws?: AwsSigV4Config;
   fetchImpl?: FetchLike;
 }): OpenSearchClient | undefined {
   const endpoint = opts.endpoint ?? process.env.OPENSEARCH_URL;
   if (!endpoint) return undefined;
   const auth: OpenSearchAuth | undefined =
-    opts.authorization || opts.username !== undefined
+    !opts.aws && (opts.authorization || opts.username !== undefined)
       ? {
           authorization: opts.authorization,
           username: opts.username,
           password: opts.password
         }
       : undefined;
-  return new OpenSearchClient({ endpoint, auth, fetchImpl: opts.fetchImpl });
+  return new OpenSearchClient({ endpoint, auth, aws: opts.aws, fetchImpl: opts.fetchImpl });
+}
+
+/**
+ * Map a connection's flat secret map to an {@link AwsSigV4Config}, or undefined
+ * when SigV4 isn't requested. Enabled by any of `awsSigv4`, `awsRegion`, or
+ * `awsService` being present. Credential fields are optional — omit them to
+ * fall through to the env / instance-role chain (IRSA, Pod Identity, …).
+ */
+export function awsSigV4FromSecrets(
+  secrets: Record<string, string | undefined>
+): AwsSigV4Config | undefined {
+  const enabled =
+    secrets.awsSigv4 === "true" ||
+    Boolean(secrets.awsRegion) ||
+    Boolean(secrets.awsService);
+  if (!enabled) return undefined;
+  return {
+    region: secrets.awsRegion,
+    service: secrets.awsService,
+    accessKeyId: secrets.awsAccessKeyId,
+    secretAccessKey: secrets.awsSecretAccessKey,
+    sessionToken: secrets.awsSessionToken
+  };
 }

@@ -26,6 +26,25 @@ Auth is via the secret-ref fields `username`/`password` (HTTP basic) or
 takes precedence. The local dev cluster runs with the security plugin disabled,
 so no credentials are needed there.
 
+### AWS SigV4 (OpenSearch Serverless / IAM-secured domains)
+
+For AWS OpenSearch **Serverless** or an IAM-secured managed domain, enable
+SigV4 request signing via these secret-ref fields (any of them turns it on;
+when set, it takes precedence over basic/`authorization`):
+
+| field | meaning |
+| --- | --- |
+| `awsSigv4` | `"true"` to enable (optional if `awsRegion`/`awsService` is set) |
+| `awsRegion` | AWS region, e.g. `us-east-1` (falls back to `AWS_REGION`) |
+| `awsService` | `aoss` for Serverless, `es` for a managed domain (default `es`) |
+| `awsAccessKeyId` / `awsSecretAccessKey` / `awsSessionToken` | explicit credentials (optional) |
+
+Credentials resolve in order: the explicit fields above → the standard
+`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` env vars → the ECS/EKS-Pod-Identity
+container endpoint → IRSA web-identity. So on EKS with an IRSA role attached to
+the pod, you set only `awsRegion` + `awsService: aoss` and leave the credentials
+blank. The signer is `node:crypto` — no AWS SDK is added.
+
 ## Tenant isolation
 
 Mirrors `qdrant_retriever`: `opensearch_output` stamps every document with a
