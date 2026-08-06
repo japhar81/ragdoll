@@ -390,6 +390,41 @@ export function createOpenSearchClient(opts: {
 }
 
 /**
+ * JSON-schema `properties` fragment for the AWS SigV4 secret-ref fields
+ * {@link awsSigV4FromSecrets} reads. Spread into a plugin's `secretsSchema` so
+ * the Builder renders inputs for them — the field NAMES here must match what
+ * the mapper below reads. Region/service flow through the same `secrets` block
+ * as the credentials (that's how the plugin receives them), hence `secret-ref`.
+ */
+export const AWS_SIGV4_SECRET_FIELDS = {
+  awsRegion: {
+    type: "string",
+    format: "secret-ref",
+    description: "AWS region (e.g. us-east-1). Setting this enables SigV4 signing."
+  },
+  awsService: {
+    type: "string",
+    format: "secret-ref",
+    description: "'aoss' for OpenSearch Serverless, 'es' for an IAM-secured managed domain (default 'es')."
+  },
+  awsAccessKeyId: {
+    type: "string",
+    format: "secret-ref",
+    description: "AWS access key id. Optional — omit to use the pod's IAM role (IRSA / Pod Identity)."
+  },
+  awsSecretAccessKey: {
+    type: "string",
+    format: "secret-ref",
+    description: "AWS secret access key. Optional — pairs with awsAccessKeyId."
+  },
+  awsSessionToken: {
+    type: "string",
+    format: "secret-ref",
+    description: "AWS session token for temporary credentials. Optional."
+  }
+} as const;
+
+/**
  * Map a connection's flat secret map to an {@link AwsSigV4Config}, or undefined
  * when SigV4 isn't requested. Enabled by any of `awsSigv4`, `awsRegion`, or
  * `awsService` being present. Credential fields are optional — omit them to

@@ -15,7 +15,8 @@ import {
   OpenSearchError,
   OpenSearchVectorStore,
   createOpenSearchClient,
-  awsSigV4FromSecrets
+  awsSigV4FromSecrets,
+  AWS_SIGV4_SECRET_FIELDS
 } from "../../../../packages/opensearch/src/index.ts";
 import { pickBackendName, requireBackendConnection } from "../dataset-binding.ts";
 import { embedTexts } from "../helpers.ts";
@@ -37,7 +38,11 @@ const OPENSEARCH_SECRETS_SCHEMA = {
       type: "string",
       format: "secret-ref",
       description: "Raw Authorization header value (e.g. an API key). Overrides username/password."
-    }
+    },
+    // AWS SigV4 (OpenSearch Serverless / IAM-secured domains). Setting
+    // awsRegion (+ awsService: aoss) enables signing; credentials are optional
+    // (fall through to the pod's IAM role / IRSA).
+    ...AWS_SIGV4_SECRET_FIELDS
   },
   additionalProperties: false
 } as const;

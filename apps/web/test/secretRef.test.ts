@@ -5,6 +5,7 @@ import {
   describeRef,
   formToRef,
   isSecretScope,
+  pickedSecretToFormPatch,
   refToForm,
   validateSecretRefForm
 } from "../src/lib/secretRef.ts";
@@ -127,4 +128,27 @@ test("describeRef gives a compact human summary", () => {
     "tenant_provider · k · provider=openai · v2"
   );
   assert.equal(describeRef(undefined), "tenant · (unset)");
+});
+
+test("pickedSecretToFormPatch: references by KEY + scope, never the id", () => {
+  // The bug: the picker stored the secret ID as the ref key → resolution
+  // "Secret not found for tenant:…:<id>:". The patch must carry the KEY.
+  assert.deepEqual(
+    pickedSecretToFormPatch({
+      ref: { key: "os-aws-region", scope: "tenant", provider: "database_encrypted" }
+    }),
+    { key: "os-aws-region", scope: "tenant", provider: "database_encrypted" }
+  );
+});
+
+test("pickedSecretToFormPatch: key + scope only when no provider", () => {
+  assert.deepEqual(
+    pickedSecretToFormPatch({ ref: { key: "llm.api_key", scope: "global" } }),
+    { key: "llm.api_key", scope: "global" }
+  );
+});
+
+test("pickedSecretToFormPatch: empty patch when the secret exposes no key", () => {
+  assert.deepEqual(pickedSecretToFormPatch({ ref: {} }), {});
+  assert.deepEqual(pickedSecretToFormPatch({}), {});
 });
