@@ -49,6 +49,24 @@ export function refToForm(ref: Partial<SecretRef> | undefined): SecretRefForm {
 }
 
 /**
+ * Map a picked stored secret to the form fields that REFERENCE it — its `key`
+ * + `scope` (+ `provider`), NOT its id. The runtime resolves a node's secret
+ * refs by (scope, tenant, key), so referencing by id produced
+ * "Secret not found for tenant:…:<id>:". Returns an empty patch when the secret
+ * exposes no key (nothing safe to reference).
+ */
+export function pickedSecretToFormPatch(secret: {
+  ref?: { key?: string; scope?: string; provider?: string } | null;
+}): Partial<SecretRefForm> {
+  const ref = secret.ref;
+  if (!ref?.key) return {};
+  const patch: Partial<SecretRefForm> = { key: ref.key };
+  if (typeof ref.scope === "string" && ref.scope) patch.scope = ref.scope;
+  if (typeof ref.provider === "string" && ref.provider) patch.provider = ref.provider;
+  return patch;
+}
+
+/**
  * Form -> SecretRef. Blank optional fields are omitted so the spec stays
  * clean. `scope`/`key` are always present (key may be empty until validated).
  */

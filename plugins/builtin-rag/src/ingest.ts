@@ -18,7 +18,7 @@ import * as crypto from "node:crypto";
 import type { InProcessPlugin } from "../../../packages/plugin-sdk/src/index.ts";
 import { pickBackendName, requireBackendConnection } from "./dataset-binding.ts";
 import { createVectorStore } from "../../../packages/vector/src/index.ts";
-import { createOpenSearchClient, awsSigV4FromSecrets } from "../../../packages/opensearch/src/index.ts";
+import { createOpenSearchClient, awsSigV4FromSecrets, AWS_SIGV4_SECRET_FIELDS } from "../../../packages/opensearch/src/index.ts";
 
 // ===========================================================================
 // filesystem_source
@@ -1157,7 +1157,8 @@ export const opensearchDeletePlugin: InProcessPlugin = {
       properties: {
         username: { type: "string", format: "secret-ref", description: "OpenSearch basic-auth username." },
         password: { type: "string", format: "secret-ref", description: "OpenSearch basic-auth password." },
-        authorization: { type: "string", format: "secret-ref", description: "Raw Authorization header value." }
+        authorization: { type: "string", format: "secret-ref", description: "Raw Authorization header value." },
+        ...AWS_SIGV4_SECRET_FIELDS
       },
       additionalProperties: false
     },

@@ -2,7 +2,8 @@ export {
   OpenSearchClient,
   OpenSearchError,
   createOpenSearchClient,
-  awsSigV4FromSecrets
+  awsSigV4FromSecrets,
+  AWS_SIGV4_SECRET_FIELDS
 } from "./client.ts";
 export type {
   BulkDoc,

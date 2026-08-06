@@ -120,13 +120,21 @@ export function SecretsScreen() {
           <DataGrid<SecretMeta>
             columns={
               [
-                { key: "id", header: "ID", accessor: (s) => s.id, width: "30%" },
+                {
+                  key: "secretKey",
+                  header: "Key",
+                  accessor: (s) => s.ref?.key ?? "",
+                  cell: (s) => s.ref?.key ?? "—",
+                  filter: "text",
+                  width: "24%"
+                },
+                { key: "id", header: "ID", accessor: (s) => s.id, width: "24%" },
                 {
                   key: "provider",
                   header: "Provider",
                   accessor: (s) => s.provider ?? "—",
                   filter: "select",
-                  width: "16%"
+                  width: "14%"
                 },
                 {
                   key: "version",

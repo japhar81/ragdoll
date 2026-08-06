@@ -1328,7 +1328,13 @@ export interface ResolvedConfig {
 export interface SecretMeta {
   id: string;
   provider?: string;
-  ref?: unknown;
+  ref?: {
+    provider?: string;
+    scope?: string;
+    tenantId?: string;
+    environment?: string;
+    key?: string;
+  };
   version?: number;
   createdAt?: string;
   updatedAt?: string;

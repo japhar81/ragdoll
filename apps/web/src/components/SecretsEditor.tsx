@@ -4,6 +4,7 @@ import { api, type JsonSchemaLike } from "../lib/api.ts";
 import {
   SECRET_SCOPES,
   formToRef,
+  pickedSecretToFormPatch,
   refToForm,
   validateSecretRefForm,
   type SecretRefForm
@@ -109,7 +110,12 @@ function SecretSlotRow(props: {
   name: string;
   required: boolean;
   ref: SecretRef | undefined;
-  stored: Array<{ id: string; provider?: string; updatedAt?: string }>;
+  stored: Array<{
+    id: string;
+    provider?: string;
+    updatedAt?: string;
+    ref?: { key?: string; scope?: string; provider?: string };
+  }>;
   storedError: boolean;
   onChange: (ref: SecretRef) => void;
   onRemove: () => void;
@@ -171,15 +177,21 @@ function SecretSlotRow(props: {
         <select
           value=""
           onChange={(e) => {
-            if (e.target.value) patch({ key: e.target.value });
+            // Reference the picked secret by its KEY + scope, not its id — the
+            // runtime resolves node secret refs by (scope, tenant, key). Storing
+            // the id here produced "Secret not found for tenant:…:<id>:".
+            const sec = stored.find((s) => s.id === e.target.value);
+            const p = sec ? pickedSecretToFormPatch(sec) : {};
+            if (p.key) patch(p);
           }}
         >
           <option value="">— pick a stored secret —</option>
           {stored.map((s) => (
+            // Show the KEY (what you actually reference); id/provider secondary.
             <option key={s.id} value={s.id}>
-              {s.id}
+              {s.ref?.key ?? s.id}
+              {s.ref?.scope ? ` · ${s.ref.scope}` : ""}
               {s.provider ? ` · ${s.provider}` : ""}
-              {s.updatedAt ? ` · ${s.updatedAt}` : ""}
             </option>
           ))}
         </select>

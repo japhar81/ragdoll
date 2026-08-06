@@ -18,7 +18,7 @@ import {
   createAwsCredentialsProvider,
   type AwsCredentials
 } from "../src/aws-sigv4.ts";
-import { OpenSearchClient } from "../src/client.ts";
+import { OpenSearchClient, awsSigV4FromSecrets, AWS_SIGV4_SECRET_FIELDS } from "../src/client.ts";
 
 const NOW = new Date("2026-08-04T12:34:56.000Z");
 const AMZ_DATE = "20260804T123456Z";
@@ -268,6 +268,39 @@ test("OpenSearchClient signs every request when aws config is set", async () => 
   assert.ok(h["x-amz-content-sha256"], "x-amz-content-sha256 present");
   // No basic-auth header when signing.
   assert.equal(h.authorization?.startsWith("Basic"), false);
+});
+
+// --- secret-map mapping + schema fragment ---------------------------------
+
+test("awsSigV4FromSecrets: enabled by awsRegion / awsService / awsSigv4; maps the fields", () => {
+  assert.deepEqual(
+    awsSigV4FromSecrets({
+      awsRegion: "us-east-1",
+      awsService: "aoss",
+      awsAccessKeyId: "AKIA",
+      awsSecretAccessKey: "sk",
+      awsSessionToken: "tok"
+    }),
+    { region: "us-east-1", service: "aoss", accessKeyId: "AKIA", secretAccessKey: "sk", sessionToken: "tok" }
+  );
+  // Region alone (IRSA) is enough to enable — credentials fall through to the role.
+  assert.equal(awsSigV4FromSecrets({ awsRegion: "eu-west-1" })?.region, "eu-west-1");
+  assert.equal(awsSigV4FromSecrets({ awsSigv4: "true" }) !== undefined, true);
+});
+
+test("awsSigV4FromSecrets: absent when no AWS field is set (basic-auth path)", () => {
+  assert.equal(awsSigV4FromSecrets({ username: "u", password: "p" }), undefined);
+  assert.equal(awsSigV4FromSecrets({}), undefined);
+});
+
+test("AWS_SIGV4_SECRET_FIELDS covers exactly the field names the mapper reads", () => {
+  assert.deepEqual(
+    Object.keys(AWS_SIGV4_SECRET_FIELDS).sort(),
+    ["awsAccessKeyId", "awsRegion", "awsSecretAccessKey", "awsService", "awsSessionToken"]
+  );
+  for (const f of Object.values(AWS_SIGV4_SECRET_FIELDS)) {
+    assert.equal(f.format, "secret-ref"); // so the Builder renders a secret-ref input
+  }
 });
 
 test("OpenSearchClient without aws still uses basic auth (unchanged)", async () => {
