@@ -680,6 +680,23 @@ components:
         completedAt: { type: string }
         latencyMs: { type: integer }
 
+    ExecutionStep:
+      type: object
+      description: >-
+        One streamed step frame (ADR-0037) — a node's streamed output or a
+        plugin `ctx.emit` payload. Returned in full by the fetch-by-ref
+        endpoint; a size-capped projection (StepWireFrame) rides the SSE stream.
+      required: [frameId, executionId, nodeId, channel, source, seq, at, data]
+      properties:
+        frameId: { type: string, description: Stable per-frame id (fetch-by-ref key). }
+        executionId: { type: string }
+        nodeId: { type: string }
+        channel: { type: string, description: Label (node.streamAs, the ctx.emit channel, or the node id). }
+        source: { type: string, enum: [node_output, emit] }
+        seq: { type: integer, description: Monotonic per-execution sequence. }
+        at: { type: string }
+        data: { type: object, additionalProperties: true, description: The redacted body. }
+
     User:
       type: object
       required: [id, email, status, createdAt, updatedAt]
@@ -2674,6 +2691,58 @@ paths:
                 properties:
                   execution: { $ref: "#/components/schemas/Execution" }
                   nodes: { type: array, items: { $ref: "#/components/schemas/ExecutionNode" } }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /api/executions/{execution_id}/stream:
+    get:
+      summary: Live result stream for one execution (SSE, ADR-0037)
+      description: >-
+        Server-Sent Events stream (`text/event-stream`). Replays the step
+        frames already recorded for the execution (each flagged
+        `replayed: true`), then tails live until the run reaches a terminal
+        status. Frames: `hello`, `step` (a StepWireFrame — a node's streamed
+        output or a plugin `ctx.emit` payload), `execution.node.started` /
+        `execution.node.completed`, the terminal
+        `execution.completed`/`failed`/`denied`, and `done`. A step whose body
+        exceeds the inline cap arrives truncated (`preview` + `frameId`); fetch
+        the full body from `/api/executions/{execution_id}/steps/{frame_id}`.
+      parameters:
+        - name: execution_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: "SSE stream of step + lifecycle frames"
+          content:
+            text/event-stream:
+              schema: { type: string }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /api/executions/{execution_id}/steps/{frame_id}:
+    get:
+      summary: Fetch the full body of a streamed step frame (ADR-0037)
+      description: >-
+        Returns the complete (redacted) body of a step that arrived truncated
+        on the stream. Use the `frameId` from a truncated `step` frame.
+      parameters:
+        - name: execution_id
+          in: path
+          required: true
+          schema: { type: string }
+        - name: frame_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: "The full step frame"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  step: { $ref: "#/components/schemas/ExecutionStep" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
 

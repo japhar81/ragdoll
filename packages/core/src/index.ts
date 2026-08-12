@@ -250,6 +250,23 @@ export interface PipelineNode {
    * the declared list — see PipelineSpec.spec.bindings.
    */
   binding?: string;
+  /**
+   * Result streaming (ADR-0037). When `true`, this node's redacted output is
+   * pushed to the live execution stream as an `execution.step` frame the
+   * moment the node completes — so a client watching
+   * `GET /api/executions/:id/stream` receives it mid-run instead of only at
+   * the end. Absent/false = not streamed (the default; large or sensitive
+   * steps stay out of the stream unless opted in). Independent of a node
+   * also calling `ctx.emit(...)` for finer-grained mid-node emission.
+   */
+  stream?: boolean;
+  /**
+   * Optional channel label for the streamed frame (ADR-0037). Lets a client
+   * distinguish e.g. a `"primary"` doc from `"ancillary"` docs when several
+   * nodes stream. Defaults to the node id when unset. Only meaningful with
+   * `stream: true` (or when the node calls `ctx.emit(channel, …)`).
+   */
+  streamAs?: string;
   ui?: Record<string, unknown>;
 }
 

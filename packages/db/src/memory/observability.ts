@@ -6,7 +6,7 @@
  * everything here so the existing import path keeps working.
  */
 import { randomUUID } from "node:crypto";
-import type { ExecutionNodeRecord, ExecutionRecord, ExecutionStore } from "../../../runtime/src/index.ts";
+import type { ExecutionNodeRecord, ExecutionRecord, ExecutionStepRecord, ExecutionStore } from "../../../runtime/src/index.ts";
 import type { UsageRecord, UUID } from "../../../core/src/index.ts";
 import { ConflictError, NotFoundError } from "../errors.ts";
 import { InMemoryCrudRepository } from "./base.ts";
@@ -106,6 +106,7 @@ export class InMemoryExecutionStore implements ExecutionStore {
   executions: ExecutionRecord[] = [];
   nodes: ExecutionNodeRecord[] = [];
   usage: UsageRecord[] = [];
+  steps: ExecutionStepRecord[] = [];
 
   async start(record: ExecutionRecord): Promise<void> {
     this.executions.push(structuredClone(record));
@@ -135,6 +136,29 @@ export class InMemoryExecutionStore implements ExecutionStore {
 
   async recordUsage(record: UsageRecord): Promise<void> {
     this.usage.push(structuredClone(record));
+  }
+
+  // ADR-0037: streamed step frames (persisted for replay).
+  async recordStep(record: ExecutionStepRecord): Promise<void> {
+    this.steps = this.steps.filter((s) => s.frameId !== record.frameId);
+    this.steps.push(structuredClone(record));
+  }
+
+  async listStepEvents(executionId: string): Promise<ExecutionStepRecord[]> {
+    return this.steps
+      .filter((s) => s.executionId === executionId)
+      .sort((a, b) => a.seq - b.seq)
+      .map((s) => structuredClone(s));
+  }
+
+  async getStepEvent(
+    executionId: string,
+    frameId: string
+  ): Promise<ExecutionStepRecord | undefined> {
+    const found = this.steps.find(
+      (s) => s.executionId === executionId && s.frameId === frameId
+    );
+    return found ? structuredClone(found) : undefined;
   }
 
   // Async read methods (the control-plane `ReadableExecutionStore` contract).

@@ -11,6 +11,30 @@ test("parseSseFrames: parses a single token frame", () => {
   assert.equal(remainder, "");
 });
 
+test("parseSseFrames: parses an ADR-0037 step frame (inline body)", () => {
+  const buf =
+    `event: step\ndata: {"frameId":"f1","nodeId":"retrieve","channel":"primary","source":"node_output","seq":1,"data":{"doc":"hi"}}\n\n`;
+  const { frames } = parseSseFrames(buf);
+  assert.equal(frames.length, 1);
+  assert.equal(frames[0].event, "step");
+  const d = frames[0].data as { channel: string; data: { doc: string } };
+  assert.equal(d.channel, "primary");
+  assert.deepEqual(d.data, { doc: "hi" });
+});
+
+test("parseSseFrames: parses a truncated step frame + skips heartbeat comment", () => {
+  // A heartbeat comment (":\n") precedes a truncated large-body step frame.
+  const buf =
+    `:\n\n` +
+    `event: step\ndata: {"frameId":"big","channel":"docs","truncated":true,"bytes":40000,"preview":"{\\"blob\\""}\n\n`;
+  const { frames } = parseSseFrames(buf);
+  // The comment produces no frame; only the step frame is emitted.
+  assert.equal(frames.length, 1);
+  const d = frames[0].data as { truncated: boolean; frameId: string };
+  assert.equal(d.truncated, true);
+  assert.equal(d.frameId, "big");
+});
+
 test("parseSseFrames: emits multiple events in one chunk", () => {
   const buf =
     `event: execution.started\ndata: {"pipelineId":"p1"}\n\n` +

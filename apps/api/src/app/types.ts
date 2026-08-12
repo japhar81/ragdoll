@@ -43,7 +43,8 @@ import type {
 import type {
   ExecutionStore,
   ExecutionRecord,
-  ExecutionNodeRecord
+  ExecutionNodeRecord,
+  ExecutionStepRecord
 } from "../../../../packages/runtime/src/index.ts";
 import type { SecretProvider } from "../../../../packages/secrets/src/index.ts";
 import type { PluginRegistry } from "../../../../packages/plugin-sdk/src/index.ts";
@@ -130,6 +131,20 @@ export interface ReadableExecutionStore extends ExecutionStore {
   }): Promise<CursorPage<ExecutionRecord>>;
   getExecution(executionId: string): Promise<ExecutionRecord | undefined>;
   listNodes(executionId: string): Promise<ExecutionNodeRecord[]>;
+  /**
+   * ADR-0037: persisted streamed step frames for an execution, in seq order.
+   * Read by `GET /api/executions/:id/stream` to replay frames a late-joining
+   * client missed before it goes live on the change bus. Optional so a reader
+   * that predates result streaming still satisfies the interface (the stream
+   * route then serves live-only, or nothing when the run already finished).
+   */
+  listStepEvents?(executionId: string): Promise<ExecutionStepRecord[]>;
+  /** ADR-0037: one persisted step frame by id — the fetch-by-ref target for a
+   *  large (truncated-on-the-wire) step body. */
+  getStepEvent?(
+    executionId: string,
+    frameId: string
+  ): Promise<ExecutionStepRecord | undefined>;
   /** Optional sync arrays kept by the InMemory store for tests. */
   executions?: ExecutionRecord[];
   nodes?: ExecutionNodeRecord[];

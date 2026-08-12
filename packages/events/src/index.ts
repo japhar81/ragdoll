@@ -60,6 +60,93 @@ export interface ChangeEvent {
 
 export type ChangeEventHandler = (event: ChangeEvent) => void;
 
+// --- Execution result streaming (ADR-0037) ---------------------------------
+//
+// A "step frame" carries a single node's (redacted) output — or a payload a
+// plugin pushed via ctx.emit — out to clients watching an execution's live
+// stream. Frames ride the change bus as `execution.step` ChangeEvents (payload
+// = a StepWireFrame) and are persisted to `execution_events` for replay. The
+// full body is size-capped on the wire: large payloads travel as a preview +
+// `truncated` flag, and the client fetches the whole thing by frameId from
+// `GET /api/executions/:id/steps/:frameId`.
+
+/** Max serialized size (bytes) of a step body sent inline on the wire. Larger
+ *  bodies are truncated to a preview + `bytes`; the full body is fetched by
+ *  frameId. 16 KiB keeps the change bus / SSE frames small without forcing a
+ *  round-trip for ordinary step outputs. */
+export const STEP_INLINE_MAX_BYTES = 16 * 1024;
+
+/** Where a step frame's body came from. */
+export type StepSource = "node_output" | "emit";
+
+/** The on-the-wire shape of one streamed step (SSE `data:` and change-bus
+ *  `payload`). Either `data` is present (small enough to inline) OR
+ *  `truncated` is set with a `preview` + `bytes` and the client fetches the
+ *  full body by `frameId`. */
+export interface StepWireFrame {
+  /** Stable per-frame id (also the execution_events row id) — used for
+   *  replay/live dedup and as the fetch-by-ref key. */
+  frameId: string;
+  nodeId: string;
+  /** Channel label (node.streamAs, the ctx.emit channel, or the node id). */
+  channel: string;
+  source: StepSource;
+  /** Monotonic per-execution sequence, assigned by the runtime. */
+  seq: number;
+  at: string;
+  /** Present when the redacted body fit under the inline cap. */
+  data?: Record<string, unknown>;
+  /** Set when the body was too large to inline. */
+  truncated?: boolean;
+  /** Byte size of the full serialized body (only when `truncated`). */
+  bytes?: number;
+  /** Short text preview of the full body (only when `truncated`). */
+  preview?: string;
+}
+
+/** One persisted/emitted step, pre-capping. `data` is the full redacted body. */
+export interface StepFrameBody {
+  frameId: string;
+  nodeId: string;
+  channel: string;
+  source: StepSource;
+  seq: number;
+  at: string;
+  data: Record<string, unknown>;
+}
+
+/** How many characters of the serialized body to include as a preview when a
+ *  step is too large to inline. */
+const STEP_PREVIEW_CHARS = 512;
+
+/**
+ * Project a full step body onto its wire frame, inlining the body when it fits
+ * under `maxBytes` and otherwise emitting a truncated preview. Pure + shared by
+ * the worker (change-bus publish) and the API (SSE replay/live) so both cap
+ * identically.
+ */
+export function toStepWireFrame(
+  step: StepFrameBody,
+  maxBytes = STEP_INLINE_MAX_BYTES
+): StepWireFrame {
+  const base = {
+    frameId: step.frameId,
+    nodeId: step.nodeId,
+    channel: step.channel,
+    source: step.source,
+    seq: step.seq,
+    at: step.at
+  };
+  const json = JSON.stringify(step.data ?? {});
+  if (json.length <= maxBytes) return { ...base, data: step.data ?? {} };
+  return {
+    ...base,
+    truncated: true,
+    bytes: json.length,
+    preview: json.slice(0, STEP_PREVIEW_CHARS)
+  };
+}
+
 /**
  * Transport-agnostic change-event bus. Implementations MUST be safe to use
  * concurrently from many call sites; subscribers MUST NOT block the publish

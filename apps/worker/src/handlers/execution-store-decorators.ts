@@ -15,10 +15,12 @@ import { randomUUID } from "node:crypto";
 import type {
   ExecutionStore,
   ExecutionRecord,
-  ExecutionNodeRecord
+  ExecutionNodeRecord,
+  ExecutionStepRecord
 } from "../../../../packages/runtime/src/index.ts";
 import type { UsageRecord } from "../../../../packages/core/src/index.ts";
 import type { ChangeBus } from "../../../../packages/events/src/index.ts";
+import { toStepWireFrame } from "../../../../packages/events/src/index.ts";
 import type { StructuredLogger } from "../../../../packages/observability/src/index.ts";
 import type { UsageRecordRepository } from "../../../../packages/db/src/index.ts";
 import type {
@@ -214,6 +216,22 @@ export class PublishingExecutionStore implements ExecutionStore {
     );
   }
 
+  async recordStep(record: ExecutionStepRecord): Promise<void> {
+    // Persist first (replay source of truth), then fan a SIZE-CAPPED copy onto
+    // the change bus — a large step travels as a preview + frameId, and the
+    // client fetches the full body via GET /api/executions/:id/steps/:frameId.
+    // The full body never rides the bus.
+    await this.inner.recordStep?.(record);
+    const meta = this.metaByExecution.get(record.executionId);
+    await this.fire(
+      "execution.step",
+      record.executionId,
+      meta?.tenantId ?? null,
+      meta?.actorId ?? null,
+      toStepWireFrame(record) as unknown as Record<string, unknown>
+    );
+  }
+
   async recordUsage(record: UsageRecord): Promise<void> {
     await this.inner.recordUsage(record);
     if (this.emit) {
@@ -274,6 +292,11 @@ export class UsageMirroringExecutionStore implements ExecutionStore {
 
   completeNode(record: ExecutionNodeRecord): Promise<void> {
     return this.inner.completeNode(record);
+  }
+
+  recordStep(record: ExecutionStepRecord): Promise<void> {
+    // Pass-through: persistence + publishing are the wrapped stores' jobs.
+    return this.inner.recordStep?.(record) ?? Promise.resolve();
   }
 
   async recordUsage(record: UsageRecord): Promise<void> {

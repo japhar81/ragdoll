@@ -25,6 +25,7 @@ import {
   redactValue,
   type PipelineSpec
 } from "../../../../../packages/core/src/index.ts";
+import { toStepWireFrame } from "../../../../../packages/events/src/index.ts";
 import { validatePipelineSpec } from "../../../../../packages/pipeline-spec/src/index.ts";
 import type {
   WebhookTriggerRow,
@@ -542,7 +543,11 @@ export function registerPipelineRunsRoutes(
         requestId: headerValue(ctx.request.headers, "x-request-id") ?? undefined,
         deadlineMs:
           typeof body.deadlineMs === "number" ? body.deadlineMs : undefined,
-        onToken: ({ nodeId, token }) => push(f("token", { nodeId, token }))
+        onToken: ({ nodeId, token }) => push(f("token", { nodeId, token })),
+        // ADR-0037: a streamed node's output (node.stream) or a plugin's
+        // ctx.emit payload → a live `step` frame, size-capped like the
+        // GET /:id/stream path (large bodies travel truncated + frameId).
+        onStep: (frame) => push(f("step", toStepWireFrame(frame)))
       })
         .then(async (result) => {
           push(
