@@ -84,21 +84,13 @@ export function parseSseFrames(buffer: string): {
   return { frames, remainder: rest };
 }
 
-export async function streamRun(opts: StreamRunOptions): Promise<void> {
-  const headers: Record<string, string> = {
-    ...buildAuthHeaders(getAuth()),
-    "content-type": "application/json",
-    accept: "text/event-stream"
-  };
-  const response = await fetch(
-    `/api/pipelines/${encodeURIComponent(opts.pipelineId)}/stream`,
-    {
-      method: "POST",
-      headers,
-      body: JSON.stringify(opts.body),
-      signal: opts.signal
-    }
-  );
+/** Drain an SSE `Response` body, parsing frames and delivering each to
+ *  `onEvent`. Shared by every SSE consumer here. Resolves when the stream
+ *  closes (server `done` frame or network drop). */
+async function consumeSse(
+  response: Response,
+  onEvent: (event: StreamEvent) => void
+): Promise<void> {
   if (!response.ok) {
     const text = await response.text();
     throw new Error(`stream HTTP ${response.status}: ${text.slice(0, 200)}`);
@@ -116,13 +108,100 @@ export async function streamRun(opts: StreamRunOptions): Promise<void> {
       buffer += decoder.decode(value, { stream: true });
       const { frames, remainder } = parseSseFrames(buffer);
       buffer = remainder;
-      for (const frame of frames) opts.onEvent(frame);
+      for (const frame of frames) onEvent(frame);
     }
     // Flush any trailing decoded text.
     buffer += decoder.decode();
     const { frames } = parseSseFrames(buffer + "\n\n");
-    for (const frame of frames) opts.onEvent(frame);
+    for (const frame of frames) onEvent(frame);
   } finally {
     reader.releaseLock();
   }
+}
+
+export async function streamRun(opts: StreamRunOptions): Promise<void> {
+  const headers: Record<string, string> = {
+    ...buildAuthHeaders(getAuth()),
+    "content-type": "application/json",
+    accept: "text/event-stream"
+  };
+  const response = await fetch(
+    `/api/pipelines/${encodeURIComponent(opts.pipelineId)}/stream`,
+    {
+      method: "POST",
+      headers,
+      body: JSON.stringify(opts.body),
+      signal: opts.signal
+    }
+  );
+  await consumeSse(response, opts.onEvent);
+}
+
+// --- Per-execution result stream (ADR-0037) --------------------------------
+
+/** One streamed step frame as it arrives on the wire. `data` is present for
+ *  small bodies; a large body arrives `truncated` (preview + `bytes`) and the
+ *  full payload is fetched with {@link fetchStepBody} using `frameId`. */
+export interface StepFrame {
+  frameId: string;
+  nodeId: string;
+  channel: string;
+  source: "node_output" | "emit";
+  seq: number;
+  at: string;
+  data?: Record<string, unknown>;
+  truncated?: boolean;
+  bytes?: number;
+  preview?: string;
+  /** True when delivered from the replay of already-recorded frames. */
+  replayed?: boolean;
+}
+
+export interface StreamExecutionOptions {
+  executionId: string;
+  onEvent: (event: StreamEvent) => void;
+  signal?: AbortSignal;
+}
+
+/**
+ * Subscribe to a single execution's live result stream
+ * (`GET /api/executions/:id/stream`, ADR-0037). Replays step frames already
+ * recorded, then tails live until the run reaches a terminal status. Unlike
+ * {@link streamRun} this does NOT start a run — it observes one already
+ * enqueued (e.g. via `POST /api/pipelines/:id/run`), so it's safe to
+ * reconnect. Resolves when the server sends `done` or the stream drops.
+ */
+export async function streamExecution(
+  opts: StreamExecutionOptions
+): Promise<void> {
+  const headers: Record<string, string> = {
+    ...buildAuthHeaders(getAuth()),
+    accept: "text/event-stream"
+  };
+  const response = await fetch(
+    `/api/executions/${encodeURIComponent(opts.executionId)}/stream`,
+    { method: "GET", headers, signal: opts.signal }
+  );
+  await consumeSse(response, opts.onEvent);
+}
+
+/**
+ * Fetch the full (redacted) body of a streamed step that arrived truncated.
+ * Returns the step's `data` object, or throws on a non-2xx / missing frame.
+ */
+export async function fetchStepBody(
+  executionId: string,
+  frameId: string
+): Promise<Record<string, unknown> | undefined> {
+  const response = await fetch(
+    `/api/executions/${encodeURIComponent(executionId)}/steps/${encodeURIComponent(frameId)}`,
+    { headers: buildAuthHeaders(getAuth()) }
+  );
+  if (!response.ok) {
+    throw new Error(`step HTTP ${response.status}`);
+  }
+  const json = (await response.json()) as {
+    step?: { data?: Record<string, unknown> };
+  };
+  return json.step?.data;
 }

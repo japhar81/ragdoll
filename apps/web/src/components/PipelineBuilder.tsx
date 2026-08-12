@@ -23,7 +23,7 @@ import ReactFlow, {
 import "reactflow/dist/style.css";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, ApiError, type PluginInfo } from "../lib/api.ts";
-import { streamRun } from "../lib/streamRun.ts";
+import { streamRun, type StepFrame } from "../lib/streamRun.ts";
 import { stringifyYaml } from "../lib/yaml.ts";
 import {
   applyResolved,
@@ -519,6 +519,7 @@ export function PipelineBuilder(props: {
   // lifecycle so the button label + abort behavior stay consistent.
   const [streamBusy, setStreamBusy] = useState(false);
   const [streamTokens, setStreamTokens] = useState<Record<string, string>>({});
+  const [streamSteps, setStreamSteps] = useState<StepFrame[]>([]);
   const [streamError, setStreamError] = useState<string | null>(null);
   const [streamFinalOutput, setStreamFinalOutput] = useState<unknown>(null);
   const streamAbortRef = useRef<AbortController | null>(null);
@@ -2646,6 +2647,7 @@ export function PipelineBuilder(props: {
                             }
                             setStreamBusy(true);
                             setStreamTokens({});
+                            setStreamSteps([]);
                             setStreamError(null);
                             setStreamFinalOutput(null);
                             const controller = new AbortController();
@@ -2673,6 +2675,16 @@ export function PipelineBuilder(props: {
                                       ...prev,
                                       [nodeId]: (prev[nodeId] ?? "") + token
                                     }));
+                                  } else if (frame.event === "step") {
+                                    // ADR-0037: a node streamed its output (or
+                                    // a plugin ctx.emit'd) mid-run — append it,
+                                    // deduped by frameId (replay + live overlap).
+                                    const step = frame.data as StepFrame;
+                                    setStreamSteps((prev) =>
+                                      prev.some((s) => s.frameId === step.frameId)
+                                        ? prev
+                                        : [...prev, step]
+                                    );
                                   } else if (frame.event === "output") {
                                     setStreamFinalOutput(
                                       (frame.data as { output: unknown }).output
@@ -2728,6 +2740,35 @@ export function PipelineBuilder(props: {
                                 {text}
                               </pre>
                             </div>
+                          ))}
+                        </div>
+                      )}
+                      {streamSteps.length > 0 && (
+                        <div style={{ marginTop: 8 }}>
+                          <div className="muted" style={{ fontSize: "0.8em" }}>
+                            Streamed steps
+                          </div>
+                          {streamSteps.map((step) => (
+                            <details key={step.frameId} style={{ marginTop: 4 }}>
+                              <summary style={{ fontSize: "0.85em" }}>
+                                <strong>{step.channel}</strong>{" "}
+                                <span className="muted">
+                                  ({step.nodeId}
+                                  {step.truncated
+                                    ? ` · ${step.bytes} bytes — fetch for full body`
+                                    : ""}
+                                  )
+                                </span>
+                              </summary>
+                              <pre
+                                className="codeblock"
+                                style={{ whiteSpace: "pre-wrap", marginTop: 4 }}
+                              >
+                                {step.truncated
+                                  ? step.preview ?? ""
+                                  : JSON.stringify(step.data ?? {}, null, 2)}
+                              </pre>
+                            </details>
                           ))}
                         </div>
                       )}
