@@ -176,6 +176,55 @@ def test_bfs_private_ip_link_blocked_by_ssrf(client, monkeypatch):
     assert data["metadata"]["skipped"] >= 1
 
 
+def test_bfs_ssrf_block_records_skip_reason(client, monkeypatch):
+    """An SSRF-blocked followed link is surfaced in metadata.skipReasons.
+
+    Diagnosability regression: a crawl that drops pages must say WHY, not just
+    bump an opaque count. Here the private-IP link is blocked; its reason must
+    name the URL and be flagged as an SSRF block.
+    """
+    data = _crawl(
+        client,
+        monkeypatch,
+        {"url": SEED, "maxPages": 20, "maxDepth": 1, "sameDomainOnly": False},
+    )
+    reasons = data["metadata"].get("skipReasons")
+    assert reasons, "skipReasons must be present when a link was skipped"
+    blocked = [r for r in reasons if r["url"] == "http://intranet.site.com/secret"]
+    assert blocked and "ssrf" in blocked[0]["reason"].lower()
+
+
+def test_bfs_all_fetches_fail_is_empty_but_diagnosable(client, monkeypatch):
+    """The field bug: works locally, empty in a locked-down deployment.
+
+    When every fetch raises (headless browser can't launch, target unreachable
+    from the pod, timeout), the run must return zero documents WITHOUT masking
+    the cause — each failure is logged and recorded in metadata.skipReasons so
+    an operator can see it was a fetch failure, not an SSRF policy block.
+    """
+
+    async def always_fail(url, cfg):
+        raise RuntimeError("net::ERR_CONNECTION_REFUSED")
+
+    monkeypatch.setattr(c4a, "run_crawl4ai", always_fail)
+    monkeypatch.setattr(safety, "system_resolver", _resolver)
+    body = make_request_body(
+        "crawl4ai_crawler",
+        {"url": SEED, "maxPages": 5, "maxDepth": 0, "sameDomainOnly": True},
+    )
+    r = client.post("/execute", json=body)
+    assert r.status_code == 200
+    data = r.json()
+    assert data["outputs"]["documents"] == []
+    assert data["outputs"]["pageCount"] == 0
+    assert data["metadata"]["skipped"] == 1
+    reasons = data["metadata"]["skipReasons"]
+    assert reasons[0]["url"] == SEED
+    assert "RuntimeError" in reasons[0]["reason"]
+    # NOT an SSRF block — the reason distinguishes a fetch failure from policy.
+    assert "ssrf" not in reasons[0]["reason"].lower()
+
+
 def test_bfs_depth_zero_only_seed(client, monkeypatch):
     data = _crawl(
         client,
