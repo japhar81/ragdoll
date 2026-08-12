@@ -132,6 +132,12 @@ export class OpenSearchClient {
     }
   }
 
+  /** AWS OpenSearch Serverless — the request-shape rules differ from a
+   *  managed domain (`_bulk`/`_delete_by_query` reject the `refresh` param). */
+  private get serverless(): boolean {
+    return this.sigv4?.service === "aoss";
+  }
+
   private headers(contentType = "application/json"): Record<string, string> {
     const headers: Record<string, string> = { "content-type": contentType };
     if (this.auth?.authorization) {
@@ -273,7 +279,10 @@ export class OpenSearchClient {
         try {
           const resp = await this.request<{ errors?: boolean; items?: unknown[] }>(
             "POST",
-            `/_bulk${refresh ? "?refresh=true" : ""}`,
+            // AWS OpenSearch Serverless (aoss) rejects the `refresh` param on
+            // _bulk with a 400 — it is near-real-time and refreshes on its own.
+            // Drop it there; honor it everywhere else.
+            `/_bulk${refresh && !this.serverless ? "?refresh=true" : ""}`,
             ndjson,
             { ndjson: true }
           );
@@ -356,9 +365,11 @@ export class OpenSearchClient {
   }
 
   async deleteByQuery(index: string, query: Record<string, unknown>): Promise<void> {
+    // aoss auto-refreshes and rejects the `refresh` param; keep conflicts=proceed.
+    const params = this.serverless ? "conflicts=proceed" : "refresh=true&conflicts=proceed";
     await this.request(
       "POST",
-      `/${encodeURIComponent(index)}/_delete_by_query?refresh=true&conflicts=proceed`,
+      `/${encodeURIComponent(index)}/_delete_by_query?${params}`,
       { query },
       { tolerate: [404] }
     );
@@ -445,4 +456,45 @@ export function awsSigV4FromSecrets(
     secretAccessKey: secrets.awsSecretAccessKey,
     sessionToken: secrets.awsSessionToken
   };
+}
+
+/**
+ * Same as {@link awsSigV4FromSecrets} but reads from a connection's `options`
+ * (config) blob — so an operator can enable SigV4 once on the CONNECTION
+ * (`awsRegion` + `awsService: aoss`) instead of on every node's secrets. Values
+ * are coerced to strings; non-string entries are ignored.
+ */
+export function awsSigV4FromConnectionOptions(
+  options: Record<string, unknown> | undefined
+): AwsSigV4Config | undefined {
+  if (!options) return undefined;
+  const str = (k: string): string | undefined =>
+    typeof options[k] === "string" ? (options[k] as string) : undefined;
+  return awsSigV4FromSecrets({
+    awsSigv4: options.awsSigv4 === true ? "true" : str("awsSigv4"),
+    awsRegion: str("awsRegion"),
+    awsService: str("awsService"),
+    awsAccessKeyId: str("awsAccessKeyId"),
+    awsSecretAccessKey: str("awsSecretAccessKey"),
+    awsSessionToken: str("awsSessionToken")
+  });
+}
+
+/**
+ * Merge SigV4 configs field-by-field, later sources overriding earlier ones for
+ * fields they actually set. Returns undefined only when EVERY source is absent
+ * (SigV4 stays off). Used to layer node secrets over the connection's config.
+ */
+export function mergeAwsSigV4(
+  ...configs: Array<AwsSigV4Config | undefined>
+): AwsSigV4Config | undefined {
+  let out: AwsSigV4Config | undefined;
+  for (const c of configs) {
+    if (!c) continue;
+    out = out ?? {};
+    for (const [k, v] of Object.entries(c)) {
+      if (v !== undefined) (out as Record<string, unknown>)[k] = v;
+    }
+  }
+  return out;
 }

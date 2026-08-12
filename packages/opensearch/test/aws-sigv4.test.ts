@@ -18,7 +18,13 @@ import {
   createAwsCredentialsProvider,
   type AwsCredentials
 } from "../src/aws-sigv4.ts";
-import { OpenSearchClient, awsSigV4FromSecrets, AWS_SIGV4_SECRET_FIELDS } from "../src/client.ts";
+import {
+  OpenSearchClient,
+  awsSigV4FromSecrets,
+  awsSigV4FromConnectionOptions,
+  mergeAwsSigV4,
+  AWS_SIGV4_SECRET_FIELDS
+} from "../src/client.ts";
 
 const NOW = new Date("2026-08-04T12:34:56.000Z");
 const AMZ_DATE = "20260804T123456Z";
@@ -301,6 +307,77 @@ test("AWS_SIGV4_SECRET_FIELDS covers exactly the field names the mapper reads", 
   for (const f of Object.values(AWS_SIGV4_SECRET_FIELDS)) {
     assert.equal(f.format, "secret-ref"); // so the Builder renders a secret-ref input
   }
+});
+
+// --- AWS OpenSearch Serverless request-shape (refresh) --------------------
+
+function captureUrls(): { urls: string[]; fetchImpl: (u: string) => Promise<{ ok: boolean; status: number; text(): Promise<string> }> } {
+  const urls: string[] = [];
+  return {
+    urls,
+    fetchImpl: async (u: string) => {
+      urls.push(u);
+      return { ok: true, status: 200, text: async () => JSON.stringify({ errors: false, items: [] }) };
+    }
+  };
+}
+
+test("aoss: bulkIndex omits the refresh param (Serverless rejects it)", async () => {
+  const cap = captureUrls();
+  const client = new OpenSearchClient({
+    endpoint: "https://abc.us-east-1.aoss.amazonaws.com",
+    aws: { region: "us-east-1", service: "aoss", accessKeyId: "A", secretAccessKey: "s" },
+    fetchImpl: cap.fetchImpl as never
+  });
+  await client.bulkIndex("idx", [{ doc: { a: 1 } }], /* refresh */ true);
+  const bulk = cap.urls.find((u) => u.includes("/_bulk"));
+  assert.ok(bulk && !bulk.includes("refresh"), `aoss _bulk must not carry refresh: ${bulk}`);
+});
+
+test("managed domain (es): bulkIndex keeps refresh=true", async () => {
+  const cap = captureUrls();
+  const client = new OpenSearchClient({
+    endpoint: "https://s.us-east-1.es.amazonaws.com",
+    aws: { region: "us-east-1", service: "es", accessKeyId: "A", secretAccessKey: "s" },
+    fetchImpl: cap.fetchImpl as never
+  });
+  await client.bulkIndex("idx", [{ doc: { a: 1 } }], true);
+  assert.ok(cap.urls.some((u) => u.includes("/_bulk?refresh=true")));
+});
+
+test("aoss: deleteByQuery drops refresh but keeps conflicts=proceed", async () => {
+  const cap = captureUrls();
+  const client = new OpenSearchClient({
+    endpoint: "https://abc.us-east-1.aoss.amazonaws.com",
+    aws: { region: "us-east-1", service: "aoss", accessKeyId: "A", secretAccessKey: "s" },
+    fetchImpl: cap.fetchImpl as never
+  });
+  await client.deleteByQuery("idx", { match_all: {} });
+  const del = cap.urls.find((u) => u.includes("_delete_by_query"));
+  assert.ok(del && !del.includes("refresh") && del.includes("conflicts=proceed"), del);
+});
+
+// --- AWS config from the connection options + merge -----------------------
+
+test("awsSigV4FromConnectionOptions: reads region/service from the connection config", () => {
+  assert.deepEqual(
+    awsSigV4FromConnectionOptions({ awsRegion: "us-east-1", awsService: "aoss", host: "x", port: 443 }),
+    { region: "us-east-1", service: "aoss", accessKeyId: undefined, secretAccessKey: undefined, sessionToken: undefined }
+  );
+  assert.equal(awsSigV4FromConnectionOptions({ host: "x" }), undefined);
+  assert.equal(awsSigV4FromConnectionOptions(undefined), undefined);
+});
+
+test("mergeAwsSigV4: node secrets override the connection config field-by-field", () => {
+  const fromConn = { region: "us-east-1", service: "aoss", accessKeyId: "conn-key" } as never;
+  const fromSecrets = { region: undefined, service: "aoss", accessKeyId: "secret-key" } as never;
+  // secrets win where set (accessKeyId); connection fills where secrets are undefined (region).
+  assert.deepEqual(mergeAwsSigV4(fromConn, fromSecrets), {
+    region: "us-east-1",
+    service: "aoss",
+    accessKeyId: "secret-key"
+  });
+  assert.equal(mergeAwsSigV4(undefined, undefined), undefined);
 });
 
 test("OpenSearchClient without aws still uses basic auth (unchanged)", async () => {

@@ -3,6 +3,8 @@ export {
   OpenSearchError,
   createOpenSearchClient,
   awsSigV4FromSecrets,
+  awsSigV4FromConnectionOptions,
+  mergeAwsSigV4,
   AWS_SIGV4_SECRET_FIELDS
 } from "./client.ts";
 export type {
