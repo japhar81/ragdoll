@@ -245,6 +245,13 @@ export function registerConnectionsRoutes(
       patch.archivedAt =
         typeof body.archivedAt === "string" ? body.archivedAt : null;
     const updated = await connections.update(ctx.params.id, patch);
+    // Invalidate the pooled client so the next acquireClient() rebuilds it from
+    // the new config. Without this the cache (keyed by connection.id) keeps
+    // serving a client built from the OLD url/host/secret — an updated
+    // connection silently keeps using its previous value (incl. a /probe that
+    // passes against the stale endpoint). DELETE already does this; UPDATE must
+    // too. Best-effort: a dispose failure must not fail the update.
+    await closeClient(ctx.params.id).catch(() => undefined);
     await audit(
       ctx,
       "connection.update",
