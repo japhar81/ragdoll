@@ -12,6 +12,11 @@ import {
   summarizeExecution
 } from "../lib/execTrace.ts";
 import { useEvents, useChangeEvents } from "../events/EventsProvider.tsx";
+import {
+  streamExecution,
+  fetchStepBody,
+  type StepFrame
+} from "../lib/streamRun.ts";
 import type { ExecutionNodeRecord } from "../lib/types.ts";
 import { ExecutionsConsole } from "./ExecutionsConsole.tsx";
 
@@ -125,6 +130,39 @@ export function ExecutionsScreen() {
     return () => window.removeEventListener("keydown", onKey);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selected]);
+
+  // ADR-0037: subscribe to the selected execution's result stream. Replays
+  // step frames already recorded, then tails live until terminal. Safe to
+  // reconnect (dedup by frameId) — this only OBSERVES, never starts a run.
+  const [streamSteps, setStreamSteps] = useState<StepFrame[]>([]);
+  const [fullBodies, setFullBodies] = useState<Record<string, unknown>>({});
+  useEffect(() => {
+    if (!selected) return;
+    setStreamSteps([]);
+    setFullBodies({});
+    const controller = new AbortController();
+    streamExecution({
+      executionId: selected,
+      signal: controller.signal,
+      onEvent: (frame) => {
+        if (frame.event !== "step") return;
+        const step = frame.data as StepFrame;
+        setStreamSteps((prev) =>
+          prev.some((s) => s.frameId === step.frameId) ? prev : [...prev, step]
+        );
+      }
+    }).catch(() => undefined); // network drop / abort — non-fatal
+    return () => controller.abort();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selected]);
+
+  const loadFullBody = (frameId: string) => {
+    if (!selected) return;
+    fetchStepBody(selected, frameId)
+      .then((data) => setFullBodies((prev) => ({ ...prev, [frameId]: data })))
+      .catch(() => undefined);
+  };
+
   const events = useEvents();
   // When the live socket is connected, lean on event-driven invalidation
   // (the EventsProvider maps `execution.*` events onto these query keys).
@@ -423,6 +461,42 @@ export function ExecutionsScreen() {
                 <div className="exec-block">
                   <h3>Output</h3>
                   <pre className="console-detail">{pretty(ex.output)}</pre>
+                </div>
+              )}
+
+              {streamSteps.length > 0 && (
+                <div className="exec-block">
+                  <h3>Streamed results ({streamSteps.length})</h3>
+                  <ol className="timeline">
+                    {streamSteps
+                      .slice()
+                      .sort((a, b) => a.seq - b.seq)
+                      .map((step) => (
+                        <li key={step.frameId}>
+                          <strong>{step.channel}</strong>{" "}
+                          <span className="muted">
+                            #{step.seq} · {step.nodeId} · {step.source}
+                            {step.truncated ? ` · ${step.bytes} bytes` : ""}
+                          </span>
+                          {step.truncated && fullBodies[step.frameId] === undefined ? (
+                            <div>
+                              <pre className="console-detail">{step.preview}</pre>
+                              <button onClick={() => loadFullBody(step.frameId)}>
+                                Load full body
+                              </button>
+                            </div>
+                          ) : (
+                            <pre className="console-detail">
+                              {pretty(
+                                step.truncated
+                                  ? fullBodies[step.frameId]
+                                  : step.data
+                              )}
+                            </pre>
+                          )}
+                        </li>
+                      ))}
+                  </ol>
                 </div>
               )}
 

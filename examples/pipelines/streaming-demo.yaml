@@ -1,0 +1,85 @@
+apiVersion: rag-platform/v1
+kind: Pipeline
+metadata:
+  name: streaming-demo
+  description: "Demonstrates ADR-0037 per-step result streaming: two transformer steps each marked `stream: true` push their output to the live execution stream as they complete (primary first, then ancillary), before the final output. Runs with no external services."
+  stages:
+  - id: s_auto_1
+    label: Stage 1
+  - id: s_auto_2
+    label: Stage 2
+  - id: s_auto_3
+    label: Stage 3
+  - id: s_auto_4
+    label: Stage 4
+spec:
+  nodes:
+  - id: input
+    type: input
+    config:
+      default:
+        topic: result streaming
+    ui:
+      position:
+        x: 16
+        y: 80
+      stageId: s_auto_1
+  - id: primary
+    plugin:
+      category: transformer
+      id: transform
+      version: 1.0.0
+    # Streamed the moment it completes (ADR-0037) — the "primary" result.
+    stream: true
+    streamAs: primary
+    config:
+      engine: jsonata
+      inputs:
+      - topic
+      outputs:
+        primary: "'Primary result for: ' & topic"
+        topic: topic
+    ui:
+      position:
+        x: 470
+        y: 80
+      stageId: s_auto_2
+  - id: ancillary
+    plugin:
+      category: transformer
+      id: transform
+      version: 1.0.0
+    # Streamed after `primary` — the supporting detail.
+    stream: true
+    streamAs: ancillary
+    config:
+      engine: jsonata
+      inputs:
+      - topic
+      outputs:
+        ancillary: "'Ancillary detail for: ' & topic"
+    ui:
+      position:
+        x: 924
+        y: 80
+      stageId: s_auto_3
+  - id: output
+    type: output
+    ui:
+      position:
+        x: 1378
+        y: 80
+      stageId: s_auto_4
+  edges:
+  - from: input
+    to: primary
+    fromPort: topic
+    toPort: topic
+  - from: primary
+    to: ancillary
+    fromPort: topic
+    toPort: topic
+  - from: ancillary
+    to: output
+    fromPort: ancillary
+    toPort: result
