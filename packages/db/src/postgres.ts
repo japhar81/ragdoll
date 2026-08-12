@@ -2,6 +2,7 @@ import type { SecretRef, UsageRecord } from "../../core/src/index.ts";
 import type {
   ExecutionNodeRecord,
   ExecutionRecord,
+  ExecutionStepRecord,
   ExecutionStore
 } from "../../runtime/src/index.ts";
 import type { SecretRecord, SecretRepository } from "../../secrets/src/index.ts";
@@ -205,6 +206,58 @@ export class PostgresExecutionStore implements ExecutionStore {
     );
   }
 
+  /**
+   * ADR-0037: persist a streamed step frame to `execution_events`. Idempotent
+   * on the frame id so a replay-then-tail SSE reconnect can't double-insert.
+   * The body reuses `stringifyForTrace` (same 8 MiB cell cap + shape sentinel
+   * as node output_redacted) so a runaway step can't blow the jsonb row limit.
+   */
+  async recordStep(record: ExecutionStepRecord): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO execution_events
+         (id, execution_id, node_id, event_type, payload_redacted, created_at)
+       VALUES ($1, $2, $3, 'execution.step', $4, $5)
+       ON CONFLICT (id) DO NOTHING`,
+      [
+        record.frameId,
+        record.executionId,
+        record.nodeId,
+        stringifyForTrace({
+          channel: record.channel,
+          source: record.source,
+          seq: record.seq,
+          at: record.at,
+          data: record.data
+        }),
+        record.at
+      ]
+    );
+  }
+
+  async listStepEvents(executionId: string): Promise<ExecutionStepRecord[]> {
+    const result = await this.pool.query<Record<string, unknown>>(
+      `SELECT id, execution_id, node_id, payload_redacted, created_at
+         FROM execution_events
+        WHERE execution_id = $1 AND event_type = 'execution.step'
+        ORDER BY created_at ASC, id ASC`,
+      [executionId]
+    );
+    return result.rows.map(rowToStepRecord);
+  }
+
+  async getStepEvent(
+    executionId: string,
+    frameId: string
+  ): Promise<ExecutionStepRecord | undefined> {
+    const result = await this.pool.query<Record<string, unknown>>(
+      `SELECT id, execution_id, node_id, payload_redacted, created_at
+         FROM execution_events
+        WHERE execution_id = $1 AND id = $2 AND event_type = 'execution.step'`,
+      [executionId, frameId]
+    );
+    return result.rows[0] ? rowToStepRecord(result.rows[0]) : undefined;
+  }
+
   // ---- read path (control-plane ReadableExecutionStore) -----------------
   async listExecutions(
     tenantId?: string,
@@ -390,6 +443,34 @@ function rowToExecutionNodeRecord(
     input: row.input_redacted ?? undefined,
     output: row.output_redacted ?? undefined,
     error: (row.error as string | null) ?? undefined
+  };
+}
+
+function rowToStepRecord(row: Record<string, unknown>): ExecutionStepRecord {
+  // payload_redacted is jsonb → node-postgres returns it already parsed.
+  const p = (row.payload_redacted ?? {}) as {
+    channel?: unknown;
+    source?: unknown;
+    seq?: unknown;
+    at?: unknown;
+    data?: unknown;
+  };
+  const nodeId = (row.node_id as string | null) ?? "";
+  return {
+    frameId: row.id as string,
+    executionId: row.execution_id as string,
+    nodeId,
+    channel: typeof p.channel === "string" ? p.channel : nodeId,
+    source: p.source === "emit" ? "emit" : "node_output",
+    seq: typeof p.seq === "number" ? p.seq : 0,
+    at:
+      typeof p.at === "string"
+        ? p.at
+        : toIso(row.created_at) ?? new Date(0).toISOString(),
+    data:
+      p.data && typeof p.data === "object" && !Array.isArray(p.data)
+        ? (p.data as Record<string, unknown>)
+        : { value: p.data ?? null }
   };
 }
 

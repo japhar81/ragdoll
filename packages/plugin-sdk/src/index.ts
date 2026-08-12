@@ -493,6 +493,18 @@ export interface PluginExecutionInput {
    */
   onToken?: (token: string) => void;
   /**
+   * Optional per-step result sink (ADR-0037). A plugin calls
+   * `emit(channel, data)` to push an intermediate result to the live
+   * execution stream mid-run — e.g. a retriever streaming the primary doc as
+   * soon as it's found (step 3), then ancillary docs later (step 6), before
+   * the node's final `outputs` return. Fire-and-forget: the runtime redacts +
+   * size-caps `data`, and the call must never block the plugin. Wired only
+   * when the surrounding execution is being streamed / recorded; `undefined`
+   * otherwise, so guard with `input.emit?.(...)`. Nodes that just want their
+   * whole output streamed should set `node.stream: true` instead of calling
+   * this. */
+  emit?: (channel: string, data: Record<string, unknown>) => void;
+  /**
    * Recursively execute a body pipeline spec from inside a plugin. Used by
    * iteration plugins (for/foreach/while) to evaluate their body N times. Only
    * provided to in-process plugins — external plugins must implement their own
