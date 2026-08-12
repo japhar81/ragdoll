@@ -17,9 +17,9 @@ same shape as the bundled Qdrant.
 apiVersion: v1
 kind: Service
 metadata:
-  name: {{ .Release.Name }}-nats
+  name: {{ include "ragdoll.fullname" . }}-nats
   labels:
-    app: {{ .Release.Name }}-nats
+    app: {{ include "ragdoll.fullname" . }}-nats
     {{- include "ragdoll.commonLabels" . | nindent 4 }}
   {{- with (include "ragdoll.commonAnnotations" . | trim) }}
   annotations:
@@ -27,7 +27,7 @@ metadata:
   {{- end }}
 spec:
   selector:
-    app: {{ .Release.Name }}-nats
+    app: {{ include "ragdoll.fullname" . }}-nats
   ports:
     - name: client
       port: 4222
@@ -40,9 +40,9 @@ spec:
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: {{ .Release.Name }}-nats
+  name: {{ include "ragdoll.fullname" . }}-nats
   labels:
-    app: {{ .Release.Name }}-nats
+    app: {{ include "ragdoll.fullname" . }}-nats
     {{- include "ragdoll.commonLabels" . | nindent 4 }}
   {{- with (include "ragdoll.commonAnnotations" . | trim) }}
   annotations:
@@ -62,9 +62,9 @@ spec:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ .Release.Name }}-nats
+  name: {{ include "ragdoll.fullname" . }}-nats
   labels:
-    app: {{ .Release.Name }}-nats
+    app: {{ include "ragdoll.fullname" . }}-nats
     {{- include "ragdoll.commonLabels" . | nindent 4 }}
   {{- with (include "ragdoll.commonAnnotations" . | trim) }}
   annotations:
@@ -78,11 +78,11 @@ spec:
     type: Recreate
   selector:
     matchLabels:
-      app: {{ .Release.Name }}-nats
+      app: {{ include "ragdoll.fullname" . }}-nats
   template:
     metadata:
       labels:
-        app: {{ .Release.Name }}-nats
+        app: {{ include "ragdoll.fullname" . }}-nats
         {{- include "ragdoll.commonLabels" . | nindent 8 }}
       {{- with (include "ragdoll.commonAnnotations" . | trim) }}
       annotations:
@@ -136,6 +136,6 @@ spec:
         {{- if .Values.bundlednats.persistence.enabled }}
         - name: store
           persistentVolumeClaim:
-            claimName: {{ .Release.Name }}-nats
+            claimName: {{ include "ragdoll.fullname" . }}-nats
         {{- end }}
 {{- end }}

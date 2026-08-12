@@ -34,6 +34,45 @@
 # ============================================================================
 
 # ---------------------------------------------------------------------------
+# Resource naming.
+#
+# By default every resource this chart renders is prefixed with the Helm
+# RELEASE NAME (`<release>-api`, `<release>-web`, `<release>-qdrant`, …).
+# That keeps two releases in one namespace uniquely named and self-
+# selecting — the multi-instance behaviour from chart 0.3.0+.
+#
+# `fullnameOverride` pins that prefix to a STABLE value that is independent
+# of the release name. Use it when a CD tool (Argo/Flux/Harness) mints a
+# per-deploy release name like `release-1a2b3c`: without a pin every
+# Service is renamed, which breaks anything that targets a Service by a
+# fixed host — notably the bundled demo Connection rows, which point at
+# `ragdoll-qdrant`, `ragdoll-bundledopensearch`, and `ragdoll-dgraph`.
+#
+#   fullnameOverride: ragdoll     # → ragdoll-api, ragdoll-qdrant, …
+#
+# CAVEAT: `fullnameOverride` pins CHART-managed resources (api / web /
+# worker / qdrant / nats / ollama / dgraph / db-init / SA / Secret). The
+# Bitnami SUBCHARTS (Postgres, Redis, OpenSearch) name themselves off THEIR
+# own release name + their own `fullnameOverride` — they do NOT inherit
+# this value. To pin those too (required for the `ragdoll-bundledopensearch`
+# demo Connection to resolve under a non-`ragdoll` release), set each
+# subchart's `fullnameOverride` to the matching stable name — the chart's
+# injected DATABASE_URL / REDIS_URL / OPENSEARCH_URL track it automatically:
+#
+#   fullnameOverride: ragdoll
+#   bundledopensearch:
+#     fullnameOverride: ragdoll-bundledopensearch   # matches the demo Connection host
+#   bundledpostgres:
+#     fullnameOverride: ragdoll-bundledpostgres     # optional — DATABASE_URL is injected
+#   bundledredis:
+#     fullnameOverride: ragdoll-bundledredis        # optional — REDIS_URL is injected (svc is <name>-master)
+#
+# Leave it empty to keep the release-name prefixing. Do NOT pin names when
+# you run multiple releases in one namespace — they would collide.
+# ---------------------------------------------------------------------------
+fullnameOverride: ""
+
+# ---------------------------------------------------------------------------
 # Common labels and annotations applied to EVERY resource the chart
 # renders. Intended for cluster policies (Kyverno, Gatekeeper, OPA)
 # that require specific metadata on all objects — e.g.

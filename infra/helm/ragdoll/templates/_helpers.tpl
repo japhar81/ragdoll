@@ -5,10 +5,28 @@ Keep these short and well-named — anything that isn't reused twice is
 better inlined into the template that needs it.
 */}}
 
+{{/*
+Resource-name prefix for every chart resource. Defaults to the release name
+— preserving the multi-instance behaviour from chart 0.3.0, where two
+releases in one namespace stay uniquely named and self-selecting.
+
+Set `fullnameOverride` to pin a STABLE prefix (e.g. "ragdoll") that is
+independent of the release name. A CD tool (Argo/Flux/Harness) that mints a
+per-deploy release name like `release-1a2b3c` otherwise renames every
+Service, which breaks anything targeting a Service by a fixed host — notably
+the demo Connection rows, which point at `ragdoll-qdrant` /
+`ragdoll-bundledopensearch` / `ragdoll-dgraph`. Pinning the prefix (plus the
+matching per-bundle overrides — see values.yaml) restores those stable names
+regardless of what the release is called.
+*/}}
+{{- define "ragdoll.fullname" -}}
+{{- default .Release.Name .Values.fullnameOverride | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+
 {{/* Effective service-account name. */}}
 {{- define "ragdoll.serviceAccountName" -}}
 {{- if .Values.serviceAccount.create -}}
-{{- default (printf "%s-ragdoll" .Release.Name) .Values.serviceAccount.name -}}
+{{- default (printf "%s-ragdoll" (include "ragdoll.fullname" .)) .Values.serviceAccount.name -}}
 {{- else -}}
 {{- default "default" .Values.serviceAccount.name -}}
 {{- end -}}
@@ -21,7 +39,7 @@ operator-supplied name (when secrets.existingSecret is set).
 */}}
 {{- define "ragdoll.secretName" -}}
 {{- if .Values.secrets.create -}}
-{{ printf "%s-ragdoll-secrets" .Release.Name }}
+{{ printf "%s-ragdoll-secrets" (include "ragdoll.fullname" .) }}
 {{- else -}}
 {{ default "ragdoll-secrets" .Values.secrets.existingSecret }}
 {{- end -}}
@@ -29,27 +47,32 @@ operator-supplied name (when secrets.existingSecret is set).
 
 {{/*
 DATABASE_URL the chart pushes into the generated Secret. When bundled
-Postgres is on, points at the subchart's Service (named
-`<release>-bundledpostgres` — Bitnami's pattern is
-`<release>-<alias>`). Otherwise empty so the operator's secret
-provides it.
+Postgres is on, points at the subchart's Service. Its name is the
+subchart's own fullname — `<release>-bundledpostgres` by default, or
+`bundledpostgres.fullnameOverride` when the operator pins it (see
+values.yaml). We mirror that here rather than `ragdoll.fullname`,
+because a subchart names itself off ITS release name + ITS own
+fullnameOverride — it does not inherit the parent's fullnameOverride.
+Otherwise empty so the operator's secret provides it.
 */}}
 {{- define "ragdoll.databaseUrl" -}}
 {{- if .Values.bundledpostgres.enabled -}}
 {{- $user := .Values.bundledpostgres.auth.username | default "ragdoll" -}}
 {{- $db := .Values.bundledpostgres.auth.database | default "ragdoll" -}}
 {{- $pwd := .Values.bundledpostgres.auth.password -}}
-{{- $host := printf "%s-bundledpostgres" .Release.Name -}}
+{{- $host := default (printf "%s-bundledpostgres" .Release.Name) .Values.bundledpostgres.fullnameOverride -}}
 postgres://{{ $user }}:{{ $pwd | urlquery }}@{{ $host }}:5432/{{ $db }}
 {{- else -}}
 {{ .Values.postgres.url }}
 {{- end -}}
 {{- end -}}
 
-{{/* REDIS_URL pointing at the Bitnami redis subchart. */}}
+{{/* REDIS_URL pointing at the Bitnami redis subchart. The master Service is
+     `<redis-fullname>-master` (redis-fullname mirrors the subchart: its own
+     fullnameOverride, else `<release>-bundledredis`). */}}
 {{- define "ragdoll.redisUrl" -}}
 {{- if .Values.bundledredis.enabled -}}
-{{- $host := printf "%s-bundledredis-master" .Release.Name -}}
+{{- $host := printf "%s-master" (default (printf "%s-bundledredis" .Release.Name) .Values.bundledredis.fullnameOverride) -}}
 redis://{{ $host }}:6379
 {{- end -}}
 {{- end -}}
@@ -59,7 +82,7 @@ redis://{{ $host }}:6379
      worker/api then fall back to the in-process queue. */}}
 {{- define "ragdoll.natsUrl" -}}
 {{- if .Values.bundlednats.enabled -}}
-nats://{{ .Release.Name }}-nats:4222
+nats://{{ include "ragdoll.fullname" . }}-nats:4222
 {{- else -}}
 {{ .Values.nats.url }}
 {{- end -}}
@@ -68,16 +91,20 @@ nats://{{ .Release.Name }}-nats:4222
 {{/* QDRANT_URL when the bundled Qdrant is on. */}}
 {{- define "ragdoll.qdrantUrl" -}}
 {{- if .Values.bundledqdrant.enabled -}}
-http://{{ .Release.Name }}-qdrant:6333
+http://{{ include "ragdoll.fullname" . }}-qdrant:6333
 {{- else -}}
 {{ .Values.qdrant.url }}
 {{- end -}}
 {{- end -}}
 
-{{/* OPENSEARCH_URL when the bundled OpenSearch is on. */}}
+{{/* OPENSEARCH_URL when the bundled OpenSearch is on. Mirrors the subchart's
+     own name (its fullnameOverride, else `<release>-bundledopensearch`) so the
+     injected URL tracks a pinned Service name — the demo Connection targets
+     `ragdoll-bundledopensearch`, which requires
+     `bundledopensearch.fullnameOverride: ragdoll-bundledopensearch`. */}}
 {{- define "ragdoll.opensearchUrl" -}}
 {{- if .Values.bundledopensearch.enabled -}}
-http://{{ .Release.Name }}-bundledopensearch:9200
+http://{{ default (printf "%s-bundledopensearch" .Release.Name) .Values.bundledopensearch.fullnameOverride }}:9200
 {{- else -}}
 {{ .Values.opensearch.url }}
 {{- end -}}
@@ -86,7 +113,7 @@ http://{{ .Release.Name }}-bundledopensearch:9200
 {{/* OLLAMA_BASE_URL — bundled service when enabled, override otherwise. */}}
 {{- define "ragdoll.ollamaBaseUrl" -}}
 {{- if .Values.bundledollama.enabled -}}
-http://{{ .Release.Name }}-ollama:{{ .Values.bundledollama.port }}
+http://{{ include "ragdoll.fullname" . }}-ollama:{{ .Values.bundledollama.port }}
 {{- else -}}
 {{ .Values.ollama.baseUrl }}
 {{- end -}}
@@ -95,7 +122,7 @@ http://{{ .Release.Name }}-ollama:{{ .Values.bundledollama.port }}
 {{/* DGRAPH_URL — bundled service when enabled, override otherwise. */}}
 {{- define "ragdoll.dgraphUrl" -}}
 {{- if .Values.bundleddgraph.enabled -}}
-http://{{ .Release.Name }}-dgraph:{{ .Values.bundleddgraph.httpPort }}
+http://{{ include "ragdoll.fullname" . }}-dgraph:{{ .Values.bundleddgraph.httpPort }}
 {{- else -}}
 {{ .Values.dgraph.url }}
 {{- end -}}
@@ -237,7 +264,7 @@ Args: . (top-level chart values context).
 # Standalone: the shared python-plugins Service (one instance — keep
 # pythonPlugins.replicas at 1; a reload can't fan out behind a ClusterIP).
 - name: PYTHON_PLUGIN_URL
-  value: "http://{{ .Release.Name }}-python-plugins:{{ .Values.pythonPlugins.port }}"
+  value: "http://{{ include "ragdoll.fullname" . }}-python-plugins:{{ .Values.pythonPlugins.port }}"
 {{- end }}
 - name: PYTHON_PLUGIN_TIMEOUT_MS
   value: {{ .Values.pythonPlugins.timeoutMs | quote }}

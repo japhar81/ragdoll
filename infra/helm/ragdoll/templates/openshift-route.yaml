@@ -11,9 +11,9 @@
 apiVersion: route.openshift.io/v1
 kind: Route
 metadata:
-  name: {{ .Release.Name }}
+  name: {{ include "ragdoll.fullname" . }}
   labels:
-    app: {{ .Release.Name }}-web
+    app: {{ include "ragdoll.fullname" . }}-web
     {{- include "ragdoll.commonLabels" . | nindent 4 }}
   annotations:
     {{- with .Values.openshift.route.annotations }}
@@ -28,7 +28,7 @@ spec:
   {{- end }}
   to:
     kind: Service
-    name: {{ .Release.Name }}-web
+    name: {{ include "ragdoll.fullname" . }}-web
     weight: 100
   port:
     targetPort: http

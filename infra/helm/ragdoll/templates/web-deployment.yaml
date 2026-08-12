@@ -1,9 +1,9 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ .Release.Name }}-web
+  name: {{ include "ragdoll.fullname" . }}-web
   labels:
-    app: {{ .Release.Name }}-web
+    app: {{ include "ragdoll.fullname" . }}-web
     {{- include "ragdoll.commonLabels" . | nindent 4 }}
   {{- with (include "ragdoll.commonAnnotations" . | trim) }}
   annotations:
@@ -15,11 +15,11 @@ spec:
   {{- end }}
   selector:
     matchLabels:
-      app: {{ .Release.Name }}-web
+      app: {{ include "ragdoll.fullname" . }}-web
   template:
     metadata:
       labels:
-        app: {{ .Release.Name }}-web
+        app: {{ include "ragdoll.fullname" . }}-web
         {{- include "ragdoll.commonLabels" . | nindent 8 }}
       annotations:
         # Roll the web pods whenever the nginx config changes (changing
@@ -81,4 +81,4 @@ spec:
       volumes:
         - name: nginx-config
           configMap:
-            name: {{ .Release.Name }}-web-nginx
+            name: {{ include "ragdoll.fullname" . }}-web-nginx
