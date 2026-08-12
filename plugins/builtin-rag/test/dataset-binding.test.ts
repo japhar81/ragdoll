@@ -23,6 +23,8 @@ function inputWith(opts: {
     connectionKind?: string;
     connectionHost?: string;
     connectionPort?: number;
+    connectionUrl?: string;
+    connectionScheme?: string;
     cascadeReason?: "global" | "tenant" | "environment";
   };
 }): PluginExecutionInput {
@@ -82,6 +84,64 @@ test("pickBindingUrl: dataset binding wins, host+port stitched with scheme", () 
     connectionKind: "qdrant",
     cascadeReason: "tenant"
   });
+});
+
+test("pickBindingUrl: connectionUrl wins over host/port (pre-baked endpoint, e.g. AOSS)", () => {
+  const r = pickBindingUrl(
+    inputWith({
+      binding: {
+        connectionSlug: "aoss-main",
+        connectionKind: "opensearch",
+        // An AWS OpenSearch Serverless collection endpoint set on the connection.
+        connectionUrl: "https://abc123.us-east-1.aoss.amazonaws.com/",
+        // host/port are ALSO present but must be ignored when the URL is set.
+        connectionHost: "should-not-be-used",
+        connectionPort: 9200,
+        cascadeReason: "tenant"
+      }
+    }),
+    "vectors",
+    { cfgKey: "url", defaultPort: 9200 }
+  );
+  // Trailing slash trimmed; host/port ignored entirely.
+  assert.equal(r?.url, "https://abc123.us-east-1.aoss.amazonaws.com");
+  assert.equal(r?.source, "binding");
+});
+
+test("pickBindingUrl: connectionScheme (https) applied to host/port when no URL", () => {
+  const r = pickBindingUrl(
+    inputWith({
+      binding: {
+        connectionSlug: "os-tls",
+        connectionKind: "opensearch",
+        connectionHost: "os.acme.example",
+        connectionPort: 9200,
+        connectionScheme: "https",
+        cascadeReason: "tenant"
+      }
+    }),
+    "vectors",
+    { cfgKey: "url", defaultPort: 9200 }
+  );
+  assert.equal(r?.url, "https://os.acme.example:9200");
+});
+
+test("pickBindingUrl: bare connectionScheme value ('https') is normalized to 'https://'", () => {
+  const r = pickBindingUrl(
+    inputWith({
+      binding: {
+        connectionSlug: "os-tls",
+        connectionKind: "opensearch",
+        connectionHost: "os.acme.example",
+        connectionScheme: "https",
+        cascadeReason: "tenant"
+      }
+    }),
+    "vectors",
+    { cfgKey: "url" }
+  );
+  // No port and no defaultPort -> host only, but still https.
+  assert.equal(r?.url, "https://os.acme.example");
 });
 
 test("pickBindingUrl: defaultPort used when binding lacks port", () => {

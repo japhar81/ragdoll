@@ -17,12 +17,15 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import logging
 import time
 from collections import deque
 from typing import Any, Dict, List, Tuple
 from urllib.parse import urldefrag, urljoin, urlsplit
 
 from app.safety import SafetyPolicy, SSRFError
+
+_LOG = logging.getLogger(__name__)
 
 PLUGIN_ID = "crawl4ai_crawler"
 
@@ -164,7 +167,7 @@ async def _bfs_crawl(
     seed_urls: List[str],
     cfg: Dict[str, Any],
     policy: SafetyPolicy,
-) -> Tuple[List[Dict[str, Any]], int]:
+) -> Tuple[List[Dict[str, Any]], int, List[Dict[str, str]]]:
     """Breadth-first crawl driven entirely on the Python side.
 
     Frontier is a FIFO queue of ``(url, depth)`` seeded from ``seed_urls``.
@@ -185,6 +188,17 @@ async def _bfs_crawl(
     visited: set[str] = set()
     documents: List[Dict[str, Any]] = []
     skipped = 0
+    # Sample of WHY pages were skipped, so an empty result is diagnosable
+    # (SSRF block vs a fetch/browser failure — the usual reason a crawl that
+    # works locally returns nothing in a locked-down deployment). Capped.
+    skip_reasons: List[Dict[str, str]] = []
+
+    def _record_skip(u: str, reason: str) -> None:
+        nonlocal skipped
+        skipped += 1
+        if len(skip_reasons) < 10:
+            skip_reasons.append({"url": u, "reason": reason})
+
     start = time.monotonic()
 
     for su in seed_urls:
@@ -201,14 +215,20 @@ async def _bfs_crawl(
         # SSRF re-check on EVERY URL we are about to fetch (seed or followed).
         try:
             safe_url = policy.check_url(url)
-        except SSRFError:
-            skipped += 1
+        except SSRFError as exc:
+            _LOG.warning("crawl4ai: SSRF-blocked url=%s: %s", url, exc)
+            _record_skip(url, f"ssrf_blocked: {exc}")
             continue
 
         try:
             page = await crawl(safe_url, cfg)
-        except Exception:  # noqa: BLE001 - one bad page must not kill the run.
-            skipped += 1
+        except Exception as exc:  # noqa: BLE001 - one bad page must not kill the run.
+            # The usual cause of "empty in deployment, fine locally": the
+            # headless browser can't launch (sandbox), the URL is unreachable
+            # from the pod, or a fetch timeout. Log it — silently swallowing it
+            # is what left operators staring at zero documents with no reason.
+            _LOG.warning("crawl4ai: fetch failed url=%s: %s", safe_url, exc)
+            _record_skip(safe_url, f"{type(exc).__name__}: {exc}")
             continue
 
         doc: Dict[str, Any] = {
@@ -231,7 +251,7 @@ async def _bfs_crawl(
             visited.add(norm)
             frontier.append((link, depth + 1))
 
-    return documents, skipped
+    return documents, skipped, skip_reasons
 
 
 def _run_coro(coro):
@@ -274,15 +294,21 @@ def handle(request) -> Dict[str, Any]:
     if not safe_seeds:
         raise first_err or SSRFError("no usable seed URL")
 
-    documents, skipped = _run_coro(_bfs_crawl(safe_seeds, cfg, policy))
+    documents, skipped, skip_reasons = _run_coro(_bfs_crawl(safe_seeds, cfg, policy))
+
+    metadata: Dict[str, Any] = {
+        "crawler": "crawl4ai",
+        "pagesRequested": int(cfg["maxPages"]),
+        "pagesFetched": len(documents),
+        "skipped": skipped,
+    }
+    # Surface WHY pages were skipped so an all-skipped run (empty documents) is
+    # diagnosable from the execution trace, not just the sidecar logs.
+    if skip_reasons:
+        metadata["skipReasons"] = skip_reasons
 
     return {
         "outputs": {"documents": documents, "pageCount": len(documents)},
         "usage": {},
-        "metadata": {
-            "crawler": "crawl4ai",
-            "pagesRequested": int(cfg["maxPages"]),
-            "pagesFetched": len(documents),
-            "skipped": skipped,
-        },
+        "metadata": metadata,
     }

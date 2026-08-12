@@ -16,6 +16,8 @@ import {
   OpenSearchVectorStore,
   createOpenSearchClient,
   awsSigV4FromSecrets,
+  awsSigV4FromConnectionOptions,
+  mergeAwsSigV4,
   AWS_SIGV4_SECRET_FIELDS
 } from "../../../../packages/opensearch/src/index.ts";
 import { pickBackendName, requireBackendConnection } from "../dataset-binding.ts";
@@ -73,12 +75,16 @@ function openSearchClientFrom(
     pluginId,
     defaultPort: 9200
   });
+  // SigV4 config comes from EITHER the connection's options (set once on the
+  // connection: awsRegion + awsService=aoss) OR the node secrets — merged, with
+  // node secrets winning field-by-field.
+  const connOptions = input.dataset?.bindings?.text?.connection?.options;
   const client = createOpenSearchClient({
     endpoint,
     username: secrets.username,
     password: secrets.password,
     authorization: secrets.authorization,
-    aws: awsSigV4FromSecrets(secrets)
+    aws: mergeAwsSigV4(awsSigV4FromConnectionOptions(connOptions), awsSigV4FromSecrets(secrets))
   });
   if (!client) {
     throw new Error(

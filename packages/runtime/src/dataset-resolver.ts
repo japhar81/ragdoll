@@ -170,6 +170,8 @@ export function buildDatasetResolver(deps: DatasetResolverDeps): DatasetResolver
         let connectionKind: string | undefined;
         let connectionHost: string | undefined;
         let connectionPort: number | undefined;
+        let connectionUrl: string | undefined;
+        let connectionScheme: string | undefined;
         let cascadeReason: ResolvedDatasetBinding["cascadeReason"];
         if (raw.connection && deps.connections && args.tenantId) {
           const conn = await deps.connections.resolveSlug({
@@ -178,10 +180,20 @@ export function buildDatasetResolver(deps: DatasetResolverDeps): DatasetResolver
             environmentId: args.environmentId
           });
           if (conn) {
-            const cfg = (conn.config ?? {}) as { host?: unknown; port?: unknown };
+            const cfg = (conn.config ?? {}) as {
+              host?: unknown;
+              port?: unknown;
+              url?: unknown;
+              scheme?: unknown;
+            };
             connectionKind = conn.kind;
             connectionHost = typeof cfg.host === "string" ? cfg.host : undefined;
             connectionPort = typeof cfg.port === "number" ? cfg.port : undefined;
+            // Carry url/scheme too — an operator who set a full url (e.g. an
+            // aoss endpoint) or https must have the plugin honor it instead of
+            // rebuilding http://host:port.
+            connectionUrl = typeof cfg.url === "string" ? cfg.url : undefined;
+            connectionScheme = typeof cfg.scheme === "string" ? cfg.scheme : undefined;
             cascadeReason =
               conn.scope === "environment"
                 ? "environment"
@@ -227,6 +239,8 @@ export function buildDatasetResolver(deps: DatasetResolverDeps): DatasetResolver
           connectionKind,
           connectionHost,
           connectionPort,
+          connectionUrl,
+          connectionScheme,
           collection: effectiveCollection,
           namespace: policy,
           cascadeReason,
