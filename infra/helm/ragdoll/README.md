@@ -30,6 +30,43 @@ helm install rag-green ./infra/helm/ragdoll -n shared   # no collisions
 > `<release>-*`; Kubernetes will recreate them (brief downtime). Pin the old
 > names with `--set` overrides, or accept the recreate.
 
+### Pinning a stable name (`fullnameOverride`)
+
+Release-name prefixing is right for running multiple instances, but it breaks
+when a CD tool (Argo/Flux/Harness) mints a per-deploy release name like
+`release-1a2b3c`: **every Service is renamed**, so anything that targets a
+Service by a fixed host stops resolving. The bundled demo **Connection** rows
+are the usual casualty — they point at the stable hosts `ragdoll-qdrant`,
+`ragdoll-bundledopensearch`, and `ragdoll-dgraph`, which no longer exist once
+the release is called something else.
+
+Set **`fullnameOverride`** to pin the prefix to a stable value, independent of
+the release name:
+
+```sh
+helm upgrade --install anything ./infra/helm/ragdoll \
+  --set fullnameOverride=ragdoll \
+  --set bundledopensearch.fullnameOverride=ragdoll-bundledopensearch
+```
+
+- `fullnameOverride: ragdoll` pins all **chart-managed** resources
+  (`ragdoll-api`, `ragdoll-web`, `ragdoll-worker`, `ragdoll-qdrant`,
+  `ragdoll-dgraph`, `ragdoll-ollama`, `ragdoll-nats`, …) regardless of the
+  release name.
+- The **Bitnami subcharts** (Postgres / Redis / OpenSearch) name themselves off
+  *their own* `fullnameOverride` and do **not** inherit the parent's. Pin each
+  one you rely on by host — `bundledopensearch.fullnameOverride:
+  ragdoll-bundledopensearch` restores the demo Connection's OpenSearch host.
+  Postgres/Redis are addressed via the injected `DATABASE_URL` / `REDIS_URL`
+  (which track whatever you pin), so pinning them is optional.
+
+The chart's own `OPENSEARCH_URL` / `QDRANT_URL` / `DGRAPH_URL` env values follow
+the pinned names automatically, so the app and its Connections stay in sync.
+
+> Leave `fullnameOverride` empty (the default) to keep release-name prefixing.
+> **Do not** pin names if you run multiple releases in one namespace — pinned
+> names would collide across releases.
+
 ## Install
 
 The Bitnami subchart tarballs (postgres, redis, opensearch) are **vendored**

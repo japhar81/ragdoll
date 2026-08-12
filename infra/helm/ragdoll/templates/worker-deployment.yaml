@@ -16,9 +16,9 @@ within ~10–15 s.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ .Release.Name }}-worker
+  name: {{ include "ragdoll.fullname" . }}-worker
   labels:
-    app: {{ .Release.Name }}-worker
+    app: {{ include "ragdoll.fullname" . }}-worker
     {{- include "ragdoll.commonLabels" . | nindent 4 }}
   {{- with (include "ragdoll.commonAnnotations" . | trim) }}
   annotations:
@@ -30,11 +30,11 @@ spec:
   {{- end }}
   selector:
     matchLabels:
-      app: {{ .Release.Name }}-worker
+      app: {{ include "ragdoll.fullname" . }}-worker
   template:
     metadata:
       labels:
-        app: {{ .Release.Name }}-worker
+        app: {{ include "ragdoll.fullname" . }}-worker
         {{- include "ragdoll.commonLabels" . | nindent 8 }}
       {{- with (include "ragdoll.commonAnnotations" . | trim) }}
       annotations:
@@ -61,7 +61,7 @@ spec:
           # Workers are background-only normally (no inbound HTTP), but
           # the Prometheus exporter inside wireOtelMetrics still starts
           # a listener on this port. Worker pods are scraped via the
-          # headless `{{ $.Release.Name }}-worker` Service (rendered only when
+          # headless `{{ include "ragdoll.fullname" $ }}-worker` Service (rendered only when
           # prometheus.enabled).
           ports:
             - name: metrics
@@ -80,7 +80,7 @@ spec:
                 fieldRef:
                   fieldPath: metadata.name
             - name: OTEL_SERVICE_NAME
-              value: "{{ .Release.Name }}-worker"
+              value: "{{ include "ragdoll.fullname" . }}-worker"
             {{- /* OLLAMA_BASE_URL is emitted by commonBackendEnv below, which
                picks the bundled-vs-external URL via the helper. The worker's
                warm-models loop reads the same env var. */ -}}

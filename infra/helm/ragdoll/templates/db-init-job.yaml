@@ -5,7 +5,7 @@ metadata:
   # so include the revision in the name to keep history visible in
   # `kubectl get jobs`. `hook-succeeded` cleans completed runs after
   # success; failed runs stick around for `kubectl logs`.
-  name: {{ .Release.Name }}-db-init-{{ .Release.Revision }}
+  name: {{ include "ragdoll.fullname" . }}-db-init-{{ .Release.Revision }}
   annotations:
     # POST-install/upgrade so the bundled Postgres has time to start.
     # Pre-install would race the subchart provisioning and connect
@@ -20,7 +20,7 @@ metadata:
     {{- . | nindent 4 }}
     {{- end }}
   labels:
-    app: {{ .Release.Name }}-db-init
+    app: {{ include "ragdoll.fullname" . }}-db-init
     {{- include "ragdoll.commonLabels" . | nindent 4 }}
 spec:
   backoffLimit: 2
@@ -31,7 +31,7 @@ spec:
   template:
     metadata:
       labels:
-        app: {{ .Release.Name }}-db-init
+        app: {{ include "ragdoll.fullname" . }}-db-init
         {{- include "ragdoll.commonLabels" . | nindent 8 }}
     spec:
       serviceAccountName: {{ include "ragdoll.serviceAccountName" . }}

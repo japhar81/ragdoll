@@ -18,7 +18,7 @@ share evaluation cadence.
 apiVersion: monitoring.coreos.com/v1
 kind: PrometheusRule
 metadata:
-  name: {{ .Release.Name }}
+  name: {{ include "ragdoll.fullname" . }}
   labels:
     app: ragdoll
     {{- include "ragdoll.commonLabels" . | nindent 4 }}

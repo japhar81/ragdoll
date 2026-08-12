@@ -6,9 +6,9 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ .Release.Name }}-python-plugins
+  name: {{ include "ragdoll.fullname" . }}-python-plugins
   labels:
-    app: {{ .Release.Name }}-python-plugins
+    app: {{ include "ragdoll.fullname" . }}-python-plugins
     {{- include "ragdoll.commonLabels" . | nindent 4 }}
   {{- with (include "ragdoll.commonAnnotations" . | trim) }}
   annotations:
@@ -18,11 +18,11 @@ spec:
   replicas: {{ .Values.pythonPlugins.replicas }}
   selector:
     matchLabels:
-      app: {{ .Release.Name }}-python-plugins
+      app: {{ include "ragdoll.fullname" . }}-python-plugins
   template:
     metadata:
       labels:
-        app: {{ .Release.Name }}-python-plugins
+        app: {{ include "ragdoll.fullname" . }}-python-plugins
         {{- include "ragdoll.commonLabels" . | nindent 8 }}
       {{- with (include "ragdoll.commonAnnotations" . | trim) }}
       annotations:
