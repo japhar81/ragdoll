@@ -78,14 +78,42 @@ export function requireBindingConnection(
         `pointing at a compatible connection (Connections screen lists what's available).`
     );
   }
-  const port = typeof b.connectionPort === "number" ? b.connectionPort : args.defaultPort;
-  const scheme = args.scheme ?? "http://";
   return {
-    url: port ? `${scheme}${b.connectionHost}:${port}` : `${scheme}${b.connectionHost}`,
+    url: bindingEndpointUrl(b, args),
     connectionSlug: b.connectionSlug ?? "(unknown)",
     connectionKind: b.connectionKind ?? "(unknown)",
     cascadeReason: b.cascadeReason ?? "global"
   };
+}
+
+/**
+ * Compute the endpoint URL for a resolved binding, honoring (in order):
+ *   1. the connection's full `url` (e.g. an aoss collection endpoint), verbatim;
+ *   2. `<scheme>://<host>:<port>`, where scheme comes from the connection's
+ *      config (`https`/`http`), then the caller default, then `http`.
+ * Previously this always built `http://host:port`, dropping a configured url
+ * and any https scheme.
+ */
+function bindingEndpointUrl(
+  b: {
+    connectionHost?: string;
+    connectionPort?: number;
+    connectionUrl?: string;
+    connectionScheme?: string;
+  },
+  args: { defaultPort?: number; scheme?: string }
+): string {
+  if (b.connectionUrl) return b.connectionUrl.replace(/\/+$/, "");
+  const port = typeof b.connectionPort === "number" ? b.connectionPort : args.defaultPort;
+  const scheme = normalizeScheme(b.connectionScheme) ?? args.scheme ?? "http://";
+  return port ? `${scheme}${b.connectionHost}:${port}` : `${scheme}${b.connectionHost}`;
+}
+
+/** Turn a bare scheme ("https" / "http") into the `scheme://` prefix these
+ *  builders concatenate; passthrough when already suffixed; undefined when absent. */
+function normalizeScheme(scheme: string | undefined): string | undefined {
+  if (!scheme) return undefined;
+  return scheme.endsWith("://") ? scheme : `${scheme}://`;
 }
 
 /**
@@ -114,11 +142,9 @@ export function pickBindingUrl(
   }
 ): BindingUrlResolution | undefined {
   const b = input.dataset?.bindings?.[binding];
-  if (b?.connectionHost) {
-    const port = typeof b.connectionPort === "number" ? b.connectionPort : args.defaultPort;
-    const scheme = args.scheme ?? "http://";
+  if (b?.connectionHost || b?.connectionUrl) {
     return {
-      url: port ? `${scheme}${b.connectionHost}:${port}` : `${scheme}${b.connectionHost}`,
+      url: bindingEndpointUrl(b, args),
       source: "binding",
       connectionSlug: b.connectionSlug,
       connectionKind: b.connectionKind,

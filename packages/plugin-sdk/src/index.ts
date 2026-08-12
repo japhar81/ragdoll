@@ -327,6 +327,13 @@ export interface ResolvedDatasetBinding {
   connectionHost?: string;
   /** Port from the resolved connection's config. Convenience field. */
   connectionPort?: number;
+  /** Full pre-baked endpoint URL from the connection's config, when set. Wins
+   *  over host/port/scheme — an AWS OpenSearch Serverless collection endpoint
+   *  (https://…​.aoss.amazonaws.com) has no host/port to reconstruct. */
+  connectionUrl?: string;
+  /** Scheme ("http" | "https") from the connection's config, when host/port are
+   *  used instead of a full url. Defaults to http when unset. */
+  connectionScheme?: string;
   /** Effective collection / index / table / predicate name the plugin
    *  should read or write. The resolver has ALREADY applied any
    *  namespace policy from the binding — plugins should not re-derive
