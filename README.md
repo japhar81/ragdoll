@@ -90,6 +90,11 @@ run with **zero install**.
   reflect in the UI within a frame.
 - Builder rooms broadcast presence + spec edits to peers editing the
   same pipeline — a top-right roster shows who else is in there.
+- Per-step **result streaming** (ADR 0037): a node opts in with
+  `stream: true` (or a plugin calls `ctx.emit`), and clients watch results
+  arrive mid-run over `GET /api/executions/:id/stream` (SSE) — with replay,
+  tenant scoping, and large-payload fetch-by-ref. See
+  `docs/developer/result-streaming.md`.
 
 **Web UI**
 
@@ -345,7 +350,8 @@ The wrapper invokes `apps/cli/src/index.ts` directly via Node's
   cartography_crawl on top)
 - Developer: `docs/developer/local-development.md`,
   `docs/developer/plugin-development.md`,
-  `docs/developer/provider-development.md`
+  `docs/developer/provider-development.md`,
+  `docs/developer/result-streaming.md`
 - Admin: `docs/admin/access-control.md`,
   `docs/admin/triggers.md`,
   `docs/admin/cli.md`,

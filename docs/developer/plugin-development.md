@@ -196,6 +196,31 @@ export const plugin: InProcessPlugin = {
 
 See `plugins/sample-text/index.ts`.
 
+### Streaming results mid-run (`ctx.emit`, ADR-0037)
+
+An in-process plugin can push an intermediate result to the live execution
+stream **before it returns**, so a client watching
+`GET /api/executions/:id/stream` sees it as it happens (e.g. stream the primary
+doc as soon as it's found, ancillary docs later). Call `input.emit(channel,
+data)` — fire-and-forget; it's `undefined` when the run isn't being
+streamed/recorded, so guard it:
+
+```ts
+async execute(input) {
+  const primary = await findPrimary(input);
+  input.emit?.("primary", primary);          // streamed immediately
+  const ancillary = await findAncillary(primary);
+  input.emit?.("ancillary", { docs: ancillary });
+  return { outputs: { primary, ancillary } }; // final output, at the end
+}
+```
+
+The runtime redacts + size-caps each emitted body. If you just want a node's
+whole output streamed (no mid-run emission), set `stream: true` on the node in
+the spec instead of calling `emit`. See
+[result-streaming.md](result-streaming.md) and
+[ADR-0037](../adr/0037-execution-result-streaming.md).
+
 ## Declaring config / secrets schemas (schema-driven forms)
 
 The web UI renders a real config/secrets form from the manifest instead of a
