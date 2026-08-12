@@ -30,6 +30,7 @@ import {
   ActivationResolutionError
 } from "../../../../packages/pipeline-spec/src/index.ts";
 import { DagExecutor, buildDatasetResolver } from "../../../../packages/runtime/src/index.ts";
+import type { ExecutionStepRecord } from "../../../../packages/runtime/src/index.ts";
 import { ExternalConnectionResolver } from "../../../../packages/external-connections/src/index.ts";
 import type {
   PipelineActivationRow,
@@ -341,6 +342,10 @@ export async function runSyncPipeline(args: {
   parentExecutionId?: string;
   /** Token-streaming callback for streaming-capable plugins. */
   onToken?: (event: { nodeId: string; token: string }) => void;
+  /** ADR-0037 per-step result sink. Wired by the SSE `/stream` route so a
+   *  streamed node's output (or a plugin's ctx.emit payload) is pushed to the
+   *  live response as it happens. Also reaches the store for replay. */
+  onStep?: (frame: ExecutionStepRecord) => void;
 }): Promise<{ executionId: string; output: Record<string, unknown> }> {
   const { deps, apiDatasetResolver, tenantId, pipeline, versionRow, environment, input } = args;
   const callStack = args.callStack ?? [];
@@ -482,6 +487,7 @@ export async function runSyncPipeline(args: {
     externalConnectionResolver,
     runPipelineByRef,
     onToken: args.onToken,
+    onStep: args.onStep,
     maxRetries: 1
   });
   const output = await executor.execute({
