@@ -64,6 +64,11 @@ export interface PipelineNode {
    * names into a v1 plugin's config.
    */
   dataset?: { slug: string; alias?: string };
+  /** ADR-0037: stream this node's output to the live execution stream the
+   *  moment it completes. */
+  stream?: boolean;
+  /** ADR-0037: channel label for the streamed frame (defaults to the node id). */
+  streamAs?: string;
   ui?: Record<string, unknown>;
 }
 

@@ -2539,6 +2539,43 @@ export function PipelineBuilder(props: {
                     schema={selectedPlugin.data?.secretsSchema}
                     onChange={setNodeSecrets}
                   />
+                  {/* ADR-0037: opt this node into live result streaming — its
+                      output is pushed to the execution stream the moment it
+                      completes, so clients see it mid-run. */}
+                  <h3>Result streaming</h3>
+                  <label
+                    style={{ display: "block", fontSize: "0.9em" }}
+                    title="Push this node's output to the live execution stream as soon as it completes"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={selectedNode.stream === true}
+                      onChange={(e) =>
+                        updateSelectedNode((n) => ({ ...n, stream: e.target.checked }))
+                      }
+                    />
+                    {" "}Stream this step's output
+                  </label>
+                  {selectedNode.stream === true && (
+                    <label
+                      style={{ display: "block", marginTop: 6, fontSize: "0.9em" }}
+                    >
+                      <span className="muted">Channel label (streamAs)</span>
+                      <input
+                        type="text"
+                        placeholder={selectedNode.id}
+                        value={selectedNode.streamAs ?? ""}
+                        onChange={(e) => {
+                          const v = e.target.value;
+                          updateSelectedNode((n) => ({
+                            ...n,
+                            streamAs: v.trim() === "" ? undefined : v
+                          }));
+                        }}
+                        style={{ display: "block", width: "100%", marginTop: 2 }}
+                      />
+                    </label>
+                  )}
                 </>
               )}
               {selectedNode && (
