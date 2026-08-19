@@ -48,6 +48,9 @@ spec:
       {{- end }}
       initContainers:
         {{- include "ragdoll.waitForDbInit" . | nindent 8 }}
+        {{- with .Values.worker.extraInitContainers }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
       containers:
         - name: worker
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
@@ -94,6 +97,13 @@ spec:
             {{- include "ragdoll.pluginCacheEnv" . | nindent 12 }}
           volumeMounts:
             {{- include "ragdoll.pluginCacheMount" . | nindent 12 }}
+            {{- if .Values.worker.workspace.enabled }}
+            # Source tree for filesystem_source (codebase-ingest). Mirrors the
+            # docker-compose `${CODEBASE_PATH}:/workspace:ro` bind mount.
+            - name: workspace
+              mountPath: {{ .Values.worker.workspace.mountPath | default "/workspace" | quote }}
+              readOnly: {{ .Values.worker.workspace.readOnly }}
+            {{- end }}
           resources:
             requests:
               cpu: {{ .Values.worker.resources.requests.cpu }}
@@ -109,3 +119,17 @@ spec:
 {{- end }}
       volumes:
         {{- include "ragdoll.pluginCacheVolume" . | nindent 8 }}
+        {{- if .Values.worker.workspace.enabled }}
+        - name: workspace
+          {{- if .Values.worker.workspace.existingClaim }}
+          persistentVolumeClaim:
+            claimName: {{ .Values.worker.workspace.existingClaim | quote }}
+          {{- else if .Values.worker.workspace.hostPath }}
+          hostPath:
+            path: {{ .Values.worker.workspace.hostPath | quote }}
+          {{- else }}
+          # No PVC / hostPath given — an emptyDir the operator populates via
+          # worker.extraInitContainers (e.g. a git clone). Empty otherwise.
+          emptyDir: {}
+          {{- end }}
+        {{- end }}

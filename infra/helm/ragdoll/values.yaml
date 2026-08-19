@@ -254,6 +254,34 @@ worker:
   # different model set, or "" to disable warming entirely.
   ollamaWarmModels: "qwen2.5:0.5b,nomic-embed-text"
   ollamaWarmIntervalMs: 300000
+  # ---------------------------------------------------------------------------
+  # Source tree mounted at /workspace for filesystem-reading plugins.
+  #
+  # `filesystem_source` (the codebase-ingest pipelines) reads its `rootPath`
+  # (default /workspace) off the worker's filesystem. docker-compose bind-mounts
+  # the repo there (`${CODEBASE_PATH:-../..}:/workspace:ro`); in Kubernetes the
+  # worker pod has no such mount, so filesystem_source emits ZERO documents and
+  # the downstream chunkers correctly chunk nothing. Enable this to provide the
+  # source tree in-cluster. OFF by default — most installs don't run
+  # filesystem_source.
+  #
+  # Pick ONE source:
+  #   existingClaim — mount a pre-populated PVC (e.g. a ReadWriteMany volume a
+  #                   CI job or an init container writes the checkout into).
+  #   hostPath      — a node path (single-node / dev only; not portable).
+  #   (neither)     — an emptyDir; populate it yourself with an init container
+  #                   (e.g. a git clone) via worker.extraInitContainers.
+  workspace:
+    enabled: false
+    mountPath: /workspace
+    readOnly: true
+    existingClaim: ""
+    hostPath: ""
+  # Extra init containers on the worker pod — e.g. a git-clone step that
+  # populates an emptyDir `workspace` volume before the worker starts. Rendered
+  # verbatim (a YAML list). The `workspace` volume (when enabled) is available
+  # to mount here under the name `workspace`.
+  extraInitContainers: []
 
 # ---------------------------------------------------------------------------
 # Web (nginx serving the SPA + reverse-proxying /api to the API Service)
