@@ -33,8 +33,13 @@ import {
   type ChatMessage
 } from "../../../packages/providers/src/index.ts";
 import { createVectorStore, type VectorPoint } from "../../../packages/vector/src/index.ts";
-import { createOpenSearchClient, awsSigV4FromSecrets } from "../../../packages/opensearch/src/index.ts";
-import { pickBackendName } from "./dataset-binding.ts";
+import {
+  createOpenSearchClient,
+  awsSigV4FromSecrets,
+  awsSigV4FromDatasetBindings,
+  mergeAwsSigV4
+} from "../../../packages/opensearch/src/index.ts";
+import { pickBackendName, pickBindingUrl } from "./dataset-binding.ts";
 import { validateAgainstSchema } from "./schema-validate.ts";
 
 function buildProviderRegistry(): ProviderRegistry {
@@ -249,14 +254,27 @@ export const datasetSearchPlugin: InProcessPlugin = {
     if (!index) {
       throw new Error("dataset_search: dataset has no keyword backend index");
     }
+    // Endpoint: prefer the dataset binding's connection URL (honors a
+    // configured `url` / https scheme — e.g. an AOSS collection endpoint),
+    // then node config.endpoint, then the resolved opensearch.url.
+    const bindingUrl = pickBindingUrl(input, "keyword", {
+      cfgKey: "endpoint",
+      defaultPort: 9200
+    })?.url;
     const client = createOpenSearchClient({
       endpoint:
+        bindingUrl ??
         (config.endpoint ? String(config.endpoint) : undefined) ??
         (context.resolvedConfig.values["opensearch.url"]?.value as string | undefined),
       username: secrets.username,
       password: secrets.password,
       authorization: secrets.authorization,
-      aws: awsSigV4FromSecrets(secrets)
+      // SigV4 from the connection (any modality binding) merged with node
+      // secrets — so AOSS retrieval signs, and `refresh` gating kicks in.
+      aws: mergeAwsSigV4(
+        awsSigV4FromDatasetBindings(input.dataset?.bindings),
+        awsSigV4FromSecrets(secrets)
+      )
     });
     if (!client) {
       throw new Error("dataset_search: OpenSearch endpoint not configured");

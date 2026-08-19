@@ -29,6 +29,11 @@
  */
 
 import { defineConnectionDriverPlugin } from "../../../../packages/connection-sdk/src/index.ts";
+import {
+  createOpenSearchClient,
+  awsSigV4FromConnectionOptions,
+  type AwsSigV4Config
+} from "../../../../packages/opensearch/src/index.ts";
 
 interface HttpEndpointOptions {
   host?: string;
@@ -126,6 +131,9 @@ interface OpenSearchClientHandle {
   url: string;
   username?: string;
   password?: string;
+  /** SigV4 config when the connection targets an IAM-secured domain / AWS
+   *  OpenSearch Serverless (awsRegion + awsService in the connection options). */
+  aws?: AwsSigV4Config;
 }
 
 export const opensearchConnectionDriver = defineConnectionDriverPlugin<OpenSearchClientHandle>({
@@ -147,9 +155,28 @@ export const opensearchConnectionDriver = defineConnectionDriverPlugin<OpenSearc
           /* leave as raw password */
         }
       }
-      return { url, username, password };
+      // SigV4 from the connection options (awsRegion + awsService, e.g.
+      // aoss). Credentials come from the standard AWS chain (env / IRSA / ECS)
+      // unless explicit keys are in the options — same as the plugin paths.
+      const aws = awsSigV4FromConnectionOptions(conn.options as Record<string, unknown>);
+      return { url, username, password, aws };
     },
     async probe(client) {
+      // AWS-secured (IAM domain / OpenSearch Serverless): an unsigned request
+      // always 403s, so probe through the SIGNING client, which also targets a
+      // serverless-compatible endpoint. AbortSignal keeps a hung backend from
+      // holding the probe open.
+      if (client.aws) {
+        const os = createOpenSearchClient({
+          endpoint: client.url,
+          username: client.username,
+          password: client.password,
+          aws: client.aws
+        });
+        if (!os) throw new Error("opensearch probe: failed to build signing client");
+        await os.ping();
+        return;
+      }
       const headers: Record<string, string> = {};
       if (client.username && client.password) {
         headers["authorization"] =
@@ -187,7 +214,22 @@ export const opensearchConnectionDriver = defineConnectionDriverPlugin<OpenSearc
         },
         url: {
           type: "string",
-          description: "Pre-baked URL — wins over host/port/scheme when set."
+          description: "Pre-baked URL — wins over host/port/scheme when set (e.g. an AOSS collection endpoint)."
+        },
+        awsSigv4: {
+          type: "boolean",
+          description:
+            "Sign requests with AWS SigV4 (IAM-secured domain / OpenSearch Serverless). Implied when awsRegion or awsService is set."
+        },
+        awsRegion: {
+          type: "string",
+          description: "AWS region for SigV4 signing, e.g. us-east-1."
+        },
+        awsService: {
+          type: "string",
+          enum: ["es", "aoss"],
+          description:
+            "SigV4 service: `es` (managed OpenSearch domain) or `aoss` (Serverless). `aoss` also drops the unsupported `refresh` param on bulk/delete."
         }
       },
       required: ["host"],
@@ -196,7 +238,7 @@ export const opensearchConnectionDriver = defineConnectionDriverPlugin<OpenSearc
     secretSchema: {
       type: "string",
       description:
-        "Password for the configured username — OR a JSON `{\"username\":...,\"password\":...}` blob."
+        "Password for the configured username — OR a JSON `{\"username\":...,\"password\":...}` blob. AWS credentials come from the standard AWS chain (env / IRSA / ECS), not here."
     },
     datasetBindings: ["text", "vectors"],
     transport: "in_process"
