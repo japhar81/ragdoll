@@ -22,6 +22,7 @@ import {
   OpenSearchClient,
   awsSigV4FromSecrets,
   awsSigV4FromConnectionOptions,
+  awsSigV4FromDatasetBindings,
   mergeAwsSigV4,
   AWS_SIGV4_SECRET_FIELDS
 } from "../src/client.ts";
@@ -366,6 +367,46 @@ test("awsSigV4FromConnectionOptions: reads region/service from the connection co
   );
   assert.equal(awsSigV4FromConnectionOptions({ host: "x" }), undefined);
   assert.equal(awsSigV4FromConnectionOptions(undefined), undefined);
+});
+
+test("awsSigV4FromDatasetBindings: finds SigV4 on ANY modality binding's connection", () => {
+  // The connection carrying AWS config can be on any binding (text/keyword/…).
+  const bindings = {
+    keyword: { connection: { options: { host: "x" } } }, // no AWS → skip
+    text: { connection: { options: { awsRegion: "us-east-1", awsService: "aoss" } } }
+  };
+  assert.deepEqual(awsSigV4FromDatasetBindings(bindings), {
+    region: "us-east-1",
+    service: "aoss",
+    accessKeyId: undefined,
+    secretAccessKey: undefined,
+    sessionToken: undefined
+  });
+  // No binding enables SigV4 → undefined (basic-auth path).
+  assert.equal(
+    awsSigV4FromDatasetBindings({ text: { connection: { options: { host: "x" } } } }),
+    undefined
+  );
+  assert.equal(awsSigV4FromDatasetBindings(undefined), undefined);
+});
+
+test("ping: aoss probes _cat/indices (signed); managed domain probes _cluster/health", async () => {
+  const aoss = captureUrls();
+  await new OpenSearchClient({
+    endpoint: "https://abc.us-east-1.aoss.amazonaws.com",
+    aws: { region: "us-east-1", service: "aoss", accessKeyId: "A", secretAccessKey: "s" },
+    fetchImpl: aoss.fetchImpl as never
+  }).ping();
+  assert.ok(aoss.urls.some((u) => u.includes("/_cat/indices")), aoss.urls.join());
+  assert.ok(!aoss.urls.some((u) => u.includes("_cluster/health")));
+
+  const es = captureUrls();
+  await new OpenSearchClient({
+    endpoint: "https://s.us-east-1.es.amazonaws.com",
+    aws: { region: "us-east-1", service: "es", accessKeyId: "A", secretAccessKey: "s" },
+    fetchImpl: es.fetchImpl as never
+  }).ping();
+  assert.ok(es.urls.some((u) => u.includes("/_cluster/health")), es.urls.join());
 });
 
 test("mergeAwsSigV4: node secrets override the connection config field-by-field", () => {

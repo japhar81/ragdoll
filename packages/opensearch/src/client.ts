@@ -192,6 +192,21 @@ export class OpenSearchClient {
     return { status: res.status, body: parsed as T };
   }
 
+  /**
+   * Lightweight signed liveness check for connection probes ("Test
+   * connection"). Signs like every other request, so it works against
+   * IAM-secured domains and AWS OpenSearch Serverless — an UNSIGNED probe
+   * always 403s there. Serverless (aoss) doesn't implement cluster APIs, so we
+   * probe the index-listing endpoint it DOES expose; managed domains use
+   * `_cluster/health`. Throws OpenSearchError on a non-2xx.
+   */
+  async ping(): Promise<void> {
+    const path = this.serverless
+      ? "/_cat/indices?format=json"
+      : "/_cluster/health";
+    await this.request("GET", path);
+  }
+
   async indexExists(index: string): Promise<boolean> {
     const { status } = await this.request("HEAD", `/${encodeURIComponent(index)}`, undefined, {
       tolerate: [404]
@@ -497,4 +512,25 @@ export function mergeAwsSigV4(
     }
   }
   return out;
+}
+
+/**
+ * Scan a dataset's resolved bindings for the first connection whose `options`
+ * enable SigV4, and return that config. So EVERY OpenSearch client path
+ * (retriever / output / retrieval-v2 / ingest) picks up AWS auth configured on
+ * the CONNECTION — regardless of which modality binding (`text` / `keyword` /
+ * `vectors`) carries it. Returns undefined when no binding's connection enables
+ * SigV4. Layer node secrets on top with {@link mergeAwsSigV4}.
+ */
+export function awsSigV4FromDatasetBindings(
+  bindings:
+    | Record<string, { connection?: { options?: Record<string, unknown> } } | undefined>
+    | undefined
+): AwsSigV4Config | undefined {
+  if (!bindings) return undefined;
+  for (const binding of Object.values(bindings)) {
+    const aws = awsSigV4FromConnectionOptions(binding?.connection?.options);
+    if (aws) return aws;
+  }
+  return undefined;
 }
