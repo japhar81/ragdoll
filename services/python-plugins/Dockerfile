@@ -33,6 +33,12 @@ ENV PYTHONUNBUFFERED=1 \
     POETRY_NO_INTERACTION=1 \
     POETRY_VIRTUALENVS_CREATE=false \
     PLAYWRIGHT_BROWSERS_PATH=/opt/playwright \
+    # Chromium (crawl4ai) writes its user-data-dir / .cache / .config under
+    # $HOME. Under OpenShift's restricted SCC the container runs as a random
+    # UID with no /etc/passwd entry, so $HOME defaults to `/` (read-only) and
+    # the browser fails to start — the crawler then returns zero documents.
+    # Point HOME at the world-writable, sticky /tmp so it works for any UID.
+    HOME=/tmp \
     PORT=8000
 
 WORKDIR /app
