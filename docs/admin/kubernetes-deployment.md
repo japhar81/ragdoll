@@ -369,6 +369,79 @@ podSecurityContext:
 If you bake your own image (above), setting `USER 1001` in it has the same
 effect and is the cleaner fix.
 
+## Empty crawler / chunker results in Kubernetes
+
+A crawl or codebase-ingest that works under docker-compose but returns
+**zero documents** in Kubernetes (a "successful" run with no output) is almost
+always a missing *host resource*, not a plugin bug — Docker provides these by
+default and K8s does not. Check the execution's `metadata.skipReasons` first:
+`_bfs_crawl` records the real exception per URL there (sandbox/shm error vs
+SSRF-block vs network-unreachable) instead of failing the job.
+
+### `crawl4ai_crawler` — headless Chromium under restricted pod security
+
+`crawl4ai` launches Playwright + headless Chromium, which breaks under a
+restricted SecurityContext:
+
+- `allowPrivilegeEscalation: false` sets `no_new_privs`, disabling Chromium's
+  SUID/namespace sandbox;
+- K8s doesn't auto-provision the 64 MB `/dev/shm` tmpfs Docker gives, so
+  Chromium crashes allocating shared memory;
+- under OpenShift's arbitrary UID, `$HOME` is `/` (read-only), so Chromium
+  can't write its user-data-dir / caches.
+
+**All three are fixed in-image and need no SCC change:** the crawler now
+launches with `--no-sandbox --disable-setuid-sandbox --disable-dev-shm-usage`
+by default, and the `python-plugins` image sets `HOME=/tmp`. If you build your
+own crawler image, keep both. Per-crawl overrides on the node's `config`:
+
+```yaml
+config:
+  # Replace the launch flags entirely (advanced).
+  browserArgs: ["--no-sandbox", "--disable-dev-shm-usage", "--proxy-server=..."]
+  # OR re-enable the sandbox on a pod that genuinely provides one (keeps the
+  # /dev/shm flag). Leave unset for the container-safe default.
+  noSandbox: false
+```
+
+If a page is heavy enough that `--disable-dev-shm-usage` (shm in `/tmp`) isn't
+enough, mount a larger `/dev/shm` on the `python-plugins` pod instead:
+
+```yaml
+volumes:      [{ name: dshm, emptyDir: { medium: Memory, sizeLimit: 1Gi } }]
+volumeMounts: [{ name: dshm, mountPath: /dev/shm }]
+```
+
+### `filesystem_source` — the `/workspace` source tree
+
+The codebase-ingest pipelines start with `filesystem_source` reading its
+`rootPath` (default `/workspace`) off the **worker's** filesystem. Compose
+bind-mounts the repo there (`${CODEBASE_PATH:-../..}:/workspace:ro`); a K8s
+worker pod has no such mount, so `filesystem_source` emits zero documents and
+the downstream chunkers correctly chunk nothing. Provide the source tree via
+the chart's `worker.workspace` knob (off by default):
+
+```yaml
+worker:
+  workspace:
+    enabled: true
+    mountPath: /workspace          # matches filesystem_source rootPath
+    readOnly: true
+    existingClaim: source-checkout # a pre-populated PVC…
+    # …or leave existingClaim/hostPath empty for an emptyDir you fill via an
+    # init container:
+  extraInitContainers:
+    - name: clone-source
+      image: alpine/git
+      command: ["git", "clone", "--depth", "1", "https://git.example.com/repo", "/workspace"]
+      volumeMounts: [{ name: workspace, mountPath: /workspace }]
+```
+
+Under OpenShift's arbitrary UID the mounted tree must be group-`0` readable
+(same rule as the baked plugin repo above) — a PVC your CI writes with
+`chgrp -R 0` + `chmod -R g=u`, or a git-clone init container (its emptyDir is
+already writable by the pod).
+
 ## Scaling notes
 
 - Scale API horizontally behind an ingress.

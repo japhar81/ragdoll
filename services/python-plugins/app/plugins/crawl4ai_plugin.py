@@ -39,6 +39,44 @@ DEFAULTS: Dict[str, Any] = {
     "allowPrivateNetworks": False,
 }
 
+# Chromium launch flags for running headless inside a locked-down container.
+# Without these the crawler works under docker-compose (Docker grants a SUID
+# sandbox + a 64 MB /dev/shm) but returns ZERO documents under Kubernetes /
+# OpenShift, because:
+#   * a restricted SecurityContext (`allowPrivilegeEscalation: false` sets
+#     no_new_privs) breaks Chromium's SUID / user-namespace sandbox unless it
+#     is launched with --no-sandbox / --disable-setuid-sandbox; and
+#   * K8s doesn't auto-provision the /dev/shm tmpfs Docker gives, so Chromium
+#     crashes on shared-memory allocation unless told to use /tmp instead
+#     (--disable-dev-shm-usage).
+# Either failure raises inside run_crawl4ai, which _bfs_crawl records as a
+# per-URL skip (see skipReasons) — the "successful run, 0 documents" symptom.
+# These flags make the K8s launch behave like the compose one. Operators can
+# override via config.browserArgs, or re-enable the sandbox on a pod that
+# genuinely provides one via config.noSandbox=false.
+_DEFAULT_BROWSER_ARGS = [
+    "--no-sandbox",
+    "--disable-setuid-sandbox",
+    "--disable-dev-shm-usage",
+    "--disable-gpu",
+]
+
+
+def _browser_args(cfg: Dict[str, Any]) -> List[str]:
+    """Resolve the Chromium launch args for this crawl.
+
+    `config.browserArgs` (a list) fully replaces the defaults. Otherwise the
+    container-safe defaults apply; `config.noSandbox: false` drops the two
+    sandbox-disabling flags for a hardened pod that provides a working sandbox.
+    """
+    override = cfg.get("browserArgs")
+    if isinstance(override, (list, tuple)):
+        return [str(a) for a in override]
+    args = list(_DEFAULT_BROWSER_ARGS)
+    if cfg.get("noSandbox") is False:
+        args = [a for a in args if a not in ("--no-sandbox", "--disable-setuid-sandbox")]
+    return args
+
 
 def _resolve_config(config: Dict[str, Any]) -> Dict[str, Any]:
     cfg = {**DEFAULTS, **(config or {})}
@@ -136,7 +174,31 @@ async def run_crawl4ai(url: str, cfg: Dict[str, Any]) -> Dict[str, Any]:
 
     extract = cfg.get("extract", "markdown")
 
-    async with AsyncWebCrawler(verbose=False) as crawler:
+    # Launch headless Chromium with container-safe flags (see
+    # _DEFAULT_BROWSER_ARGS) so the crawl produces documents under Kubernetes /
+    # OpenShift pod security, not just under docker-compose. BrowserConfig is
+    # the crawl4ai 0.4.x seam for browser launch args; fall back to the plain
+    # constructor (logging why) if a crawl4ai version without it is installed,
+    # so a version bump can't silently disable crawling.
+    crawler_kwargs: Dict[str, Any] = {}
+    try:
+        from crawl4ai import BrowserConfig  # type: ignore
+
+        crawler_kwargs["config"] = BrowserConfig(
+            headless=True,
+            verbose=False,
+            extra_args=_browser_args(cfg),
+        )
+    except Exception as exc:  # noqa: BLE001 - never let this abort the crawl.
+        _LOG.warning(
+            "crawl4ai: BrowserConfig unavailable (%s); launching without "
+            "container-safe browser flags — crawling may fail under "
+            "restricted pod security",
+            exc,
+        )
+        crawler_kwargs["verbose"] = False
+
+    async with AsyncWebCrawler(**crawler_kwargs) as crawler:
         result = await crawler.arun(url=url)
 
     # Per-mode content. "html" is the unmodified source crawl4ai fetched;

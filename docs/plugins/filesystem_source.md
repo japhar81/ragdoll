@@ -46,6 +46,12 @@ first place; treat `rootPath` as the perimeter, not the only barrier.
 
 ## Gotchas
 
+- **Zero documents in Kubernetes.** `rootPath` (default `/workspace`) is read
+  off the *worker's* filesystem. docker-compose bind-mounts the repo there; a
+  Helm worker pod has none, so the walk finds nothing and downstream chunkers
+  chunk nothing. Provide the tree with the chart's `worker.workspace` knob —
+  see [Kubernetes deployment → Empty crawler / chunker
+  results](../admin/kubernetes-deployment.md#empty-crawler--chunker-results-in-kubernetes).
 - Glob matching is a deliberate subset of minimatch — no character classes,
   no negation. If you need `!pattern`, use `exclude` instead.
 - mtimes from `stat()` are millisecond-precision on most filesystems; ext4

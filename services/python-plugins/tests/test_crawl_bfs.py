@@ -194,6 +194,28 @@ def test_bfs_ssrf_block_records_skip_reason(client, monkeypatch):
     assert blocked and "ssrf" in blocked[0]["reason"].lower()
 
 
+def test_browser_args_default_container_safe():
+    """Headless Chromium must launch with the flags that make it work under
+    restricted K8s / OpenShift pod security (the empty-in-cluster bug)."""
+    args = c4a._browser_args({})
+    assert "--no-sandbox" in args
+    assert "--disable-setuid-sandbox" in args
+    assert "--disable-dev-shm-usage" in args
+
+
+def test_browser_args_no_sandbox_false_keeps_shm_flag():
+    """`noSandbox: false` re-enables the sandbox (hardened pod) but still avoids
+    the /dev/shm crash."""
+    args = c4a._browser_args({"noSandbox": False})
+    assert "--no-sandbox" not in args
+    assert "--disable-setuid-sandbox" not in args
+    assert "--disable-dev-shm-usage" in args
+
+
+def test_browser_args_explicit_override_replaces():
+    assert c4a._browser_args({"browserArgs": ["--foo", "--bar"]}) == ["--foo", "--bar"]
+
+
 def test_bfs_all_fetches_fail_is_empty_but_diagnosable(client, monkeypatch):
     """The field bug: works locally, empty in a locked-down deployment.
 
