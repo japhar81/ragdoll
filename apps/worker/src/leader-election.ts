@@ -39,6 +39,7 @@
 
 import { randomUUID } from "node:crypto";
 import type { StructuredLogger } from "../../../packages/observability/src/index.ts";
+import { createRedisClient } from "../../../packages/redis/src/index.ts";
 
 /**
  * Cooperative-leadership primitive consumed by the scheduler. Every
@@ -172,19 +173,15 @@ export class RedisLeaderElection implements LeaderElection {
         );
       }
       this.ownedClient = true;
-      this.clientFactory = async () => {
-        // Lazy ioredis import keeps this module install-free for the
-        // offline test path. Mirrors createRedisChangeBus.
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const ioredis: any = await import("ioredis");
-        const Redis = ioredis.default ?? ioredis.Redis ?? ioredis;
-        const c = new Redis(redisUrl, { lazyConnect: true });
-        c.on("error", (e: Error) =>
-          this.logger?.warn?.("leader_election_redis_error", { message: e.message })
-        );
-        await c.connect();
-        return c as RedisLikeClient;
-      };
+      this.clientFactory = async () =>
+        // Shared factory: builds an ioredis client with `reconnectOnError` so a
+        // Valkey failover that demotes our connected pod to a read-only replica
+        // reconnects to the new primary + resends the write, instead of erroring
+        // (READONLY) forever. ioredis import stays lazy for the offline path.
+        (await createRedisClient(redisUrl, {
+          logger: this.logger,
+          errorEvent: "leader_election_redis_error"
+        })) as RedisLikeClient;
     }
   }
 
