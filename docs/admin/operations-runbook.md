@@ -53,6 +53,35 @@ on change, so coordinate with a re-login window.
 - Stuck job: inspect with BullMQ tooling, `retry` to requeue, or
   `deadLetter` to fail it with a reason.
 
+## Redis / Valkey failover (READONLY replica)
+
+Symptom — after Valkey is redeployed or fails over, a worker logs, repeatedly and
+without recovering:
+
+```
+leader_election_tick_failed  error: READONLY You can't write against a read only replica.
+```
+
+Root cause: `REDIS_URL` points at the Bitnami redis/Valkey `-master` Service,
+which routes to the current primary. A failover / StatefulSet rolling update can
+demote the pod our connection is pinned to into a **read-only replica**. ioredis
+keeps that TCP connection open (a role change does not drop the socket), so every
+write (`SET NX`, the lease-renew Lua `eval`, SSO pending-state writes) errors with
+`READONLY` — and, since the connection is never re-established, it never recovers.
+
+Fix (shipped): every keyspace-writing client is built through
+`@ragdoll/redis` `createRedisClient`, which sets ioredis `reconnectOnError` to
+reconnect **and re-send** the failed command on a `READONLY` error. Reconnecting
+re-resolves the `-master` Service to the new primary, so writes land there. The
+worker now self-recovers within one leader-election poll interval (≈ half the
+lease TTL, ~5 s by default); no manual intervention is needed.
+
+If you still see it stick (e.g. Valkey wedged with no promotable replica, or a
+`-master` Service whose selector never updates): confirm a primary exists
+(`valkey-cli -h <master-svc> INFO replication` shows `role:master`), check the
+Sentinel/operator promoted a replica, and restart the affected worker pod as a
+last resort — the reconnect logic makes that rarely necessary.
+
 ## Health and readiness
 
 - `GET /healthz` — liveness; `GET /readyz` — readiness. Both are unauthenticated.

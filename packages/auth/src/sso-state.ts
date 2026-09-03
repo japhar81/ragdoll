@@ -22,6 +22,8 @@
  * tokens are opaque random strings the operator should never enumerate.
  */
 
+import { createRedisClient } from "../../redis/src/index.ts";
+
 export interface SsoPendingState {
   /** Identity-provider slug the user is signing in via. */
   slug: string;
@@ -166,18 +168,15 @@ export class RedisSsoStateStore implements SsoStateStore {
 export async function createRedisSsoStateStore(
   options: RedisSsoStateStoreOptions
 ): Promise<RedisSsoStateStore> {
-  // Lazy import keeps tests and offline single-pod paths free of the
-  // ioredis dependency. Same pattern as createRedisChangeBus.
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const ioredis: any = await import("ioredis");
-  const Redis = ioredis.default ?? ioredis.Redis ?? ioredis;
-  const client = new Redis(options.redisUrl, { lazyConnect: true });
-  client.on("error", () => {
-    // Swallowed: real outages reconnect via ioredis's retry strategy;
-    // a failing publish surfaces at call time as a rejected promise.
-  });
-  await client.connect();
-  return new RedisSsoStateStore(client as RedisLikeClient, {
+  // Shared factory: ioredis is imported lazily (offline/single-pod paths stay
+  // dependency-free) and the client carries `reconnectOnError`, so a Valkey
+  // failover that leaves us pinned to a read-only replica reconnects to the new
+  // primary and resends the write — SSO pending-state does keyspace writes
+  // (SET/DEL), which otherwise error `READONLY` forever after a failover. Client
+  // errors are swallowed (no logger): real outages reconnect via ioredis's retry
+  // strategy; a failing write surfaces at call time as a rejected promise.
+  const client = (await createRedisClient(options.redisUrl)) as RedisLikeClient;
+  return new RedisSsoStateStore(client, {
     keyPrefix: options.keyPrefix,
     owned: true
   });
