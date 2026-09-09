@@ -233,6 +233,35 @@ function nonce(): string {
 let nonceCounter = 0;
 
 /**
+ * Environment for our `git` subprocesses.
+ *
+ * The loader routinely reads repos it does NOT own: a bind-mounted
+ * `file://` plugin source is owned by the host user, while the runtime
+ * user inside the container is someone else. Git's "dubious ownership"
+ * guard (CVE-2022-24765) then aborts EVERY command against that repo
+ * with `fatal: detected dubious ownership in repository at '<path>'`.
+ *
+ * We opt out for just these subprocesses via `GIT_CONFIG_*` env vars —
+ * `safe.directory=*` — instead of mutating a global `~/.gitconfig`
+ * (surprising side effect, and `$HOME` may not be writable). Scoped to
+ * the child process, no on-disk state. Safe here because the paths we
+ * run git against are operator-configured plugin sources + our own
+ * cache dir, not arbitrary user directories.
+ *
+ * Exported for unit testing.
+ */
+export function gitSubprocessEnv(
+  base: NodeJS.ProcessEnv = process.env
+): NodeJS.ProcessEnv {
+  return {
+    ...base,
+    GIT_CONFIG_COUNT: "1",
+    GIT_CONFIG_KEY_0: "safe.directory",
+    GIT_CONFIG_VALUE_0: "*"
+  };
+}
+
+/**
  * Run `git` with the given args. Returns stdout. Throws on non-zero
  * exit with the stderr text in the message. Five-second hard timeout
  * on the resolve step is generous for ls-remote; clones can take much
@@ -241,7 +270,10 @@ let nonceCounter = 0;
  */
 function runGit(args: string[]): Promise<string> {
   return new Promise<string>((resolve, reject) => {
-    const proc = spawn("git", args, { stdio: ["ignore", "pipe", "pipe"] });
+    const proc = spawn("git", args, {
+      stdio: ["ignore", "pipe", "pipe"],
+      env: gitSubprocessEnv()
+    });
     const stdout: Buffer[] = [];
     const stderr: Buffer[] = [];
     proc.stdout.on("data", (c) => stdout.push(c));
