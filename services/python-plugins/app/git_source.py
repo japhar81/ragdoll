@@ -51,6 +51,28 @@ def default_cache_dir() -> str:
     )
 
 
+def _git_env() -> dict[str, str]:
+    """Environment for our git subprocess calls.
+
+    The sidecar routinely reads repos it does NOT own: a bind-mounted
+    ``file://`` plugin source is owned by the host user, while the
+    container's runtime user is someone else. Git's "dubious ownership"
+    guard (CVE-2022-24765) then aborts every command against that repo
+    with ``fatal: detected dubious ownership in repository at '<path>'``.
+
+    We opt out for just these subprocesses via ``GIT_CONFIG_*`` env vars
+    (``safe.directory=*``) rather than mutating a global ``~/.gitconfig``
+    (surprising side effect, and ``$HOME`` may not be writable in the
+    sidecar) — scoped to the child process, no on-disk state. Safe here:
+    the paths are operator-configured plugin sources + our own cache dir.
+    """
+    env = os.environ.copy()
+    env["GIT_CONFIG_COUNT"] = "1"
+    env["GIT_CONFIG_KEY_0"] = "safe.directory"
+    env["GIT_CONFIG_VALUE_0"] = "*"
+    return env
+
+
 def _run_git(args: list[str], timeout: Optional[float] = None) -> str:
     """Run git; return stdout; raise with stderr on non-zero exit."""
     try:
@@ -60,6 +82,7 @@ def _run_git(args: list[str], timeout: Optional[float] = None) -> str:
             text=True,
             timeout=timeout,
             check=False,
+            env=_git_env(),
         )
     except FileNotFoundError as exc:
         raise GitFetchError(
