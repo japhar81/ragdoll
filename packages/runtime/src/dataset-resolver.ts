@@ -35,6 +35,32 @@ import type {
 import { type SecretProvider, resolveConnectionSecret } from "../../secrets/src/index.ts";
 import { applyNamespacePolicy } from "./dataset-namespace.ts";
 
+/**
+ * Thrown when a dataset row EXISTS and matched the ref, but has no published
+ * version yet — created + bound, never "cut" into a version (`stable` alias
+ * absent and `current_version_id IS NULL`).
+ *
+ * This is deliberately DISTINCT from `resolve()` returning `undefined` (no
+ * dataset matched the ref at all). Without the distinction, a bound-but-unbuilt
+ * dataset resolved to `undefined`, arrived at the sink as an empty
+ * `input.dataset`, and the sink's generic guard mislabelled it as a *missing
+ * binding* — sending the operator to fix the one thing that wasn't broken. The
+ * executor catches this type and surfaces an accurate "cut a version" message
+ * instead; every other resolution failure keeps the pre-Phase-5 tolerance.
+ */
+export class DatasetNotBuiltError extends Error {
+  readonly slug: string;
+  constructor(slug: string) {
+    super(
+      `dataset "${slug}" has no published version yet — cut a version on the ` +
+        `Datasets screen (or via POST /api/datasets/:id/versions) before a ` +
+        `pipeline can read from or write to it.`
+    );
+    this.name = "DatasetNotBuiltError";
+    this.slug = slug;
+  }
+}
+
 export interface DatasetResolverDeps {
   datasets: DatasetRepository;
   datasetVersions: DatasetVersionRepository;
@@ -92,7 +118,14 @@ export function buildDatasetResolver(deps: DatasetResolverDeps): DatasetResolver
       const aliasName = args.ref.alias ?? "stable";
       const aliasRow = await deps.datasetAliases.resolve(ds.id, aliasName);
       const versionId = aliasRow?.versionId ?? ds.currentVersionId;
-      if (!versionId) return undefined;
+      if (!versionId) {
+        // The dataset EXISTS but was never cut into a version. Signal that
+        // distinctly (vs. the `undefined` returns above, which mean "no
+        // dataset matched") so the executor can surface an accurate error
+        // rather than letting a sink mislabel the empty dataset as a missing
+        // binding. See DatasetNotBuiltError.
+        throw new DatasetNotBuiltError(ds.slug);
+      }
       const ver = await deps.datasetVersions.get(versionId);
       if (!ver) return undefined;
 
@@ -158,13 +191,19 @@ export function buildDatasetResolver(deps: DatasetResolverDeps): DatasetResolver
           typeof raw.namespace === "string"
             ? (raw.namespace as DatasetNamespacePolicy)
             : undefined;
+        // Collection base-name precedence: explicit `binding.collection`,
+        // then the version's `backendCollections[name]`, then the dataset
+        // slug. The slug fallback is load-bearing: a version cut without
+        // backend collections (e.g. a bare `POST …/versions {status:ready}`)
+        // would otherwise leave `base` undefined and every storage sink's
+        // `?? "default"` guard would silently write EVERY dataset's chunks
+        // into one shared `default` index instead of `<slug>_tenant_<env>`.
+        // The namespace policy still owns the per-tenant/env suffix.
         const base =
           (typeof raw.collection === "string" && raw.collection) ||
           versionCollections[name] ||
-          undefined;
-        const effectiveCollection = base
-          ? await expandNamespace(base, policy)
-          : undefined;
+          ds.slug;
+        const effectiveCollection = await expandNamespace(base, policy);
 
         let connection: ResolvedDatasetBinding["connection"];
         let connectionKind: string | undefined;

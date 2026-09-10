@@ -34,6 +34,7 @@ import {
   type ConnectionKindInfo
 } from "../lib/api.ts";
 import { buildScopeTree, findScopeNode, type ScopeNode } from "../lib/orgtree.ts";
+import { initialBackendCollections } from "../lib/datasetVersions.ts";
 import { tenantIdFromScopeKey } from "../lib/tenantContext.ts";
 import { useTenants } from "./useTenants.tsx";
 import { useEnvironments } from "./useEnvironments.tsx";
@@ -496,7 +497,13 @@ function UsedBySection(props: { dataset: DatasetView }) {
 // Versions + aliases — collapsible secondary surface
 // ===========================================================================
 
-function VersionsSection(props: { dataset: DatasetView; canAdmin: boolean }) {
+function VersionsSection(props: {
+  dataset: DatasetView;
+  canAdmin: boolean;
+  onCutVersion: () => void;
+  cutting: boolean;
+  cutError: unknown;
+}) {
   const qc = useQueryClient();
   const versions = useQuery({
     queryKey: ["dataset-versions", props.dataset.id],
@@ -513,7 +520,27 @@ function VersionsSection(props: { dataset: DatasetView; canAdmin: boolean }) {
   const aliasList = versions.data?.aliases ?? [];
   return (
     <>
-      <h4 style={{ marginTop: 16 }}>Versions</h4>
+      <div
+        style={{
+          marginTop: 16,
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "baseline"
+        }}
+      >
+        <h4 style={{ margin: 0 }}>Versions</h4>
+        {props.canAdmin && (
+          <button
+            className="link-btn"
+            onClick={props.onCutVersion}
+            disabled={props.cutting}
+            title="Cut a ready version snapshotting the current bindings into per-dataset backend collections. A dataset must have a version before a pipeline can read from or write to it."
+          >
+            {props.cutting ? "Cutting…" : "Cut version"}
+          </button>
+        )}
+      </div>
+      {props.cutError != null && <p className="error">{errText(props.cutError)}</p>}
       {versionList.length === 0 ? (
         <p className="muted">No versions cut yet.</p>
       ) : (
@@ -645,8 +672,27 @@ function DatasetDetail(props: {
       }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["datasets-all"] })
   });
+  // Cut a ready version snapshotting the current bindings. The runtime can't
+  // read/write a dataset until a version exists (+ a `stable` alias); until
+  // then a pipeline that binds it fails at execute. The UI never exposed this
+  // action before, so a UI-only operator could create + bind a dataset that
+  // was permanently runtime-dead. Snapshot bindings → backend collections so
+  // per-dataset index naming is correct from the first cut.
+  const cutVersion = useMutation({
+    mutationFn: () =>
+      api.createDatasetVersion(props.dataset.id, {
+        status: "ready",
+        backendCollections: initialBackendCollections(props.dataset)
+      }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["datasets-all"] });
+      qc.invalidateQueries({ queryKey: ["dataset-versions", props.dataset.id] });
+      setShowVersions(true);
+    }
+  });
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [showVersions, setShowVersions] = useState(false);
+  const notBuilt = !props.dataset.currentVersionId && !props.dataset.archivedAt;
   // Hard delete is separate from archive — archive flips a flag, delete
   // removes the row + cascades versions/aliases. The modal handles
   // refuse-on-used-by with the pipelineReferences count from the same
@@ -703,6 +749,37 @@ function DatasetDetail(props: {
         onClose={() => setDeleteOpen(false)}
       />
 
+      {notBuilt && (
+        <div
+          className="banner warn"
+          style={{
+            marginTop: 12,
+            padding: "10px 12px",
+            border: "1px solid var(--warn-border, #b8860b)",
+            borderRadius: 6,
+            background: "var(--warn-bg, rgba(184, 134, 11, 0.08))"
+          }}
+        >
+          <strong>Not runtime-ready — no version cut yet.</strong>{" "}
+          A pipeline that binds this dataset will fail at execute (
+          <code>no published version</code>) until you cut one. Bindings below
+          are saved, but the corpus has no published version for the runtime to
+          resolve.
+          {props.canAdmin && (
+            <div style={{ marginTop: 8 }}>
+              <button
+                className="link-btn"
+                onClick={() => cutVersion.mutate()}
+                disabled={cutVersion.isPending}
+              >
+                {cutVersion.isPending ? "Cutting…" : "Cut initial version (ready)"}
+              </button>
+            </div>
+          )}
+          {cutVersion.isError && <p className="error">{errText(cutVersion.error)}</p>}
+        </div>
+      )}
+
       <BindingsSection
         dataset={props.dataset}
         canAdmin={props.canAdmin}
@@ -717,7 +794,13 @@ function DatasetDetail(props: {
           {showVersions ? "▾" : "▸"} Versions + aliases
         </button>
         {showVersions && (
-          <VersionsSection dataset={props.dataset} canAdmin={props.canAdmin} />
+          <VersionsSection
+            dataset={props.dataset}
+            canAdmin={props.canAdmin}
+            onCutVersion={() => cutVersion.mutate()}
+            cutting={cutVersion.isPending}
+            cutError={cutVersion.isError ? cutVersion.error : null}
+          />
         )}
       </section>
 
