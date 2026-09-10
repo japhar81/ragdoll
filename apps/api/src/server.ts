@@ -471,28 +471,52 @@ async function buildDeps(): Promise<{
   // `holder.swap(...)`; routes re-read `deps.pluginRegistry` at
   // request time and see the new pointer.
   if (pluginSourceStore) {
-    const { PluginRegistryHolder } = await import(
-      "../../../packages/plugin-loader/src/index.ts"
-    );
-    pluginRegistryHolder = new PluginRegistryHolder(pluginRegistry, []);
-    deps.pluginRegistryHolder = pluginRegistryHolder;
+    const {
+      PluginRegistryHolder,
+      loadPluginRegistryWithStore,
+      pushSidecarSources,
+      registerSidecarGitPlugins
+    } = await import("../../../packages/plugin-loader/src/index.ts");
     deps.pluginSourceStore = pluginSourceStore;
-    // The holder IS a PluginRegistry (extends + delegates). Point
-    // `deps.pluginRegistry` at it so routes that still type
-    // `PluginRegistry` get the live, swappable instance — old code
-    // unchanged, refresh becomes effective the moment the swap lands.
-    deps.pluginRegistry = pluginRegistryHolder;
-    // PLUGIN-ARCH-2: at boot, PUSH the `host: "sidecar"` plugin_sources
-    // rows to the python-plugins sidecar (single source of truth), then
-    // discover the resulting plugins back via /manifests so they appear
-    // in the builder palette without requiring a manual refresh.
-    // Best-effort — a sidecar that's down / on an older image is a
-    // silent no-op (the sync load above already registered the
-    // hardcoded built-in sidecar manifests).
+    // Fallback holder: the sync-loaded built-ins with NO live source
+    // statuses. Replaced below on a successful store-backed load; kept
+    // only if that load throws, so a transient store/git failure
+    // degrades to "built-ins only" instead of blocking boot.
+    pluginRegistryHolder = new PluginRegistryHolder(pluginRegistry, []);
+    // Load the external `host: "worker"` (in-process git) sources from
+    // the SAME plugin_sources store the /api/plugins/refresh endpoint
+    // uses, so a redeploy shows them LOADED — real pluginCount + status
+    // on the Plugin Sources screen — WITHOUT an operator clicking
+    // Refresh. This mirrors the worker's boot (apps/worker/src/main.ts):
+    // before it, the API booted with an empty holder whose
+    // `statuses()` was empty, so every git source rendered `loaded: 0`
+    // until a manual refresh populated it. Best-effort: buildPluginRegistry
+    // records a per-source failure and keeps going (one bad source never
+    // aborts the load); a hard failure falls back to the built-ins holder.
     try {
-      const { pushSidecarSources, registerSidecarGitPlugins } = await import(
-        "../../../packages/plugin-loader/src/index.ts"
-      );
+      const { holder } = await loadPluginRegistryWithStore({
+        store: pluginSourceStore
+      });
+      pluginRegistryHolder = holder;
+      const statuses = holder.statuses();
+      logger.info("plugin_registry_loaded_from_store", {
+        sources: statuses.length,
+        loaded: statuses.filter((s) => s.status === "loaded").length,
+        failed: statuses.filter((s) => s.status === "failed").length
+      });
+    } catch (e) {
+      logger.warn("store_backed_plugin_load_failed_using_builtins", {
+        error: e instanceof Error ? e.message : String(e)
+      });
+    }
+    // PLUGIN-ARCH-2: PUSH the `host: "sidecar"` plugin_sources rows to
+    // the python-plugins sidecar (single source of truth), then discover
+    // the resulting plugins back via /manifests so they appear in the
+    // builder palette without requiring a manual refresh. Best-effort —
+    // a sidecar that's down / on an older image is a silent no-op (the
+    // sync load above already registered the hardcoded built-in sidecar
+    // manifests).
+    try {
       const push = await pushSidecarSources(pluginSourceStore);
       if (push.pushed) {
         logger.info("sidecar_sources_pushed", {
@@ -501,12 +525,18 @@ async function buildDeps(): Promise<{
       } else if (push.reason && push.reason !== "no PYTHON_PLUGIN_URL") {
         logger.warn("sidecar_sources_push_skipped", { reason: push.reason });
       }
-      await registerSidecarGitPlugins(pluginRegistry);
+      await registerSidecarGitPlugins(pluginRegistryHolder);
     } catch (e) {
       logger.warn("sidecar_git_plugin_discovery_failed", {
         error: e instanceof Error ? e.message : String(e)
       });
     }
+    // The holder IS a PluginRegistry (extends + delegates). Point
+    // `deps.pluginRegistry` at whichever holder we ended with so routes
+    // that still type `PluginRegistry` get the live, swappable instance;
+    // a later /api/plugins/refresh swaps in a rebuilt registry.
+    deps.pluginRegistryHolder = pluginRegistryHolder;
+    deps.pluginRegistry = pluginRegistryHolder;
   }
 
   // --- Authorizer (ADR 0035). A custom authorization provider from an
