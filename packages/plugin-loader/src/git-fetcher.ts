@@ -25,7 +25,9 @@
  */
 
 import { spawn } from "node:child_process";
+import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
 import { mkdir, stat } from "node:fs/promises";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 
 /**
@@ -233,6 +235,45 @@ function nonce(): string {
 let nonceCounter = 0;
 
 /**
+ * Path to a temp *global* gitconfig that lifts git's dubious-ownership
+ * guard for our subprocesses. Built once per process, then reused.
+ *
+ * Why a real global-config file and not scoped `GIT_CONFIG_*` env vars:
+ * git only honors `safe.directory` from **global or system** config, and —
+ * the subtlety that bit the sidecar — a `file://` remote forks a separate
+ * `git-upload-pack` child that re-reads global config and does NOT inherit
+ * the inline `GIT_CONFIG_*` values. The scoped-env approach fixed direct
+ * commands (`git -C <path> …`) but left `git ls-remote file://<path>` still
+ * aborting. Pointing `GIT_CONFIG_GLOBAL` at a file we control covers that
+ * forked child too. We `[include]` the operator's existing global config so
+ * their settings still apply (git silently ignores a missing include path);
+ * we never touch the real `~/.gitconfig`.
+ */
+let safeDirectoryGlobalConfigPath: string | undefined;
+
+function safeDirectoryGlobalConfig(): string {
+  if (
+    safeDirectoryGlobalConfigPath &&
+    existsSync(safeDirectoryGlobalConfigPath)
+  ) {
+    return safeDirectoryGlobalConfigPath;
+  }
+  // Preserve whatever global config is currently in effect: an operator may
+  // already point GIT_CONFIG_GLOBAL somewhere; otherwise it's ~/.gitconfig.
+  const existing =
+    process.env.GIT_CONFIG_GLOBAL ?? join(homedir(), ".gitconfig");
+  const dir = mkdtempSync(join(tmpdir(), "ragdoll-gitconfig-"));
+  const path = join(dir, "config");
+  writeFileSync(
+    path,
+    `[safe]\n\tdirectory = *\n[include]\n\tpath = ${existing}\n`,
+    "utf8"
+  );
+  safeDirectoryGlobalConfigPath = path;
+  return path;
+}
+
+/**
  * Environment for our `git` subprocesses.
  *
  * The loader routinely reads repos it does NOT own: a bind-mounted
@@ -241,12 +282,12 @@ let nonceCounter = 0;
  * guard (CVE-2022-24765) then aborts EVERY command against that repo
  * with `fatal: detected dubious ownership in repository at '<path>'`.
  *
- * We opt out for just these subprocesses via `GIT_CONFIG_*` env vars —
- * `safe.directory=*` — instead of mutating a global `~/.gitconfig`
- * (surprising side effect, and `$HOME` may not be writable). Scoped to
- * the child process, no on-disk state. Safe here because the paths we
- * run git against are operator-configured plugin sources + our own
- * cache dir, not arbitrary user directories.
+ * We opt out via `GIT_CONFIG_GLOBAL` → a temp config carrying
+ * `safe.directory=*` (see `safeDirectoryGlobalConfig` for why a
+ * global-config file rather than scoped `GIT_CONFIG_*` env vars — the
+ * `file://` transport's forked `upload-pack` doesn't see the latter).
+ * Safe here because the paths we run git against are operator-configured
+ * plugin sources + our own cache dir, not arbitrary user directories.
  *
  * Exported for unit testing.
  */
@@ -255,9 +296,7 @@ export function gitSubprocessEnv(
 ): NodeJS.ProcessEnv {
   return {
     ...base,
-    GIT_CONFIG_COUNT: "1",
-    GIT_CONFIG_KEY_0: "safe.directory",
-    GIT_CONFIG_VALUE_0: "*"
+    GIT_CONFIG_GLOBAL: safeDirectoryGlobalConfig()
   };
 }
 

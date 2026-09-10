@@ -51,6 +51,45 @@ def default_cache_dir() -> str:
     )
 
 
+_SAFE_DIRECTORY_GLOBAL_CONFIG: Optional[str] = None
+
+
+def _safe_directory_global_config() -> str:
+    """Path to a temp *global* gitconfig that lifts the dubious-ownership
+    guard for our subprocesses. Built once per process, then reused.
+
+    Why a real global-config file and not scoped ``GIT_CONFIG_*`` env vars:
+    git only honors ``safe.directory`` from **global or system** config, and
+    — the subtlety that bit us — a ``file://`` remote forks a separate
+    ``git-upload-pack`` child that re-reads global config and does NOT
+    inherit the inline ``GIT_CONFIG_*`` values. So the scoped-env approach
+    fixed direct commands (``git -C <path> …``) but left ``git ls-remote
+    file://<path>`` still aborting with ``fatal: detected dubious ownership
+    …`` — exactly the sidecar failure. Pointing ``GIT_CONFIG_GLOBAL`` at a
+    file we control covers that forked child too.
+
+    We ``[include]`` the operator's existing global config so their settings
+    (proxy, credentials, url.*.insteadOf) still apply; git silently ignores
+    a missing include path. We never touch the real ``~/.gitconfig``.
+    """
+    global _SAFE_DIRECTORY_GLOBAL_CONFIG
+    if _SAFE_DIRECTORY_GLOBAL_CONFIG is not None and os.path.exists(
+        _SAFE_DIRECTORY_GLOBAL_CONFIG
+    ):
+        return _SAFE_DIRECTORY_GLOBAL_CONFIG
+    # Preserve whatever global config is currently in effect: an operator
+    # may already point GIT_CONFIG_GLOBAL somewhere; otherwise it's ~/.gitconfig.
+    existing = os.environ.get("GIT_CONFIG_GLOBAL") or os.path.expanduser(
+        "~/.gitconfig"
+    )
+    fd, path = tempfile.mkstemp(prefix="ragdoll-gitconfig-", suffix=".ini")
+    with os.fdopen(fd, "w") as fh:
+        fh.write("[safe]\n\tdirectory = *\n")
+        fh.write(f"[include]\n\tpath = {existing}\n")
+    _SAFE_DIRECTORY_GLOBAL_CONFIG = path
+    return path
+
+
 def _git_env() -> dict[str, str]:
     """Environment for our git subprocess calls.
 
@@ -60,16 +99,15 @@ def _git_env() -> dict[str, str]:
     guard (CVE-2022-24765) then aborts every command against that repo
     with ``fatal: detected dubious ownership in repository at '<path>'``.
 
-    We opt out for just these subprocesses via ``GIT_CONFIG_*`` env vars
-    (``safe.directory=*``) rather than mutating a global ``~/.gitconfig``
-    (surprising side effect, and ``$HOME`` may not be writable in the
-    sidecar) — scoped to the child process, no on-disk state. Safe here:
-    the paths are operator-configured plugin sources + our own cache dir.
+    We opt out via ``GIT_CONFIG_GLOBAL`` → a temp config carrying
+    ``safe.directory=*`` (see :func:`_safe_directory_global_config` for why
+    a global-config file rather than scoped ``GIT_CONFIG_*`` env vars — the
+    ``file://`` transport's forked ``upload-pack`` doesn't see the latter).
+    Safe here: the paths are operator-configured plugin sources + our own
+    cache dir, not arbitrary user directories.
     """
     env = os.environ.copy()
-    env["GIT_CONFIG_COUNT"] = "1"
-    env["GIT_CONFIG_KEY_0"] = "safe.directory"
-    env["GIT_CONFIG_VALUE_0"] = "*"
+    env["GIT_CONFIG_GLOBAL"] = _safe_directory_global_config()
     return env
 
 
