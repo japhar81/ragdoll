@@ -47,11 +47,24 @@ concrete dataset row with backend collections. Same slug can route to
 different physical indexes per environment — that's how `prod` writes
 to a real Qdrant while `dev` writes to in-memory.
 
-Datasets declare **modalities** — which backend slots they carry:
-`vector` (Qdrant / pgvector), `text` (OpenSearch), or both for hybrid
-retrieval. The Builder picker filters slugs by what each plugin
-needs, so wiring an OpenSearch sink to a vector-only dataset is
-caught at edit time, not at runtime.
+Datasets declare **bindings** — named backend slots (`vectors` on
+Qdrant / pgvector, `text` on OpenSearch, or both for hybrid retrieval)
+that map to a connection + a collection. The Builder picker filters
+slugs by what each plugin needs, so wiring an OpenSearch sink to a
+vector-only dataset is caught at edit time, not at runtime.
+
+**Cut a version before you use it.** A dataset isn't runtime-ready the
+moment you save its bindings — the runtime resolves a slug through its
+`stable` alias → a published **version**, and a freshly-created dataset
+has neither. Until you cut one (Datasets → the dataset → *Versions* →
+**Cut version**), a pipeline that binds the dataset fails at execute
+with `dataset "<slug>" has no published version` — and the Datasets
+screen flags the dataset as *not runtime-ready* with a one-click
+**Cut initial version**. Cutting snapshots the current bindings into
+per-dataset backend collections (named from the slug unless you
+override a binding's collection), sets `current_version_id`, and pins
+the `stable` alias. Re-cut whenever you want a fresh snapshot, and
+retarget `stable` to any ready version from the same panel.
 
 ## Plugins
 

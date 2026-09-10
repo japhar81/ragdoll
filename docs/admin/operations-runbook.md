@@ -82,6 +82,36 @@ If you still see it stick (e.g. Valkey wedged with no promotable replica, or a
 Sentinel/operator promoted a replica, and restart the affected worker pod as a
 last resort — the reconnect logic makes that rarely necessary.
 
+## Datasets: pipeline fails on a dataset that was never cut into a version
+
+Symptom — a pipeline whose node binds a dataset fails at execute with
+`dataset "<slug>" has no published version yet — cut a version on the Datasets
+screen …`, even though the Datasets screen shows the dataset with correct
+bindings.
+
+Cause — a dataset is only runtime-resolvable through its `stable` alias → a
+published **version**. A dataset created + bound but never cut has
+`current_version_id IS NULL` and no `stable` alias, so the resolver can't produce
+a concrete dataset. (Before the fix the resolver returned "nothing" here and the
+downstream sink mislabelled it as a *missing binding* — sending you to fix the
+one thing that wasn't broken. It now fails with the accurate message above.)
+
+Fix — cut a version. In the UI: open the dataset → **Cut initial version** on
+the not-runtime-ready banner (or *Versions* → **Cut version**). Via the API:
+
+```sh
+curl -s -X POST -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"status":"ready","backendCollections":{"text":"<slug>","vectors":"<slug>"}}' \
+  "$API/api/datasets/<dataset-id>/versions"
+```
+
+Passing `backendCollections` is optional — the resolver defaults each binding's
+collection base-name to the dataset **slug** when a version omits it, so a bare
+`{"status":"ready"}` no longer silently degrades ingest to a shared `default`
+index. The namespace policy still owns the per-tenant/env suffix
+(`<slug>_tenant_<env>`). The UI's Cut-version action fills `backendCollections`
+in from the current bindings automatically.
+
 ## Health and readiness
 
 - `GET /healthz` — liveness; `GET /readyz` — readiness. Both are unauthenticated.
