@@ -580,6 +580,37 @@ api/worker pod + localhost URL + no standalone resources; standalone →
 shared Deployment+Service + Service-DNS URL); `docker compose config`
 on the scale overlay (second sidecar + dual-URL on all compute services).
 
+## Amendment — API boot-loads worker-host sources (no manual refresh on redeploy)
+
+Original PLUGIN-ARCH-1 (the "Worker-side refresh" limitation above) had the
+API boot with an *empty* holder over the sync-loaded built-ins and only
+populate external `host: "worker"` (in-process git) sources on the first
+`POST /api/plugins/refresh`. The worker already loaded from the store at boot
+(issues-log #9), but the API did not — so after a redeploy the Plugin Sources
+screen (fed by the API) showed every git source with **`loaded: 0`** until an
+operator clicked **Refresh**, even though the sources were configured and the
+worker had them.
+
+Fix: the API boot now calls `loadPluginRegistryWithStore({ store })` — the same
+loader `/api/plugins/refresh` uses — so `holder.statuses()` is populated at
+startup and the screen shows real `pluginCount` + status immediately. It
+mirrors the worker's boot exactly (load worker-host git sources → push +
+discover sidecar sources). Best-effort and non-blocking: `buildPluginRegistry`
+records a per-source failure and continues (one bad source never aborts the
+load), and a hard failure falls back to the built-ins-only holder so a
+transient store/git problem can't wedge API boot.
+
+Net effect: a redeploy (or any API restart / pod reschedule) is self-healing —
+no post-deploy `POST /api/plugins/refresh` provisioning step is required.
+Refresh remains for *live* changes (add/edit a source without a restart). The
+separate worker-snapshot caveat is unchanged: a live refresh updates the API's
+registry; the worker stays on its boot snapshot until it restarts.
+
+Verified: API boot log emits `plugin_registry_loaded_from_store`
+(`sources`/`loaded`/`failed` counts) and the `/sources` endpoint reports live
+`pluginCount` before any refresh. See `apps/api/src/server.ts` (the
+`if (pluginSourceStore)` boot block).
+
 ## References
 
 - `packages/plugin-loader/src/sources.ts` — source store + types.
