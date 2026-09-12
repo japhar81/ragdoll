@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { useBuilderRoom } from "../events/EventsProvider.tsx";
 import { BuilderRoster } from "../events/BuilderRoster.tsx";
@@ -64,6 +64,14 @@ import { BuilderConsole, useConsoleLog } from "./BuilderConsole.tsx";
 import { TenantSelect, useSelectedTenant } from "./useTenants.tsx";
 import { useEnvironments, EnvironmentSelect } from "./useEnvironments.tsx";
 import { ToolbarMenu } from "./ToolbarMenu.tsx";
+import { specToPrettyJson } from "../lib/pipelineJson.ts";
+
+// Lazy: the JSON view pulls in CodeMirror (~140KB gzip). Splitting it into its
+// own chunk keeps that weight off the main builder bundle until an operator
+// actually opens the JSON tab.
+const PipelineJsonEditor = lazy(() =>
+  import("./PipelineJsonEditor.tsx").then((m) => ({ default: m.PipelineJsonEditor }))
+);
 import {
   applyLayout,
   type LayoutKind
@@ -582,8 +590,11 @@ export function PipelineBuilder(props: {
   // `spec.metadata.stages`. Each PipelineNode references one via
   // `node.ui.stageId`; nodes with no stageId render under "Unassigned".
   const [stages, setStages] = useState<PipelineStage[]>([]);
-  // Flow View vs Tree View. Persisted so the choice survives reload.
-  type BuilderView = "flow" | "tree";
+  // Flow View vs Tree View vs JSON View. flow/tree persist across reload;
+  // JSON is an on-demand tool that re-seeds from the canvas each time it's
+  // opened, so a persisted "json" falls back to flow (avoids seeding before
+  // the async spec load has populated the canvas).
+  type BuilderView = "flow" | "tree" | "json";
   const [builderView, setBuilderView] = useState<BuilderView>(() => {
     try {
       const v = localStorage.getItem("ragdoll.builderView");
@@ -592,6 +603,11 @@ export function PipelineBuilder(props: {
       return "flow";
     }
   });
+  // JSON view draft (lifted so it survives while the component re-renders) +
+  // a seed nonce that remounts the editor when we reload it from the canvas.
+  const [jsonText, setJsonText] = useState("");
+  const [jsonSeedNonce, setJsonSeedNonce] = useState(0);
+  const [jsonApplyError, setJsonApplyError] = useState<string | null>(null);
   useEffect(() => {
     try {
       localStorage.setItem("ragdoll.builderView", builderView);
@@ -996,6 +1012,64 @@ export function PipelineBuilder(props: {
     [spec]
   );
 
+  // Hydrate the canvas + pipeline-level metadata from a spec object. Mirrors
+  // the editing-load effect below (the one place spec → state already lives) so
+  // "Apply JSON to canvas" loses nothing (stages, executionKind, timeout, …).
+  const hydrateFromSpec = useCallback(
+    (loaded: PipelineSpec) => {
+      setPipelineName(loaded.metadata?.name ?? pipelineName);
+      setPipelineDescription(loaded.metadata?.description ?? "");
+      const loadedStages = (loaded.metadata as { stages?: PipelineStage[] } | undefined)?.stages;
+      setStages(Array.isArray(loadedStages) ? loadedStages : []);
+      const loadedMeta = (loaded.metadata ?? {}) as {
+        executionKind?: "batch" | "synchronous";
+        mcpExpose?: boolean;
+        timeoutMs?: number;
+      };
+      setExecutionKind(loadedMeta.executionKind ?? "batch");
+      setMcpExpose(loadedMeta.mcpExpose === true);
+      setTimeoutMinutes(
+        typeof loadedMeta.timeoutMs === "number" && loadedMeta.timeoutMs > 0
+          ? Math.round(loadedMeta.timeoutMs / 60000)
+          : 60
+      );
+      setNodes(toFlowNodes(loaded));
+      setEdges(toFlowEdges(loaded));
+    },
+    [pipelineName, setNodes, setEdges]
+  );
+
+  // Seed the JSON draft from the current canvas (with layout) and remount the
+  // editor. Called when opening the JSON tab and on "Reload from canvas".
+  const seedJsonFromCanvas = useCallback(() => {
+    setJsonText(specToPrettyJson(specWithLayout()));
+    setJsonSeedNonce((n) => n + 1);
+    setJsonApplyError(null);
+  }, [specWithLayout]);
+
+  const openJsonView = useCallback(() => {
+    seedJsonFromCanvas();
+    setBuilderView("json");
+  }, [seedJsonFromCanvas]);
+
+  // Apply parsed JSON back onto the canvas. Note: applying does NOT persist —
+  // Save/Publish in the toolbar do, gated by the same validation.
+  const applyJsonSpec = useCallback(
+    (parsed: PipelineSpec) => {
+      try {
+        hydrateFromSpec(parsed);
+        setJsonApplyError(null);
+        setBuilderView("flow");
+        clog.log("success", "Applied JSON to canvas", {
+          nodes: parsed.spec?.nodes?.length ?? 0
+        });
+      } catch (e) {
+        setJsonApplyError(e instanceof Error ? e.message : String(e));
+      }
+    },
+    [hydrateFromSpec, clog]
+  );
+
   /**
    * Apply a viewport stashed by the editing-load effect onto the React Flow
    * instance, overriding the `fitView` prop so the canvas reopens at the saved
@@ -1118,6 +1192,35 @@ export function PipelineBuilder(props: {
       return { bindings };
     };
   }, [datasetsForValidation.data, connectionsForValidation.data]);
+
+  // Validate an ARBITRARY parsed spec object (from the JSON view) with the
+  // exact same registry + dataset index the visual builder validates against.
+  // Returns null while plugins are still loading (every ref would look missing).
+  const validateSpecObject = useCallback(
+    (parsed: unknown) => {
+      if (pluginList.length === 0) return null;
+      const result = validatePipelineSpec(
+        parsed as Parameters<typeof validatePipelineSpec>[0],
+        clientPluginRegistry as unknown as Parameters<typeof validatePipelineSpec>[1],
+        datasetModalityIndex
+      );
+      return { errors: result.errors, warnings: result.warnings };
+    },
+    [pluginList.length, clientPluginRegistry, datasetModalityIndex]
+  );
+
+  // Completion lists for the JSON view: connection slugs and plugin ids.
+  const connectionSlugs = useMemo(
+    () =>
+      Array.from(
+        new Set((connectionsForValidation.data?.connections ?? []).map((c) => c.slug))
+      ).sort(),
+    [connectionsForValidation.data]
+  );
+  const pluginIds = useMemo(
+    () => Array.from(new Set(pluginList.map((p) => p.id))).sort(),
+    [pluginList]
+  );
 
   const validation = useMemo(() => {
     // Skip validation while the plugin list is still loading — otherwise
@@ -2286,7 +2389,8 @@ export function PipelineBuilder(props: {
             {(
               [
                 ["flow", "Flow View"],
-                ["tree", "Tree View"]
+                ["tree", "Tree View"],
+                ["json", "JSON View"]
               ] as Array<[BuilderView, string]>
             ).map(([id, label]) => (
               <button
@@ -2298,13 +2402,31 @@ export function PipelineBuilder(props: {
                   "builder-view-tab" +
                   (builderView === id ? " active" : "")
                 }
-                onClick={() => setBuilderView(id)}
+                // Opening JSON re-seeds the draft from the current canvas;
+                // switching away is a plain view change.
+                onClick={() => (id === "json" ? openJsonView() : setBuilderView(id))}
               >
                 {label}
               </button>
             ))}
           </div>
-        {builderView === "tree" ? (
+        {builderView === "json" ? (
+          <Suspense
+            fallback={<div className="pjson-view" style={{ padding: 16 }}>Loading editor…</div>}
+          >
+            <PipelineJsonEditor
+              key={jsonSeedNonce}
+              initialDoc={jsonText}
+              onChange={setJsonText}
+              validate={validateSpecObject}
+              connectionSlugs={connectionSlugs}
+              pluginIds={pluginIds}
+              onApply={applyJsonSpec}
+              onReload={seedJsonFromCanvas}
+              applyError={jsonApplyError}
+            />
+          </Suspense>
+        ) : builderView === "tree" ? (
           <BuilderTree
             nodes={nodes}
             edges={edges}

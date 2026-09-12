@@ -305,6 +305,48 @@ button.palette-item:active {
   border-color: #cbd5e1;
 }
 
+/* JSON View — the CodeMirror editor pane, sized like the canvas/tree so it
+   fills the middle column, with a validation/actions footer underneath. */
+.builder-canvas-col > .pjson-view { flex: 1; min-height: 0; }
+.pjson-view {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: #fff;
+}
+.pjson-editor {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+.pjson-editor .cm-editor { height: 100%; }
+.pjson-editor .cm-scroller { overflow: auto; }
+.pjson-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 12px;
+  background: #f8fafc;
+  border-top: 1px solid #e2e8f0;
+  flex-wrap: wrap;
+}
+.pjson-status { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.pjson-actions { display: flex; align-items: center; gap: 8px; }
+.pjson-badge {
+  font-size: 12px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  white-space: nowrap;
+}
+.pjson-badge-ok { background: #ecfdf5; color: #047857; border-color: #a7f3d0; }
+.pjson-badge-warn { background: #fffbeb; color: #b45309; border-color: #fde68a; }
+.pjson-badge-error { background: #fef2f2; color: #b91c1c; border-color: #fecaca; }
+.pjson-hint { font-size: 12px; color: #64748b; }
+.pjson-apply-error { margin: 8px 12px; }
+
 /* FinalBuilder-style tree view (components/builder/BuilderTree.tsx). */
 .builder-tree {
   display: flex;
