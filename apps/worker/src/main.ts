@@ -46,11 +46,9 @@ import { createPostgresSystemSweeps } from "./systemSweeps.ts";
 import { startOllamaWarmer } from "./ollama-warmer.ts";
 import {
   loadRegistries,
-  loadPluginRegistryWithStore,
-  DbPluginSourceStore,
-  pushSidecarSources,
-  registerSidecarGitPlugins
+  DbPluginSourceStore
 } from "../../../packages/plugin-loader/src/index.ts";
+import { initWorkerPluginRegistry } from "./plugin-registry-init.ts";
 import type { PluginRegistry } from "../../../packages/plugin-sdk/src/index.ts";
 import { createVectorStore } from "../../../packages/vector/src/index.ts";
 import {
@@ -152,20 +150,21 @@ async function buildDeps(): Promise<BuiltDeps> {
     // plugins intact.
     try {
       const sourceStore = new DbPluginSourceStore(pool);
-      const { holder } = await loadPluginRegistryWithStore({ store: sourceStore });
-      const push = await pushSidecarSources(sourceStore);
-      if (push.pushed) {
-        logger.info("worker sidecar_sources_pushed", {
-          sources: push.report?.sources?.length ?? 0
-        });
-      }
-      await registerSidecarGitPlugins(holder);
-      plugins = holder;
-      logger.info("worker plugin registry built from plugin_sources store");
+      plugins = await initWorkerPluginRegistry({ store: sourceStore, logger });
     } catch (e) {
-      logger.warn("worker store-backed plugin load failed; using static registry", {
-        error: e instanceof Error ? e.message : String(e)
-      });
+      // The store-backed load ITSELF failed (e.g. the DB wasn't reachable at
+      // boot). Do NOT silently fall back to the static built-ins and then
+      // consume jobs: every run referencing an external plugin would fail
+      // validation ("plugin <id> is not registered") and dead-letter (attempts:1
+      // → no redelivery) until someone redeployed. Fail fast so the orchestrator
+      // restarts us; the next boot (once the DB is up) loads the plugins and the
+      // worker recovers on its own instead of silently dead-lettering runs.
+      logger.error(
+        "worker plugin registry load failed — exiting so the orchestrator restarts us",
+        { error: e instanceof Error ? e.message : String(e) }
+      );
+      await pool.end().catch(() => undefined);
+      process.exit(1);
     }
     store = new db.PostgresExecutionStore(pool);
     ingestStateRepository = new db.PostgresIngestStateRepository(pool);

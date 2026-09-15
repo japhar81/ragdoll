@@ -112,6 +112,42 @@ index. The namespace policy still owns the per-tenant/env suffix
 (`<slug>_tenant_<env>`). The UI's Cut-version action fills `backendCollections`
 in from the current bindings automatically.
 
+## Worker: runs dead-letter with "plugin X is not registered" after a restart
+
+Symptom — `run_pipeline` jobs dead-letter with
+`pipeline validation failed: plugin <cat>:<id>:<ver> is not registered`, while
+the **Plugin Sources** page shows those sources Loaded with the right count and
+opening the pipeline in the Builder shows **no** error icon. A redeploy fixes
+it; it recurs intermittently.
+
+This is **not** a NATS problem. The job was delivered fine (`delivery:1,
+attempts:1`); `run_pipeline` is deliberately `attempts:1` (a state-mutating run
+is never redelivered), so the dead-letter after one delivery is by design, and
+raising the attempts limit would only re-run the same deterministic validation
+failure. The worker validates every run against **its own** plugin registry —
+the failure means that registry is missing the external plugins.
+
+Cause — the worker loads its registry from the shared `plugin_sources` store at
+boot. If that load failed (e.g. the DB wasn't reachable yet), the worker used to
+**silently fall back to the static built-ins and keep consuming jobs** — so every
+run using an external (git-sourced) plugin dead-lettered until someone
+redeployed. The API loads independently, which is why the Plugin Sources page
+(and the Builder, which validates client-side against the API's registry) looked
+healthy. A second, subtler variant: a transient failure in the best-effort
+sidecar push/discovery ran *before* the loaded registry was committed and
+discarded it, dropping even the worker-host plugins that had loaded fine.
+
+Fix (shipped) — the worker now commits the loaded registry **before** the
+best-effort sidecar steps (a sidecar or DB blip can no longer discard it), and
+if the store-backed load itself fails it **exits non-zero** instead of serving
+jobs with a static registry. The orchestrator restarts the pod, and the next
+boot (once the DB is up) loads the plugins — self-healing, no manual redeploy.
+Per-source load failures are logged at `error` (`worker plugin sources failed to
+load`) so a single bad source is visible instead of silently dead-lettering its
+runs. Boot success logs `worker plugin registry built from plugin_sources store`
+with `loaded` / `failed` counts — check for it (and for a crash-loop) when a
+worker won't run external plugins.
+
 ## Health and readiness
 
 - `GET /healthz` — liveness; `GET /readyz` — readiness. Both are unauthenticated.
