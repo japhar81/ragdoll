@@ -417,7 +417,15 @@ export interface ResolvedExternalConnection {
 export interface DatasetResolver {
   resolve(args: {
     ref: DatasetRef;
+    /** The tenant's row **id** (a uuid). */
     tenantId?: string;
+    /**
+     * The environment **NAME** (e.g. "dev") — despite the field name. The
+     * runtime passes `context.environment`, and every `environment` column in
+     * the schema is text FK'd to `environments(name)`. Do NOT look this up by
+     * id in a uuid column: that threw `invalid input syntax for type uuid` and
+     * broke `by-tenant-env` / `by-env` namespace expansion.
+     */
     environmentId?: string;
     /**
      * Pipeline id of the calling execution (PR3). When set, the

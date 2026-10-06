@@ -912,10 +912,27 @@ export class DagExecutor {
                   // A dataset that EXISTS but was never cut into a version is
                   // a real misconfiguration — surface it accurately instead
                   // of letting a downstream sink mislabel the empty dataset
-                  // as a missing binding. Every OTHER resolution failure
-                  // keeps the pre-Phase-5 tolerance (fall through with the
-                  // dataset unresolved so config-as-source still works).
+                  // as a missing binding.
                   if (err instanceof DatasetNotBuiltError) throw err;
+                  // Every OTHER resolution failure keeps the pre-Phase-5
+                  // tolerance (fall through with the dataset unresolved so
+                  // config-as-source still works) — but LOG it. A silently
+                  // swallowed resolver error (e.g. a bad env/connection lookup)
+                  // used to surface only as a misleading downstream
+                  // "requires a <X> binding" error at the sink, which made it
+                  // very hard to diagnose.
+                  // eslint-disable-next-line no-console
+                  console.warn(
+                    JSON.stringify({
+                      level: "warn",
+                      message: "dataset.resolution_failed",
+                      executionId: context.executionId,
+                      pipelineId: context.pipelineId,
+                      nodeId: node.id,
+                      datasetSlug: effectiveDatasetRef?.slug,
+                      error: err instanceof Error ? err.message : String(err)
+                    })
+                  );
                   return undefined;
                 })
             : undefined;

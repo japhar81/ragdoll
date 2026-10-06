@@ -311,8 +311,7 @@ export function buildApiDatasetResolver(
     // /probe on the same connection succeeds.
     secrets: deps.secretProvider,
     pipelineDatasetBindings: deps.pipelineDatasetBindings,
-    tenants: deps.tenants,
-    environments: deps.environments
+    tenants: deps.tenants
   });
 }
 

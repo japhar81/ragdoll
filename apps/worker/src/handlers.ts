@@ -199,8 +199,7 @@ export function createWorker(deps: WorkerDeps): Worker {
           // secret-resolution path.
           secrets: deps.secretProvider,
           pipelineDatasetBindings: deps.repositories.pipelineDatasetBindings,
-          tenants: deps.repositories.tenants,
-          environments: deps.repositories.environments
+          tenants: deps.repositories.tenants
         })
       : undefined;
 

@@ -112,6 +112,26 @@ index. The namespace policy still owns the per-tenant/env suffix
 (`<slug>_tenant_<env>`). The UI's Cut-version action fills `backendCollections`
 in from the current bindings automatically.
 
+### Same symptom, different cause: a `by-tenant-env` / `by-env` binding
+
+A `requires a "<binding>" binding …` error can ALSO come from a dataset whose
+binding uses a `by-tenant-env` or `by-env` namespace policy. This was a resolver
+bug (fixed): when expanding the per-env collection suffix the resolver looked the
+environment up by **id** (`SELECT … WHERE id = $1`, a uuid column) using the
+environment **name** it was actually given (e.g. `"dev"`), so Postgres threw
+`invalid input syntax for type uuid`, the resolver threw, the executor swallowed
+it, and the sink mislabelled the empty dataset as a missing binding. `by-tenant`
+and `shared` were unaffected (no env lookup), which is why switching the
+binding's namespace to `shared` was the working-around. The resolver now reads
+the environment name directly from the run context — no lookup — so every policy
+works. (If you hit this on an older build, the workaround is to set the binding's
+namespace to `shared` or `by-tenant` until you upgrade.)
+
+Diagnosability: any resolver failure the executor tolerates is now logged as
+`dataset.resolution_failed` (with `nodeId` + `datasetSlug` + the underlying
+error) instead of surfacing only as a misleading downstream binding error —
+grep the worker logs for it when a run fails a binding check that looks correct.
+
 ## Worker: runs dead-letter with "plugin X is not registered" after a restart
 
 Symptom — `run_pipeline` jobs dead-letter with
