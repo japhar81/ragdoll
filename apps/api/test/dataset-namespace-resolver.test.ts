@@ -160,12 +160,12 @@ test("namespace=by-tenant-env on a global dataset: per-(tenant,env) split", asyn
   const dev = await resolver.resolve({
     ref: { slug: "docs" },
     tenantId: "tA",
-    environmentId: "eDev"
+    environmentId: "dev"
   });
   const prod = await resolver.resolve({
     ref: { slug: "docs" },
     tenantId: "tA",
-    environmentId: "eProd"
+    environmentId: "prod"
   });
   assert.equal(dev!.bindings.vector.collection, "docs_tenant_a_dev");
   assert.equal(prod!.bindings.vector.collection, "docs_tenant_a_prod");
@@ -205,12 +205,12 @@ test("namespace=by-env on a tenant-scope dataset: per-env split, NO tenant suffi
   const dev = await resolver.resolve({
     ref: { slug: "internal-kb" },
     tenantId: "tA",
-    environmentId: "eDev"
+    environmentId: "dev"
   });
   const stg = await resolver.resolve({
     ref: { slug: "internal-kb" },
     tenantId: "tA",
-    environmentId: "eStg"
+    environmentId: "staging"
   });
   assert.equal(dev!.bindings.text.collection, "kb_dev");
   assert.equal(stg!.bindings.text.collection, "kb_staging");
@@ -234,7 +234,7 @@ test("namespace expansion runs per-modality independently", async () => {
   const r = await resolver.resolve({
     ref: { slug: "docs" },
     tenantId: "tA",
-    environmentId: "eProd"
+    environmentId: "prod"
   });
   assert.equal(r!.bindings.vector.collection, "docs_vec_tenant_a_prod");
   assert.equal(r!.bindings.text.collection, "docs_text");
@@ -254,4 +254,53 @@ test("sanitiser pass-through: special chars in tenant slug get normalised in the
   const r = await resolver.resolve({ ref: { slug: "docs" }, tenantId: "tA" });
   // Hyphen collapsed to underscore, lowercased.
   assert.equal(r!.bindings.vector.collection, "docs_tenant_a");
+});
+
+test("REGRESSION: environmentId is the env NAME — by-tenant-env resolves with NO env-row lookup", async () => {
+  // The runtime passes `context.environment` (the NAME, e.g. "dev") as the
+  // resolver's `environmentId`. The resolver used to call
+  // `environments.get(environmentId)` → `SELECT … WHERE id = $1` against a uuid
+  // column with "dev" → Postgres threw "invalid input syntax for type uuid",
+  // the resolver threw, the executor swallowed it, and opensearch_upsert
+  // reported a bogus `requires a "text" binding` error. `by-tenant` worked
+  // because `tenantId` really IS a uuid; only the env branch was wrong. The
+  // in-memory repo didn't throw on a non-uuid id, AND the old tests passed the
+  // env *id* (not the name), so they never caught it.
+  //
+  // We seed NO environment row and resolve with the bare name, proving the env
+  // suffix comes straight from `environmentId` with no lookup to go wrong.
+  const h = buildHarness();
+  await seedTenant(h, "tA", "tenant-a");
+  await seedDataset(h, {
+    scope: "global",
+    slug: "sp-docs",
+    bindings: { text: { connection: "opensearch", namespace: "by-tenant-env" } },
+    backendCollections: { text: "sp_docs" }
+  });
+  const resolver = buildApiDatasetResolver(h.deps)!;
+  const r = await resolver.resolve({
+    ref: { slug: "sp-docs" },
+    tenantId: "tA",
+    environmentId: "dev" // the NAME, exactly as context.environment carries it
+  });
+  assert.equal(r!.bindings.text.collection, "sp_docs_tenant_a_dev");
+});
+
+test("REGRESSION: by-env resolves from the env NAME with no env-row lookup", async () => {
+  const h = buildHarness();
+  await seedTenant(h, "tA", "tenant-a");
+  await seedDataset(h, {
+    scope: "tenant",
+    tenantId: "tA",
+    slug: "kb",
+    bindings: { text: { connection: "opensearch", namespace: "by-env" } },
+    backendCollections: { text: "kb" }
+  });
+  const resolver = buildApiDatasetResolver(h.deps)!;
+  const r = await resolver.resolve({
+    ref: { slug: "kb" },
+    tenantId: "tA",
+    environmentId: "prod"
+  });
+  assert.equal(r!.bindings.text.collection, "kb_prod");
 });

@@ -29,8 +29,7 @@ import type {
   ConnectionRepository,
   PipelineDatasetBindingRepository,
   DatasetRow,
-  TenantRepository,
-  EnvironmentRepository
+  TenantRepository
 } from "../../db/src/index.ts";
 import { type SecretProvider, resolveConnectionSecret } from "../../secrets/src/index.ts";
 import { applyNamespacePolicy } from "./dataset-namespace.ts";
@@ -83,11 +82,12 @@ export interface DatasetResolverDeps {
   /** Optional. When set + a binding declares a `namespace` policy
    *  other than `shared`, the resolver looks up the tenant slug here
    *  to compute the per-tenant collection suffix. Without it, any
-   *  `by-tenant*` policy degrades silently to `shared`. */
+   *  `by-tenant*` policy degrades silently to `shared`.
+   *
+   *  NOTE: there is intentionally NO `environments` repo here. The env
+   *  suffix comes straight from `resolve()`'s `environmentId` arg, which is
+   *  already the environment NAME (see the expansion code) — no lookup. */
   tenants?: TenantRepository;
-  /** Optional, same rationale as `tenants` — required to expand
-   *  `by-tenant-env` / `by-env` policies. */
-  environments?: EnvironmentRepository;
 }
 
 export function buildDatasetResolver(deps: DatasetResolverDeps): DatasetResolver {
@@ -131,10 +131,25 @@ export function buildDatasetResolver(deps: DatasetResolverDeps): DatasetResolver
 
       // Namespace policy expansion — same lookup cache for every binding,
       // most resolves are `shared` and pay nothing extra.
+      //
+      // `args.environmentId` IS the environment NAME, not a row id: the runtime
+      // passes `context.environment`, and every `environment` column in the
+      // schema is text FK'd to `environments(name)`. So the env suffix comes
+      // from it DIRECTLY — no repository lookup.
+      //
+      // This was the bug behind the misleading
+      // `opensearch_upsert requires a "text" binding …` error: the resolver
+      // used to call `environments.get(args.environmentId)`, which runs
+      // `SELECT … WHERE id = $1` against a uuid column with the env NAME
+      // ("dev"). Postgres rejected it ("invalid input syntax for type uuid"),
+      // the resolver threw, the executor swallowed the error, and the sink
+      // mislabelled the empty dataset as a missing binding. The TENANT branch
+      // is different: `args.tenantId` IS a uuid, so it genuinely needs the
+      // id → slug lookup — which is exactly why `by-tenant` worked while
+      // `by-tenant-env` / `by-env` failed.
+      const environmentName = args.environmentId;
       let tenantSlugCache: string | undefined;
-      let envNameCache: string | undefined;
       let tenantLookupTried = false;
-      let envLookupTried = false;
       const expandNamespace = async (
         base: string,
         policy: DatasetNamespacePolicy | undefined
@@ -150,21 +165,11 @@ export function buildDatasetResolver(deps: DatasetResolverDeps): DatasetResolver
           const t = await deps.tenants.get(args.tenantId);
           tenantSlugCache = t?.slug;
         }
-        if (
-          !envLookupTried &&
-          deps.environments &&
-          args.environmentId &&
-          (policy === "by-env" || policy === "by-tenant-env")
-        ) {
-          envLookupTried = true;
-          const e = await deps.environments.get(args.environmentId);
-          envNameCache = e?.name;
-        }
         return applyNamespacePolicy({
           baseName: base,
           policy,
           tenantSlug: tenantSlugCache,
-          environmentName: envNameCache
+          environmentName
         });
       };
 
