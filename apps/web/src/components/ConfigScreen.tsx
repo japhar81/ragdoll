@@ -1,7 +1,23 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
-import { api } from "../lib/api.ts";
+import { api, ApiError } from "../lib/api.ts";
 import type { ConfigDefinitionRow, ConfigValueRow } from "../lib/api.ts";
+
+/** Prefer the API's actionable message/issue text over the bare error code. */
+function configErrText(e: unknown): string {
+  if (e instanceof ApiError) {
+    const b = e.body as
+      | { message?: string; error?: string; issues?: Array<{ message?: string }> }
+      | undefined;
+    return (
+      b?.issues?.find((i) => i.message)?.message ??
+      b?.message ??
+      b?.error ??
+      `HTTP ${e.status}`
+    );
+  }
+  return e instanceof Error ? e.message : String(e);
+}
 import {
   buildScopeTree,
   findScopeNode,
@@ -122,12 +138,24 @@ export function ConfigScreen() {
               upsert.mutate();
             }}
           >
+            {/* A value can only be set for a REGISTERED config key (the
+               config_values.key FK). Offer the defined keys so the operator
+               picks a real knob instead of typing one with no definition
+               (which the API now rejects with an actionable 422). */}
             <input
               placeholder="key"
+              list="config-definition-keys"
               value={key}
               onChange={(e) => setKey(e.target.value)}
               required
             />
+            <datalist id="config-definition-keys">
+              {(definitions.data?.definitions ?? []).map((d) => (
+                <option key={d.key} value={d.key}>
+                  {d.type}
+                </option>
+              ))}
+            </datalist>
             <input
               placeholder="value"
               value={value}
@@ -137,7 +165,7 @@ export function ConfigScreen() {
               Upsert at {node.scope}
             </button>
             {upsert.isError && (
-              <span className="error">{String(upsert.error)}</span>
+              <span className="error">{configErrText(upsert.error)}</span>
             )}
           </form>
 
