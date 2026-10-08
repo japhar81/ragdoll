@@ -117,6 +117,22 @@ export function registerConfigRoutes(
       tenantId:
         scope === "tenant" ? (body.scopeId as string | undefined) : ctx.principal.tenantId
     });
+    // A config VALUE can only be set for a REGISTERED config key — the
+    // `config_values.key` FK → `config_definitions(key)` enforces it. Check
+    // up front so an unknown key returns an actionable 422 instead of the raw
+    // `violates foreign key constraint "config_values_key_fkey"` 500 the
+    // UI used to surface when someone typed a key with no definition.
+    const definition = await deps.configDefinitions.get(body.key);
+    if (!definition) {
+      return error(422, "unknown_config_key", {
+        issues: [
+          {
+            path: "key",
+            message: `no config definition for key "${body.key}" — a value can only be set for a registered config key`
+          }
+        ]
+      });
+    }
     const saved = await deps.configValues.upsert({
       key: body.key,
       value: body.value,

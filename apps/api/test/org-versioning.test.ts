@@ -654,3 +654,38 @@ test("config/values accepts scope + scopeId filters (camelCase + snake_case)", a
   });
   assert.equal(tenantSnake.body.values.length, 1);
 });
+
+test("config/values POST for an UNKNOWN key returns an actionable 422 (not a FK 500)", async () => {
+  // A config value's key FKs to config_definitions(key). Posting a value for a
+  // key with no definition used to surface the raw
+  // `violates foreign key constraint "config_values_key_fkey"` as a 500 — which
+  // is exactly what the UI's free-text key input produced. The handler now
+  // checks the definition exists up front and returns a clean 422. (The
+  // in-memory repo doesn't enforce the FK, so without the explicit check this
+  // path would silently "succeed" in tests while 500ing in Postgres.)
+  const { request } = buildHarness();
+  const res = await request({
+    method: "POST",
+    path: "/api/config/values",
+    headers: ADMIN,
+    body: { key: "does.not.exist", value: "x", scope: "global" }
+  });
+  assert.equal(res.status, 422);
+  assert.equal(res.body.error, "unknown_config_key");
+  assert.match(String(res.body.issues?.[0]?.message ?? ""), /does\.not\.exist/);
+
+  // A value for a DEFINED key still works.
+  await request({
+    method: "PUT",
+    path: "/api/config/definitions/defined.key",
+    headers: ADMIN,
+    body: { type: "string", allowedScopes: ["global"] }
+  });
+  const ok = await request({
+    method: "POST",
+    path: "/api/config/values",
+    headers: ADMIN,
+    body: { key: "defined.key", value: "v", scope: "global" }
+  });
+  assert.equal(ok.status, 201);
+});

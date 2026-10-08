@@ -1391,17 +1391,27 @@ export function PipelineBuilder(props: {
   });
 
   // When the Edit hand-off targets a pipeline that is associated with a
-  // tenant, snap the tenant dropdown to one that actually covers it — the
+  // tenant, snap the tenant dropdown ONCE to one that actually covers it — the
   // default `tenant-local` is almost always wrong for a freshly-created
   // pipeline tied to a different tenant.
+  //
+  // Gated to run at most once per edited pipeline (`tenantSnappedFor`). Without
+  // the gate the effect re-fired on every `tenantId` change and, whenever the
+  // chosen tenant didn't cover the pipeline, snapped straight back to
+  // `matches[0]` — so manually picking a different tenant (top-bar OR the Run
+  // modal, which share this setter) reverted instantly. The snap is a
+  // convenience default, never an override of a deliberate selection.
+  const tenantSnappedFor = useRef<string | undefined>(undefined);
   useEffect(() => {
     const editing = props.editing;
     if (!editing) return;
-    if (!tenantPipelinesAll.data) return;
+    if (tenantSnappedFor.current === editing.id) return;
+    if (!tenantPipelinesAll.data) return; // wait for the data, then decide once
     const matches = tenantPipelinesAll.data.filter((t) =>
       (t.pipelines ?? []).some((p) => p.pipelineId === editing.id)
     );
-    if (matches.length === 0) return;
+    if (matches.length === 0) return; // no owning tenant known yet — retry on next data
+    tenantSnappedFor.current = editing.id; // decided for this pipeline; don't fight the user after
     if (matches.some((t) => t.tenantId === tenantId)) return;
     setTenantId(matches[0].tenantId);
   }, [props.editing, tenantPipelinesAll.data, tenantId, setTenantId]);
