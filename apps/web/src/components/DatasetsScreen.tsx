@@ -541,6 +541,12 @@ function VersionsSection(props: {
         )}
       </div>
       {props.cutError != null && <p className="error">{errText(props.cutError)}</p>}
+      <p className="muted" style={{ marginTop: 4, marginBottom: 8, maxWidth: 680 }}>
+        The runtime resolves this dataset through the <code>stable</code> alias —
+        that's the version pipelines actually read and write. Cutting a new
+        version does <strong>not</strong> move <code>stable</code>; retarget it
+        under <em>Aliases</em> below to make a version live.
+      </p>
       {versionList.length === 0 ? (
         <p className="muted">No versions cut yet.</p>
       ) : (
@@ -551,7 +557,9 @@ function VersionsSection(props: {
               <th>Status</th>
               <th>Backend collections</th>
               <th>Created</th>
-              <th>Current</th>
+              <th title="Aliases that resolve to this version. 'stable' is what the runtime serves by default.">
+                Serving
+              </th>
             </tr>
           </thead>
           <tbody>
@@ -582,9 +590,25 @@ function VersionsSection(props: {
                 </td>
                 <td>{new Date(v.createdAt).toLocaleString()}</td>
                 <td>
-                  {props.dataset.currentVersionId === v.id && (
-                    <span className="status status-running">current</span>
-                  )}
+                  {aliasList
+                    .filter((a: DatasetAliasView) => a.versionId === v.id)
+                    .map((a: DatasetAliasView) => (
+                      <span
+                        key={a.id}
+                        className={
+                          "status " +
+                          (a.alias === "stable" ? "status-succeeded" : "status-running")
+                        }
+                        title={
+                          a.alias === "stable"
+                            ? "The runtime resolves this dataset to this version by default (the stable alias)."
+                            : `alias "${a.alias}" points here`
+                        }
+                        style={{ marginRight: 4 }}
+                      >
+                        {a.alias}
+                      </span>
+                    ))}
                 </td>
               </tr>
             ))}
