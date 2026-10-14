@@ -10,7 +10,10 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { initWorkerPluginRegistry } from "../src/plugin-registry-init.ts";
+import {
+  initWorkerPluginRegistry,
+  reloadWorkerPluginRegistry
+} from "../src/plugin-registry-init.ts";
 
 interface LogCall {
   level: "info" | "warn" | "error";
@@ -102,4 +105,59 @@ test("a failure of the LOAD itself propagates (caller fail-fasts, does not degra
     }
   });
   await assert.rejects(() => initWorkerPluginRegistry(base), /DB not reachable/);
+});
+
+/* -------------------------------------------------------------------------- */
+/* reloadWorkerPluginRegistry — hot-reload on a refresh broadcast              */
+/* -------------------------------------------------------------------------- */
+
+const REFRESH_REPORT = {
+  sources: [],
+  pluginCount: 7,
+  diff: { added: ["a"], removed: [], updated: [] }
+};
+
+test("reloadWorkerPluginRegistry swaps the EXISTING holder (via refreshPluginRegistry) and logs the diff", async () => {
+  const lg = fakeLogger();
+  let gotHolder: unknown;
+  let gotPostRegister: unknown;
+  await reloadWorkerPluginRegistry({
+    holder: HOLDER,
+    store: {} as never,
+    logger: lg.logger,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    refresh: (async (args: any) => {
+      gotHolder = args.holder;
+      gotPostRegister = args.postRegister;
+      return REFRESH_REPORT;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    }) as any
+  });
+  // It reloads the SAME holder in place (so the executor's reference stays valid)
+  // and layers externals/sidecar back on via a postRegister.
+  assert.equal(gotHolder, HOLDER);
+  assert.equal(typeof gotPostRegister, "function");
+  const reloaded = lg.calls.find((c) => /reloaded/.test(c.message));
+  assert.ok(reloaded);
+  assert.equal(reloaded!.meta?.pluginCount, 7);
+  assert.equal(reloaded!.meta?.added, 1);
+});
+
+test("reloadWorkerPluginRegistry is NON-destructive: a failed rebuild is swallowed (never throws)", async () => {
+  const lg = fakeLogger();
+  // refreshPluginRegistry only swaps after a successful build, so a throw leaves
+  // the live registry intact; the reload must not propagate (it would crash the
+  // bus handler / take the worker down).
+  await reloadWorkerPluginRegistry({
+    holder: HOLDER,
+    store: {} as never,
+    logger: lg.logger,
+    refresh: (async () => {
+      throw new Error("source clone failed");
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    }) as any
+  });
+  assert.ok(
+    lg.calls.some((c) => c.level === "warn" && /keeping the current registry/.test(c.message))
+  );
 });

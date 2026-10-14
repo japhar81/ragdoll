@@ -611,6 +611,48 @@ Verified: API boot log emits `plugin_registry_loaded_from_store`
 `pluginCount` before any refresh. See `apps/api/src/server.ts` (the
 `if (pluginSourceStore)` boot block).
 
+## Amendment — refresh fans out to every API replica AND every worker (ChangeBus)
+
+Resolves the "Worker-side refresh" limitation flagged in the original
+consequences: `POST /api/plugins/refresh` rebuilt only the serving process'
+registry (+ pushed the sidecar), so other API replicas and — critically — the
+**workers** kept executing the old `host: "worker"` plugins until a restart.
+Developers who refresh often had to bounce the worker containers every time.
+
+Fix (the ADR's own "Redis pub/sub channel" follow-on): the refresh endpoint
+publishes a `plugins.refreshed` event on the existing **ChangeBus** (the same
+Redis-backed, cross-replica bus the UI live-updates ride —
+`packages/events`). Every API replica and every worker subscribes and rebuilds
+its own holder via `refreshPluginRegistry({ holder, store, postRegister:
+applyExternalPlugins })` — the exact call the endpoint already uses, so
+composition can't drift. Key properties:
+
+- **Non-destructive.** `refreshPluginRegistry` only swaps after a *successful*
+  rebuild, and the subscribers never throw — a transient failure (DB blip, a
+  source that won't clone) leaves the live registry serving. A worker whose
+  reload fails keeps running the plugins it already had.
+- **In-place swap.** The holder is mutated, not replaced, so the DagExecutor's
+  holder reference stays valid; in-flight executions resolve per-node against
+  whatever is current (a refresh is eventually-consistent for a run already in
+  flight — acceptable, and refreshes are rare in prod).
+- **No self-reload / no sidecar re-push stampede.** The event carries the
+  publisher's `origin` (a per-process id) so the serving replica skips its own
+  broadcast (it already rebuilt). Subscribers only rebuild + re-discover sidecar
+  plugins; they do NOT re-push sidecar sources (the serving replica already did
+  — one push updates the shared sidecar for everyone).
+- **Transport.** Needs the Redis ChangeBus to cross the API→worker process
+  boundary; the in-memory bus is single-process (tests / a single local
+  process), where the only subscriber is the publisher, which self-skips.
+
+Verified: `apps/api/test/plugins-providers.test.ts` asserts the endpoint
+publishes the event; `apps/worker/test/plugin-registry-init.test.ts` covers the
+worker reload (in-place holder swap + non-destructive on failure). Boot logs:
+`plugin registry hot-reload armed` (API + worker);
+`plugin_registry_reloaded_from_broadcast` / `worker plugin registry reloaded
+(refresh broadcast)` on receipt. See `registry-holder.ts`
+(`PLUGIN_REFRESH_EVENT_ACTION`), the refresh endpoint, `server.ts`, and
+`apps/worker/src/plugin-registry-init.ts` (`reloadWorkerPluginRegistry`).
+
 ## References
 
 - `packages/plugin-loader/src/sources.ts` — source store + types.

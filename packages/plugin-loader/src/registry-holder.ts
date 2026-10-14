@@ -172,6 +172,15 @@ export class PluginRegistryHolder extends PluginRegistry {
  * other sources still load. Same contract `buildPluginRegistry`
  * upholds; this function chains it with the swap + diff.
  */
+/**
+ * ChangeBus action a registry refresh broadcasts so EVERY API replica and
+ * worker rebuilds its own registry — not just the process that served
+ * `POST /api/plugins/refresh`. Published by the refresh endpoint; subscribed by
+ * apps/api/src/server.ts and apps/worker/src/main.ts, which each reload their
+ * holder via `refreshPluginRegistry({ holder, store, postRegister: applyExternalPlugins })`.
+ */
+export const PLUGIN_REFRESH_EVENT_ACTION = "plugins.refreshed";
+
 export async function refreshPluginRegistry(args: {
   holder: PluginRegistryHolder;
   store: PluginSourceStore;

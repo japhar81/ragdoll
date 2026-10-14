@@ -8,6 +8,8 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { buildHarness } from "./helpers.ts";
 import { PasswordService } from "../../../packages/auth/src/index.ts";
+import { InMemoryChangeBus, type ChangeEvent } from "../../../packages/events/src/index.ts";
+import { PLUGIN_REFRESH_EVENT_ACTION } from "../../../packages/plugin-loader/src/index.ts";
 
 async function seedAuth(h: ReturnType<typeof buildHarness>): Promise<Record<string, string>> {
   const id = randomUUID();
@@ -145,6 +147,38 @@ test("POST /api/plugins/refresh rebuilds the registry through the source store +
   assert.ok(
     res.body.diff.removed.some((k: string) => k.includes("fake_echo")),
     "fake_echo must surface in `removed` — the swap really happened"
+  );
+});
+
+test("POST /api/plugins/refresh BROADCASTS a plugins.refreshed event (so other replicas + workers reload)", async () => {
+  // A refresh only rebuilds the serving process' registry + the sidecar. The
+  // broadcast is how every OTHER API replica and every worker learns to rebuild
+  // — without it they keep executing the old host:"worker" plugins until a
+  // restart. Pin that the endpoint publishes it.
+  const events: ChangeEvent[] = [];
+  const bus = new InMemoryChangeBus();
+  bus.subscribe((e) => events.push(e));
+  const h = buildHarness({ withAuth: true, changeBus: bus });
+  const auth = await seedAuth(h);
+
+  const res = await h.request({
+    method: "POST",
+    path: "/api/plugins/refresh",
+    headers: auth,
+    body: {}
+  });
+  assert.equal(res.status, 200);
+
+  const refreshed = events.find((e) => e.action === PLUGIN_REFRESH_EVENT_ACTION);
+  assert.ok(refreshed, "a plugins.refreshed event must be published");
+  assert.equal(refreshed!.targetType, "plugin_source");
+  assert.equal(refreshed!.tenantId, null); // platform-level
+  // Carries an origin (so the publishing replica can skip its own reload) and
+  // the new plugin count.
+  assert.equal(typeof (refreshed!.payload as { origin?: string }).origin, "string");
+  assert.equal(
+    (refreshed!.payload as { pluginCount?: number }).pluginCount,
+    res.body.pluginCount
   );
 });
 
