@@ -13,6 +13,7 @@
  * for the docs endpoint. Permission `execution:view_logs` is reused
  * across all five — it is the broadest "logged-in" gate.
  */
+import { randomUUID } from "node:crypto";
 import { enforce } from "../../../../../packages/auth/src/index.ts";
 import { ok, error } from "../http-utils.ts";
 import { readPluginDoc, projectPlugin } from "../spec-helpers.ts";
@@ -20,10 +21,12 @@ import {
   BUILTIN_SOURCES,
   refreshPluginRegistry,
   applyExternalPlugins,
-  pushSidecarSources
+  pushSidecarSources,
+  PLUGIN_REFRESH_EVENT_ACTION
 } from "../../../../../packages/plugin-loader/src/index.ts";
 import type { PluginRef } from "../../../../../packages/core/src/index.ts";
 import type { AppDeps } from "../types.ts";
+import { API_INSTANCE_ID } from "../instance-id.ts";
 import type { RouteRegistry } from "./types.ts";
 
 interface PluginsProvidersServices {
@@ -250,6 +253,27 @@ export function registerPluginsProvidersRoutes(
       store,
       postRegister: applyExternalPlugins
     });
+    // Broadcast so EVERY OTHER API replica and ALL workers rebuild their own
+    // registry too — otherwise a refresh only reaches this process + the sidecar
+    // and workers keep executing the old host:"worker" plugins until a restart.
+    // Best-effort: a bus hiccup must not fail the refresh the operator just ran
+    // (this process + the sidecar are already updated). `origin` lets the other
+    // subscribers skip this process, which has already rebuilt above.
+    if (deps.changeBus) {
+      await deps.changeBus
+        .publish({
+          id: randomUUID(),
+          action: PLUGIN_REFRESH_EVENT_ACTION,
+          targetType: "plugin_source",
+          targetId: "all",
+          tenantId: null,
+          actorId: ctx.principal.id,
+          requiredPermission: "plugin:manage",
+          at: new Date().toISOString(),
+          payload: { origin: API_INSTANCE_ID, pluginCount: report.pluginCount }
+        })
+        .catch(() => undefined);
+    }
     return ok({ ...report, sidecar });
   });
 

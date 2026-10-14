@@ -168,6 +168,16 @@ runs. Boot success logs `worker plugin registry built from plugin_sources store`
 with `loaded` / `failed` counts — check for it (and for a crash-loop) when a
 worker won't run external plugins.
 
+Live refresh: `POST /api/plugins/refresh` (the UI's "Refresh Plugin Sources")
+now fans out to every API replica AND every worker over the Redis ChangeBus, so
+new/changed `host: "worker"` plugins go live **without** a worker restart — look
+for `worker plugin registry reloaded (refresh broadcast)` /
+`plugin_registry_reloaded_from_broadcast`. This needs `REDIS_URL` set (the bus
+is Redis-backed to cross process boundaries); without Redis, the refresh only
+reaches the serving API process and workers still need a restart. The reload is
+non-destructive — a worker whose rebuild fails keeps running its current
+registry (`worker plugin registry reload failed; keeping the current registry`).
+
 ## Health and readiness
 
 - `GET /healthz` — liveness; `GET /readyz` — readiness. Both are unauthenticated.

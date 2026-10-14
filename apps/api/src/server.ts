@@ -18,6 +18,7 @@ import {
 } from "../../../packages/platform-plugins/src/index.ts";
 import { handleMcpRequest } from "./mcp.ts";
 import { mountWebsocket } from "./websocket.ts";
+import { API_INSTANCE_ID } from "./app/instance-id.ts";
 import {
   InMemoryChangeBus,
   createRedisChangeBus,
@@ -537,6 +538,46 @@ async function buildDeps(): Promise<{
     // a later /api/plugins/refresh swaps in a rebuilt registry.
     deps.pluginRegistryHolder = pluginRegistryHolder;
     deps.pluginRegistry = pluginRegistryHolder;
+
+    // Cross-replica/worker hot-reload: when ANY API replica broadcasts a plugin
+    // refresh, the OTHERS (and every worker — apps/worker/src/main.ts) rebuild
+    // their registry, so a "Refresh Plugin Sources" reaches the whole fleet, not
+    // just the process that served the request. Best-effort + non-destructive:
+    // refreshPluginRegistry only swaps after a successful rebuild. Needs the
+    // Redis-backed bus to cross process boundaries (in-memory is single-process,
+    // where the sole subscriber is this process, which self-skips).
+    const { refreshPluginRegistry, applyExternalPlugins, PLUGIN_REFRESH_EVENT_ACTION } =
+      await import("../../../packages/plugin-loader/src/index.ts");
+    const reloadHolder = pluginRegistryHolder;
+    const reloadStore = pluginSourceStore;
+    changeBus.subscribe((event) => {
+      if (event.action !== PLUGIN_REFRESH_EVENT_ACTION) return;
+      // Skip the broadcast this process published — it already rebuilt above.
+      if ((event.payload as { origin?: string } | undefined)?.origin === API_INSTANCE_ID) {
+        return;
+      }
+      void refreshPluginRegistry({
+        holder: reloadHolder,
+        store: reloadStore,
+        postRegister: applyExternalPlugins
+      })
+        .then((r) =>
+          logger.info("plugin_registry_reloaded_from_broadcast", {
+            pluginCount: r.pluginCount,
+            added: r.diff.added.length,
+            removed: r.diff.removed.length,
+            updated: r.diff.updated.length
+          })
+        )
+        .catch((e) =>
+          logger.warn("plugin_registry_broadcast_reload_failed", {
+            error: e instanceof Error ? e.message : String(e)
+          })
+        );
+    });
+    logger.info("plugin registry hot-reload armed", {
+      transport: redisUrl ? "redis" : "in-process (single-process only)"
+    });
   }
 
   // --- Authorizer (ADR 0035). A custom authorization provider from an

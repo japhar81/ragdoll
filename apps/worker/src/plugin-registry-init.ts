@@ -30,10 +30,12 @@ import {
   loadPluginRegistryWithStore,
   pushSidecarSources,
   registerSidecarGitPlugins,
+  refreshPluginRegistry,
+  applyExternalPlugins,
+  type PluginRegistryHolder,
   type DbPluginSourceStore,
   type SourceLoadStatus
 } from "../../../packages/plugin-loader/src/index.ts";
-import type { PluginRegistry } from "../../../packages/plugin-sdk/src/index.ts";
 
 interface WorkerLogger {
   info(message: string, meta?: Record<string, unknown>): void;
@@ -57,7 +59,7 @@ export interface InitWorkerPluginRegistryDeps {
  */
 export async function initWorkerPluginRegistry(
   deps: InitWorkerPluginRegistryDeps
-): Promise<PluginRegistry> {
+): Promise<PluginRegistryHolder> {
   const load = deps.loadRegistry ?? loadPluginRegistryWithStore;
   const push = deps.pushSidecar ?? pushSidecarSources;
   const register = deps.registerSidecar ?? registerSidecarGitPlugins;
@@ -100,4 +102,49 @@ export async function initWorkerPluginRegistry(
   }
 
   return holder;
+}
+
+export interface ReloadWorkerPluginRegistryDeps {
+  holder: PluginRegistryHolder;
+  store: DbPluginSourceStore;
+  logger: WorkerLogger;
+  // Injectable for tests; defaults to the real implementation.
+  refresh?: typeof refreshPluginRegistry;
+}
+
+/**
+ * Hot-reload the worker's plugin registry in place when the API broadcasts a
+ * refresh (ChangeBus `PLUGIN_REFRESH_EVENT_ACTION`), so a "Refresh Plugin
+ * Sources" picks up new/changed `host: "worker"` plugins WITHOUT a worker
+ * restart. Rebuilds from the same store + re-layers the external/sidecar
+ * plugins (`applyExternalPlugins`), exactly as boot does, then atomically swaps
+ * the EXISTING holder — so the executor's holder reference stays valid.
+ *
+ * Non-destructive: `refreshPluginRegistry` only swaps after a successful
+ * rebuild, so a transient failure (DB blip, a source that won't clone) leaves
+ * the live registry untouched. We never throw — a failed reload must not take
+ * the worker down; it keeps serving the registry it already had.
+ */
+export async function reloadWorkerPluginRegistry(
+  deps: ReloadWorkerPluginRegistryDeps
+): Promise<void> {
+  const refresh = deps.refresh ?? refreshPluginRegistry;
+  try {
+    const report = await refresh({
+      holder: deps.holder,
+      store: deps.store,
+      postRegister: applyExternalPlugins
+    });
+    deps.logger.info("worker plugin registry reloaded (refresh broadcast)", {
+      pluginCount: report.pluginCount,
+      added: report.diff.added.length,
+      removed: report.diff.removed.length,
+      updated: report.diff.updated.length
+    });
+  } catch (e) {
+    deps.logger.warn(
+      "worker plugin registry reload failed; keeping the current registry",
+      { error: e instanceof Error ? e.message : String(e) }
+    );
+  }
 }

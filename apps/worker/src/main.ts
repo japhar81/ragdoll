@@ -46,9 +46,14 @@ import { createPostgresSystemSweeps } from "./systemSweeps.ts";
 import { startOllamaWarmer } from "./ollama-warmer.ts";
 import {
   loadRegistries,
-  DbPluginSourceStore
+  DbPluginSourceStore,
+  PLUGIN_REFRESH_EVENT_ACTION,
+  type PluginRegistryHolder
 } from "../../../packages/plugin-loader/src/index.ts";
-import { initWorkerPluginRegistry } from "./plugin-registry-init.ts";
+import {
+  initWorkerPluginRegistry,
+  reloadWorkerPluginRegistry
+} from "./plugin-registry-init.ts";
 import type { PluginRegistry } from "../../../packages/plugin-sdk/src/index.ts";
 import { createVectorStore } from "../../../packages/vector/src/index.ts";
 import {
@@ -104,6 +109,10 @@ async function buildDeps(): Promise<BuiltDeps> {
   const staticRegistries = loadRegistries();
   const providers = staticRegistries.providers;
   let plugins: PluginRegistry = staticRegistries.plugins;
+  // Captured when the store-backed registry loads, so the ChangeBus subscriber
+  // below can hot-reload it in place on a refresh broadcast (no worker restart).
+  let pluginSourceStore: DbPluginSourceStore | undefined;
+  let workerPluginHolder: PluginRegistryHolder | undefined;
   const tracer = await createTracer({ enabled: process.env.OTEL_ENABLED !== "false" });
   const meter = getMeter();
   const vectorStore = createVectorStore({
@@ -150,7 +159,9 @@ async function buildDeps(): Promise<BuiltDeps> {
     // plugins intact.
     try {
       const sourceStore = new DbPluginSourceStore(pool);
-      plugins = await initWorkerPluginRegistry({ store: sourceStore, logger });
+      workerPluginHolder = await initWorkerPluginRegistry({ store: sourceStore, logger });
+      plugins = workerPluginHolder;
+      pluginSourceStore = sourceStore;
     } catch (e) {
       // The store-backed load ITSELF failed (e.g. the DB wasn't reachable at
       // boot). Do NOT silently fall back to the static built-ins and then
@@ -251,6 +262,23 @@ async function buildDeps(): Promise<BuiltDeps> {
   logger.info("worker change_bus_ready", {
     transport: redisUrl ? "redis" : "in-process"
   });
+
+  // Hot-reload the plugin registry when the API broadcasts a refresh, so a
+  // "Refresh Plugin Sources" picks up new/changed host:"worker" plugins WITHOUT
+  // a worker restart. Needs the Redis-backed bus to cross the API→worker
+  // process boundary (in-memory is single-process, e.g. tests). Best-effort +
+  // non-destructive (see reloadWorkerPluginRegistry).
+  if (workerPluginHolder && pluginSourceStore) {
+    const holder = workerPluginHolder;
+    const sourceStore = pluginSourceStore;
+    changeBus.subscribe((event) => {
+      if (event.action !== PLUGIN_REFRESH_EVENT_ACTION) return;
+      void reloadWorkerPluginRegistry({ holder, store: sourceStore, logger });
+    });
+    logger.info("worker plugin registry hot-reload armed", {
+      transport: redisUrl ? "redis" : "in-process (single-process only)"
+    });
+  }
 
   return {
     deps: {

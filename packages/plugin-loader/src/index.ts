@@ -40,6 +40,7 @@ export {
   PluginRegistryHolder,
   buildPluginRegistry,
   refreshPluginRegistry,
+  PLUGIN_REFRESH_EVENT_ACTION,
   type RefreshReport
 } from "./registry-holder.ts";
 export {
