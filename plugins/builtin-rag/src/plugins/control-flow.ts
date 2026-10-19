@@ -12,7 +12,7 @@ import type { PipelineSpec } from "../../../../packages/core/src/index.ts";
  * complete `PipelineSpec`) in a uniform PipelineSpec the runtime can
  * validate + execute. Used by every loop plugin in this file.
  */
-function normaliseBodySpec(raw: unknown, label: string): PipelineSpec {
+export function normaliseBodySpec(raw: unknown, label: string): PipelineSpec {
   const body = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
   const inner = (body.spec && typeof body.spec === "object" ? body.spec : body) as Record<string, unknown>;
   const nodes = Array.isArray(inner.nodes) ? inner.nodes : [];
