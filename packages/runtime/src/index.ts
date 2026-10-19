@@ -36,6 +36,44 @@ export class CancelledError extends Error {
   }
 }
 
+/**
+ * Thrown when a single node's output holds more documents than
+ * `maxNodeOutputDocs` allows. The runtime passes a whole in-memory collection
+ * between steps (ADR-0038), so an unbounded source can OOM the worker. This
+ * turns the silent OOM-kill (which takes down every in-flight run on the pod)
+ * into a clean, attributable failure that points at the batching path.
+ */
+export class NodeOutputTooLargeError extends Error {
+  readonly nodeId: string;
+  readonly docs: number;
+  readonly limit: number;
+  constructor(nodeId: string, docs: number, limit: number) {
+    super(
+      `node "${nodeId}" produced ${docs} documents in one step, over the configured ` +
+        `limit of ${limit} (RAGDOLL_MAX_NODE_OUTPUT_DOCS). Process large corpora in ` +
+        `bounded batches (stage_collection → foreach_batch) rather than one in-memory ` +
+        `collection, or raise the limit if the worker has the memory.`
+    );
+    this.name = "NodeOutputTooLargeError";
+    this.nodeId = nodeId;
+    this.docs = docs;
+    this.limit = limit;
+  }
+}
+
+/**
+ * Largest top-level array length in a node's outputs — a cheap proxy for "how
+ * many documents is this step holding in memory" that never serializes the
+ * payload (serializing a multi-GB output to measure bytes would itself OOM).
+ */
+function largestCollectionSize(outputs: Record<string, unknown>): number {
+  let max = 0;
+  for (const value of Object.values(outputs)) {
+    if (Array.isArray(value) && value.length > max) max = value.length;
+  }
+  return max;
+}
+
 function isAbortError(error: unknown): boolean {
   return error instanceof CancelledError || error instanceof DeadlineExceededError;
 }
@@ -251,6 +289,20 @@ export interface DagExecutorOptions {
   /** Optional. When unset, plugins requesting ingestStateStore see undefined
    *  and must handle that themselves (delta_filter treats it as empty state). */
   ingestStateRepository?: IngestStateRepository;
+  /**
+   * Phase 0 scaling guard. When > 0, a node whose output holds more than this
+   * many documents (largest top-level array) fails with a
+   * {@link NodeOutputTooLargeError} instead of silently ballooning worker RAM
+   * toward an OOM-kill. 0 / undefined disables the check. Wire from
+   * `RAGDOLL_MAX_NODE_OUTPUT_DOCS`.
+   */
+  maxNodeOutputDocs?: number;
+  /**
+   * Test hook, fired when a node's output is evicted from the in-run `outputs`
+   * map (once all its consumers have resolved). Lets tests assert the memory
+   * hygiene actually happened; production leaves it unset.
+   */
+  onOutputEvicted?: (nodeId: string) => void;
   /**
    * Optional dataset resolver (Phase 5 of dataset/RBAC/retrieval
    * refactor). When wired AND a node carries `dataset: { slug, alias? }`,
@@ -632,6 +684,27 @@ export class DagExecutor {
     const outputs = new Map<string, Record<string, unknown>>();
     const resolved = (nodeId: string) => completed.has(nodeId) || skipped.has(nodeId);
 
+    // Phase 0 memory hygiene: free a node's output from the in-run `outputs`
+    // map once ALL its consumers have resolved, so a multi-stage run doesn't
+    // retain every stage's full payload for the whole run (the historical
+    // behaviour behind peak worker RAM = sum of all steps' payloads). Gated on
+    // an explicit `output` node so the terminal-output selection is
+    // unambiguous; that node and its direct sources are never evicted (they're
+    // what `pickOutput` reads). Leaves (no consumers) are never decremented, so
+    // never evicted. Pure hygiene — evicted outputs are provably unread.
+    const outputNodeForEvict = spec.spec.nodes.find((node) => node.type === "output");
+    const evictProtected = new Set<string>();
+    if (outputNodeForEvict) {
+      evictProtected.add(outputNodeForEvict.id);
+      for (const edge of incoming.get(outputNodeForEvict.id) ?? []) {
+        evictProtected.add(edge.from);
+      }
+    }
+    const remainingConsumers = new Map<string, number>();
+    for (const [from, edges] of outgoing) {
+      remainingConsumers.set(from, new Set(edges.map((edge) => edge.to)).size);
+    }
+
     // Drain the ready queue in concurrent batches. Every node that becomes
     // ready in a given iteration runs in parallel (Promise.all). After the
     // batch settles, we look at each completed/skipped node's outgoing
@@ -679,6 +752,23 @@ export class DagExecutor {
           if (resolved(next) || ready.includes(next)) continue;
           if ((incoming.get(next) ?? []).every((upstream) => resolved(upstream.from))) {
             ready.push(next);
+          }
+        }
+      }
+
+      // Evict upstream outputs now that this batch's nodes (which consumed
+      // them) have resolved. Each resolved consumer decrements its upstreams'
+      // remaining-consumer count; at zero the upstream's output is provably
+      // unread downstream and gets freed (unless protected).
+      if (outputNodeForEvict) {
+        for (const nodeId of batch) {
+          for (const upstream of new Set((incoming.get(nodeId) ?? []).map((edge) => edge.from))) {
+            const left = (remainingConsumers.get(upstream) ?? 0) - 1;
+            remainingConsumers.set(upstream, left);
+            if (left <= 0 && !evictProtected.has(upstream) && outputs.has(upstream)) {
+              outputs.delete(upstream);
+              this.options.onOutputEvicted?.(upstream);
+            }
           }
         }
       }
@@ -1021,6 +1111,18 @@ export class DagExecutor {
         );
       } else {
         throw new Error(`Node ${node.id} has no executable type or plugin`);
+      }
+
+      // Phase 0 scaling guard: fail loud (and attributably) when a single step
+      // holds more documents in memory than configured, instead of ballooning
+      // toward a silent OOM-kill that takes down every in-flight run on the pod.
+      const limit = this.options.maxNodeOutputDocs ?? 0;
+      if (limit > 0) {
+        const docs = largestCollectionSize(output.outputs);
+        span.setAttribute("node.output_docs", docs);
+        if (docs > limit) {
+          throw new NodeOutputTooLargeError(node.id, docs, limit);
+        }
       }
 
       const latencyMs = performance.now() - started;

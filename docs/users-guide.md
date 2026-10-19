@@ -78,6 +78,28 @@ You don't need to write plugins to use the platform. ~25 built-ins
 cover the common RAG path: filesystem source → chunker → embedder →
 vector store → retriever → reranker → prompt → LLM.
 
+### Processing large corpora (batching)
+
+A pipeline passes a whole document collection between steps in memory, so a
+run over 100,000s of documents would otherwise load everything into the
+worker's RAM. For large corpora, **stage and batch** (ADR-0038):
+
+- **`stage_collection`** writes the incoming documents to a durable, paged
+  store and emits a small *handle* in their place — everything downstream then
+  flows the handle, not the documents.
+- **`foreach_batch`** runs a body sub-pipeline once per batch, reading the
+  staged collection one page at a time with bounded `concurrency`. Peak memory
+  is `pageSize × concurrency × docSize`, flat regardless of corpus size. Give it
+  a `resumeKey` and a failed run resumes from the last committed batch instead
+  of restarting — and re-running it on a kept handle reprocesses previously
+  staged content.
+
+So a scaled ingest looks like: `source → stage_collection → foreach_batch(body:
+chunk → embed → sink)`. There's also a guard rail: a single step that produces
+more than `RAGDOLL_MAX_NODE_OUTPUT_DOCS` documents fails loudly rather than
+OOM-killing the worker. See the operations runbook for the deployment settings
+(`RAGDOLL_COLLECTION_DIR` must be a durable, shared mount).
+
 ## Secrets
 
 API keys and passwords live in **secrets**, not in pipeline specs.

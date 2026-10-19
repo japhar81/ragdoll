@@ -1845,6 +1845,13 @@ export {
   whileLoopPlugin
 } from "./plugins/control-flow.ts";
 
+// Batching / scale plugins (ADR-0038): stage a collection out of RAM + process
+// it in bounded-memory batches. Re-exported so the namespace scan registers them.
+export {
+  stageCollectionPlugin,
+  forEachBatchPlugin
+} from "./plugins/batching.ts";
+
 // OpenSearch plugin family lives in its own module. Re-exported so the
 // plugin-loader's namespace scan picks them up alongside everything else.
 // fuseHybridResults is re-exported too because the unit tests reference
