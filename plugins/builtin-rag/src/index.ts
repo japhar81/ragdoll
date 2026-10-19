@@ -1845,7 +1845,7 @@ export {
   whileLoopPlugin
 } from "./plugins/control-flow.ts";
 
-// Batching / scale plugins (ADR-00XX): stage a collection out of RAM + process
+// Batching / scale plugins (ADR-0038): stage a collection out of RAM + process
 // it in bounded-memory batches. Re-exported so the namespace scan registers them.
 export {
   stageCollectionPlugin,

@@ -1,5 +1,5 @@
 /**
- * Collection store (ADR-00XX, pipeline batching / M2).
+ * Collection store (ADR-0038, pipeline batching / M2).
  *
  * A document collection staged out of pipeline RAM and into durable, *paged*
  * storage, addressed by a small {@link CollectionHandle}. This is the

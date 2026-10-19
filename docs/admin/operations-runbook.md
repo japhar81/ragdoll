@@ -178,6 +178,32 @@ reaches the serving API process and workers still need a restart. The reload is
 non-destructive — a worker whose rebuild fails keeps running its current
 registry (`worker plugin registry reload failed; keeping the current registry`).
 
+## Pipeline memory + batching at scale (ADR-0038)
+
+A pipeline passes a whole document collection between steps in memory, so peak
+worker RAM scales with corpus size. Two levers:
+
+- **`RAGDOLL_MAX_NODE_OUTPUT_DOCS`** (worker + API, default `0` = off). A single
+  step producing more than this many documents fails with
+  `NodeOutputTooLargeError` (`node "<id>" produced N documents …`) instead of
+  silently OOM-killing the pod — which would take down *every* in-flight run on
+  it. Set it a bit above your largest expected single-step collection as a
+  backstop; a breach means the pipeline should stage + batch (below), not that
+  the limit is wrong. The executor also now frees each node's output once its
+  consumers have run, so retention is the live frontier rather than the whole
+  run.
+- **`RAGDOLL_COLLECTION_DIR`** — root for `stage_collection` / `foreach_batch`
+  (the batch-by-reference path). It **must be a durable, shared mount** (a PVC or
+  object-store mount) in multi-worker / k8s deployments: cross-run reprocessing
+  and resume read collections written by another run or pod. It defaults to a
+  per-pod temp dir, which is fine for a single local worker but **not** durable
+  or shared — so configure it before relying on batched ingest in production.
+
+Scaled ingest shape: `source → stage_collection → foreach_batch(body: chunk →
+embed → sink)` with a `resumeKey` so a failed large run resumes from the last
+committed batch. Peak memory is then `pageSize × concurrency × docSize`,
+independent of corpus size.
+
 ## Health and readiness
 
 - `GET /healthz` — liveness; `GET /readyz` — readiness. Both are unauthenticated.

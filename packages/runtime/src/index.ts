@@ -39,7 +39,7 @@ export class CancelledError extends Error {
 /**
  * Thrown when a single node's output holds more documents than
  * `maxNodeOutputDocs` allows. The runtime passes a whole in-memory collection
- * between steps (ADR-00XX), so an unbounded source can OOM the worker. This
+ * between steps (ADR-0038), so an unbounded source can OOM the worker. This
  * turns the silent OOM-kill (which takes down every in-flight run on the pod)
  * into a clean, attributable failure that points at the batching path.
  */

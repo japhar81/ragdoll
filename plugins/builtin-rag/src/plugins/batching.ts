@@ -1,5 +1,5 @@
 /**
- * Batching / scale plugins (ADR-00XX, pipeline batching / M2).
+ * Batching / scale plugins (ADR-0038, pipeline batching / M2).
  *
  *   - `stage_collection`: write an in-memory documents array to a durable,
  *     *paged* collection store and emit a small {@link CollectionHandle} in its
