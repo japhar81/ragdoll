@@ -223,6 +223,10 @@ export function createWorker(deps: WorkerDeps): Worker {
       externalConnectionResolver,
       lifecycle: deps.executionLifecycle,
       maxRetries: deps.maxRetries ?? 1,
+      // Phase 0 scaling guard — a step producing more than this many documents
+      // fails loud instead of ballooning worker RAM toward an OOM-kill. 0/unset
+      // disables it. Process large corpora via stage_collection → foreach_batch.
+      maxNodeOutputDocs: Number(process.env.RAGDOLL_MAX_NODE_OUTPUT_DOCS) || 0,
       tracer
     });
   }

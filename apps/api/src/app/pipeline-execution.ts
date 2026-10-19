@@ -487,7 +487,10 @@ export async function runSyncPipeline(args: {
     runPipelineByRef,
     onToken: args.onToken,
     onStep: args.onStep,
-    maxRetries: 1
+    maxRetries: 1,
+    // Phase 0 scaling guard (same as the worker) — synchronous API runs are
+    // smaller, but the cap keeps a runaway step from OOMing the API too.
+    maxNodeOutputDocs: Number(process.env.RAGDOLL_MAX_NODE_OUTPUT_DOCS) || 0
   });
   const output = await executor.execute({
     spec: versionRow.spec as PipelineSpec,
