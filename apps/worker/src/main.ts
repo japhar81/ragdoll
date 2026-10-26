@@ -191,6 +191,10 @@ async function buildDeps(): Promise<BuiltDeps> {
       connections: new db.PostgresConnectionRepository(
         pool
       ),
+      // ADR-0039: shared grant store — the worker mints refresh grants here and
+      // the API reads them to re-materialise a sidecar's connection credential.
+      connectionCredentialGrants:
+        new db.PostgresConnectionCredentialGrantRepository(pool),
       usageRecords: new db.PostgresUsageRecordRepository(pool),
       // Org-versioning resolution for schedule-originated run_pipeline jobs.
       pipelines: new db.PostgresPipelineRepository(pool),
@@ -229,6 +233,8 @@ async function buildDeps(): Promise<BuiltDeps> {
       providerModels: new InMemoryProviderModelRepository(),
       vectorCollections: new InMemoryVectorCollectionRepository(),
       connections: new InMemoryConnectionRepository(),
+      connectionCredentialGrants:
+        new db.InMemoryConnectionCredentialGrantRepository(),
       usageRecords: new InMemoryUsageRecordRepository(),
       // Org-versioning resolution for schedule-originated run_pipeline jobs.
       pipelines: new InMemoryPipelineRepository(),

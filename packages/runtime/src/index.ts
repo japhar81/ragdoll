@@ -6,11 +6,14 @@ import type { SecretProvider } from "../../secrets/src/index.ts";
 import {
   type DatasetResolver,
   type DatasetRef,
+  type ExternalConnectionEnvelope,
+  type ExternalCredential,
   type IngestStateEntry,
   type IngestStateStore,
   type PluginExecutionOutput,
   type PluginRegistry,
-  type ResolvedDataset
+  type ResolvedDataset,
+  type ResolvedExternalConnection
 } from "../../plugin-sdk/src/index.ts";
 // Transport dispatch is a separate subpath so the web bundle never reaches
 // connect-rpc through pipeline-spec → plugin-sdk. Server-side runtime only.
@@ -340,6 +343,41 @@ export interface DagExecutorOptions {
     >;
   };
   /**
+   * ADR-0039: materialise a serialisable credential for a SIDECAR plugin by
+   * running the referenced connection driver's opt-in hook. Wired by the app to
+   * `@ragdoll/connection-sdk`'s `materializeExternalCredential`. Returns
+   * `undefined` when the driver is in-process only (no hook) — the executor then
+   * falls back to the connection's static `secret`, or ships no credential.
+   * Only invoked for external plugins that carry a resolved connection.
+   */
+  materializeExternalCredential?: (
+    connection: ResolvedExternalConnection
+  ) => Promise<ExternalCredential | undefined>;
+  /**
+   * ADR-0039: mint a revocable refresh grant so the sidecar can re-materialise
+   * an expiring credential mid-run. Wired by the app to write a
+   * `connection_credential_grants` row and return the callback descriptor. Only
+   * called for external plugins whose credential came from the driver hook
+   * (a static secret can't meaningfully refresh). Unset in tests / in-process-
+   * only deployments — the envelope then carries the initial credential with no
+   * refresh path.
+   */
+  issueConnectionRefreshGrant?: (args: {
+    executionId: string;
+    nodeId: string;
+    tenantId: string;
+    environment: string;
+    connectionSlug: string;
+    deadline?: Date;
+  }) => Promise<{ url: string; token: string; expiresAt?: string } | undefined>;
+  /**
+   * ADR-0039: revoke every refresh grant minted for an execution once the run
+   * reaches a terminal state, so a leaked token dies with the run rather than
+   * lingering until its TTL. Wired to the grant repo's `revokeForExecution`.
+   * Best-effort — a revoke failure never fails the run.
+   */
+  revokeConnectionRefreshGrants?: (executionId: string) => Promise<void>;
+  /**
    * Sync nested-pipeline invocation (Phase 9, Round 2). When wired,
    * the `pipeline_call` plugin (and any other v2 plugin that wants
    * to compose) can reach for `input.runPipelineByRef`. Only the
@@ -561,6 +599,16 @@ export class DagExecutor {
     } finally {
       span.end();
       this.stepSeq.delete(args.context.executionId);
+      // ADR-0039: revoke this run's connection refresh grants so a leaked token
+      // dies with the run instead of lingering until its TTL. Best-effort — a
+      // cleanup failure must never surface over the run's real outcome.
+      if (this.options.revokeConnectionRefreshGrants) {
+        try {
+          await this.options.revokeConnectionRefreshGrants(args.context.executionId);
+        } catch {
+          /* best-effort */
+        }
+      }
     }
   }
 
@@ -1052,6 +1100,15 @@ export class DagExecutor {
             );
           }
         }
+        // ADR-0039: for a SIDECAR plugin that references a connection, project
+        // the resolved connection into a serialisable envelope — the live driver
+        // client stays in-process; only a materialised credential (+ a revocable
+        // refresh grant) crosses the wire. In-process plugins keep reading the
+        // live `connection` object below.
+        const externalConnectionEnvelope =
+          plugin.mode === "external" && resolvedConn
+            ? await this.buildExternalConnectionEnvelope(context, node.id, resolvedConn)
+            : undefined;
         const baseConfig = resolveNodeTemplateValues(node.config ?? {}, context);
         const effectiveConfig = applyDatasetShim(
           plugin.manifest.contract ?? 1,
@@ -1084,6 +1141,7 @@ export class DagExecutor {
                 (plugin.manifest.contract ?? 1) === 2 ? resolved : undefined,
               connection:
                 (plugin.manifest.contract ?? 1) === 2 ? resolvedConn : undefined,
+              externalConnection: externalConnectionEnvelope,
               runPipelineByRef: this.options.runPipelineByRef,
               onToken: this.options.onToken
                 ? (token) =>
@@ -1199,6 +1257,50 @@ export class DagExecutor {
     } finally {
       span.end();
     }
+  }
+
+  /**
+   * ADR-0039: build the serialisable external-connection envelope handed to a
+   * sidecar plugin. Materialises a credential via the referenced driver's
+   * opt-in hook (falling back to the connection's static `secret`), and — only
+   * for a driver-materialised (potentially-rotating) credential — mints a
+   * revocable refresh grant so the sidecar can re-materialise it mid-run. The
+   * live driver client never crosses the wire; `resolveSecret` and other
+   * closures stay in-process.
+   */
+  private async buildExternalConnectionEnvelope(
+    context: RuntimeContext,
+    nodeId: string,
+    conn: ResolvedExternalConnection
+  ): Promise<ExternalConnectionEnvelope> {
+    const materialized = this.options.materializeExternalCredential
+      ? await this.options.materializeExternalCredential(conn)
+      : undefined;
+    const credential: ExternalCredential | undefined =
+      materialized ??
+      (conn.secret !== undefined ? { value: conn.secret } : undefined);
+    // A refresh grant only makes sense for a driver-materialised credential —
+    // a static secret re-materialises to the same value. Mint one only when the
+    // app wired an issuer AND the driver actually produced a credential.
+    let refresh: ExternalConnectionEnvelope["refresh"];
+    if (materialized && this.options.issueConnectionRefreshGrant) {
+      refresh =
+        (await this.options.issueConnectionRefreshGrant({
+          executionId: context.executionId,
+          nodeId,
+          tenantId: context.tenantId,
+          environment: context.environment,
+          connectionSlug: conn.slug,
+          deadline: context.deadline
+        })) ?? undefined;
+    }
+    return {
+      slug: conn.slug,
+      kind: conn.kind,
+      options: conn.options,
+      ...(credential ? { credential } : {}),
+      ...(refresh ? { refresh } : {})
+    };
   }
 
   private async resolveNodeSecrets(

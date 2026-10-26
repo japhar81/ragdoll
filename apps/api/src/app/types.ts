@@ -14,6 +14,7 @@ import type {
   PluginRepository,
   ProviderRepository,
   ConnectionRepository,
+  ConnectionCredentialGrantRepository,
   PipelineDatasetBindingRepository,
   VectorCollectionRepository,
   TenantRepository,
@@ -187,6 +188,11 @@ export interface AppDeps {
    *  `datasources` (ADR-0020) and `externalConnections` (ADR-0021)
    *  fields into one. */
   connections: ConnectionRepository;
+  /** ADR-0039: durable, revocable grants that let a sidecar plugin refresh an
+   *  external connection's materialised credential mid-run. Optional so legacy
+   *  harnesses still construct a valid `AppDeps`; the refresh route is only
+   *  mounted when present. */
+  connectionCredentialGrants?: ConnectionCredentialGrantRepository;
   /** Per-(pipeline, tenant, env) dataset binding overrides (PR3). */
   pipelineDatasetBindings?: PipelineDatasetBindingRepository;
   vectorCollections: VectorCollectionRepository;

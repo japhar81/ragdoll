@@ -31,7 +31,10 @@ import {
 } from "../../../../packages/pipeline-spec/src/index.ts";
 import { DagExecutor, buildDatasetResolver } from "../../../../packages/runtime/src/index.ts";
 import type { ExecutionStepRecord } from "../../../../packages/runtime/src/index.ts";
-import { ExternalConnectionResolver } from "../../../../packages/external-connections/src/index.ts";
+import {
+  ExternalConnectionResolver,
+  buildConnectionCredentialRuntimeOptions
+} from "../../../../packages/external-connections/src/index.ts";
 import type {
   PipelineActivationRow,
   PipelineActivationRepository,
@@ -478,12 +481,24 @@ export async function runSyncPipeline(args: {
   const externalConnectionResolver = deps.connections
     ? new ExternalConnectionResolver(deps.connections, deps.secretProvider)
     : undefined;
+  // ADR-0039: materialise + refresh-grant options for sidecar nodes, wired when
+  // a grant store AND a sidecar-reachable callback URL are both present. Sync
+  // API runs are short, but an external node here still gets its credential.
+  const connectionCallbackUrl = process.env.RAGDOLL_CONNECTION_CALLBACK_URL;
+  const connectionCredentialOptions =
+    deps.connectionCredentialGrants && connectionCallbackUrl
+      ? buildConnectionCredentialRuntimeOptions({
+          grants: deps.connectionCredentialGrants,
+          callbackBaseUrl: connectionCallbackUrl
+        })
+      : undefined;
   const executor = new DagExecutor({
     pluginRegistry: deps.pluginRegistry,
     secretProvider: deps.secretProvider,
     store: deps.executionStore,
     datasetResolver: apiDatasetResolver,
     externalConnectionResolver,
+    ...(connectionCredentialOptions ?? {}),
     runPipelineByRef,
     onToken: args.onToken,
     onStep: args.onStep,

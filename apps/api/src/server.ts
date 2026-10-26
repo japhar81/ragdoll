@@ -68,6 +68,7 @@ import {
   PostgresConfigValueRepository,
   PostgresProviderRepository,
   PostgresConnectionRepository,
+  PostgresConnectionCredentialGrantRepository,
   PostgresPipelineDatasetBindingRepository,
   PostgresVectorCollectionRepository,
   PostgresAuditLogRepository,
@@ -111,6 +112,7 @@ import {
   InMemoryPluginRepository,
   InMemoryProviderRepository,
   InMemoryConnectionRepository,
+  InMemoryConnectionCredentialGrantRepository,
   InMemoryPipelineDatasetBindingRepository,
   InMemoryVectorCollectionRepository,
   InMemoryExecutionStore,
@@ -373,6 +375,8 @@ async function buildDeps(): Promise<{
       plugins: new InMemoryPluginRepository(),
       providers: new PostgresProviderRepository(pool),
       connections: new PostgresConnectionRepository(pool),
+      // ADR-0039: the API reads refresh grants the worker minted (same store).
+      connectionCredentialGrants: new PostgresConnectionCredentialGrantRepository(pool),
       pipelineDatasetBindings: new PostgresPipelineDatasetBindingRepository(pool),
       vectorCollections: new PostgresVectorCollectionRepository(pool),
       // Single Postgres store: the worker writes executions here and the
@@ -441,6 +445,7 @@ async function buildDeps(): Promise<{
       plugins: new InMemoryPluginRepository(),
       providers: new InMemoryProviderRepository(),
       connections: new InMemoryConnectionRepository(),
+      connectionCredentialGrants: new InMemoryConnectionCredentialGrantRepository(),
       pipelineDatasetBindings: new InMemoryPipelineDatasetBindingRepository(),
       vectorCollections: new InMemoryVectorCollectionRepository(),
       executionStore: new InMemoryExecutionStore(),

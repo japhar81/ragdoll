@@ -27,6 +27,9 @@ import type {
 export * from "../../connection-sdk/src/index.ts";
 export type { ConnectionRow, ConnectionRepository };
 
+// ADR-0039: the external-plugin credential bridge (grant minting + redemption).
+export * from "./credential-grants.ts";
+
 export class ExternalConnectionResolver {
   private repo: ConnectionRepository;
   private secrets: SecretProvider;
