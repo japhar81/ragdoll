@@ -405,6 +405,45 @@ export interface ResolvedExternalConnection {
 }
 
 /**
+ * ADR-0039: a JSON-serialisable credential for a sidecar plugin. Structural
+ * mirror of `@ragdoll/connection-sdk`'s `ExternalCredential` (re-declared here
+ * so plugin-sdk stays dependency-light, same as {@link ResolvedExternalConnection}).
+ */
+export interface ExternalCredential {
+  value?: string;
+  headers?: Record<string, string>;
+  query?: Record<string, string>;
+  expiresAt?: string;
+  options?: Record<string, unknown>;
+}
+
+/**
+ * ADR-0039: what an external (sidecar) node receives in place of the live
+ * `ResolvedExternalConnection` — a fully serialisable envelope. The runtime
+ * builds this only for external plugins (the in-process path keeps using the
+ * live {@link ResolvedExternalConnection} on `input.connection`), and the
+ * transport serialises it into the proto `connection` Struct. The live driver
+ * client never appears here; only the materialised {@link ExternalCredential}
+ * plus a revocable callback grant the sidecar redeems to refresh it.
+ */
+export interface ExternalConnectionEnvelope {
+  slug: string;
+  kind: string;
+  /** The connection's static config (host/port/region…), from the resolved row. */
+  options?: Record<string, unknown>;
+  /** Materialised by the driver's `materializeExternalCredential` hook. Never
+   *  sent empty — a node whose driver did not opt in fails before dispatch. */
+  credential?: ExternalCredential;
+  /** The sidecar POSTs `{ token }` to `url` to re-materialise `credential`
+   *  before `credential.expiresAt`. Absent when no grant store is wired. */
+  refresh?: {
+    url: string;
+    token: string;
+    expiresAt?: string;
+  };
+}
+
+/**
  * Resolves {@link DatasetRef} against the running context's
  * (tenantId, environment) — walking env → tenant → global, first match
  * wins. Returns `undefined` when no dataset matches (the runtime then
@@ -472,6 +511,15 @@ export interface PluginExecutionInput {
    * never see the secret-ref machinery.
    */
   connection?: ResolvedExternalConnection;
+  /**
+   * ADR-0039: the serialisable external-connection envelope for a SIDECAR
+   * plugin — the materialised credential + the callback grant. Populated by the
+   * runtime only when the node references a connection AND the target plugin is
+   * external; the connect-rpc transport serialises it into the proto
+   * `connection` field. In-process plugins ignore this and read the live
+   * {@link ResolvedExternalConnection} on `connection` instead.
+   */
+  externalConnection?: ExternalConnectionEnvelope;
   /**
    * Nested synchronous pipeline invocation (Phase 9, Round 2). Only
    * populated when the current pipeline is itself running in

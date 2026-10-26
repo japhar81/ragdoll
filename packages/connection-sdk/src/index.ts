@@ -66,6 +66,35 @@ export interface ResolveConnectionArgs {
   environmentId?: string;
 }
 
+/**
+ * ADR-0039: a JSON-serialisable credential a driver materialises for an
+ * external (sidecar) plugin. The live driver client (a pooled DB handle, an
+ * open socket) can never cross a transport; this is the portable projection of
+ * it — a bearer token, a header set, a DSN string — that core computes in-TS
+ * and ships to the sidecar so the sidecar never re-implements the driver's
+ * credential logic.
+ *
+ * Every field is optional so a driver emits only what its backend needs; a
+ * sidecar reads whichever it understands.
+ */
+export interface ExternalCredential {
+  /** Primary credential string — a bearer token, DSN, password, signed URL.
+   *  The common case; a sidecar reads it as `connection.credential.value`. */
+  value?: string;
+  /** Header name → value to attach to outbound requests (e.g. `Authorization`). */
+  headers?: Record<string, string>;
+  /** Query-string params to attach (signed-URL schemes). */
+  query?: Record<string, string>;
+  /** ISO-8601 instant after which `value` / `headers` are stale. The sidecar
+   *  redeems its callback grant to re-materialise BEFORE this. Absent = the
+   *  credential has no known expiry (static DSN / password). */
+  expiresAt?: string;
+  /** Non-secret, driver-specific metadata the plugin needs alongside the
+   *  credential (region, account id, base URL…). Distinct from the connection's
+   *  own `options`; use this for anything derived while materialising. */
+  options?: Record<string, unknown>;
+}
+
 // ---------------------------------------------------------------------------
 // Driver registry: per-kind factories + per-(connection.id) pool cache.
 // ---------------------------------------------------------------------------
@@ -86,6 +115,20 @@ export interface ConnectionDriver<TClient = unknown> {
   /** Optional health probe — the periodic probe job calls this; the
    *  result is stored on the connection row. */
   probe?(client: TClient): Promise<void>;
+  /**
+   * ADR-0039 — OPT-IN: produce a serialisable {@link ExternalCredential} for a
+   * sidecar plugin. Only drivers whose credential is meaningfully portable
+   * across a process boundary (a minted token, a header set, a DSN) implement
+   * this; a pooled live-client driver (Postgres, Mongo) omits it and stays
+   * in-process only, which is exactly why a credential never leaks to a sidecar
+   * unless a driver author deliberately exposes one. Identity-protected drivers
+   * typically mint a fresh token here (reusing their in-process
+   * {@link TokenSource}), so core materialises a current credential per call —
+   * and the external callback grant re-invokes this to refresh mid-run.
+   */
+  materializeExternalCredential?(
+    connection: ResolvedExternalConnection
+  ): Promise<ExternalCredential>;
 }
 
 /**
@@ -240,6 +283,31 @@ export async function acquireClient<T = unknown>(
       });
   }
   return (await pending) as T;
+}
+
+/**
+ * ADR-0039: materialise a serialisable credential for a sidecar plugin by
+ * running the driver's opt-in {@link ConnectionDriver.materializeExternalCredential}
+ * hook. Called in core at two points — the runtime, to ship the INITIAL
+ * credential inline in the external request, and the API callback endpoint, to
+ * RE-materialise a fresh one when the sidecar's grant is redeemed near expiry.
+ *
+ * Returns `undefined` when the driver does not implement the hook: that is the
+ * explicit signal that this connection kind is in-process only, and the caller
+ * must fail loudly rather than hand the sidecar an empty credential. Throws
+ * when no driver is registered for the kind at all.
+ */
+export async function materializeExternalCredential(
+  connection: ResolvedExternalConnection
+): Promise<ExternalCredential | undefined> {
+  const entry = drivers.get(connection.kind);
+  if (!entry) {
+    throw new Error(
+      `no driver registered for connection kind "${connection.kind}" — call registerConnectionDriver() in the plugin module`
+    );
+  }
+  if (!entry.driver.materializeExternalCredential) return undefined;
+  return entry.driver.materializeExternalCredential(connection);
 }
 
 /**
