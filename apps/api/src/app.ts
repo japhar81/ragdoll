@@ -225,6 +225,7 @@ import { registerConfigRoutes } from "./app/routes/config.ts";
 import { registerSchedulesRoutes } from "./app/routes/schedules.ts";
 import { registerDatasetsRoutes } from "./app/routes/datasets.ts";
 import { registerConnectionsRoutes } from "./app/routes/connections.ts";
+import { registerConnectionCredentialRoutes } from "./app/routes/connection-credentials.ts";
 import { registerPipelineBindingsRoutes } from "./app/routes/pipeline-bindings.ts";
 import { registerTenantPipelinesRoutes } from "./app/routes/tenant-pipelines.ts";
 import { registerPipelinesRoutes } from "./app/routes/pipelines.ts";
@@ -541,6 +542,16 @@ export function createApp(deps: AppDeps): App {
     }
   );
 
+  // ADR-0039: the sidecar credential-refresh callback. Only mounted when a
+  // grant store is wired (production + the worker share it); legacy harnesses
+  // without one simply don't expose the route.
+  if (deps.connectionCredentialGrants) {
+    registerConnectionCredentialRoutes(
+      { route },
+      { deps, audit, grants: deps.connectionCredentialGrants }
+    );
+  }
+
   // Per-(pipeline, tenant, env) dataset binding overrides (PR3).
   // Optional dep — legacy harnesses can skip this without breaking
   // anything; the runtime resolver falls through to the default
@@ -673,7 +684,10 @@ export function createApp(deps: AppDeps): App {
       request.path === "/api/auth/providers" ||
       request.path.startsWith("/api/auth/sso/") ||
       // Webhook triggers carry their own bearer-in-URL: the token IS the auth.
-      request.path.startsWith("/api/triggers/webhook/");
+      request.path.startsWith("/api/triggers/webhook/") ||
+      // ADR-0039: the sidecar credential-refresh callback — the grant token in
+      // the body IS the auth (minted only after `connection:use` was enforced).
+      request.path === "/api/internal/connection-credentials/refresh";
 
     let principal: Principal = { id: "anonymous", type: "service", roles: [] };
     if (!isPublic) {

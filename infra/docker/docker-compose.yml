@@ -330,6 +330,10 @@ services:
       QDRANT_URL: http://qdrant:6333
       OPENSEARCH_URL: http://opensearch:9200
       DGRAPH_URL: http://dgraph:8080
+      # ADR-0039: API base URL as reachable in-network by the worker + sidecar,
+      # so a sidecar plugin can refresh an expiring connection credential. The
+      # api service listens on PORT 3001 inside the compose network.
+      RAGDOLL_CONNECTION_CALLBACK_URL: http://api:3001
       # Phase 6: which vector backend createVectorStore picks when a
       # plugin hasn't been pointed at a specific Dataset. Default
       # `qdrant` keeps every existing pipeline working unchanged; flip
@@ -412,6 +416,10 @@ services:
       QDRANT_URL: http://qdrant:6333
       OPENSEARCH_URL: http://opensearch:9200
       DGRAPH_URL: http://dgraph:8080
+      # ADR-0039: API base URL as reachable in-network by the worker + sidecar,
+      # so a sidecar plugin can refresh an expiring connection credential. The
+      # api service listens on PORT 3001 inside the compose network.
+      RAGDOLL_CONNECTION_CALLBACK_URL: http://api:3001
       RAGDOLL_VECTOR_BACKEND: ${RAGDOLL_VECTOR_BACKEND:-qdrant}
       OLLAMA_BASE_URL: http://ollama:11434
       OLLAMA_WARM_MODELS: ${OLLAMA_WARM_MODELS:-qwen2.5:0.5b,nomic-embed-text}
@@ -468,6 +476,10 @@ services:
       QDRANT_URL: http://qdrant:6333
       OPENSEARCH_URL: http://opensearch:9200
       DGRAPH_URL: http://dgraph:8080
+      # ADR-0039: API base URL as reachable in-network by the worker + sidecar,
+      # so a sidecar plugin can refresh an expiring connection credential. The
+      # api service listens on PORT 3001 inside the compose network.
+      RAGDOLL_CONNECTION_CALLBACK_URL: http://api:3001
       RAGDOLL_VECTOR_BACKEND: ${RAGDOLL_VECTOR_BACKEND:-qdrant}
       OLLAMA_BASE_URL: http://ollama:11434
       OLLAMA_WARM_MODELS: ${OLLAMA_WARM_MODELS:-qwen2.5:0.5b,nomic-embed-text}

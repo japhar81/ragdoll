@@ -204,6 +204,37 @@ embed → sink)` with a `resumeKey` so a failed large run resumes from the last
 committed batch. Peak memory is then `pageSize × concurrency × docSize`,
 independent of corpus size.
 
+## Connection credentials for sidecar plugins (ADR-0039)
+
+A sidecar (external) plugin that references a `connection` whose driver opts into
+`materializeExternalCredential` receives a materialised credential inline in its
+execute request, plus a revocable **refresh grant** it can redeem mid-run when
+the credential nears expiry. One lever:
+
+- **`RAGDOLL_CONNECTION_CALLBACK_URL`** (worker + API). The API base URL **as
+  reachable by the sidecar and worker** (e.g. `http://api:8080` inside the
+  compose/k8s network — no trailing slash needed). When set *and* a grant store
+  is wired, external nodes get the refresh path; the sidecar POSTs
+  `{ token }` to `<base>/api/internal/connection-credentials/refresh` and gets a
+  freshly re-materialised credential. **Absent it, sidecar nodes still get the
+  inline credential** — they just can't refresh it, so a crawl that outlives the
+  credential's TTL will fail. Set it wherever long sidecar crawls use an
+  identity-protected connection.
+
+Grants are durable rows in `connection_credential_grants`, scoped to one
+`(execution, node, connection)`, minted by the worker and redeemed by the API.
+They expire with the run deadline, are revoked when the run finishes, and are
+cleaned up via the `executions` FK cascade. The refresh endpoint is public
+(the grant token is the auth, like webhook triggers) and rate-limited per IP and
+per token. Audit: each refresh writes a `connection_credential.refresh` entry at
+the connection's tenant scope — the credential value is never logged.
+
+If a sidecar reports expired credentials mid-crawl: confirm
+`RAGDOLL_CONNECTION_CALLBACK_URL` resolves from the sidecar's network namespace,
+that the grant row exists and is not revoked (the run may have already finished),
+and that the driver still implements `materializeExternalCredential` (a redeem
+returns `409 not_materializable` otherwise).
+
 ## Health and readiness
 
 - `GET /healthz` — liveness; `GET /readyz` — readiness. Both are unauthenticated.

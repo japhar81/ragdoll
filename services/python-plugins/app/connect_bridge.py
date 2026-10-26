@@ -79,6 +79,11 @@ def _proto_to_pydantic(req: ProtoExecuteRequest) -> ExecuteRequest:
                                         envelope; cartography_crawl pulls
                                         the bound neo4j connection out of
                                         `dataset.bindings.target.connection`).
+      proto.connection               -> pydantic.connection (ADR-0039 resolved
+                                        external connection: a materialised
+                                        credential + an optional revocable
+                                        refresh grant; pydantic coerces the
+                                        decoded Struct into ExternalConnection).
       proto.tenant_id / .environment / .request_id -> pydantic.context.*
     """
     return ExecuteRequest(
@@ -88,6 +93,7 @@ def _proto_to_pydantic(req: ProtoExecuteRequest) -> ExecuteRequest:
         config=_struct_to_dict(req.config) if req.HasField("config") else {},
         secrets=_struct_to_dict(req.secrets) if req.HasField("secrets") else {},
         dataset=_struct_to_dict(req.dataset) if req.HasField("dataset") else {},
+        connection=_struct_to_dict(req.connection) if req.HasField("connection") else None,
         context=ExecutionContext(
             requestId=req.request_id or None,
             tenantId=req.tenant_id or None,

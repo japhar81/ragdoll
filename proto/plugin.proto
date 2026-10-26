@@ -55,6 +55,13 @@ message ExecuteRequest {
   google.protobuf.Struct dataset = 9;     // resolved dataset backends + connections
   google.protobuf.Struct secrets = 10;    // resolved secret values keyed by name
   int64 deadline_ms = 11;                 // soft deadline (ms from now); 0 = none. int64 because a far-future Date can exceed 24-day int32 limit (~2.1B ms).
+  // ADR-0039: the node's resolved external connection, materialised for a
+  // sidecar. Carries { slug, kind, options, credential?, refresh? } — the live
+  // driver client never crosses the wire, only a serialisable credential blob
+  // (token/headers/DSN) produced in core by the driver's
+  // materializeExternalCredential hook, plus a revocable callback grant the
+  // sidecar redeems to re-materialise the credential when it nears expiry.
+  google.protobuf.Struct connection = 12;
 }
 
 message ExecuteResponse {

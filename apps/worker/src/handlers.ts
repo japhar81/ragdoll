@@ -25,6 +25,7 @@ import {
 } from "../../../packages/runtime/src/index.ts";
 import {
   ExternalConnectionResolver,
+  buildConnectionCredentialRuntimeOptions,
   probeConnection
 } from "../../../packages/external-connections/src/index.ts";
 import { pluginKey } from "../../../packages/plugin-sdk/src/index.ts";
@@ -213,6 +214,20 @@ export function createWorker(deps: WorkerDeps): Worker {
       )
     : undefined;
 
+  // ADR-0039: when a grant store AND a sidecar-reachable API callback URL are
+  // both configured, external nodes that reference a connection get a
+  // materialised credential + a revocable refresh grant. Absent either, sidecar
+  // nodes still receive the inline credential (if any) with no refresh path —
+  // and in-process nodes are unaffected regardless.
+  const connectionCallbackUrl = process.env.RAGDOLL_CONNECTION_CALLBACK_URL;
+  const connectionCredentialOptions =
+    deps.repositories.connectionCredentialGrants && connectionCallbackUrl
+      ? buildConnectionCredentialRuntimeOptions({
+          grants: deps.repositories.connectionCredentialGrants,
+          callbackBaseUrl: connectionCallbackUrl
+        })
+      : undefined;
+
   function executor(): DagExecutor {
     return new DagExecutor({
       pluginRegistry: deps.plugins,
@@ -221,6 +236,7 @@ export function createWorker(deps: WorkerDeps): Worker {
       ingestStateRepository: deps.ingestStateRepository,
       datasetResolver,
       externalConnectionResolver,
+      ...(connectionCredentialOptions ?? {}),
       lifecycle: deps.executionLifecycle,
       maxRetries: deps.maxRetries ?? 1,
       // Phase 0 scaling guard — a step producing more than this many documents

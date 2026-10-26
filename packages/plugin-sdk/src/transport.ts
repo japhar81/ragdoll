@@ -74,6 +74,13 @@ function buildExecuteRequest(
     inputs: asJsonObject(input.inputs),
     dataset: input.dataset ? asJsonObject(input.dataset) : undefined,
     secrets: asJsonObject(input.secrets),
+    // ADR-0039: the resolved external connection, materialised for the sidecar
+    // (credential + revocable refresh grant). Only the serialisable envelope
+    // crosses — `input.connection` (the live driver-bound object, with its
+    // `resolveSecret` closure) stays in-process and is never put on the wire.
+    connection: input.externalConnection
+      ? asJsonObject(input.externalConnection)
+      : undefined,
     // int64 on the wire → bigint in TS. Far-future Dates can exceed int32's
     // ~24-day ms ceiling, so bigint is necessary; 0n means "no deadline."
     deadlineMs:

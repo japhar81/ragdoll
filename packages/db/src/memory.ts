@@ -22,6 +22,8 @@ export {
 
 export { InMemoryConnectionRepository } from "./memory/connections.ts";
 
+export { InMemoryConnectionCredentialGrantRepository } from "./memory/credential-grants.ts";
+
 export {
   InMemoryPipelineRepository,
   InMemoryPipelineVersionRepository,

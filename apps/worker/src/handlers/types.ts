@@ -38,6 +38,7 @@ import type {
   ProviderModelRepository,
   VectorCollectionRepository,
   ConnectionRepository,
+  ConnectionCredentialGrantRepository,
   UsageRecordRepository,
   EventSubscriptionRepository,
   WebhookDeliveryFailureRepository,
@@ -66,6 +67,11 @@ export interface WorkerRepositories {
   /** ADR-0023 Unified Connections Registry. Replaces the older
    *  `datasourceConnections` + `externalConnections` fields. */
   connections: ConnectionRepository;
+  /** ADR-0039: shared grant store for sidecar credential refresh. Optional so
+   *  the legacy e2e harness still builds a valid bundle; when absent (or no
+   *  callback URL is configured) sidecar nodes get an inline credential with no
+   *  refresh path. */
+  connectionCredentialGrants?: ConnectionCredentialGrantRepository;
   usageRecords: UsageRecordRepository;
   /**
    * Optional pipeline repository. When present (alongside `activations`) the
