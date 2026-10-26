@@ -174,6 +174,32 @@ Re-export the driver from your plugin module's index (the same place
 you re-export executable plugins). The platform's loader picks it up
 on next start; no platform release required.
 
+#### Exposing a credential to a sidecar plugin (ADR-0039)
+
+A driver's live client (a pool, a socket) can't cross a transport, so by default
+a connection is usable only by **in-process** plugins. If your driver's
+credential is something *portable* — a bearer token, a header set, a DSN — add
+the opt-in `materializeExternalCredential` hook so an **external (sidecar)**
+plugin can use it too:
+
+```ts
+driver: {
+  async create(conn) { /* live client for in-process plugins */ },
+  // ADR-0039 — only drivers that implement this expose a credential to sidecars.
+  async materializeExternalCredential(conn) {
+    const token = await mintToken(conn);          // reuse your TokenSource
+    return { value: token.value, expiresAt: token.expiresAt };
+  }
+}
+```
+
+The runtime materialises the credential, ships it inline in the node's execute
+request (`connection.credential`), and mints a **revocable refresh grant** the
+sidecar redeems when the credential nears `expiresAt` — so a long crawl refreshes
+in place rather than dying on an expired token. Omit the hook and the driver
+stays in-process only; a pooled DB client should. Operators enable the refresh
+path with `RAGDOLL_CONNECTION_CALLBACK_URL` (see the operations runbook).
+
 ## In-process plugin
 
 ```ts
