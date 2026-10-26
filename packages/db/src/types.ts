@@ -472,6 +472,54 @@ export interface ConnectionRepository {
   ): Promise<void>;
 }
 
+/**
+ * ADR-0039: a revocable grant the worker mints when it dispatches an external
+ * (sidecar) node that references a connection. The sidecar redeems it against
+ * the API to RE-materialise the connection's credential when the inline one
+ * nears expiry. Durable + auditable + revocable by design: redemptions are
+ * counted, grants are revoked en masse when their execution finishes, and
+ * expiry is bounded by the run deadline so a leaked token is useless after the
+ * run. The token is the only authorisation the endpoint needs — it is minted
+ * ONLY after `connection:use` has already been enforced at dispatch, and it is
+ * scoped to exactly one (execution, node, connection).
+ */
+export interface ConnectionCredentialGrantRow {
+  id: UUID;
+  /** Opaque, unguessable token the sidecar presents. Unique; primary lookup. */
+  token: string;
+  executionId: UUID;
+  nodeId: string;
+  tenantId: UUID;
+  /** Environment NAME (dev/staging/prod) — matches the execution context. */
+  environment: string;
+  /** The connection slug this grant may re-materialise, and nothing else. */
+  connectionSlug: string;
+  /** ISO-8601; the grant is invalid at/after this (≤ the run deadline). */
+  expiresAt: string;
+  /** Set when revoked (execution finished/cancelled, or an admin nuke). */
+  revokedAt?: string | null;
+  /** Issuance audit — how many times the sidecar has redeemed it. */
+  redeemCount: number;
+  lastRedeemedAt?: string | null;
+  createdAt: string;
+}
+
+export interface ConnectionCredentialGrantRepository {
+  create(
+    row: ConnectionCredentialGrantRow
+  ): Promise<ConnectionCredentialGrantRow>;
+  /** Redemption lookup by opaque token. `undefined` when unknown. The caller
+   *  checks `revokedAt` / `expiresAt` — the store returns the row as-is. */
+  getByToken(token: string): Promise<ConnectionCredentialGrantRow | undefined>;
+  /** Stamp a successful redemption: ++redeemCount, set lastRedeemedAt. */
+  recordRedemption(token: string, at: string): Promise<void>;
+  /** Revoke every (still-live) grant for an execution. Returns rows affected.
+   *  Called from the run's finish/cancel path so grants die with the run. */
+  revokeForExecution(executionId: UUID, at: string): Promise<number>;
+  /** Housekeeping sweep — hard-delete grants already past expiry. */
+  deleteExpired(now: string): Promise<number>;
+}
+
 export interface VectorCollectionRow {
   id: UUID;
   tenantId: UUID;

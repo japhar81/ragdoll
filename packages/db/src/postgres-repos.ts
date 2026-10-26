@@ -43,6 +43,8 @@ export {
   PostgresVectorCollectionRepository
 } from "./postgres/catalog.ts";
 
+export { PostgresConnectionCredentialGrantRepository } from "./postgres/credential-grants.ts";
+
 export {
   PostgresConfigDefinitionRepository,
   PostgresConfigValueRepository
