@@ -95,6 +95,63 @@ export interface ExternalCredential {
   options?: Record<string, unknown>;
 }
 
+/**
+ * ADR-0040: the run context a driver may read while materialising a credential
+ * for a sidecar plugin. Handed to {@link ConnectionDriver.materializeExternalCredential}
+ * so a SINGLE connection can serve many tenants / environments / credentials —
+ * the per-run selectors (a tenant id, an environment id, a credential id) come
+ * from the node's resolved `config` or an upstream input port rather than being
+ * baked into the connection, which would force one connection per combination.
+ *
+ * Everything here is resolved IN CORE (the driver runs in-process), so reading
+ * it is free — nothing is serialised at materialise time; only the returned
+ * {@link ExternalCredential} crosses the wire.
+ */
+export interface CredentialMaterializationContext {
+  tenantId: string;
+  /** Environment NAME (dev/staging/prod) — matches the execution context. */
+  environment: string;
+  executionId: string;
+  nodeId: string;
+  requestId?: string;
+  /** The node's resolved config (templates substituted), exactly as the plugin
+   *  sees it. A driver reads its selectors from here, e.g. `config.tenantRef`. */
+  config: Record<string, unknown>;
+  /** The node's resolved input-port values (upstream outputs feeding this
+   *  node). A driver may read a selector from a wired port instead of config.
+   *  Can be large — read the specific key you need, don't walk the whole map. */
+  inputs: Record<string, unknown>;
+  /**
+   * Set ONLY on the refresh-callback path, NEVER on the first (runtime)
+   * materialisation. It is the {@link MaterializedExternalCredential.refreshContext}
+   * the driver nominated on the first call, persisted on the grant and replayed
+   * here: the API callback has no node config / input ports at redeem time, so a
+   * run-context-dependent driver stashes its selectors here on the first call
+   * and reads them back from here on refresh. When this is present, prefer it
+   * over `config` / `inputs` (which are empty on the refresh path).
+   */
+  refreshContext?: Record<string, unknown>;
+}
+
+/**
+ * ADR-0040: the return of {@link ConnectionDriver.materializeExternalCredential}.
+ * It is an {@link ExternalCredential} (what ships to the sidecar) plus an
+ * optional, CORE-ONLY `refreshContext` the driver wants replayed on the refresh
+ * callback. Core persists `refreshContext` on the grant and STRIPS it from the
+ * envelope — it never crosses the wire. A driver that doesn't depend on run
+ * context simply returns a plain {@link ExternalCredential} (back-compatible).
+ */
+export interface MaterializedExternalCredential extends ExternalCredential {
+  /**
+   * Identifiers-only selectors (a tenant id, an environment id, a credential
+   * id) the driver needs to re-materialise this exact credential on refresh.
+   * MUST NOT contain secrets — it is persisted in the grant store; the secret
+   * itself is always re-fetched, never stored. Absent for drivers that resolve
+   * the credential from the connection alone.
+   */
+  refreshContext?: Record<string, unknown>;
+}
+
 // ---------------------------------------------------------------------------
 // Driver registry: per-kind factories + per-(connection.id) pool cache.
 // ---------------------------------------------------------------------------
@@ -125,10 +182,19 @@ export interface ConnectionDriver<TClient = unknown> {
    * typically mint a fresh token here (reusing their in-process
    * {@link TokenSource}), so core materialises a current credential per call —
    * and the external callback grant re-invokes this to refresh mid-run.
+   *
+   * ADR-0040 — the optional second argument carries the run context (node
+   * config / input ports / tenant / environment). A driver reads its per-run
+   * selectors from it so ONE connection serves many tenants/credentials, and
+   * returns a {@link MaterializedExternalCredential} whose `refreshContext`
+   * core replays on the refresh callback. The argument is optional and the
+   * richer return extends {@link ExternalCredential}, so a driver written
+   * against ADR-0039 keeps compiling and working unchanged.
    */
   materializeExternalCredential?(
-    connection: ResolvedExternalConnection
-  ): Promise<ExternalCredential>;
+    connection: ResolvedExternalConnection,
+    context?: CredentialMaterializationContext
+  ): Promise<MaterializedExternalCredential>;
 }
 
 /**
@@ -296,10 +362,16 @@ export async function acquireClient<T = unknown>(
  * explicit signal that this connection kind is in-process only, and the caller
  * must fail loudly rather than hand the sidecar an empty credential. Throws
  * when no driver is registered for the kind at all.
+ *
+ * ADR-0040: the optional `context` carries the run's node config / input ports
+ * so a run-context-dependent driver resolves the right credential. Forwarded
+ * verbatim to the driver hook; omit it and the driver falls back to
+ * connection-only resolution (ADR-0039 behaviour).
  */
 export async function materializeExternalCredential(
-  connection: ResolvedExternalConnection
-): Promise<ExternalCredential | undefined> {
+  connection: ResolvedExternalConnection,
+  context?: CredentialMaterializationContext
+): Promise<MaterializedExternalCredential | undefined> {
   const entry = drivers.get(connection.kind);
   if (!entry) {
     throw new Error(
@@ -307,7 +379,7 @@ export async function materializeExternalCredential(
     );
   }
   if (!entry.driver.materializeExternalCredential) return undefined;
-  return entry.driver.materializeExternalCredential(connection);
+  return entry.driver.materializeExternalCredential(connection, context);
 }
 
 /**

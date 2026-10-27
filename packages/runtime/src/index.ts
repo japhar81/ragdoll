@@ -4,12 +4,14 @@ import type { PipelineEdge, PipelineNode, PipelineSpec, RuntimeContext, SecretRe
 import { redactValue } from "../../core/src/index.ts";
 import type { SecretProvider } from "../../secrets/src/index.ts";
 import {
+  type CredentialMaterializationContext,
   type DatasetResolver,
   type DatasetRef,
   type ExternalConnectionEnvelope,
   type ExternalCredential,
   type IngestStateEntry,
   type IngestStateStore,
+  type MaterializedExternalCredential,
   type PluginExecutionOutput,
   type PluginRegistry,
   type ResolvedDataset,
@@ -351,8 +353,9 @@ export interface DagExecutorOptions {
    * Only invoked for external plugins that carry a resolved connection.
    */
   materializeExternalCredential?: (
-    connection: ResolvedExternalConnection
-  ) => Promise<ExternalCredential | undefined>;
+    connection: ResolvedExternalConnection,
+    context?: CredentialMaterializationContext
+  ) => Promise<MaterializedExternalCredential | undefined>;
   /**
    * ADR-0039: mint a revocable refresh grant so the sidecar can re-materialise
    * an expiring credential mid-run. Wired by the app to write a
@@ -369,6 +372,9 @@ export interface DagExecutorOptions {
     environment: string;
     connectionSlug: string;
     deadline?: Date;
+    /** ADR-0040: driver-nominated selectors (identifiers only) to persist on
+     *  the grant and replay on the refresh callback. */
+    refreshContext?: Record<string, unknown>;
   }) => Promise<{ url: string; token: string; expiresAt?: string } | undefined>;
   /**
    * ADR-0039: revoke every refresh grant minted for an execution once the run
@@ -1100,21 +1106,29 @@ export class DagExecutor {
             );
           }
         }
-        // ADR-0039: for a SIDECAR plugin that references a connection, project
-        // the resolved connection into a serialisable envelope — the live driver
-        // client stays in-process; only a materialised credential (+ a revocable
-        // refresh grant) crosses the wire. In-process plugins keep reading the
-        // live `connection` object below.
-        const externalConnectionEnvelope =
-          plugin.mode === "external" && resolvedConn
-            ? await this.buildExternalConnectionEnvelope(context, node.id, resolvedConn)
-            : undefined;
         const baseConfig = resolveNodeTemplateValues(node.config ?? {}, context);
         const effectiveConfig = applyDatasetShim(
           plugin.manifest.contract ?? 1,
           baseConfig,
           resolved
         );
+        // ADR-0039/0040: for a SIDECAR plugin that references a connection,
+        // project the resolved connection into a serialisable envelope — the
+        // live driver client stays in-process; only a materialised credential
+        // (+ a revocable refresh grant) crosses the wire. The driver receives
+        // the run context (the node's resolved config + input ports) so one
+        // connection can serve many tenants/credentials (ADR-0040). In-process
+        // plugins keep reading the live `connection` object below.
+        const externalConnectionEnvelope =
+          plugin.mode === "external" && resolvedConn
+            ? await this.buildExternalConnectionEnvelope(
+                context,
+                node.id,
+                resolvedConn,
+                effectiveConfig,
+                inputs
+              )
+            : undefined;
         output = await withRetries(
           async () => {
             this.checkAborted(context);
@@ -1271,17 +1285,43 @@ export class DagExecutor {
   private async buildExternalConnectionEnvelope(
     context: RuntimeContext,
     nodeId: string,
-    conn: ResolvedExternalConnection
+    conn: ResolvedExternalConnection,
+    nodeConfig: Record<string, unknown>,
+    inputs: Record<string, unknown>
   ): Promise<ExternalConnectionEnvelope> {
+    // ADR-0040: hand the driver the run context (node config + input ports +
+    // identity) so it can resolve a per-run credential from ONE connection. All
+    // in-process — nothing here is serialised; only the returned credential is.
+    const materializationContext: CredentialMaterializationContext = {
+      tenantId: context.tenantId,
+      environment: context.environment,
+      executionId: context.executionId,
+      nodeId,
+      requestId: context.requestId,
+      config: nodeConfig,
+      inputs
+    };
     const materialized = this.options.materializeExternalCredential
-      ? await this.options.materializeExternalCredential(conn)
+      ? await this.options.materializeExternalCredential(conn, materializationContext)
       : undefined;
+    // ADR-0040: split the core-only `refreshContext` from the wire credential —
+    // the driver's refresh selectors are persisted on the grant (below) and
+    // replayed on the callback, and must NOT reach the sidecar.
+    let refreshContext: Record<string, unknown> | undefined;
+    let wireCredential: ExternalCredential | undefined;
+    if (materialized) {
+      const { refreshContext: rc, ...rest } = materialized;
+      refreshContext = rc;
+      wireCredential = rest;
+    }
     const credential: ExternalCredential | undefined =
-      materialized ??
+      wireCredential ??
       (conn.secret !== undefined ? { value: conn.secret } : undefined);
     // A refresh grant only makes sense for a driver-materialised credential —
     // a static secret re-materialises to the same value. Mint one only when the
-    // app wired an issuer AND the driver actually produced a credential.
+    // app wired an issuer AND the driver actually produced a credential. The
+    // grant carries the driver's `refreshContext` so the callback re-resolves
+    // the same per-run credential.
     let refresh: ExternalConnectionEnvelope["refresh"];
     if (materialized && this.options.issueConnectionRefreshGrant) {
       refresh =
@@ -1291,7 +1331,8 @@ export class DagExecutor {
           tenantId: context.tenantId,
           environment: context.environment,
           connectionSlug: conn.slug,
-          deadline: context.deadline
+          deadline: context.deadline,
+          refreshContext
         })) ?? undefined;
     }
     return {

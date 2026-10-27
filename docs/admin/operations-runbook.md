@@ -229,6 +229,16 @@ cleaned up via the `executions` FK cascade. The refresh endpoint is public
 per token. Audit: each refresh writes a `connection_credential.refresh` entry at
 the connection's tenant scope — the credential value is never logged.
 
+**Run-context-aware drivers (ADR-0040).** A driver may resolve the credential
+from the run (the node's config or an input port) so one connection serves many
+tenants/environments/credentials. When it does, the grant's
+`materialization_context` column (migration 031) holds the **identifiers** the
+driver nominated to re-resolve the same credential on refresh — tenant / env /
+credential ids, **never a secret** (the credential itself is always re-fetched,
+never stored). It is `NULL` for connection-only drivers. Nothing new crosses to
+the sidecar and there is no new operator lever — the same
+`RAGDOLL_CONNECTION_CALLBACK_URL` governs refresh.
+
 If a sidecar reports expired credentials mid-crawl: confirm
 `RAGDOLL_CONNECTION_CALLBACK_URL` resolves from the sidecar's network namespace,
 that the grant row exists and is not revoked (the run may have already finished),

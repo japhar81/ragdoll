@@ -24,7 +24,9 @@ import type {
 } from "../../db/src/types.ts";
 import {
   materializeExternalCredential,
+  type CredentialMaterializationContext,
   type ExternalCredential,
+  type MaterializedExternalCredential,
   type ResolvedExternalConnection
 } from "../../connection-sdk/src/index.ts";
 
@@ -53,8 +55,9 @@ export interface ConnectionCredentialCallbackOptions {
  */
 export interface ConnectionCredentialRuntimeOptions {
   materializeExternalCredential: (
-    connection: ResolvedExternalConnection
-  ) => Promise<ExternalCredential | undefined>;
+    connection: ResolvedExternalConnection,
+    context?: CredentialMaterializationContext
+  ) => Promise<MaterializedExternalCredential | undefined>;
   issueConnectionRefreshGrant: (args: {
     executionId: string;
     nodeId: string;
@@ -62,6 +65,10 @@ export interface ConnectionCredentialRuntimeOptions {
     environment: string;
     connectionSlug: string;
     deadline?: Date;
+    /** ADR-0040: driver-nominated, identifiers-only selectors to persist on the
+     *  grant and replay on the refresh callback. Omitted by connection-only
+     *  drivers. */
+    refreshContext?: Record<string, unknown>;
   }) => Promise<{ url: string; token: string; expiresAt?: string } | undefined>;
   revokeConnectionRefreshGrants: (executionId: string) => Promise<void>;
 }
@@ -73,8 +80,8 @@ export function buildConnectionCredentialRuntimeOptions(
   const base = opts.callbackBaseUrl.replace(/\/+$/, "");
   const url = `${base}${CONNECTION_CREDENTIAL_REFRESH_PATH}`;
   return {
-    materializeExternalCredential: (connection) =>
-      materializeExternalCredential(connection),
+    materializeExternalCredential: (connection, context) =>
+      materializeExternalCredential(connection, context),
     issueConnectionRefreshGrant: async (args) => {
       const now = Date.now();
       // Bound the grant by the run deadline AND an absolute ceiling, whichever
@@ -96,7 +103,11 @@ export function buildConnectionCredentialRuntimeOptions(
         revokedAt: null,
         redeemCount: 0,
         lastRedeemedAt: null,
-        createdAt: new Date(now).toISOString()
+        createdAt: new Date(now).toISOString(),
+        // ADR-0040: persist the driver's refresh selectors so the API callback
+        // (which has no node config / input ports) can replay them. `null` for
+        // connection-only drivers — the column stays empty.
+        materializationContext: args.refreshContext ?? null
       });
       return { url, token, expiresAt };
     },
@@ -152,8 +163,25 @@ export async function redeemConnectionCredentialGrant(args: {
     environmentId: grant.environment
   });
   if (!conn) return { status: "no_connection", grant };
-  const credential = await materializeExternalCredential(conn);
+  // ADR-0040: the callback has no live node config / input ports — rebuild the
+  // materialisation context from the grant and replay the driver's nominated
+  // `refreshContext` (persisted on issue). A run-context-dependent driver reads
+  // its selectors back from `context.refreshContext`; a connection-only driver
+  // (no persisted context) ignores all of it, exactly as on the first call.
+  const context: CredentialMaterializationContext = {
+    tenantId: grant.tenantId,
+    environment: grant.environment,
+    executionId: grant.executionId,
+    nodeId: grant.nodeId,
+    config: {},
+    inputs: {},
+    refreshContext: grant.materializationContext ?? undefined
+  };
+  const credential = await materializeExternalCredential(conn, context);
   if (!credential) return { status: "not_materializable", grant };
   await args.grants.recordRedemption(args.token, now.toISOString());
-  return { status: "ok", credential, grant };
+  // Strip the core-only `refreshContext` — only the wire credential goes back
+  // to the sidecar. The persisted selectors are unchanged by a refresh.
+  const { refreshContext: _refreshContext, ...wireCredential } = credential;
+  return { status: "ok", credential: wireCredential, grant };
 }

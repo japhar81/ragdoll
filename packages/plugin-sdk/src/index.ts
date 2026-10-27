@@ -418,6 +418,36 @@ export interface ExternalCredential {
 }
 
 /**
+ * ADR-0040: the run context a connection driver may read while materialising a
+ * sidecar credential, so ONE connection serves many tenants/credentials.
+ * Structural mirror of `@ragdoll/connection-sdk`'s
+ * `CredentialMaterializationContext` (re-declared here so plugin-sdk stays
+ * dependency-light). Resolved in core; nothing here crosses the wire.
+ */
+export interface CredentialMaterializationContext {
+  tenantId: string;
+  environment: string;
+  executionId: string;
+  nodeId: string;
+  requestId?: string;
+  config: Record<string, unknown>;
+  inputs: Record<string, unknown>;
+  /** Set ONLY on the refresh callback — the driver's persisted selectors. */
+  refreshContext?: Record<string, unknown>;
+}
+
+/**
+ * ADR-0040: the driver-hook return — an {@link ExternalCredential} (shipped to
+ * the sidecar) plus a core-only `refreshContext` core persists on the grant and
+ * replays on refresh. Structural mirror of `@ragdoll/connection-sdk`'s
+ * `MaterializedExternalCredential`. `refreshContext` is stripped before the
+ * envelope is built, so it never crosses the wire.
+ */
+export interface MaterializedExternalCredential extends ExternalCredential {
+  refreshContext?: Record<string, unknown>;
+}
+
+/**
  * ADR-0039: what an external (sidecar) node receives in place of the live
  * `ResolvedExternalConnection` — a fully serialisable envelope. The runtime
  * builds this only for external plugins (the in-process path keeps using the

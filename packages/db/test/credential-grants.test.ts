@@ -40,6 +40,20 @@ test("getByToken on unknown token returns undefined", async () => {
   assert.equal(await repo.getByToken("nope"), undefined);
 });
 
+test("ADR-0040: materializationContext round-trips and is deep-copied", async () => {
+  const repo = new InMemoryConnectionCredentialGrantRepository();
+  const row = grant({ materializationContext: { tenantRef: "acme", credId: "cred-7" } });
+  await repo.create(row);
+  const fetched = await repo.getByToken(row.token);
+  assert.deepEqual(fetched?.materializationContext, { tenantRef: "acme", credId: "cred-7" });
+  // Mutating the fetched copy does not corrupt the stored row.
+  (fetched!.materializationContext as Record<string, unknown>).tenantRef = "evil";
+  assert.equal(
+    (await repo.getByToken(row.token))?.materializationContext?.tenantRef,
+    "acme"
+  );
+});
+
 test("recordRedemption increments count + stamps lastRedeemedAt", async () => {
   const repo = new InMemoryConnectionCredentialGrantRepository();
   const row = grant();
