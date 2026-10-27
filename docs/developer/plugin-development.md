@@ -200,6 +200,31 @@ in place rather than dying on an expired token. Omit the hook and the driver
 stays in-process only; a pooled DB client should. Operators enable the refresh
 path with `RAGDOLL_CONNECTION_CALLBACK_URL` (see the operations runbook).
 
+##### Resolving the credential from the run (ADR-0040)
+
+To let **one connection** serve many tenants / environments / credentials, read
+the per-run selectors from the optional second argument — the run context (the
+node's resolved `config` or an upstream **input port**) — instead of baking them
+into a connection per combination. Return a `refreshContext` with the selectors
+(identifiers **only**, never a secret): core persists it on the grant and
+replays it on the refresh callback, which has no node config or input ports:
+
+```ts
+async materializeExternalCredential(conn, ctx) {
+  // On the first call ctx.config / ctx.inputs are populated; on the refresh
+  // callback they are empty and ctx.refreshContext carries the persisted ids.
+  const tenantRef =
+    ctx?.refreshContext?.tenantRef ??
+    ctx?.config.tenantRef ??
+    ctx?.inputs.tenantRef;
+  const token = await mintTokenFor(conn, tenantRef);
+  return { value: token.value, expiresAt: token.expiresAt, refreshContext: { tenantRef } };
+}
+```
+
+Both the argument and `refreshContext` are optional — a driver that resolves
+from the connection alone ignores them and behaves exactly as under ADR-0039.
+
 ## In-process plugin
 
 ```ts

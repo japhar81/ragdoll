@@ -502,6 +502,15 @@ export interface ConnectionCredentialGrantRow {
   redeemCount: number;
   lastRedeemedAt?: string | null;
   createdAt: string;
+  /**
+   * ADR-0040: the driver-nominated, identifiers-ONLY selectors (tenant id,
+   * environment id, credential id) needed to re-materialise this exact
+   * credential on the refresh callback, which has no node config / input ports.
+   * Persisted here and replayed into the driver hook on redeem. Never contains
+   * a secret — the credential itself is always re-fetched, never stored.
+   * `null`/absent for connection-only drivers (ADR-0039).
+   */
+  materializationContext?: Record<string, unknown> | null;
 }
 
 export interface ConnectionCredentialGrantRepository {

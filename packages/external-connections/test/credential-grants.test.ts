@@ -215,3 +215,74 @@ test("redeem: ok re-materialises a fresh credential and records the redemption",
   assert.ok(grants.rows.get("tok")!.lastRedeemedAt);
   resetConnectionRegistry();
 });
+
+test("ADR-0040: issueConnectionRefreshGrant persists the driver's refreshContext on the grant", async () => {
+  const grants = fakeGrants();
+  const opts = buildConnectionCredentialRuntimeOptions({
+    grants,
+    callbackBaseUrl: "https://api.internal"
+  });
+  const grant = await opts.issueConnectionRefreshGrant({
+    executionId: "exec-1",
+    nodeId: "n1",
+    tenantId: "tenant-a",
+    environment: "prod",
+    connectionSlug: "crm-identity",
+    refreshContext: { tenantRef: "acme", credId: "cred-7" }
+  });
+  const row = grants.rows.get(grant!.token)!;
+  assert.deepEqual(row.materializationContext, { tenantRef: "acme", credId: "cred-7" });
+});
+
+test("ADR-0040: a connection-only grant persists null materializationContext", async () => {
+  const grants = fakeGrants();
+  const opts = buildConnectionCredentialRuntimeOptions({
+    grants,
+    callbackBaseUrl: "https://api.internal"
+  });
+  const grant = await opts.issueConnectionRefreshGrant({
+    executionId: "exec-1",
+    nodeId: "n1",
+    tenantId: "t",
+    environment: "prod",
+    connectionSlug: "crm-identity"
+  });
+  assert.equal(grants.rows.get(grant!.token)!.materializationContext, null);
+});
+
+test("ADR-0040: redeem replays the persisted context into the hook and strips refreshContext from the wire credential", async () => {
+  resetConnectionRegistry();
+  let seenRefreshContext: Record<string, unknown> | undefined = "unset" as never;
+  let seenConfigEmpty = false;
+  registerConnectionDriver("identity_http", {
+    async create() { return {}; },
+    async materializeExternalCredential(_c, context) {
+      seenRefreshContext = context?.refreshContext;
+      seenConfigEmpty =
+        !!context && Object.keys(context.config).length === 0 &&
+        Object.keys(context.inputs).length === 0;
+      const tenantRef = context?.refreshContext?.tenantRef as string | undefined;
+      return {
+        value: `fresh-${tenantRef}`,
+        expiresAt: "2030-01-01T00:00:00.000Z",
+        refreshContext: context?.refreshContext // driver echoes it; must be stripped
+      };
+    }
+  });
+  const grants = fakeGrants([
+    grantRow({ materializationContext: { tenantRef: "acme", credId: "cred-7" } })
+  ]);
+  const res = await redeemConnectionCredentialGrant({ token: "tok", grants, resolver: okResolver });
+  assert.equal(res.status, "ok");
+  // Driver re-resolved from the replayed selectors.
+  assert.equal(res.credential?.value, "fresh-acme");
+  assert.deepEqual(seenRefreshContext, { tenantRef: "acme", credId: "cred-7" });
+  // The callback path carries no live node config / input ports.
+  assert.ok(seenConfigEmpty, "config + inputs are empty on the refresh path");
+  // refreshContext is core-only and must NOT be returned to the sidecar.
+  assert.ok(
+    !("refreshContext" in (res.credential ?? {})),
+    "refreshContext stripped from the wire credential"
+  );
+  resetConnectionRegistry();
+});

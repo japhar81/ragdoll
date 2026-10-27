@@ -19,7 +19,11 @@ export class PostgresConnectionCredentialGrantRepository
   implements T.ConnectionCredentialGrantRepository
 {
   constructor(pool: PoolLike) {
-    super(pool, "connection_credential_grants", "connection_credential_grant");
+    // `materializationContext` is a jsonb column (ADR-0040) — list it so the
+    // base insert JSON-serialises it; pg parses it back to an object on read.
+    super(pool, "connection_credential_grants", "connection_credential_grant", [
+      "materializationContext"
+    ]);
   }
 
   async getByToken(

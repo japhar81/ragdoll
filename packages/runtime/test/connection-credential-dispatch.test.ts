@@ -103,6 +103,9 @@ function spec(withConnection: boolean): PipelineSpec {
   const ext: PipelineSpec["spec"]["nodes"][number] = {
     id: "ext",
     plugin: { category: "datasource", id: "crawl_worker", version: "1.0.0" },
+    // ADR-0040: the per-run selector lives on the node config, not the
+    // connection — so one connection serves many tenants.
+    config: { tenantRef: "acme" },
     ...(withConnection ? { connection: { slug: "crm-identity" } } : {})
   };
   return {
@@ -132,13 +135,26 @@ const ctx = {
 test("external node with a connection: materialise + grant + envelope to sidecar, revoke on finish", async () => {
   const sidecar = await startSidecar();
   try {
-    const materializeCalls: string[] = [];
+    const materializeCalls: Array<{
+      slug: string;
+      context?: { config: Record<string, unknown>; inputs: Record<string, unknown>; nodeId?: string };
+    }> = [];
     const issueCalls: Array<Record<string, unknown>> = [];
     const revoked: string[] = [];
     const executor = makeExecutor(registryWithExternal(sidecar.baseUrl), {
-      materializeExternalCredential: async (c: { slug: string }) => {
-        materializeCalls.push(c.slug);
-        return { value: "fresh-token", expiresAt: "2030-01-01T00:00:00.000Z" };
+      materializeExternalCredential: async (
+        c: { slug: string },
+        context?: { config: Record<string, unknown>; inputs: Record<string, unknown>; nodeId?: string }
+      ) => {
+        materializeCalls.push({ slug: c.slug, context });
+        // ADR-0040: resolve the per-run credential from the run context and
+        // stash the selector for the refresh callback.
+        const tenantRef = context?.config.tenantRef as string | undefined;
+        return {
+          value: `fresh-token-${tenantRef}`,
+          expiresAt: "2030-01-01T00:00:00.000Z",
+          refreshContext: { tenantRef }
+        };
       },
       issueConnectionRefreshGrant: async (args: Record<string, unknown>) => {
         issueCalls.push(args);
@@ -151,20 +167,26 @@ test("external node with a connection: materialise + grant + envelope to sidecar
 
     await executor.execute({ spec: spec(true), context: ctx, input: {} });
 
-    // The sidecar received the full envelope.
+    // The sidecar received the full envelope — credential resolved from the run
+    // context, and crucially WITHOUT the core-only refreshContext.
     assert.deepEqual(sidecar.seen(), {
       slug: "crm-identity",
       kind: "identity_http",
       options: { region: "eu" },
-      credential: { value: "fresh-token", expiresAt: "2030-01-01T00:00:00.000Z" },
+      credential: { value: "fresh-token-acme", expiresAt: "2030-01-01T00:00:00.000Z" },
       refresh: { url: "https://api.internal/refresh", token: "grant-xyz", expiresAt: "2030-01-01T00:00:00.000Z" }
     });
-    // The hooks were driven with the right identity.
-    assert.deepEqual(materializeCalls, ["crm-identity"]);
+    // The hook was driven with the right identity AND the node's run context.
+    assert.equal(materializeCalls.length, 1);
+    assert.equal(materializeCalls[0].slug, "crm-identity");
+    assert.equal(materializeCalls[0].context?.config.tenantRef, "acme");
+    assert.equal(materializeCalls[0].context?.nodeId, "ext");
+    // The issuer received the driver's refreshContext to persist on the grant.
     assert.equal(issueCalls.length, 1);
     assert.equal(issueCalls[0].executionId, "exec-9");
     assert.equal(issueCalls[0].nodeId, "ext");
     assert.equal(issueCalls[0].connectionSlug, "crm-identity");
+    assert.deepEqual(issueCalls[0].refreshContext, { tenantRef: "acme" });
     // Grants revoked when the run finished.
     assert.deepEqual(revoked, ["exec-9"]);
   } finally {
