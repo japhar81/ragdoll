@@ -48,6 +48,7 @@ import {
   loadRegistries,
   DbPluginSourceStore,
   PLUGIN_REFRESH_EVENT_ACTION,
+  sidecarTargets,
   type PluginRegistryHolder
 } from "../../../packages/plugin-loader/src/index.ts";
 import {
@@ -284,6 +285,25 @@ async function buildDeps(): Promise<BuiltDeps> {
     logger.info("worker plugin registry hot-reload armed", {
       transport: redisUrl ? "redis" : "in-process (single-process only)"
     });
+  }
+
+  // Fail LOUD when the sidecar base URL is missing. `PYTHON_PLUGIN_URL` is the
+  // master gate for EVERY external/sidecar plugin: with it unset,
+  // `sidecarTargets()` is empty, so `registerExternalPlugins` and
+  // `registerSidecarGitPlugins` both no-op and the worker registers ZERO
+  // external plugins — while the API, which has the env, registers them fine.
+  // The only symptom today is a late, opaque "plugin <id> is not registered"
+  // at validation time, on the worker ONLY, with nothing in the boot log to
+  // explain it. Surface it at startup so the misconfiguration is obvious in the
+  // worker's own log instead of a per-run mystery.
+  if (sidecarTargets().length === 0) {
+    logger.warn(
+      "worker has no PYTHON_PLUGIN_URL — external/sidecar plugins will NOT be " +
+        "registered here. Pipelines using a sidecar plugin (web crawlers, " +
+        "cartography, cloudquery) will fail validation with \"plugin <id> is " +
+        "not registered\" on the worker even when they run on the API. Set " +
+        "PYTHON_PLUGIN_URL to the sidecar base URL (e.g. http://python-plugins:8000)."
+    );
   }
 
   return {

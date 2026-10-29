@@ -17,6 +17,7 @@ single `final` chunk for clients that call ExecuteServerStream.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any, Callable, Dict, List, Optional
 
@@ -103,6 +104,30 @@ def _proto_to_pydantic(req: ProtoExecuteRequest) -> ExecuteRequest:
     )
 
 
+async def _run_handler(
+    handler: Callable[[ExecuteRequest], Dict[str, Any]],
+    req: ExecuteRequest,
+) -> Dict[str, Any]:
+    """Run a plugin handler OFF the event loop.
+
+    Every plugin handler is a *blocking, synchronous* call — cartography /
+    cloudquery shell out via ``subprocess.run``; scrapy drives a crawl in a
+    child process and waits; crawl4ai runs its coroutine on a fresh loop in a
+    worker thread and blocks on the result; rerank runs CPU-bound model
+    inference. Calling one directly from this ``async`` path would pin
+    Hypercorn's single event loop for the whole crawl, so ``/healthz`` (served
+    by that same loop, app/main.py) could not answer and the liveness probe
+    would restart the container mid-crawl.
+
+    ``asyncio.to_thread`` dispatches the blocking handler to a worker thread and
+    awaits it, leaving the event loop free to keep answering health checks (and
+    to service other concurrent Execute calls) while a crawl runs. The handler's
+    own exceptions propagate out of the await unchanged, so the caller's
+    error-mapping still sees them.
+    """
+    return await asyncio.to_thread(handler, req)
+
+
 def _result_to_proto(result: Dict[str, Any]) -> ProtoExecuteResponse:
     """Wrap a plugin's dict result into a proto ExecuteResponse."""
     response = ProtoExecuteResponse(
@@ -173,7 +198,10 @@ def build_connect_app(
             raise ConnectError(Code.UNIMPLEMENTED, f"unknown plugin {req.plugin}")
         pydantic_req = _proto_to_pydantic(req)
         try:
-            result = handler(pydantic_req)
+            # Off the event loop — the handler blocks (subprocess / crawl / model
+            # inference) and must not freeze Hypercorn's loop, or /healthz times
+            # out and the liveness probe restarts us mid-crawl. See _run_handler.
+            result = await _run_handler(handler, pydantic_req)
         except ValueError as exc:
             # Maps SSRFError (a ValueError subclass) + bad-config errors to
             # a client error rather than an internal one.

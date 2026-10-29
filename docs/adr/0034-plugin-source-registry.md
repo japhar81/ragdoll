@@ -653,6 +653,28 @@ worker reload (in-place holder swap + non-destructive on failure). Boot logs:
 (`PLUGIN_REFRESH_EVENT_ACTION`), the refresh endpoint, `server.ts`, and
 `apps/worker/src/plugin-registry-init.ts` (`reloadWorkerPluginRegistry`).
 
+## Amendment — worker fails loud without `PYTHON_PLUGIN_URL` (issues-log #10)
+
+With the worker now symmetric to the API (issues-log #9), a reported "plugin
+`<id>` is not registered **on the worker only**" traces not to code but to the
+one env gate the worker shares with the API: **`PYTHON_PLUGIN_URL`**. It is the
+master switch for every external/sidecar plugin — `sidecarTargets()` returns
+`[]` when it is unset, so `registerExternalPlugins` and
+`registerSidecarGitPlugins` both no-op (`packages/plugin-loader/src/index.ts`).
+A worker missing it (an overlay that strips it, a hand-rolled deploy) registers
+**zero** externals while an API that has it works, and the only symptom is a
+late, opaque `missing_plugin_ref` at validation time with nothing in the boot
+log.
+
+Fix: the worker now **warns loudly at startup** when `sidecarTargets()` is empty
+(`apps/worker/src/main.ts`) — naming the env var and the exact failure it causes
+— so the misconfiguration is visible in the worker's own log instead of a
+per-run mystery. Separately, both docker-compose workers now also receive
+`RAGDOLL_SIDECAR_ADMIN_TOKEN` (previously API-only), so a *token-gated* sidecar
+accepts each worker's own `plugin_sources` push, not just the API's. No
+behaviour change when the env is present; this is purely diagnostics + config
+symmetry.
+
 ## References
 
 - `packages/plugin-loader/src/sources.ts` — source store + types.

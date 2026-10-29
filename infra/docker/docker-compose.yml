@@ -440,6 +440,11 @@ services:
       # overlay, or `PYTHON_PLUGIN_URL=http://python-plugins:8000,http://python-plugins-2:8000`.
       PYTHON_PLUGIN_URL: ${PYTHON_PLUGIN_URL:-http://python-plugins:8000}
       PYTHON_PLUGIN_TIMEOUT_MS: "300000"
+      # PLUGIN-ARCH-2: must match the sidecar's token so THIS worker's own
+      # plugin_sources push (POST /admin/reload) is accepted — not just the
+      # API's. Without it a token-gated sidecar rejects the worker's push,
+      # leaving git-sourced sidecar plugins unregistered on the worker.
+      RAGDOLL_SIDECAR_ADMIN_TOKEN: ${RAGDOLL_SIDECAR_ADMIN_TOKEN:-}
     volumes:
       - "${CODEBASE_PATH:-../..}:/workspace:ro"
     depends_on:
@@ -500,6 +505,11 @@ services:
       # overlay, or `PYTHON_PLUGIN_URL=http://python-plugins:8000,http://python-plugins-2:8000`.
       PYTHON_PLUGIN_URL: ${PYTHON_PLUGIN_URL:-http://python-plugins:8000}
       PYTHON_PLUGIN_TIMEOUT_MS: "300000"
+      # PLUGIN-ARCH-2: must match the sidecar's token so THIS worker's own
+      # plugin_sources push (POST /admin/reload) is accepted — not just the
+      # API's. Without it a token-gated sidecar rejects the worker's push,
+      # leaving git-sourced sidecar plugins unregistered on the worker.
+      RAGDOLL_SIDECAR_ADMIN_TOKEN: ${RAGDOLL_SIDECAR_ADMIN_TOKEN:-}
     volumes:
       - "${CODEBASE_PATH:-../..}:/workspace:ro"
     depends_on:
