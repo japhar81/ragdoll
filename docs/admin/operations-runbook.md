@@ -178,6 +178,34 @@ reaches the serving API process and workers still need a restart. The reload is
 non-destructive — a worker whose rebuild fails keeps running its current
 registry (`worker plugin registry reload failed; keeping the current registry`).
 
+Variant — **sidecar (Python) plugins only, on the worker only**: if a web
+crawler / cartography / cloudquery run fails `plugin <id> is not registered` on
+the worker while the same plugin runs fine on the API, the worker is almost
+certainly missing **`PYTHON_PLUGIN_URL`**. That env is the master gate for every
+external/sidecar plugin — unset, the worker registers none of them, while an API
+that has it works. The worker now **warns at boot** (`worker has no
+PYTHON_PLUGIN_URL — external/sidecar plugins will NOT be registered here`): grep
+the worker log for it. Fix by setting `PYTHON_PLUGIN_URL` (e.g.
+`http://python-plugins:8000`) on the worker — stock docker-compose and Helm
+already do, so suspect a custom overlay that drops it. If the sidecar's
+`/admin/reload` is token-gated, also set `RAGDOLL_SIDECAR_ADMIN_TOKEN` on the
+worker so its own `plugin_sources` push is accepted.
+
+## python-plugins container restarts during a crawl (liveness timeout)
+
+Symptom — the `python-plugins` container keeps restarting, and `/healthz` times
+out whenever a crawl is running. Cause — the sidecar's Connect `Execute` handler
+is `async`, but every plugin handler is a **blocking** call (a child-process
+crawl, a `subprocess.run`, CPU-bound inference). Running one directly on
+Hypercorn's single event loop froze it for the whole crawl, so `/healthz` (served
+by that same loop) could not answer and the liveness probe restarted the pod —
+killing the in-flight crawl. Fix (shipped): the bridge dispatches each handler
+off the loop via `asyncio.to_thread` (`services/python-plugins/app/connect_bridge.py`,
+`_run_handler`), so the loop stays free to answer health checks and service other
+Execute calls while a crawl runs. No probe tuning is required; if you still see
+restarts, confirm the sidecar image postdates this fix and check for an
+out-of-memory kill (a large crawl) rather than a liveness timeout.
+
 ## Pipeline memory + batching at scale (ADR-0038)
 
 A pipeline passes a whole document collection between steps in memory, so peak
