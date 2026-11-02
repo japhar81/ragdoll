@@ -675,6 +675,57 @@ accepts each worker's own `plugin_sources` push, not just the API's. No
 behaviour change when the env is present; this is purely diagnostics + config
 symmetry.
 
+## Amendment — worker/API retry the sidecar push until the sidecar is ready (issues-log #11)
+
+The symmetric worker push (issues-log #9) and the fail-loud guard (issues-log
+#10) still assumed the sidecar was **listening** by the time a worker/API booted
+and pushed its `host: "sidecar"` rows. It often isn't: Kubernetes starts a pod's
+containers concurrently with no ordering, and a worker's only initContainer
+waits for db-init, not for its co-located python-plugins sidecar. (docker-compose
+gates the workers on `service_healthy`, but the API only on `service_started`,
+and a hand-rolled overlay may gate neither.)
+
+When the worker won the race, `pushSidecarSources` did a **single** best-effort
+`POST /admin/reload`, hit connection-refused, and **swallowed it silently** (the
+worker only logged on `pushed: true`). It then queried `/manifests`, got
+`{"plugins":[]}` — nothing had been pushed — and registered **zero** git-loaded
+sidecar plugins. The hardcoded built-in sidecar manifests (`crawl4ai`, `scrapy`,
+`cartography`, `cloudquery`) were still present, so `/healthz` looked healthy
+with 5 plugins, but any git-loaded plugin (a custom web crawler, an extractor)
+was absent and every run that used one dead-lettered with "plugin `<id>` is not
+registered" until an operator hit *Refresh Plugin Sources* (which re-pushes from
+the API) or the worker was restarted. The Plugin Sources row showed the sidecar
+source `loaded: 0` with no boot log explaining why — the silence was the hardest
+part to diagnose.
+
+Fix — two parts, both in `packages/plugin-loader` + the two boot sites:
+
+1. **Readiness retry.** `pushSidecarSources(store, { waitForReady })` now keeps
+   re-pushing the targets that are still **unreachable** (connection refused —
+   the sidecar isn't up yet) until every target answers or a budget is spent
+   (`RAGDOLL_SIDECAR_PUSH_READY_TIMEOUT_MS`, default 60s;
+   `RAGDOLL_SIDECAR_PUSH_RETRY_INTERVAL_MS`, default 3s). A target that **answers**
+   — even with a load error — is settled and never retried: `/admin/reload`
+   clones + pip-installs, so a genuine load failure won't self-heal and must not
+   be hammered. The worker and API boot paths pass `waitForReady`; the
+   operator-driven refresh does **not** (the sidecar is already up, and a
+   minute-long retry would just block the HTTP request — it stays a single shot).
+   This removes the need for an initContainer that orders the sidecar before the
+   worker: a sidecar that comes up seconds late now self-heals.
+2. **Fail loud when the push never lands.** If the readiness window is exhausted
+   and the push still didn't land, the worker now logs
+   `worker sidecar_sources_push_failed` naming the consequence (git-loaded
+   sidecar plugins won't be registered here; their runs will dead-letter) and
+   the recovery (sidecar reachability + a refresh or restart) — instead of
+   nothing. The `no PYTHON_PLUGIN_URL` case is left to the issues-log #10 guard
+   so the two don't double-warn.
+
+No behaviour change when the sidecar is already up before boot: the first push
+succeeds and the retry loop exits immediately. See `pushSidecarSources`
+(`packages/plugin-loader/src/index.ts`), `initWorkerPluginRegistry`
+(`apps/worker/src/plugin-registry-init.ts`), and the API boot push
+(`apps/api/src/server.ts`).
+
 ## References
 
 - `packages/plugin-loader/src/sources.ts` — source store + types.

@@ -191,6 +191,24 @@ already do, so suspect a custom overlay that drops it. If the sidecar's
 `/admin/reload` is token-gated, also set `RAGDOLL_SIDECAR_ADMIN_TOKEN` on the
 worker so its own `plugin_sources` push is accepted.
 
+Variant — **`PYTHON_PLUGIN_URL` is set, but git-loaded sidecar plugins are
+still missing right after a deploy** (a startup race, issues-log #11): the
+built-in sidecar plugins work and `/healthz` lists its 5 plugins, but a
+git-loaded one (a custom web crawler / extractor) fails `plugin <id> is not
+registered`, the Plugin Sources row shows the sidecar source `loaded: 0`, and
+`GET <sidecar>/manifests` returns `{"plugins":[]}`. This means the worker/API
+booted and pushed the `host: "sidecar"` rows **before the sidecar was
+listening**; the push was swallowed and nothing got git-loaded. The boot push
+now **waits for the sidecar and retries** (`waiting for sidecar to accept plugin
+reload` in the log), so this self-heals within
+`RAGDOLL_SIDECAR_PUSH_READY_TIMEOUT_MS` (default 60s) — no initContainer
+ordering hack needed. If it persists past that window, grep the worker log for
+`worker sidecar_sources_push_failed`: it names why (sidecar still unreachable, or
+`/admin/reload` returned an error). Recover immediately by hitting **Refresh
+Plugin Sources** (the API re-pushes, then broadcasts so workers re-discover) or
+restarting the worker; if the sidecar is genuinely slow to start, widen
+`RAGDOLL_SIDECAR_PUSH_READY_TIMEOUT_MS`.
+
 ## python-plugins container restarts during a crawl (liveness timeout)
 
 Symptom — the `python-plugins` container keeps restarting, and `/healthz` times

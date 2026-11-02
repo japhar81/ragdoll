@@ -484,9 +484,55 @@ export interface SidecarPushResult {
 interface SidecarPushOne {
   url: string;
   ok: boolean;
+  /** Did the target ANSWER the HTTP call at all? `false` = the sidecar wasn't
+   *  listening (connection refused / aborted) — the boot-time startup race we
+   *  retry under `waitForReady`. `true` = it responded, even with a load error
+   *  (NOT retried: `/admin/reload` git-clones + pip-installs, so a genuine
+   *  failure won't self-heal and must not be hammered). */
+  reachable: boolean;
   reason?: string;
   report?: SidecarPushResult["report"];
 }
+
+/** Tuning for {@link pushSidecarSources}. Defaults are env-overridable so the
+ *  readiness budget can be widened on a slow-booting sidecar without a code
+ *  change. */
+export interface SidecarPushOptions {
+  /**
+   * Keep re-pushing to targets that are still UNREACHABLE (the sidecar
+   * container isn't listening yet — the boot-time startup race, issues-log #11)
+   * until every target answers or the readiness budget is spent. Boot callers
+   * (worker / API startup) set this so a sidecar that comes up a few seconds
+   * after them still receives the git sources — WITHOUT an orchestration
+   * ordering hack (an initContainer that waits on the sidecar). The
+   * operator-driven "Refresh Plugin Sources" leaves it OFF: the sidecar is
+   * already up, and a minute-long retry would just block the HTTP request.
+   */
+  waitForReady?: boolean;
+  /** Total time budget for the readiness retry. Default:
+   *  `RAGDOLL_SIDECAR_PUSH_READY_TIMEOUT_MS` (60000ms when unset). Ignored
+   *  unless `waitForReady`. */
+  readyTimeoutMs?: number;
+  /** Delay between readiness attempts. Default:
+   *  `RAGDOLL_SIDECAR_PUSH_RETRY_INTERVAL_MS` (3000ms when unset), floored at
+   *  250ms. */
+  retryIntervalMs?: number;
+  /** Fired before each readiness wait, for progress logging. */
+  onRetry?: (info: {
+    attempt: number;
+    unreachable: string[];
+    waitMs: number;
+    remainingMs: number;
+  }) => void;
+  /** Injectable clock — tests pass a no-op to retry without real delay. */
+  sleep?: (ms: number) => Promise<void>;
+  /** Injectable fetch — tests drive the reachable/unreachable sequence. */
+  fetchImpl?: typeof fetch;
+}
+
+const DEFAULT_SIDECAR_PUSH_READY_TIMEOUT_MS = 60_000;
+const DEFAULT_SIDECAR_PUSH_RETRY_INTERVAL_MS = 3_000;
+const MIN_SIDECAR_PUSH_RETRY_INTERVAL_MS = 250;
 
 /**
  * PLUGIN-ARCH-2: push the `host: "sidecar"` plugin sources to the
@@ -504,9 +550,16 @@ interface SidecarPushOne {
  * unreachable sidecar → `{ pushed: false, reason }` (never throws).
  * When `RAGDOLL_SIDECAR_ADMIN_TOKEN` is set it's sent as the
  * `x-ragdoll-admin-token` header (the sidecar's `/admin/reload` gate).
+ *
+ * With `options.waitForReady` (boot callers), a sidecar that isn't listening
+ * yet is retried until it comes up or the readiness budget is spent, so a
+ * worker/API that boots ahead of the sidecar still lands the push instead of
+ * silently serving zero git-loaded sidecar plugins. See {@link
+ * SidecarPushOptions}. (issues-log #11.)
  */
 export async function pushSidecarSources(
-  store: PluginSourceStore
+  store: PluginSourceStore,
+  options: SidecarPushOptions = {}
 ): Promise<SidecarPushResult> {
   const targets = sidecarTargets();
   if (!targets.length) return { pushed: false, reason: "no PYTHON_PLUGIN_URL" };
@@ -528,13 +581,57 @@ export async function pushSidecarSources(
   const token = process.env.RAGDOLL_SIDECAR_ADMIN_TOKEN;
   if (token) headers["x-ragdoll-admin-token"] = token;
 
+  const fetchImpl = options.fetchImpl ?? fetch;
+  const sleep =
+    options.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  const readyTimeoutMs = options.waitForReady
+    ? options.readyTimeoutMs ??
+      Number(
+        process.env.RAGDOLL_SIDECAR_PUSH_READY_TIMEOUT_MS ??
+          DEFAULT_SIDECAR_PUSH_READY_TIMEOUT_MS
+      )
+    : 0;
+  const retryIntervalMs = Math.max(
+    MIN_SIDECAR_PUSH_RETRY_INTERVAL_MS,
+    options.retryIntervalMs ??
+      Number(
+        process.env.RAGDOLL_SIDECAR_PUSH_RETRY_INTERVAL_MS ??
+          DEFAULT_SIDECAR_PUSH_RETRY_INTERVAL_MS
+      )
+  );
+
   // Fan out to EVERY target so all sidecar instances load the same set —
   // a reload that reached only one replica (behind a load-balancing Service)
   // left the rest stale. (issues-log #8.) Concurrent: one slow/unreachable
   // target doesn't serialise the others.
-  const outcomes = await Promise.all(
-    targets.map((url) => pushSidecarOne(url, sources, headers))
-  );
+  //
+  // Under `waitForReady` (boot), keep retrying ONLY the still-UNREACHABLE
+  // targets (connection refused — the sidecar container isn't up yet) until
+  // every target answers or the readiness budget is spent. A target that
+  // ANSWERS — even with a load error — is settled and never retried, because
+  // `/admin/reload` clones + pip-installs and a genuine failure won't fix
+  // itself on a retry. Without `waitForReady` the budget is 0 → a single shot
+  // (unchanged behaviour for the operator-driven refresh). (issues-log #11.)
+  const deadline = Date.now() + Math.max(0, readyTimeoutMs);
+  const byUrl = new Map<string, SidecarPushOne>();
+  let attempt = 0;
+  for (;;) {
+    attempt += 1;
+    const pending = targets.filter((url) => byUrl.get(url)?.reachable !== true);
+    const results = await Promise.all(
+      pending.map((url) => pushSidecarOne(url, sources, headers, fetchImpl))
+    );
+    for (const r of results) byUrl.set(r.url, r);
+    const unreachable = targets.filter((url) => byUrl.get(url)!.reachable !== true);
+    if (unreachable.length === 0) break;
+    const remainingMs = deadline - Date.now();
+    if (remainingMs <= 0) break;
+    const waitMs = Math.min(retryIntervalMs, remainingMs);
+    options.onRetry?.({ attempt, unreachable, waitMs, remainingMs });
+    await sleep(waitMs);
+  }
+  // Preserve target order (stable `targets` list) for the summaries below.
+  const outcomes = targets.map((url) => byUrl.get(url)!);
 
   const ok = outcomes.filter((o) => o.ok);
   const targetSummary = outcomes.map((o) => ({
@@ -601,30 +698,40 @@ export async function pushSidecarSources(
 async function pushSidecarOne(
   url: string,
   sources: Array<Record<string, unknown>>,
-  headers: Record<string, string>
+  headers: Record<string, string>,
+  fetchImpl: typeof fetch = fetch
 ): Promise<SidecarPushOne> {
   try {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 60_000);
     try {
-      const res = await fetch(`${url}/admin/reload`, {
+      const res = await fetchImpl(`${url}/admin/reload`, {
         method: "POST",
         headers,
         body: JSON.stringify({ sources }),
         signal: controller.signal
       });
+      // It answered — reachable, even on a non-2xx load error (not retried).
       if (!res.ok) {
-        return { url, ok: false, reason: `/admin/reload returned ${res.status}` };
+        return {
+          url,
+          ok: false,
+          reachable: true,
+          reason: `/admin/reload returned ${res.status}`
+        };
       }
       const report = (await res.json()) as SidecarPushResult["report"];
-      return { url, ok: true, report };
+      return { url, ok: true, reachable: true, report };
     } finally {
       clearTimeout(timer);
     }
   } catch (e) {
+    // Connection refused / aborted — the sidecar isn't listening yet. Retried
+    // under `waitForReady` (the boot startup race).
     return {
       url,
       ok: false,
+      reachable: false,
       reason: `unreachable: ${e instanceof Error ? e.message : String(e)}`
     };
   }

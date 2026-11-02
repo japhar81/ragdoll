@@ -254,6 +254,12 @@ migrations automatically when `DATABASE_URL` is set.
   the external `crawl4ai_crawler` / `scrapy_spider` plugins (no-op when unset).
 - `PYTHON_PLUGIN_TIMEOUT_MS` — external plugin execute/health timeout
   (default `300000`; crawls are slow).
+- `RAGDOLL_SIDECAR_PUSH_READY_TIMEOUT_MS` / `RAGDOLL_SIDECAR_PUSH_RETRY_INTERVAL_MS`
+  — at boot the worker/API push the `host: "sidecar"` plugin sources to the
+  sidecar's `/admin/reload`; if the sidecar isn't listening yet (startup race,
+  issues-log #11) they retry for up to the first (default `60000`) every second
+  (default `3000`) before giving up. Widen the timeout for a slow-starting
+  sidecar; no effect once it's already up.
 - **Pluggable providers (ADR 0035)** — `RAGDOLL_IDENTITY_PROVIDER` /
   `RAGDOLL_AUTHZ_PROVIDER`: module specifiers for a custom identity (auth/SSO)
   or authorization (PolicyEngine) provider, imported at boot (unset → built-in
