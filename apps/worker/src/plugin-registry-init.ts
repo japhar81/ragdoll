@@ -86,12 +86,41 @@ export async function initWorkerPluginRegistry(
   // Sidecar push + discovery is best-effort and INDEPENDENT of the holder we
   // just built — a sidecar that's down (or a DB blip in the push) must not
   // take the worker-host plugins down with it.
+  //
+  // `waitForReady`: the worker often boots BEFORE its sidecar is listening
+  // (k8s starts pod containers concurrently with no ordering; compose gates on
+  // health but a custom overlay may not). Without a retry the one boot push
+  // hit a connection-refused, was swallowed, and the worker served ZERO
+  // git-loaded sidecar plugins (web crawlers, etc.) until an API refresh or a
+  // restart — every such run dead-lettering "plugin <id> is not registered".
+  // Now we wait for the sidecar to come up and retry the push. (issues-log #11.)
   try {
-    const pushed = await push(deps.store);
+    const pushed = await push(deps.store, {
+      waitForReady: true,
+      onRetry: ({ attempt, unreachable, remainingMs }) =>
+        deps.logger.info("worker waiting for sidecar to accept plugin reload", {
+          attempt,
+          unreachable,
+          remainingMs
+        })
+    });
     if (pushed.pushed) {
       deps.logger.info("worker sidecar_sources_pushed", {
         sources: pushed.report?.sources?.length ?? 0
       });
+    } else if (pushed.reason !== "no PYTHON_PLUGIN_URL") {
+      // The URL is set but the push never landed within the readiness window
+      // (sidecar still down, or the reload errored). Say so LOUDLY and name the
+      // consequence + the recovery — silence here is exactly what made this
+      // hard to diagnose in the field.
+      deps.logger.warn(
+        "worker sidecar_sources_push_failed — git-loaded sidecar plugins " +
+          "(web crawlers, custom Python plugins) will NOT be registered on " +
+          "this worker until the sidecar is reachable and a plugin-source " +
+          "refresh (or a worker restart) re-pushes. Runs using them will " +
+          'dead-letter with "plugin <id> is not registered".',
+        { reason: pushed.reason, targets: pushed.targets }
+      );
     }
     await register(holder);
   } catch (e) {

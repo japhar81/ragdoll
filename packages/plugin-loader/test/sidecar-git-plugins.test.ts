@@ -314,6 +314,171 @@ test("pushSidecarSources: sidecar unreachable → not pushed, reason surfaced, n
   });
 });
 
+// ---------------------------------------------------------------------------
+// pushSidecarSources — waitForReady readiness retry (issues-log #11).
+// The worker/API often boot BEFORE the sidecar is listening (k8s starts pod
+// containers concurrently). A single best-effort push then hit connection-
+// refused, was swallowed, and left ZERO git-loaded sidecar plugins registered
+// until a restart. `waitForReady` retries the UNREACHABLE targets until the
+// sidecar comes up — but never retries a target that ANSWERED (a load error
+// won't self-heal and /admin/reload is expensive).
+// ---------------------------------------------------------------------------
+
+/** A fake `fetch` that walks a scripted sequence per call. Each step is
+ *  "refused" (throws, as a not-yet-listening sidecar does), "ok" (200 + a
+ *  loaded report), or an HTTP status number (reachable but a load error). The
+ *  LAST step repeats for any further calls. */
+function scriptedFetch(steps: Array<"refused" | "ok" | number>): {
+  fetchImpl: typeof fetch;
+  calls: () => number;
+} {
+  let i = 0;
+  const fetchImpl = (async () => {
+    const step = steps[Math.min(i, steps.length - 1)];
+    i += 1;
+    if (step === "refused") throw new Error("connect ECONNREFUSED 127.0.0.1:8000");
+    if (step === "ok") {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          sources: [
+            {
+              id: "py_a",
+              status: "loaded",
+              pluginCount: 1,
+              commitSha: "f".repeat(40),
+              error: null,
+              errorStage: null,
+              pluginIds: ["py_a_plug"]
+            }
+          ]
+        })
+      } as unknown as Response;
+    }
+    return { ok: false, status: step, json: async () => ({}) } as unknown as Response;
+  }) as unknown as typeof fetch;
+  return { fetchImpl, calls: () => i };
+}
+
+const noSleep = async () => {};
+
+test("pushSidecarSources: waitForReady retries an UNREACHABLE target until it comes up, then pushes", async () => {
+  const store = new InMemoryPluginSourceStore([sidecarRow("py_a")]);
+  const { fetchImpl, calls } = scriptedFetch(["refused", "refused", "ok"]);
+  const retries: number[] = [];
+  await withEnv({ PYTHON_PLUGIN_URL: "http://pp:8000" }, async () => {
+    const result = await pushSidecarSources(store, {
+      waitForReady: true,
+      sleep: noSleep,
+      fetchImpl,
+      onRetry: ({ attempt }) => retries.push(attempt)
+    });
+    assert.equal(result.pushed, true);
+    // Two refusals + the successful third attempt.
+    assert.equal(calls(), 3);
+    assert.deepEqual(retries, [1, 2]);
+    // The eventual success is marked on the store row.
+    const row = await store.get!("py_a");
+    assert.equal(row?.lastLoadOk, true);
+  });
+});
+
+test("pushSidecarSources: waitForReady gives up once the readiness budget is spent (sidecar never comes up)", async () => {
+  const store = new InMemoryPluginSourceStore([sidecarRow("py_a")]);
+  const { fetchImpl, calls } = scriptedFetch(["refused"]); // never answers
+  const retries: number[] = [];
+  await withEnv({ PYTHON_PLUGIN_URL: "http://pp:8000" }, async () => {
+    const result = await pushSidecarSources(store, {
+      waitForReady: true,
+      readyTimeoutMs: 120, // short real budget; one real wait then give up
+      fetchImpl,
+      onRetry: ({ attempt }) => retries.push(attempt)
+    });
+    assert.equal(result.pushed, false);
+    assert.match(result.reason ?? "", /unreachable/);
+    // It retried before giving up (not a single shot) and bounded itself.
+    assert.ok(retries.length >= 1, "should have waited for the sidecar at least once");
+    assert.ok(calls() >= 2, "should have re-attempted the push");
+  });
+});
+
+test("pushSidecarSources: a REACHABLE load error is NOT retried (sidecar is up; /admin/reload won't self-heal)", async () => {
+  const store = new InMemoryPluginSourceStore([sidecarRow("py_a")]);
+  const { fetchImpl, calls } = scriptedFetch([503]); // answers 503 every time
+  const retries: number[] = [];
+  await withEnv({ PYTHON_PLUGIN_URL: "http://pp:8000" }, async () => {
+    const result = await pushSidecarSources(store, {
+      waitForReady: true,
+      readyTimeoutMs: 60_000,
+      sleep: noSleep,
+      fetchImpl,
+      onRetry: ({ attempt }) => retries.push(attempt)
+    });
+    assert.equal(result.pushed, false);
+    assert.match(result.reason ?? "", /returned 503/);
+    // Settled on the first answer — no readiness retry despite a huge budget.
+    assert.equal(calls(), 1);
+    assert.deepEqual(retries, []);
+  });
+});
+
+test("pushSidecarSources: WITHOUT waitForReady an unreachable target is a single shot (operator refresh path)", async () => {
+  const store = new InMemoryPluginSourceStore([sidecarRow("py_a")]);
+  const { fetchImpl, calls } = scriptedFetch(["refused"]);
+  await withEnv({ PYTHON_PLUGIN_URL: "http://pp:8000" }, async () => {
+    const result = await pushSidecarSources(store, { fetchImpl });
+    assert.equal(result.pushed, false);
+    assert.match(result.reason ?? "", /unreachable/);
+    assert.equal(calls(), 1); // no retry — refresh must not block on a down sidecar
+  });
+});
+
+test("pushSidecarSources: waitForReady retries ONLY the down target in a fan-out, leaving the healthy one settled", async () => {
+  const store = new InMemoryPluginSourceStore([sidecarRow("py_a")]);
+  // Target A answers ok immediately; target B refuses once then comes up.
+  let aCalls = 0;
+  let bCalls = 0;
+  const okReport = {
+    ok: true,
+    status: 200,
+    json: async () => ({
+      sources: [
+        {
+          id: "py_a",
+          status: "loaded",
+          pluginCount: 1,
+          commitSha: "f".repeat(40),
+          error: null,
+          errorStage: null,
+          pluginIds: ["py_a_plug"]
+        }
+      ]
+    })
+  } as unknown as Response;
+  const fetchImpl = (async (url: string) => {
+    if (String(url).startsWith("http://a:8000")) {
+      aCalls += 1;
+      return okReport;
+    }
+    bCalls += 1;
+    if (bCalls === 1) throw new Error("connect ECONNREFUSED");
+    return okReport;
+  }) as unknown as typeof fetch;
+  await withEnv({ PYTHON_PLUGIN_URL: "http://a:8000, http://b:8000" }, async () => {
+    const result = await pushSidecarSources(store, {
+      waitForReady: true,
+      sleep: noSleep,
+      fetchImpl
+    });
+    assert.equal(result.pushed, true);
+    // A was hit exactly once (settled on first answer); B was retried.
+    assert.equal(aCalls, 1);
+    assert.equal(bCalls, 2);
+    assert.ok(result.targets?.every((t) => t.ok));
+  });
+});
+
 test("sidecarTargets: parses a single URL or a comma/space list, strips slashes + dedupes", () => {
   assert.deepEqual(sidecarTargets({ PYTHON_PLUGIN_URL: undefined }), []);
   assert.deepEqual(sidecarTargets({ PYTHON_PLUGIN_URL: "http://pp:8000/" }), [

@@ -107,6 +107,47 @@ test("a failure of the LOAD itself propagates (caller fail-fasts, does not degra
   await assert.rejects(() => initWorkerPluginRegistry(base), /DB not reachable/);
 });
 
+test("boot passes waitForReady so a slow-booting sidecar is retried, not single-shot (issues-log #11)", async () => {
+  let gotOptions: any;
+  const { base } = deps({
+    pushSidecar: (async (_store: any, options: any) => {
+      gotOptions = options;
+      return { pushed: true, report: { sources: [] } };
+    }) as any
+  });
+  await initWorkerPluginRegistry(base);
+  assert.equal(gotOptions?.waitForReady, true);
+  assert.equal(typeof gotOptions?.onRetry, "function");
+});
+
+test("a sidecar push that never lands warns LOUDLY and names the consequence (issues-log #11)", async () => {
+  const { base, lg } = deps({
+    pushSidecar: async () => ({
+      pushed: false,
+      reason: "http://pp:8000: unreachable: ECONNREFUSED",
+      targets: [{ url: "http://pp:8000", ok: false, reason: "unreachable: ECONNREFUSED" }]
+    })
+  });
+  const holder = await initWorkerPluginRegistry(base);
+  assert.equal(holder, HOLDER); // still returns the worker-host registry
+  const warn = lg.calls.find(
+    (c) => c.level === "warn" && /sidecar_sources_push_failed/.test(c.message)
+  );
+  assert.ok(warn, "a push that didn't land must warn loudly (silence made this hard to diagnose)");
+  assert.match(String(warn!.meta?.reason), /unreachable/);
+});
+
+test("a 'no PYTHON_PLUGIN_URL' push is NOT warned here (the main() boot guard already covers it)", async () => {
+  const { base, lg } = deps({
+    pushSidecar: async () => ({ pushed: false, reason: "no PYTHON_PLUGIN_URL" })
+  });
+  await initWorkerPluginRegistry(base);
+  assert.ok(
+    !lg.calls.some((c) => /sidecar_sources_push_failed/.test(c.message)),
+    "the dedicated no-URL boot guard owns this message; don't double-warn"
+  );
+});
+
 /* -------------------------------------------------------------------------- */
 /* reloadWorkerPluginRegistry — hot-reload on a refresh broadcast              */
 /* -------------------------------------------------------------------------- */

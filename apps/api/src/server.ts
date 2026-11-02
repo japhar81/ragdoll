@@ -523,7 +523,19 @@ async function buildDeps(): Promise<{
     // sync load above already registered the hardcoded built-in sidecar
     // manifests).
     try {
-      const push = await pushSidecarSources(pluginSourceStore);
+      // waitForReady: the API can boot before the sidecar is listening (compose
+      // gates the API on `service_started`, not health), which otherwise left
+      // the builder palette missing every git-loaded sidecar plugin until a
+      // manual refresh. Retry the push until the sidecar comes up. (issues-log #11.)
+      const push = await pushSidecarSources(pluginSourceStore, {
+        waitForReady: true,
+        onRetry: ({ attempt, unreachable, remainingMs }) =>
+          logger.info("waiting for sidecar to accept plugin reload", {
+            attempt,
+            unreachable,
+            remainingMs
+          })
+      });
       if (push.pushed) {
         logger.info("sidecar_sources_pushed", {
           sources: push.report?.sources?.length ?? 0
