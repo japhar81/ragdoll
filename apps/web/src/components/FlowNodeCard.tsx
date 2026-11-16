@@ -3,6 +3,7 @@ import { Handle, Position, type NodeProps } from "reactflow";
 import type { PipelineNode } from "../lib/types.ts";
 import type { PluginInfo, PortInfo } from "../lib/api.ts";
 import { nodeKind, nodeTheme, styleKeyFor } from "../lib/graph.ts";
+import { NodeGlyph } from "./NodeGlyph.tsx";
 
 export interface RagNodeData {
   label: string;
@@ -191,12 +192,14 @@ function FlowNodeCardImpl({ data, selected }: NodeProps<RagNodeData>) {
   return (
     <div
       className={`rf-node has-ports${selected ? " selected" : ""}${sideClasses ? ` ${sideClasses}` : ""}`}
-      style={{ borderColor: theme.color, minHeight }}
+      // Category hue drives the left spine + icon chip (CSS var), not the whole
+      // border — the border is reserved for selection/state (hybrid, ADR-free).
+      style={{ "--node-accent": theme.color, minHeight } as React.CSSProperties}
     >
       {inputPorts.length > 0 && <PortHandles type="target" ports={inputPorts} position={Position.Left} />}
       {inputPorts.length > 0 && <PortLabels ports={inputPorts} side="left" />}
       <span className="rf-ico" style={{ background: theme.color }}>
-        {theme.icon}
+        <NodeGlyph name={theme.icon} />
       </span>
       <div className="rf-body">
         <div className="rf-title">

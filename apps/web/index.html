@@ -1,9 +1,30 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="dark">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>RAGdoll Console</title>
+    <!-- Set the theme before first paint so there's no flash. Default dark
+         (the paddock aesthetic); honour a persisted choice. -->
+    <script>
+      (function () {
+        try {
+          var t = localStorage.getItem("ragdoll-theme");
+          document.documentElement.setAttribute(
+            "data-theme",
+            t === "light" ? "light" : "dark"
+          );
+        } catch (e) {
+          document.documentElement.setAttribute("data-theme", "dark");
+        }
+      })();
+    </script>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500&display=swap"
+    />
   </head>
   <body>
     <div id="root"></div>

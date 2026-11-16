@@ -39,9 +39,11 @@ import {
 import {
   Grid,
   Willow,
+  WillowDark,
   type IApi,
   type IColumnConfig
 } from "@svar-ui/react-grid";
+import { useTheme } from "../lib/theme.ts";
 
 export interface SvarColumn<Row> {
   /** Field key on the row. Required — SVAR uses it for sort + filter. */
@@ -380,6 +382,8 @@ function FilterIcon() {
 export function SvarDataGrid<Row>(props: SvarDataGridProps<Row>) {
   const { rows, columns } = props;
   const rowNoun = props.rowNoun ?? "row";
+  // Mount SVAR's dark theme wrapper under the dark console theme (live).
+  const GridTheme = useTheme() === "dark" ? WillowDark : Willow;
   // Footer text logic:
   //   - if the API gave us a total AND it differs from the loaded
   //     slice (i.e. more pages exist), show "N of M …";
@@ -683,7 +687,7 @@ export function SvarDataGrid<Row>(props: SvarDataGridProps<Row>) {
         className="svar-grid-host"
         style={heightStyle ? { height: heightStyle, minHeight: 200 } : undefined}
       >
-        <Willow>
+        <GridTheme>
           {rows.length === 0 ? (
             <div className="svar-grid-empty">
               {props.emptyMessage ?? "No rows."}
@@ -697,7 +701,7 @@ export function SvarDataGrid<Row>(props: SvarDataGridProps<Row>) {
               init={onInit}
             />
           )}
-        </Willow>
+        </GridTheme>
       </div>
       {props.isLoadingMore && (
         <div className="svar-grid-loadmore" aria-live="polite">

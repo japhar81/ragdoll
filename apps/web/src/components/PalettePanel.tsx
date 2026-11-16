@@ -11,6 +11,7 @@ import {
   filterAndGroupPalette,
   type PaletteDragItem
 } from "../lib/palette.ts";
+import { NodeGlyph } from "./NodeGlyph.tsx";
 
 /**
  * The fixed "Flow" group: Input and Output sentinels. These never come from
@@ -30,7 +31,7 @@ function Swatch({ styleKey }: { styleKey: StyleKey }) {
       style={{ background: theme.color }}
       aria-hidden="true"
     >
-      {theme.icon}
+      <NodeGlyph name={theme.icon} />
     </span>
   );
 }
