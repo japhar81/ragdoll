@@ -8,71 +8,98 @@
 :root[data-theme="dark"] {
   color-scheme: dark;
 
-  /* Surfaces */
-  --bg: #0f1013;
-  --surface: #141821;
-  --surface-2: #1b2130;
-  --surface-3: #232a3a;
-  --sidebar-bg: #0b0d12;
-  --canvas-bg: #0f1013;
+  /* Surfaces — paddock admin console (paddock/server/packages/web global.css) */
+  --bg: #1a1b1f;
+  --surface: #1e1f24;
+  --surface-2: #23252a;       /* hover / raised */
+  --surface-3: #24262c;       /* active / selected */
+  --sidebar-bg: #16171a;
+  --canvas-bg: #18191c;
+  --input: #141518;           /* sunken field + segmented-control track */
+  --control: #25272d;         /* secondary button fill */
+  --control-hover: #2c2f36;   /* selected segment / hover */
 
-  /* Always-dark chrome (console, code, tooltip) */
-  --chrome-bg: #0b0c0f;
-  --console-bg: #0b0c0f;
-  --console-head-bg: #111318;
-  --code-bg: #0b0c0f;
+  /* Always-dark chrome (console, code, tooltip, topbar) */
+  --chrome-bg: #111214;
+  --console-bg: #111214;
+  --console-head-bg: #16171a;
+  --code-bg: #141518;
 
-  /* Borders */
-  --border: rgba(255, 255, 255, 0.09);
-  --border-2: rgba(255, 255, 255, 0.07);
-  --border-strong: rgba(255, 255, 255, 0.16);
+  /* Borders — opaque hairlines (the console uses solid hex, not rgba) */
+  --border: #26282e;
+  --border-2: #232529;
+  --border-strong: #34373e;
+  --line-card: #2a2c32;       /* card / panel / chart grid */
+  --line-row: #24262b;        /* table row separators */
+  --line-input: #2f323a;      /* input borders */
 
-  /* Text */
+  /* Text ramp */
   --text: #d4d6db;
-  --text-strong: #eceef1;
-  --text-2: #c3c7cf;
-  --text-secondary: #aeb4bf;
-  --text-muted: #9298a3;
-  --text-faint: #767d8c;
+  --text-strong: #e6e7ea;
+  --text-2: #cfd2d8;
+  --text-secondary: #9a9ea8;  /* nav resting */
+  --text-muted: #8b909a;      /* labels / secondary */
+  --text-faint: #6b707a;      /* section labels, captions, axis */
+  --text-dim: #5d626b;        /* placeholders, empty */
   --on-accent: #0d0f1a;
 
-  /* Accent — periwinkle */
+  /* Accent — periwinkle (oklch(0.70 0.14 262) → #6d9df5) */
   --accent: #6d9df5;
-  --accent-hover: #8ab2f7;
-  --accent-border: rgba(109, 157, 245, 0.5);
-  --accent-tint: rgba(109, 157, 245, 0.14);
-  --accent-tint-2: rgba(109, 157, 245, 0.22);
-  --accent-ink: #bcd2fb;
+  --accent-hover: #83b0ff;
+  --accent-border: rgba(109, 157, 245, 0.55);
+  --accent-tint: rgba(109, 157, 245, 0.12);
+  --accent-tint-2: rgba(109, 157, 245, 0.20);
+  --accent-ink: #9bbeff;
 
   /* Status */
-  --success: #3dbe88;
-  --success-fg: #8ff0bf;
-  --success-bg: rgba(61, 190, 136, 0.15);
-  --success-border: rgba(61, 190, 136, 0.4);
+  --success: #6ac48c;
+  --success-fg: #9be0b5;
+  --success-bg: rgba(106, 196, 140, 0.13);
+  --success-border: rgba(106, 196, 140, 0.4);
 
-  --warn: #dfa73a;
-  --warn-fg: #f3cd73;
-  --warn-bg: rgba(223, 167, 58, 0.15);
-  --warn-border: rgba(223, 167, 58, 0.4);
+  --warn: #ebb353;
+  --warn-fg: #f5c984;
+  --warn-bg: rgba(235, 179, 83, 0.13);
+  --warn-border: rgba(235, 179, 83, 0.4);
 
-  --error: #ee6d5c;
-  --error-fg: #f6a79b;
-  --error-bg: rgba(238, 109, 92, 0.15);
-  --error-border: rgba(238, 109, 92, 0.4);
-  --error-text: #f08c7f;
+  --error: #f2716a;
+  --error-fg: #f98f87;
+  --error-bg: rgba(242, 113, 106, 0.13);
+  --error-border: rgba(242, 113, 106, 0.4);
+  --error-text: #f98f87;
 
-  --violet: #8b93f8;
-  --violet-fg: #c4b5fd;
-  --violet-bg: rgba(124, 109, 245, 0.18);
-  --violet-border: rgba(124, 109, 245, 0.45);
+  --violet: #ba9cef;
+  --violet-fg: #cdb4f5;
+  --violet-bg: rgba(186, 156, 239, 0.15);
+  --violet-border: rgba(186, 156, 239, 0.45);
+
+  /* Code / CodeMirror syntax — the editor surface stays dark in BOTH themes,
+     so these are shared (not redefined under [data-theme="light"]). */
+  --code-fg: #d7d9de;
+  --code-gutter: #5d626b;
+  --code-gutter-active: #9a9ea8;
+  --code-key: #ba9cef;        /* property names — violet */
+  --code-string: #9be0b5;     /* strings — green */
+  --code-number: #f5c984;     /* numbers / bool / null — amber */
+  --code-punct: #8b909a;      /* punctuation — muted */
+  --cm-selection: rgba(109, 157, 245, 0.26);
+  --cm-active-line: rgba(255, 255, 255, 0.035);
 
   /* Effects */
   --focus-ring: rgba(109, 157, 245, 0.35);
-  --hover: rgba(255, 255, 255, 0.06);
-  --scrim: rgba(0, 0, 0, 0.6);
+  --hover: rgba(255, 255, 255, 0.055);
+  --scrim: rgba(5, 6, 8, 0.55);
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
-  --shadow: 0 6px 20px rgba(0, 0, 0, 0.5);
-  --shadow-lg: 0 16px 48px rgba(0, 0, 0, 0.6);
+  --shadow: 0 18px 50px rgba(0, 0, 0, 0.5);
+  --shadow-lg: 0 24px 70px rgba(0, 0, 0, 0.55);
+
+  /* Radius scale (theme-independent; shared across both themes) */
+  --radius-xs: 3px;
+  --radius-sm: 4px;
+  --radius: 6px;
+  --radius-md: 7px;
+  --radius-lg: 8px;
+  --radius-xl: 10px;
 
   /* Type */
   --font: 'Geist', ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
@@ -86,8 +113,11 @@
   --surface: #ffffff;
   --surface-2: #f1f5f9;
   --surface-3: #e2e8f0;
-  --sidebar-bg: #0f172a;
+  --sidebar-bg: #eef1f6;
   --canvas-bg: #f1f5f9;
+  --input: #ffffff;
+  --control: #f1f5f9;
+  --control-hover: #ffffff;
 
   --chrome-bg: #0f172a;
   --console-bg: #0f172a;
@@ -97,6 +127,9 @@
   --border: #e5e7eb;
   --border-2: #e2e8f0;
   --border-strong: #cbd5e1;
+  --line-card: #e2e8f0;
+  --line-row: #eef2f7;
+  --line-input: #cbd5e1;
 
   --text: #1f2937;
   --text-strong: #0f172a;
@@ -104,6 +137,7 @@
   --text-secondary: #475569;
   --text-muted: #64748b;
   --text-faint: #94a3b8;
+  --text-dim: #94a3b8;
   --on-accent: #ffffff;
 
   --accent: #2f6ae0;
@@ -146,12 +180,57 @@ html, body, #root {
   height: 100%;
   margin: 0;
   font-family: var(--font);
+  font-size: 13px;
   color: var(--text);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
 }
 
 body {
   overflow: hidden;
+  background: var(--bg);
 }
+
+/* ---- Base element language (paddock console): every button/field/heading
+   inherits this unless a component overrides it. Low specificity on purpose. */
+:where(h1, h2, h3, h4) {
+  font-weight: 600;
+  color: var(--text-strong);
+  letter-spacing: -0.01em;
+  line-height: 1.25;
+}
+:where(h1) { font-size: 21px; }
+:where(h2) { font-size: 16px; }
+:where(h3) { font-size: 13.5px; }
+:where(a) { color: var(--accent-ink); text-decoration: none; }
+:where(a:hover) { color: var(--accent-hover); }
+:where(code, kbd, samp) { font-family: var(--font-mono); font-size: 0.92em; }
+
+:where(button) {
+  font-family: var(--font);
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text);
+  cursor: pointer;
+}
+:where(button:disabled) { opacity: 0.45; cursor: default; }
+
+:where(input, select, textarea) {
+  font-family: var(--font);
+  font-size: 13px;
+  color: var(--text-strong);
+  background: var(--input, var(--code-bg));
+  border: 1px solid var(--line-input);
+  border-radius: var(--radius);
+  outline: none;
+}
+:where(input, select, textarea):focus {
+  border-color: var(--accent);
+}
+:where(input)::placeholder,
+:where(textarea)::placeholder { color: var(--text-dim); }
+:where(select) { cursor: pointer; }
 
 .app-shell {
   display: grid;
@@ -163,46 +242,56 @@ body {
 
 .sidebar {
   border-right: 1px solid var(--border);
-  background: var(--code-bg);
-  color: #fff;
-  padding: 20px;
+  background: var(--sidebar-bg);
+  color: var(--text-secondary);
+  padding: 16px 10px 14px;
   overflow: auto;
 }
 
 .sidebar h1 {
-  margin-top: 0;
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  color: var(--text-strong);
+  margin: 2px 8px 16px;
 }
 
 .sidebar nav {
   display: grid;
-  gap: 12px;
+  gap: 2px;
 }
 
 .sidebar nav a {
   cursor: pointer;
-  color: #cbd5e1;
-  padding: 6px 8px;
-  border-radius: 6px;
-  font-size: 14px;
+  color: var(--text-secondary);
+  height: 34px;
+  padding: 0 10px;
+  border-radius: var(--radius);
+  font-size: 13px;
+  font-weight: 500;
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
+  text-decoration: none;
 }
 .sidebar nav a .nav-icon {
-  flex: 0 0 14px;
+  flex: 0 0 16px;
+  width: 16px;
+  height: 16px;
   color: var(--text-faint);
 }
 .sidebar nav a:hover {
-  background: #1e293b;
-  color: #fff;
+  background: var(--surface-2);
+  color: var(--text-strong);
 }
-.sidebar nav a:hover .nav-icon { color: #cbd5e1; }
+.sidebar nav a:hover .nav-icon { color: var(--text-secondary); }
 
+/* Active = subtle neutral tint + accent-colored icon (NOT a full accent fill). */
 .sidebar nav a.active {
-  background: var(--accent);
-  color: var(--on-accent);
+  background: var(--surface-3);
+  color: var(--text-strong);
 }
-.sidebar nav a.active .nav-icon { color: var(--on-accent); }
+.sidebar nav a.active .nav-icon { color: var(--accent); }
 
 .builder {
   display: grid;
@@ -266,12 +355,15 @@ body {
 
 .palette button, .toolbar button {
   border: 1px solid var(--border-strong);
-  background: var(--surface);
-  border-radius: 8px;
-  padding: 8px 10px;
+  background: var(--control);
+  color: var(--text);
+  border-radius: var(--radius);
+  padding: 7px 12px;
+  font-weight: 500;
   cursor: pointer;
   text-align: left;
 }
+.palette button:hover, .toolbar button:hover { background: var(--control-hover); }
 
 .palette button {
   cursor: grab;
@@ -424,29 +516,33 @@ button.palette-item:active {
   flex: 1;
   min-height: 0;
 }
+/* Segmented control (console .seg): sunken track + raised selected segment. */
 .builder-view-tabs {
-  display: flex;
-  gap: 4px;
-  padding: 6px 6px 0;
-  background: var(--surface-2);
-  border-bottom: 1px solid var(--border-2);
+  display: inline-flex;
+  align-self: flex-start;   /* flex item: don't stretch to the column width */
+  gap: 2px;
+  margin: 8px 0 8px 8px;
+  padding: 2px;
+  background: var(--input);
+  border: 1px solid var(--line-card);
+  border-radius: var(--radius-md);
 }
 .builder-view-tab {
-  border: 1px solid var(--border-2);
-  border-bottom: none;
-  background: var(--surface);
-  color: var(--text-secondary);
-  font-size: 12px;
-  padding: 6px 12px;
-  border-radius: 6px 6px 0 0;
+  border: 0;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 12.5px;
+  font-weight: 500;
+  height: 26px;
+  padding: 0 12px;
+  border-radius: 5px;
   cursor: pointer;
+  white-space: nowrap;
 }
 .builder-view-tab:hover { color: var(--text-strong); }
 .builder-view-tab.active {
-  background: var(--surface-2);
+  background: var(--control-hover);
   color: var(--text-strong);
-  font-weight: 600;
-  border-color: #cbd5e1;
 }
 
 /* JSON View — the CodeMirror editor pane, sized like the canvas/tree so it
@@ -486,7 +582,7 @@ button.palette-item:active {
   white-space: nowrap;
 }
 .pjson-badge-ok { background: var(--success-bg); color: var(--success-fg); border-color: var(--success-border); }
-.pjson-badge-warn { background: var(--surface)beb; color: var(--warn-fg); border-color: var(--warn-border); }
+.pjson-badge-warn { background: var(--warn-bg); color: var(--warn-fg); border-color: var(--warn-border); }
 .pjson-badge-error { background: var(--error-bg); color: var(--error-text); border-color: var(--error-border); }
 .pjson-hint { font-size: 12px; color: var(--text-muted); }
 .pjson-apply-error { margin: 8px 12px; }
@@ -627,7 +723,7 @@ button.palette-item:active {
   color: var(--text-strong);
   background: var(--surface-3);
 }
-.tree-port-chip-ref { background: var(--surface)7ed; border-color: var(--warn-border); color: var(--warn-fg); }
+.tree-port-chip-ref { background: var(--warn-bg); border-color: var(--warn-border); color: var(--warn-fg); }
 .tree-port-chip-join { background: var(--accent-tint); border-color: var(--accent-border); color: var(--accent-hover); }
 .tree-port-name { font-family: var(--font-mono); }
 .tree-port-arrow { color: var(--text-faint); }
@@ -861,7 +957,7 @@ button.palette-item:active {
 }
 .builder-outline-code {
   background: var(--code-bg);
-  color: #e2e8f0;
+  color: var(--code-fg);
   font-family: var(--font-mono);
   font-size: 12px;
   line-height: 1.5;
@@ -1131,9 +1227,10 @@ pre {
 .toolbar select,
 .inline-form input,
 .inline-form select {
-  border: 1px solid var(--border-strong);
-  border-radius: 6px;
-  padding: 6px 8px;
+  background: var(--input);
+  border: 1px solid var(--line-input);
+  border-radius: var(--radius);
+  padding: 6px 10px;
 }
 
 .inline-form {
@@ -1191,22 +1288,31 @@ table.grid {
 
 table.grid th,
 table.grid td {
-  border: 1px solid var(--border);
-  padding: 6px 10px;
+  border: none;
+  border-bottom: 1px solid var(--line-row);
+  padding: 8px 14px;
   text-align: left;
   vertical-align: top;
 }
 
+table.grid td { font-size: 12.5px; color: var(--text-2); }
+
+/* Header: no fill, muted small label, hairline underline (console .tbl th). */
 table.grid th {
-  background: var(--surface-2);
+  background: transparent;
+  font-weight: 500;
+  font-size: 11.5px;
+  color: var(--text-muted);
+  border-bottom: 1px solid var(--border);
 }
 
 /* DataGrid additions — per-column filter input + sort affordance.
    The base `table.grid` styling stays untouched so the existing
    non-datagrid tables look identical. */
 table.datagrid th {
-  padding: 6px 8px 4px;
-  font-weight: 600;
+  padding: 8px 14px 6px;
+  font-weight: 500;
+  background: var(--surface);
   position: sticky;
   top: 0;
   z-index: 1;
@@ -1525,12 +1631,14 @@ table.grid tbody tr.row-selectable:hover {
 
 /* ---- Sidebar nav groups ---- */
 .sidebar nav .nav-group {
+  display: block;
   text-transform: uppercase;
-  letter-spacing: 0.06em;
+  letter-spacing: 0.08em;
   font-size: 11px;
-  color: var(--text-muted);
-  margin-top: 14px;
-  padding: 0 8px;
+  font-weight: 500;
+  color: var(--text-faint);
+  margin-top: 16px;
+  padding: 0 10px 6px;
 }
 
 .sidebar nav .nav-group:first-child {
@@ -1886,8 +1994,8 @@ table.grid tbody tr.row-selectable:hover {
   flex-direction: column;
   position: relative;
   border-top: 1px solid var(--border);
-  background: var(--code-bg);
-  color: #e2e8f0;
+  background: var(--console-bg);
+  color: var(--code-fg);
   min-height: 0;
   overflow: hidden;
 }
@@ -1900,8 +2008,8 @@ table.grid tbody tr.row-selectable:hover {
   height: 6px;
   flex: none;
   cursor: row-resize;
-  background: #1e293b;
-  border-bottom: 1px solid #334155;
+  background: var(--border);
+  border-bottom: 1px solid var(--border-strong);
 }
 
 .console-resizer:hover {
@@ -1914,7 +2022,7 @@ table.grid tbody tr.row-selectable:hover {
   gap: 10px;
   padding: 6px 12px;
   background: var(--console-head-bg);
-  border-bottom: 1px solid #1f2937;
+  border-bottom: 1px solid var(--border);
   flex: none;
   font-size: 12px;
 }
@@ -1922,7 +2030,7 @@ table.grid tbody tr.row-selectable:hover {
 .console-toggle {
   border: none;
   background: none;
-  color: #e2e8f0;
+  color: var(--text-strong);
   cursor: pointer;
   font-weight: 600;
   font-size: 13px;
@@ -1938,10 +2046,10 @@ table.grid tbody tr.row-selectable:hover {
 }
 
 .console-head button:not(.console-toggle) {
-  border: 1px solid #334155;
-  background: #1e293b;
-  color: #e2e8f0;
-  border-radius: 6px;
+  border: 1px solid var(--border-strong);
+  background: var(--surface-2);
+  color: var(--text);
+  border-radius: var(--radius);
   padding: 3px 8px;
   cursor: pointer;
   font-size: 12px;
@@ -1965,7 +2073,7 @@ table.grid tbody tr.row-selectable:hover {
 }
 
 .console-row {
-  border-bottom: 1px solid #1f2937;
+  border-bottom: 1px solid var(--border-2);
 }
 
 .console-line {
@@ -1988,6 +2096,7 @@ table.grid tbody tr.row-selectable:hover {
 .console-time {
   color: var(--text-muted);
   flex: none;
+  font-family: var(--font-mono);
 }
 
 .console-level {
@@ -2000,32 +2109,33 @@ table.grid tbody tr.row-selectable:hover {
 }
 
 .lvl-info {
-  background: #1e3a5f;
-  color: #93c5fd;
+  background: var(--accent-tint);
+  color: var(--accent-ink);
 }
 
 .lvl-success {
-  background: #14532d;
-  color: #86efac;
+  background: var(--success-bg);
+  color: var(--success-fg);
 }
 
 .lvl-warn {
-  background: #713f12;
-  color: #fcd34d;
+  background: var(--warn-bg);
+  color: var(--warn-fg);
 }
 
 .lvl-error {
-  background: #7f1d1d;
-  color: #fca5a5;
+  background: var(--error-bg);
+  color: var(--error-fg);
 }
 
 .console-badge {
   flex: none;
-  background: #334155;
-  color: #cbd5e1;
-  border-radius: 4px;
+  background: var(--surface-3);
+  color: var(--text-secondary);
+  border-radius: var(--radius-xs);
   padding: 1px 6px;
   font-size: 11px;
+  font-family: var(--font-mono);
 }
 
 .console-label {
@@ -2036,11 +2146,11 @@ table.grid tbody tr.row-selectable:hover {
 }
 
 .console-row.console-error .console-label {
-  color: #fca5a5;
+  color: var(--error-fg);
 }
 
 .console-row.console-success .console-label {
-  color: #bbf7d0;
+  color: var(--success-fg);
 }
 
 .console-row.console-warn .console-label {
@@ -2056,11 +2166,12 @@ table.grid tbody tr.row-selectable:hover {
   margin: 0;
   border: none;
   border-radius: 0;
-  background: #0b1220;
-  color: #cbd5e1;
+  background: var(--code-bg);
+  color: var(--code-fg);
   min-height: 0;
   max-height: 280px;
   font-size: 11px;
+  font-family: var(--font-mono);
 }
 
 /* ---- Toolbar dropdown menus ---- */
@@ -2136,7 +2247,9 @@ table.grid tbody tr.row-selectable:hover {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: linear-gradient(160deg, #0f172a 0%, #1e293b 60%, #334155 100%);
+  background:
+    radial-gradient(1200px 600px at 50% -10%, var(--accent-tint) 0%, transparent 60%),
+    var(--bg);
   padding: 24px;
 }
 
@@ -2144,7 +2257,8 @@ table.grid tbody tr.row-selectable:hover {
   width: 100%;
   max-width: 380px;
   background: var(--surface);
-  border-radius: 16px;
+  border: 1px solid var(--line-card);
+  border-radius: var(--radius-xl);
   padding: 32px 28px;
   box-shadow: var(--shadow-lg);
 }
@@ -2237,14 +2351,14 @@ table.grid tbody tr.row-selectable:hover {
 
 .sidebar-user {
   margin-top: auto;
-  padding: 12px 14px;
-  border-top: 1px solid #1e293b;
+  padding: 12px 10px 4px;
+  border-top: 1px solid var(--border);
   display: flex;
   flex-direction: column;
   gap: 4px;
 }
 .sidebar-user-id {
-  color: #cbd5e1;
+  color: var(--text-secondary);
   font-size: 12px;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -2252,9 +2366,9 @@ table.grid tbody tr.row-selectable:hover {
   text-decoration: none;
   display: block;
 }
-.sidebar-user-id:hover { color: #fff; }
-.sidebar-user-id.active { color: #93c5fd; }
-.sidebar-user .link-btn { color: #93c5fd; align-self: flex-start; }
+.sidebar-user-id:hover { color: var(--text-strong); }
+.sidebar-user-id.active { color: var(--accent-ink); }
+.sidebar-user .link-btn { color: var(--accent-ink); align-self: flex-start; }
 .sidebar-user-actions {
   display: flex;
   align-items: center;
@@ -2303,8 +2417,8 @@ table.grid tbody tr.row-selectable:hover {
   width: 26px;
   height: 26px;
   border-radius: 50%;
-  background: #1e293b;
-  color: #e2e8f0;
+  background: var(--surface-3);
+  color: var(--text-strong);
   font-size: 11px;
   font-weight: 600;
   display: inline-flex;
@@ -2854,7 +2968,7 @@ kbd {
 }
 .help-drawer-md pre {
   background: var(--code-bg);
-  color: #e2e8f0;
+  color: var(--code-fg);
   padding: 12px 14px;
   border-radius: 8px;
   overflow: auto;
@@ -2882,33 +2996,34 @@ kbd {
 
 /* ---- Sidebar Help row + Cmd-K hint chip --------------------------------- */
 .sidebar-help {
-  padding: 10px 14px 6px;
+  padding: 10px 10px 6px;
   display: flex;
   flex-direction: column;
   gap: 6px;
-  border-top: 1px solid #1e293b;
+  border-top: 1px solid var(--border);
 }
 .sidebar-cmdk-btn {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  background: #1e293b;
-  border: 1px solid #334155;
-  color: #cbd5e1;
-  border-radius: 6px;
-  padding: 5px 9px;
+  background: var(--input);
+  border: 1px solid var(--line-input);
+  color: var(--text-secondary);
+  border-radius: var(--radius);
+  padding: 6px 10px;
   font-size: 12px;
   cursor: pointer;
 }
-.sidebar-cmdk-btn:hover { background: #334155; color: #fff; }
+.sidebar-cmdk-btn:hover { background: var(--surface-2); color: var(--text-strong); }
 .sidebar-cmdk-btn kbd {
   background: var(--code-bg);
-  color: #cbd5e1;
-  border-color: var(--text-secondary);
+  color: var(--code-fg);
+  border-color: var(--border-strong);
   font-size: 10px;
+  font-family: var(--font-mono);
 }
-.sidebar-help .link-btn { color: #93c5fd; align-self: flex-start; }
+.sidebar-help .link-btn { color: var(--accent-ink); align-self: flex-start; }
 
 /* ---- Builder inspector tabs --------------------------------------------- */
 /* Three-tab layout (Config / Resolved / Docs) inside the inspector aside.
@@ -3214,7 +3329,7 @@ kbd {
 }
 .node-docs-sample {
   background: var(--code-bg);
-  color: #e2e8f0;
+  color: var(--code-fg);
   padding: 10px 12px;
   border-radius: 6px;
   font-size: 12px;
@@ -3433,15 +3548,15 @@ kbd {
   display: flex;
   align-items: center;
   gap: 8px;
-  background: #1e293b;
-  border: 1px solid #334155;
-  color: #cbd5e1;
-  border-radius: 6px;
-  padding: 5px 9px;
+  background: var(--input);
+  border: 1px solid var(--line-input);
+  color: var(--text-secondary);
+  border-radius: var(--radius);
+  padding: 6px 10px;
   font-size: 12px;
   cursor: pointer;
 }
-.theme-toggle:hover { background: #334155; color: #fff; }
+.theme-toggle:hover { background: var(--surface-2); color: var(--text-strong); }
 .theme-toggle-glyph { font-size: 13px; line-height: 1; }
 
 /* Themed scrollbars so a dark UI doesn't flash bright native tracks. */
@@ -3500,3 +3615,57 @@ kbd {
 [data-theme="dark"] .hljs-attr,
 [data-theme="dark"] .hljs-attribute { color: #c4b5fd; }
 [data-theme="dark"] .hljs-deletion { color: #f6a79b; }
+
+/* ============================================================================
+   Paddock console polish — the mono-caption signature + shape refinements a
+   colour-only swap missed. Mono on metadata/counts/captions/IDs is the texture
+   that makes the UI read as the paddock admin console (its global.css uses
+   Geist Mono on every number, caption and metadatum).
+   ============================================================================ */
+
+/* Mono on metadata, IDs, counts, captions, status pills. */
+.rf-sub,
+.palette-item-sub,
+.palette-group-count,
+.pjson-hint,
+.pjson-badge,
+.cell-mono,
+.mono {
+  font-family: var(--font-mono);
+}
+
+/* Palette helper line → mono caption (console caption treatment). */
+.palette > p.muted {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--text-faint);
+  letter-spacing: 0;
+}
+
+/* Status pills: fully-rounded, mono, 11px (console .pill). */
+.pjson-badge {
+  font-size: 11px;
+  font-weight: 600;
+  border-radius: 999px;
+}
+
+/* Cards / panels: console hairline + 8px radius wherever .card is used. */
+.card {
+  border: 1px solid var(--line-card);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+}
+
+/* Primary buttons everywhere (toolbar + Apply etc.) — accent fill. */
+button.primary {
+  background: var(--accent);
+  border: 1px solid var(--accent);
+  color: var(--on-accent);
+  font-weight: 500;
+  border-radius: var(--radius);
+}
+button.primary:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
+
+/* Link-styled buttons use the console link ink, not raw hardcoded blue. */
+.link-btn { color: var(--accent-ink); }
+.link-btn:hover { color: var(--accent-hover); }

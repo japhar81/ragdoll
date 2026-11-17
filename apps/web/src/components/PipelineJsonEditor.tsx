@@ -16,10 +16,12 @@
  */
 import { useEffect, useMemo, useRef, useState } from "react";
 import { EditorView } from "@codemirror/view";
-import { EditorState } from "@codemirror/state";
+import { EditorState, Prec } from "@codemirror/state";
 import { basicSetup } from "codemirror";
 import { json, jsonParseLinter } from "@codemirror/lang-json";
 import { linter, lintGutter, type Diagnostic } from "@codemirror/lint";
+import { HighlightStyle, syntaxHighlighting } from "@codemirror/language";
+import { tags as t } from "@lezer/highlight";
 import type { CompletionContext, CompletionResult } from "@codemirror/autocomplete";
 import type { ValidationIssue } from "../../../../packages/pipeline-spec/src/index.ts";
 import type { PipelineSpec } from "../lib/types.ts";
@@ -29,6 +31,72 @@ import {
   parsePipelineJson,
   specToPrettyJson
 } from "../lib/pipelineJson.ts";
+
+/**
+ * Editor surface theme. Every colour is a CSS custom property read from the
+ * document root, so the editor tracks the app's dark/light toggle live without
+ * recreating the view (CodeMirror resolves `var(--…)` against the host element).
+ * The code surface stays dark in both themes (the `--code-*` tokens aren't
+ * redefined under [data-theme="light"]). This replaces CodeMirror's default
+ * light theme — the source of the white editor pane.
+ */
+const ragdollEditorTheme = EditorView.theme({
+  "&": {
+    height: "100%",
+    fontSize: "13px",
+    backgroundColor: "var(--code-bg)",
+    color: "var(--code-fg)"
+  },
+  ".cm-scroller": { fontFamily: "var(--font-mono)", lineHeight: "1.6" },
+  "&.cm-focused": { outline: "none" },
+  ".cm-content": { caretColor: "var(--accent)" },
+  ".cm-cursor, .cm-dropCursor": { borderLeftColor: "var(--accent)" },
+  ".cm-gutters": {
+    backgroundColor: "var(--code-bg)",
+    color: "var(--code-gutter)",
+    border: "none",
+    borderRight: "1px solid var(--border)"
+  },
+  ".cm-lineNumbers .cm-gutterElement": { padding: "0 8px 0 14px" },
+  ".cm-activeLine": { backgroundColor: "var(--cm-active-line)" },
+  ".cm-activeLineGutter": {
+    backgroundColor: "var(--cm-active-line)",
+    color: "var(--code-gutter-active)"
+  },
+  "&.cm-focused .cm-selectionBackground, .cm-selectionBackground, .cm-content ::selection":
+    { backgroundColor: "var(--cm-selection)" },
+  ".cm-selectionMatch": { backgroundColor: "var(--cm-selection)" },
+  ".cm-foldPlaceholder": {
+    backgroundColor: "var(--surface-2)",
+    border: "1px solid var(--border)",
+    color: "var(--text-muted)"
+  },
+  ".cm-tooltip": {
+    backgroundColor: "var(--surface-2)",
+    border: "1px solid var(--border)",
+    color: "var(--text)",
+    borderRadius: "var(--radius)"
+  },
+  ".cm-tooltip.cm-tooltip-autocomplete > ul > li": { fontFamily: "var(--font-mono)" },
+  ".cm-tooltip.cm-tooltip-autocomplete > ul > li[aria-selected]": {
+    backgroundColor: "var(--accent)",
+    color: "var(--on-accent)"
+  },
+  ".cm-panels": { backgroundColor: "var(--surface)", color: "var(--text)" }
+});
+
+/** Syntax colours, also var()-driven so they read on the dark editor surface in
+ *  both themes. Precedence is forced above basicSetup's default highlight. */
+const ragdollHighlight = HighlightStyle.define([
+  { tag: t.propertyName, color: "var(--code-key)" },
+  { tag: [t.string, t.special(t.string)], color: "var(--code-string)" },
+  { tag: [t.number, t.bool, t.null], color: "var(--code-number)" },
+  {
+    tag: [t.punctuation, t.separator, t.brace, t.squareBracket, t.bracket],
+    color: "var(--code-punct)"
+  },
+  { tag: t.invalid, color: "var(--error-fg)" }
+]);
 
 export interface PipelineJsonEditorProps {
   /** Seed document (current spec as pretty JSON). Read only at mount. */
@@ -141,14 +209,8 @@ export function PipelineJsonEditor(props: PipelineJsonEditorProps) {
           jsonSupport.language.data.of({ autocomplete: complete }),
           lintGutter(),
           semanticLinter,
-          EditorView.theme({
-            "&": { height: "100%", fontSize: "13px" },
-            ".cm-scroller": {
-              fontFamily: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
-              lineHeight: "1.5"
-            },
-            "&.cm-focused": { outline: "none" }
-          }),
+          ragdollEditorTheme,
+          Prec.highest(syntaxHighlighting(ragdollHighlight)),
           EditorView.updateListener.of((u) => {
             if (u.docChanged) {
               const text = u.state.doc.toString();
