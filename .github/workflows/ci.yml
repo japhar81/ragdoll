@@ -8,6 +8,11 @@ jobs:
   build-and-test:
     name: Build & Test (Node 22.x)
     runs-on: ubuntu-latest
+    # A hung test must fail the run in minutes, not wedge it for GitHub's 6-hour
+    # job ceiling. The full suite + typecheck + web build finishes well inside
+    # this; anything slower is a hang worth failing on. (See the CI post-mortem:
+    # a single test's recursive mkdir under /proc hung every run to the ceiling.)
+    timeout-minutes: 20
 
     steps:
       - name: Checkout

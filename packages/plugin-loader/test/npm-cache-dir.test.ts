@@ -105,11 +105,19 @@ test("an operator-set NPM_CONFIG_CACHE is honored verbatim", async (t) => {
 
 test("an uncreatable cache dir fails loud, naming the knob to set", async (t) => {
   const prev = process.env.NPM_CONFIG_CACHE;
-  // /proc is real but not writable — mkdir under it fails on Linux and macOS.
-  process.env.NPM_CONFIG_CACHE = "/proc/ragdoll-cannot-create-this";
-  t.after(() => {
+  // Point the cache under a path whose parent is a regular FILE, so the
+  // recursive `mkdir` fails fast with ENOTDIR on every platform. The earlier
+  // "/proc/…" only fails fast on macOS; on Linux `mkdir -p` under /proc wedges
+  // indefinitely, which hung this test — and thus all of CI — for the full
+  // 6-hour job timeout on every run. See the CI-hang post-mortem.
+  const blockerDir = await mkdtemp(join(tmpdir(), "ragdoll-blocker-"));
+  const blockerFile = join(blockerDir, "not-a-dir");
+  await writeFile(blockerFile, "x");
+  process.env.NPM_CONFIG_CACHE = join(blockerFile, "cache");
+  t.after(async () => {
     if (prev === undefined) delete process.env.NPM_CONFIG_CACHE;
     else process.env.NPM_CONFIG_CACHE = prev;
+    await rm(blockerDir, { recursive: true, force: true });
   });
 
   const dir = await pluginDirWithPackageJson();
