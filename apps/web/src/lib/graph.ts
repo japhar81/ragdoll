@@ -19,34 +19,37 @@ export function nodeKind(node: Pick<PipelineNode, "type">): NodeKind {
 
 export interface NodeTheme {
   color: string;
+  /** Stable icon key — the React view layer (NodeGlyph) maps it to a
+   *  monochrome line icon. Kept a plain string so this module stays DOM-free
+   *  and unit-testable without React. */
   icon: string;
 }
 
 const THEME: Record<StyleKey, NodeTheme> = {
-  input: { color: "#16a34a", icon: "\u{1F4E5}" },
-  output: { color: "#dc2626", icon: "\u{1F4E4}" },
-  datasource: { color: "#0ea5e9", icon: "\u{1F50C}" },
-  loader: { color: "#0ea5e9", icon: "\u{1F4C2}" },
-  parser: { color: "#0891b2", icon: "\u{1F527}" },
-  chunker: { color: "#f59e0b", icon: "✂️" },
-  embedder: { color: "#7c3aed", icon: "\u{1F9EC}" },
-  vector_store: { color: "#2563eb", icon: "\u{1F5C3}️" },
-  retriever: { color: "#2563eb", icon: "\u{1F50E}" },
-  reranker: { color: "#4f46e5", icon: "\u{1F4CA}" },
-  llm: { color: "#9333ea", icon: "\u{1F9E0}" },
-  prompt_template: { color: "#6366f1", icon: "\u{1F4DD}" },
-  tool: { color: "#0d9488", icon: "\u{1F6E0}️" },
-  guardrail: { color: "#e11d48", icon: "\u{1F6E1}️" },
-  evaluator: { color: "#0d9488", icon: "✅" },
-  output_parser: { color: "#64748b", icon: "\u{1F9E9}" },
-  transformer: { color: "#64748b", icon: "\u{1F501}" },
-  router: { color: "#ea580c", icon: "\u{1F500}" },
-  control: { color: "#c026d3", icon: "\u{1F504}" },
-  memory: { color: "#a16207", icon: "\u{1F4BE}" },
-  sink: { color: "#475569", icon: "\u{1FAA3}" }
+  input: { color: "#16a34a", icon: "download" },
+  output: { color: "#dc2626", icon: "upload" },
+  datasource: { color: "#0ea5e9", icon: "plug" },
+  loader: { color: "#0ea5e9", icon: "folder-open" },
+  parser: { color: "#0891b2", icon: "wrench" },
+  chunker: { color: "#f59e0b", icon: "scissors" },
+  embedder: { color: "#7c3aed", icon: "dna" },
+  vector_store: { color: "#2563eb", icon: "database" },
+  retriever: { color: "#2563eb", icon: "search" },
+  reranker: { color: "#4f46e5", icon: "bar-chart" },
+  llm: { color: "#9333ea", icon: "brain" },
+  prompt_template: { color: "#6366f1", icon: "file-text" },
+  tool: { color: "#0d9488", icon: "hammer" },
+  guardrail: { color: "#e11d48", icon: "shield" },
+  evaluator: { color: "#0d9488", icon: "check-circle" },
+  output_parser: { color: "#64748b", icon: "puzzle" },
+  transformer: { color: "#64748b", icon: "repeat" },
+  router: { color: "#ea580c", icon: "split" },
+  control: { color: "#c026d3", icon: "refresh" },
+  memory: { color: "#a16207", icon: "save" },
+  sink: { color: "#475569", icon: "container" }
 };
 
-const FALLBACK: NodeTheme = { color: "#64748b", icon: "\u{1F4E6}" };
+const FALLBACK: NodeTheme = { color: "#64748b", icon: "box" };
 
 export function styleKeyFor(node: PipelineNode): StyleKey {
   const kind = nodeKind(node);

@@ -36,6 +36,7 @@ import { AuthSettingsScreen } from "./components/AuthSettingsScreen.tsx";
 import { RetentionScreen } from "./components/RetentionScreen.tsx";
 import { ProfileScreen } from "./components/ProfileScreen.tsx";
 import { LoginScreen } from "./components/LoginScreen.tsx";
+import { ThemeToggle } from "./components/ThemeToggle.tsx";
 import { AuthProvider, useAuth } from "./auth/AuthContext.tsx";
 import { EventsProvider, useEvents, statusLabel } from "./events/EventsProvider.tsx";
 import "./styles.css";
@@ -308,6 +309,7 @@ function Shell() {
               Help
             </button>
           </Tooltip>
+          <ThemeToggle />
         </div>
         <div className="sidebar-user">
           <NavLink

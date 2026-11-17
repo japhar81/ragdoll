@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, ApiError } from "../lib/api.ts";
@@ -133,9 +133,12 @@ function PipelineDatasetPills(props: { pipelineId: string }) {
           style: {
             background: c.bg,
             color: c.fg,
-            padding: "1px 6px",
-            borderRadius: 8,
-            fontSize: "0.8em"
+            border: `1px solid ${c.border}`,
+            padding: "0 6px",
+            borderRadius: 6,
+            fontFamily: "var(--font-mono)",
+            fontSize: "0.76em",
+            lineHeight: "1.65"
           } as const
         };
         return datasetId ? (
