@@ -36,12 +36,14 @@ function hashIndex(slug: string): number {
   return Math.abs(h) % HUES.length;
 }
 
-export function datasetColor(slug: string): { bg: string; fg: string } {
+export function datasetColor(slug: string): { bg: string; fg: string; border: string } {
   const hue = HUES[hashIndex(slug)];
-  // bg: a faint wash of the hue over the current surface; fg: the hue pulled
-  // toward the current text colour. Both adapt to the active theme.
+  // A subtle console-style tag: faint hue wash over the surface, hue-tinted
+  // text, and a low-opacity hue border — not a loud highlighter pill. All
+  // three adapt to the active theme via color-mix.
   return {
-    bg: `color-mix(in srgb, ${hue} 20%, var(--surface))`,
-    fg: `color-mix(in srgb, ${hue} 62%, var(--text))`
+    bg: `color-mix(in srgb, ${hue} 13%, var(--surface))`,
+    fg: `color-mix(in srgb, ${hue} 55%, var(--text))`,
+    border: `color-mix(in srgb, ${hue} 30%, transparent)`
   };
 }

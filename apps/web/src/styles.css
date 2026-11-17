@@ -212,6 +212,8 @@ body {
   font-size: 13px;
   font-weight: 500;
   color: var(--text);
+  background: none;
+  border: 0;            /* drop the 2px outset UA chrome; components add their own */
   cursor: pointer;
 }
 :where(button:disabled) { opacity: 0.45; cursor: default; }
@@ -1675,7 +1677,7 @@ table.grid tbody tr.row-selectable:hover {
 }
 
 .tree-folder:hover {
-  background: rgba(99, 102, 241, 0.08);
+  background: var(--hover);
 }
 
 .tree-leaf {
